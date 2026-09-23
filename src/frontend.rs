@@ -388,9 +388,7 @@ fn report_unmatched_expect_roots(
         };
         diags.error(
             range,
-            format!(
-                "expected {name} has no actual declaration in module <{module_name}> for {target}"
-            ),
+            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
         );
     }
 }

@@ -1465,9 +1465,9 @@ mod tests {
     #[test]
     fn stdlib_map_array_and_text_shapes_publish_exact_plans() {
         // `toolchain::stdlib_jar()` is selected by the toolchain matrix, so this survey runs against
-        // both the Kotlin 2.4.0 and 2.4.10 stdlibs in their respective CI jobs.
+        // every supported Kotlin 2.4.x stdlib, each in its own CI job.
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -1572,7 +1572,7 @@ mod tests {
     #[test]
     fn text_iteration_plans_survive_jdk_member_enrichment() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
             return;
         }
         let (Some(stdlib), Some(jdk)) = (
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn plain_iterator_recognizer_uses_body_shape_and_rejects_a_wrong_erased_cast() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -1669,7 +1669,7 @@ mod tests {
     #[test]
     fn iterable_recognizer_rejects_effect_branch_increment_and_handler_mutations() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {

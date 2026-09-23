@@ -199,7 +199,14 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     );
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
-    assert_eq!(diagnostics.diags[0].msg, "unresolved reference 'missing'.");
+    // The receiver clause 2.4.20 adds is checked against kotlinc per version in `tests/`.
+    assert!(
+        diagnostics.diags[0]
+            .msg
+            .starts_with("unresolved reference 'missing'"),
+        "{:?}",
+        diagnostics.diags[0].msg
+    );
 }
 
 #[test]

@@ -1,0 +1,19 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_star_projection_still_fails_a_non_nullable_formal_receiver]
+2.4.0..2.4.10:
+  Strict.kt:2:35: error: return type mismatch: expected 'List<Any>', actual 'List<Any?>'.
+  fun use(xs: List<*>): List<Any> = xs.only()
+                                    ^^^^^^^^^
+  Strict.kt:2:38: error: unresolved reference. None of the following candidates is applicable because of a receiver type mismatch:
+  fun <T : Any> Iterable<T>.only(): List<T>
+  fun use(xs: List<*>): List<Any> = xs.only()
+                                       ^^^^
+2.4.20..:
+  Strict.kt:2:35: error: return type mismatch: expected 'List<Any>', actual 'List<Any?>'.
+  fun use(xs: List<*>): List<Any> = xs.only()
+                                    ^^^^^^^^^
+  Strict.kt:2:38: error: candidate 'fun <T : Any> Iterable<T>.only(): List<T>' is inapplicable because of a receiver type mismatch.
+  fun use(xs: List<*>): List<Any> = xs.only()
+                                       ^^^^

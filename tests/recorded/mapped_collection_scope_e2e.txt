@@ -1,0 +1,54 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[java_only_members_are_not_in_the_kotlin_scope#add]
+2.4.0..2.4.10:
+  unresolved reference 'add'.
+2.4.20..:
+  unresolved reference 'add' on receiver of type 'List<Int>'.
+
+[java_only_members_are_not_in_the_kotlin_scope#computeIfAbsent]
+2.4.0..2.4.10:
+  unresolved reference 'computeIfAbsent'.
+2.4.20..:
+  unresolved reference 'computeIfAbsent' on receiver of type 'Map<String, Int>'.
+
+[java_only_members_are_not_in_the_kotlin_scope#getFirst]
+2.4.0..:
+  unresolved reference 'getFirst'.
+
+[java_only_members_are_not_in_the_kotlin_scope#putIfAbsent]
+2.4.0..2.4.10:
+  unresolved reference 'putIfAbsent'.
+2.4.20..:
+  unresolved reference 'putIfAbsent' on receiver of type 'Map<String, Int>'.
+
+[java_only_members_are_not_in_the_kotlin_scope#removeIf]
+2.4.0..2.4.10:
+  unresolved reference 'removeIf'.
+2.4.20..:
+  unresolved reference 'removeIf' on receiver of type 'List<Int>'.
+
+[java_only_members_are_not_in_the_kotlin_scope#replaceAll]
+2.4.0..2.4.10:
+  unresolved reference 'replaceAll'.
+2.4.20..:
+  unresolved reference 'replaceAll' on receiver of type 'List<Int>'.
+
+[whitelisted_mutating_members_resolve_only_on_mutable_receivers#addFirst]
+2.4.0..2.4.10:
+  unresolved reference 'addFirst'.
+2.4.20..:
+  unresolved reference 'addFirst' on receiver of type 'List<Int>'.
+
+[whitelisted_mutating_members_resolve_only_on_mutable_receivers#remove]
+2.4.0..2.4.10:
+  unresolved reference 'remove'.
+2.4.20..:
+  unresolved reference 'remove' on receiver of type 'Map<String, Int>'.
+
+[whitelisted_mutating_members_resolve_only_on_mutable_receivers#replaceAll]
+2.4.0..2.4.10:
+  unresolved reference 'replaceAll'.
+2.4.20..:
+  unresolved reference 'replaceAll' on receiver of type 'Map<String, Int>'.

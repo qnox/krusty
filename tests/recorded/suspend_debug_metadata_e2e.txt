@@ -1,0 +1,8 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[continuation_uses_synthetic_kotlin_metadata]
+2.4.0..2.4.10:
+  xi=48
+2.4.20..:
+  xi=560

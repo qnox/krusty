@@ -374,6 +374,24 @@ fn is_continuation_class(class: &crate::ir::IrClass) -> bool {
         || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
 }
 
+/// `ProtoBuf.Visibility` numbers kotlinc writes for a synthetic class (see [`synthetic_class_xi`]).
+const SYNTHETIC_PROTECTED: i32 = 2;
+const SYNTHETIC_PUBLIC: i32 = 3;
+const SYNTHETIC_LOCAL: i32 = 5;
+
+/// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
+/// visibility into bits 8–10 (`METADATA_SYNTHETIC_CLASS_VISIBILITY_BIT_FIRST..LAST`): a lambda or
+/// suspend lambda is `local`, a named suspend function's package-private continuation normalizes to
+/// `protected`, and a `$DefaultImpls` holder is `public`. Earlier releases wrote the IR flags alone.
+fn synthetic_class_xi(visibility: i32) -> i32 {
+    const JVM_IR_AND_STABLE_ABI: i32 = 48;
+    if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
+        JVM_IR_AND_STABLE_ABI | (visibility << 8)
+    } else {
+        JVM_IR_AND_STABLE_ABI
+    }
+}
+
 fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
     is_continuation_class(class)
         || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
@@ -1038,7 +1056,11 @@ fn build_class_metadata(
         return Some(KotlinMetadata {
             k: 3,
             mv: vec![2, 4, 0],
-            xi: 48,
+            xi: synthetic_class_xi(if is_continuation_class(c) {
+                SYNTHETIC_PROTECTED
+            } else {
+                SYNTHETIC_LOCAL
+            }),
             d1: vec![],
             d2: vec![],
         });
@@ -8336,13 +8358,16 @@ fn emit_annotation_impl_class(
         cw.set_method_debug("<init>", &desc, None, &locals);
         // A reference member is non-null (the JVM annotation format has no null), so kotlinc stamps
         // the synthesized `@NotNull` on each such parameter — the same annotation any non-null
-        // parameter gets, and what a Java caller reads to know the contract.
-        let notnull = "Lorg/jetbrains/annotations/NotNull;";
-        let param_nullability: Vec<Option<&str>> = members
-            .iter()
-            .map(|(_, jt)| jt.is_reference().then_some(notnull))
-            .collect();
-        cw.set_method_nullability("<init>", &desc, None, &param_nullability);
+        // parameter gets, and what a Java caller reads to know the contract. Kotlin 2.4.20 stamps
+        // none anywhere in this synthetic class.
+        if annotation_impl_carries_nullability() {
+            let notnull = "Lorg/jetbrains/annotations/NotNull;";
+            let param_nullability: Vec<Option<&str>> = members
+                .iter()
+                .map(|(_, jt)| jt.is_reference().then_some(notnull))
+                .collect();
+            cw.set_method_nullability("<init>", &desc, None, &param_nullability);
+        }
         // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
@@ -8510,12 +8535,20 @@ fn emit_annotation_equals(
     cw.set_method_debug("equals", "(Ljava/lang/Object;)Z", None, &locals);
     // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
     // stamps it, and a Java caller reads the contract from it.
-    cw.set_method_nullability(
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        None,
-        &[Some("Lorg/jetbrains/annotations/Nullable;")],
-    );
+    if annotation_impl_carries_nullability() {
+        cw.set_method_nullability(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[Some("Lorg/jetbrains/annotations/Nullable;")],
+        );
+    }
+}
+
+/// Whether an annotation implementation class stamps `@NotNull`/`@Nullable` on its constructor,
+/// `equals` and `toString`. Kotlin 2.4.20 stopped; earlier releases did.
+fn annotation_impl_carries_nullability() -> bool {
+    !crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
 /// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
@@ -8788,12 +8821,14 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
     );
     // `toString()` returns a non-null String, and kotlinc stamps the synthesized `@NotNull` on it.
     // The member ACCESSORS carry none, even the reference-typed ones — measured, not assumed.
-    cw.set_method_nullability(
-        "toString",
-        "()Ljava/lang/String;",
-        Some("Lorg/jetbrains/annotations/NotNull;"),
-        &[],
-    );
+    if annotation_impl_carries_nullability() {
+        cw.set_method_nullability(
+            "toString",
+            "()Ljava/lang/String;",
+            Some("Lorg/jetbrains/annotations/NotNull;"),
+            &[],
+        );
+    }
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -9125,7 +9160,13 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        di.set_kotlin_metadata(3, &[2, 4, 0], 48, &[], &[]);
+        di.set_kotlin_metadata(
+            3,
+            &[2, 4, 0],
+            synthetic_class_xi(SYNTHETIC_PUBLIC),
+            &[],
+            &[],
+        );
         extra.push((holder, di.finish()));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);

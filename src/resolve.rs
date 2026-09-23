@@ -677,6 +677,33 @@ fn classifier_path<S: SymbolSource + ?Sized>(
     }
 }
 
+/// `UNRESOLVED_REFERENCE` for a member looked up on an explicit receiver. Which receivers kotlinc
+/// names (from 2.4.20, see [`crate::diagnostic_wording::unresolved_reference_on`]) was measured
+/// against the reference compiler: a smart cast names the narrowed type, a safe call the non-null
+/// one, a platform type its Kotlin spelling, the `null` literal `Nothing?`; a receiver typed by a
+/// type parameter (nullable or not) is not named at all, and neither is one that failed to resolve.
+pub(crate) fn unresolved_member_message(name: &str, receiver: Ty) -> String {
+    // JDK 21's `List.getFirst()`/`getLast()` stay in the mapped scope as HIDDEN-deprecated
+    // candidates (`JvmBuiltInsSignatures.DEPRECATED_LIST_METHODS`), and kotlinc reports a hidden
+    // candidate as a bare unresolved name, with no receiver.
+    let hidden_list_member = matches!(name, "getFirst" | "getLast")
+        && matches!(
+            receiver.non_null().kotlin_class_internal(),
+            Some(owner) if owner == "kotlin/collections/List" || owner == "kotlin/collections/MutableList"
+        );
+    if hidden_list_member {
+        return crate::diagnostic_wording::unresolved_reference_on(name, None);
+    }
+    let rendered = match receiver {
+        Ty::Error | Ty::Pending | Ty::TyParam(..) => None,
+        Ty::Nullable(Ty::TyParam(..)) => None,
+        Ty::Null => Some("Nothing?".to_string()),
+        Ty::PlatformNullable(inner) => Some(inner.source_name()),
+        other => Some(other.source_name()),
+    };
+    crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
+}
+
 /// Validate an import from left to right and return its single source diagnostic, if any.
 fn import_path_diagnostic(
     import: &crate::ast::ImportPath,
@@ -15501,10 +15528,37 @@ impl<'a> Checker<'a> {
         if report_diagnostics
             && !self.defer_postponed_member_error(rt, mexpr, diagnostic_span, name)
         {
-            self.diags
-                .error(diagnostic_span, format!("unresolved reference '{name}'."));
+            let receiver = mexpr.and_then(|member| match self.file.expr(member) {
+                Expr::Member { receiver, .. } => Some(*receiver),
+                _ => None,
+            });
+            let message = self.unresolved_member_diagnostic(scope, receiver, name, rt);
+            self.diags.error(diagnostic_span, message);
         }
         Ty::Error
+    }
+
+    /// `UNRESOLVED_REFERENCE` for `name` looked up on `receiver`. A classifier qualifier
+    /// (`Limits.MAX` through a companion, `Obj.x`) is not a receiver value, so kotlinc names no
+    /// receiver type for it.
+    fn unresolved_member_diagnostic(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Option<ExprId>,
+        name: &str,
+        rt: Ty,
+    ) -> String {
+        let qualifier = receiver.is_some_and(|receiver| {
+            matches!(
+                self.qualifier(scope, QualifierInput::Expression(receiver)),
+                Ok(ResolvedQualifier::Classifier(_))
+            )
+        });
+        if qualifier {
+            crate::diagnostic_wording::unresolved_reference_on(name, None)
+        } else {
+            unresolved_member_message(name, rt)
+        }
     }
 
     fn record_associated_property(
@@ -21210,7 +21264,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     if inapplicable_candidates.is_empty() {
-                        format!("unresolved reference '{name}'.")
+                        self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt)
                     } else {
                         self.inapplicable_member_candidates_message(&name, &inapplicable_candidates)
                     },
@@ -26536,9 +26590,7 @@ impl<'a> Checker<'a> {
                     ),
                     Ok(None) => match rt {
                         Ty::Error => {}
-                        Ty::Obj(..) => self
-                            .diags
-                            .error(span, format!("unresolved reference '{name}'.")),
+                        Ty::Obj(..) => self.diags.error(span, unresolved_member_message(&name, rt)),
                         _ => self.diags.error(
                             span,
                             format!("cannot assign to a member of '{}'", rt.source_name()),
@@ -27489,6 +27541,16 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    /// Where NO_VALUE_FOR_PARAMETER is anchored: `argument` in the argument list, or the callee's
+    /// name where the reference version reports it there. That table row is checked against kotlinc
+    /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
+    fn missing_argument_anchor<'a>(argument: &'a str, callee: &'a str) -> &'a str {
+        match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+            crate::diagnostic_wording::Anchor::ValueArguments => argument,
+            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => callee,
+        }
+    }
 
     fn initialized_jvm_libraries(
         classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
@@ -28505,7 +28567,13 @@ fun rejected(owner: Owner) { owner.hidden() }
              fun read(box: Box): String = box.component2()",
         );
 
-        assert_eq!(errors, ["unresolved reference 'component2'."]);
+        // The wording (with or without the receiver clause) is checked against kotlinc per version
+        // in `tests/`; here only that `component2` is unresolved and nothing else is reported.
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("unresolved reference 'component2'"),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -32405,10 +32473,10 @@ fun box(): String {
                 .map(|diagnostic| &diagnostic.msg)
                 .collect::<Vec<_>>()
         );
-        for diagnostic in missing {
+        for (diagnostic, callee) in missing.into_iter().zip(["knownPair", "known", "mixExt"]) {
             assert_eq!(
                 &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-                "1)"
+                missing_argument_anchor("1)", callee)
             );
         }
     }
@@ -35714,7 +35782,7 @@ fun use() {
             .expect("missing-argument diagnostic");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            "1"
+            missing_argument_anchor("1", "pair")
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -35740,7 +35808,7 @@ fun use() {
             .expect("missing-named-argument diagnostic");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            "left"
+            missing_argument_anchor("left", "namedPair")
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -35773,7 +35841,7 @@ fun use() {
         );
         err_contains(
             "fun f(a: Int): Int = a.substring(1)",
-            "unresolved reference 'substring'.",
+            "unresolved reference 'substring'",
         );
     }
 
@@ -35989,7 +36057,7 @@ fun use() {
     fn reference_type_errors() {
         err_contains(
             "class Point(val x: Int)\nfun f(p: Point): Int = p.z",
-            "unresolved reference 'z'.",
+            "unresolved reference 'z'",
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",
@@ -49127,6 +49195,22 @@ impl<'a> Checker<'a> {
         (!literals.is_empty()).then_some(literals)
     }
 
+    /// The span kotlinc's positioning strategy `anchor` gives `call`; `value_arguments` computes
+    /// the argument-list position, which depends on the failure being reported.
+    fn anchored_span(
+        &self,
+        anchor: crate::diagnostic_wording::Anchor,
+        call: ExprId,
+        value_arguments: impl FnOnce() -> Span,
+    ) -> Span {
+        match anchor {
+            crate::diagnostic_wording::Anchor::ValueArguments => value_arguments(),
+            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
+                self.call_callee_name_span(call)
+            }
+        }
+    }
+
     fn call_callee_name_span(&self, call: ExprId) -> Span {
         let Expr::Call { callee, .. } = self.file.expr(call) else {
             return self.span(call);
@@ -49286,9 +49370,11 @@ impl<'a> Checker<'a> {
                     .get(*argument)
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
-                CallArgMappingError::MissingRequired { .. } => {
-                    recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args))
-                }
+                CallArgMappingError::MissingRequired { .. } => self.anchored_span(
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    call,
+                    || recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args)),
+                ),
             };
             if error.highlights_callee() {
                 self.diags.error_with_editor_span(
@@ -62414,6 +62500,11 @@ impl<'a> Checker<'a> {
                 missing.and_then(|index| names_complete.then(|| &param_names[index]))
             {
                 let editor_span = self.call_callee_name_span(call);
+                let span = self.anchored_span(
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    call,
+                    || span,
+                );
                 self.diags.error_with_editor_span(
                     span,
                     editor_span,
@@ -69091,10 +69182,9 @@ impl<'a> Checker<'a> {
                 && !reported_inapplicable
                 && !self.member_name_exists_on(scope, safe_rt, &name)
             {
-                self.diags.error(
-                    self.member_name_span(e, &name),
-                    format!("unresolved reference '{name}'."),
-                );
+                let message =
+                    self.unresolved_member_diagnostic(scope, Some(receiver), &name, safe_rt);
+                self.diags.error(self.member_name_span(e, &name), message);
             }
             // Named arguments must have a checker-owned parameter-slot mapping before lowering.
             if result != Ty::Error

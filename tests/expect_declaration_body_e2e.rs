@@ -4,20 +4,14 @@
 //! as "no actual declaration", which sent a reader looking for a missing `actual` rather than at
 //! the body they had written.
 //!
-//! Every position below is measured against the reference compiler, including three that a guess
+//! Every ledger below is kotlinc's own, recorded per Kotlin version in
+//! `tests/recorded/expect_declaration_body_e2e.txt` (see `tests/common/recorded.rs`). Its positions
+//! include three that a guess
 //! would have got wrong: a property INITIALIZER is reported under the initializer expression rather
 //! than at the property, an `init` block is reported at the `init` keyword rather than at its `{`,
 //! and a secondary constructor with a body inside an `expect class` is not reported at all.
 
 use super::common;
-
-/// kotlinc's three sentences. None varies with the declaration's kind.
-const BODY: &str = "error: expected declaration cannot have a body.";
-const INITIALIZER: &str = "error: expected property cannot have an initializer.";
-const DELEGATE: &str = "error: expected property cannot be delegated.";
-/// The default module name both compilers use when none is given, which the unmatched-expect
-/// sentence names.
-const MODULE: &str = "main";
 
 fn compile_files(files: &[(&str, &str)], multiplatform: bool) -> (bool, String) {
     let dir = common::scratch_dir().expect("scratch dir");
@@ -90,17 +84,20 @@ fn ledger(report: &str, sources: &[(&str, &str)]) -> Vec<String> {
     entries
 }
 
-/// The reference compiler's ledger for the same sources, so every expectation below is measured
-/// rather than pinned. A missing reference compiler fails the test; it does not pass it.
+/// The reference compiler's ledger for the same sources, recorded per Kotlin version by the tests
+/// below, so every expectation is measured rather than typed.
 fn kotlinc_ledger(sources: &[(&str, &str)]) -> Vec<String> {
+    kotlinc_ledger_with(sources, true)
+}
+
+fn kotlinc_ledger_with(sources: &[(&str, &str)], multiplatform: bool) -> Vec<String> {
     let dir = common::scratch_dir().expect("scratch dir");
     let out = dir.join("kotlinc-out");
-    let mut args = vec![
-        "-nowarn".to_string(),
-        "-Xmulti-platform".to_string(),
-        "-d".to_string(),
-        out.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec!["-nowarn".to_string()];
+    if multiplatform {
+        args.push("-Xmulti-platform".to_string());
+    }
+    args.extend(["-d".to_string(), out.to_string_lossy().into_owned()]);
     for (name, source) in sources {
         let path = dir.join(name);
         std::fs::write(&path, source).expect("write source");
@@ -131,14 +128,8 @@ fn a_top_level_expect_declaration_may_not_implement_itself() {
     // A function is reported at the `expect` KEYWORD, which introduces the whole header; a property
     // initializer under the INITIALIZER, not at the property and not at the keyword; an accessor at
     // its own header. Complete and ordered, so an entry neither compiler writes fails here.
-    let expected = vec![
-        format!("Main.kt:3:1: {BODY}"),
-        format!("Main.kt:5:1: {BODY}"),
-        format!("Main.kt:7:31: {INITIALIZER}"),
-        format!("Main.kt:10:5: {BODY}"),
-    ];
     let sources = [("Main.kt", SOURCE)];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -170,15 +161,8 @@ fn a_member_of_an_expect_classifier_may_not_implement_itself_either() {
     // A member initializer under the initializer; an `init` block at the KEYWORD (column 5), not at
     // the `{` its block expression starts on. The body-less member at line 10 and the classifiers
     // themselves are absent, which the complete ledger states rather than probing for.
-    let expected = vec![
-        format!("Main.kt:4:27: {INITIALIZER}"),
-        format!("Main.kt:6:9: {BODY}"),
-        format!("Main.kt:8:9: {BODY}"),
-        format!("Main.kt:9:5: {BODY}"),
-        format!("Main.kt:14:5: {BODY}"),
-    ];
     let sources = [("Main.kt", SOURCE)];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -203,12 +187,8 @@ fn a_nested_classifier_and_a_companion_are_headers_too() {
                           }\n";
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
-    let expected = vec![
-        format!("Main.kt:5:9: {BODY}"),
-        format!("Main.kt:8:9: {BODY}"),
-    ];
     let sources = [("Main.kt", SOURCE)];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -239,12 +219,8 @@ fn an_expect_property_may_not_be_delegated() {
                           }\n";
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
-    let expected = vec![
-        format!("Main.kt:9:30: {DELEGATE}"),
-        format!("Main.kt:12:24: {DELEGATE}"),
-    ];
     let sources = [("Main.kt", SOURCE)];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -261,9 +237,8 @@ fn a_lazy_delegate_on_an_expect_property_is_reported_too() {
                           expect val delegated: Int by lazy { 1 }\n";
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
-    let expected = vec![format!("Main.kt:3:30: {DELEGATE}")];
     let sources = [("Main.kt", SOURCE)];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -284,10 +259,7 @@ fn a_secondary_constructor_body_is_not_this_diagnostic() {
     let sources = [("Main.kt", SOURCE)];
     // The whole ledger, so "not this diagnostic" is a measured absence rather than one probe: the
     // only entry either compiler writes is the unmatched header, and it is the same entry.
-    let expected = vec![format!(
-        "Main.kt:3:1: error: expected A has no actual declaration in module <{MODULE}> for JVM"
-    )];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -309,8 +281,7 @@ fn a_body_error_suppresses_the_unmatched_expect_report_everywhere() {
     // The whole ledger over BOTH files: the body error, and nothing for the clean unmatched header
     // in the other file. A probe for "has no actual declaration" could not tell that apart from a
     // report that named the wrong declaration.
-    let expected = vec![format!("A.kt:2:1: {BODY}")];
-    assert_eq!(kotlinc_ledger(&sources), expected, "kotlinc's whole ledger");
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -325,15 +296,16 @@ fn the_body_is_rejected_with_or_without_the_multiplatform_feature() {
     const SOURCE: &str = "package plib\n\nexpect fun exprBody(): Int = 1\n";
     let (ok, report) = compile(SOURCE, false);
     assert!(!ok, "the compile must fail:\n{report}");
+    let sources = [("Main.kt", SOURCE)];
+    let expected = common::recorded(|| kotlinc_ledger_with(&sources, false));
     assert_eq!(
-        ledger(&report, &[("Main.kt", SOURCE)]),
-        [
-            "Main.kt:3:1: error: 'expect' and 'actual' declarations can be used only in \
-             multiplatform projects. Learn more about Kotlin Multiplatform: \
-             https://kotl.in/multiplatform-setup"
-                .to_string(),
-            format!("Main.kt:3:1: {BODY}"),
-        ],
+        expected.len(),
+        2,
+        "kotlinc's ledger: the feature gate, then the body"
+    );
+    assert_eq!(
+        ledger(&report, &sources),
+        expected,
         "the whole ledger, in order: the feature gate first, then the body:\n{report}"
     );
 }
@@ -355,33 +327,24 @@ fn a_body_less_expect_is_untouched() {
     // A header declares nothing to reject, so the only entries are the unmatched-expect reports —
     // each at its own `expect` keyword. Stating all three says both halves at once: this check
     // costs an ordinary header nothing, and the report it does get is unaffected.
-    let unmatched = |line: u32, name: &str| {
-        format!(
-            "Main.kt:{line}:1: error: expected {name} has no actual \
-             declaration in module <{MODULE}> for JVM"
-        )
+    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    assert_eq!(expected.len(), 3, "kotlinc's whole ledger: {expected:?}");
+    // One measured difference: the reference compiler reports every unactualized CLASSIFIER before
+    // any callable, each group in source order, so `Holder` comes first there although it is
+    // written last. krusty's diagnostic sink normalises the whole compilation to source order,
+    // which is a property of the sink and not of this check — a grouping every diagnostic krusty
+    // writes would have to give up.
+    let line_of = |entry: &String| {
+        entry
+            .split(':')
+            .nth(1)
+            .and_then(|line| line.parse::<u32>().ok())
     };
-    // One measured difference, pinned by both complete ledgers rather than described: the reference
-    // compiler reports every unactualized CLASSIFIER before any callable, each group in source
-    // order, so `Holder` comes first there although it is written last. krusty's diagnostic sink
-    // normalises the whole compilation to source order, which is a property of the sink and not of
-    // this check — a grouping every diagnostic krusty writes would have to give up.
-    assert_eq!(
-        kotlinc_ledger(&sources),
-        vec![
-            unmatched(7, "Holder"),
-            unmatched(3, "helper"),
-            unmatched(5, "prop")
-        ],
-        "kotlinc's whole ledger"
-    );
+    let mut in_source_order = expected.clone();
+    in_source_order.sort_by_key(line_of);
     assert_eq!(
         ledger(&report, &sources),
-        vec![
-            unmatched(3, "helper"),
-            unmatched(5, "prop"),
-            unmatched(7, "Holder")
-        ],
+        in_source_order,
         "krusty's whole ledger: the same three entries, in the sink's source order:\n{report}"
     );
 }

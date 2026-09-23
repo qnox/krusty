@@ -280,9 +280,9 @@ fun box(): String {{\n\
 /// The formal's declared BOUND still constrains a receiver that is the only evidence for it: a
 /// receiver outside the bound is rejected rather than widening the formal to admit it.
 ///
-/// Both compilers reject at the same position; kotlinc's message additionally enumerates why the
-/// candidate did not apply. That wording difference is general and predates this change, so both
-/// texts are recorded rather than matched.
+/// Both compilers reject at the same position. kotlinc reports the one candidate as inapplicable
+/// because of a receiver type mismatch, while krusty still calls the reference unresolved; only the
+/// position is pinned until krusty's diagnostic is fixed.
 #[test]
 fn a_receiver_outside_the_formals_bound_is_still_rejected() {
     let main = format!(
@@ -295,24 +295,13 @@ fun probe() {{\n\
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
     assert_eq!((result.krusty_code, result.reference_code), (1, 1));
     assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
-    assert_eq!(
-        common::compiler_errors(&result.krusty_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 23,
-            column: 11,
-            message: "unresolved reference 'piped'.".to_string(),
-        }]
-    );
-    assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 23,
-            column: 11,
-            message: "unresolved reference. None of the following candidates is applicable \
-                      because of a receiver type mismatch:"
-                .to_string(),
-        }]
-    );
+    let position = |stderr: &str| {
+        common::compiler_errors(stderr)
+            .into_iter()
+            .map(|error| (error.file, error.line, error.column))
+            .collect::<Vec<_>>()
+    };
+    let expected = [("Main.kt".to_string(), 23, 11)];
+    assert_eq!(position(&result.reference_stderr), expected, "kotlinc");
+    assert_eq!(position(&result.krusty_stderr), expected, "krusty");
 }

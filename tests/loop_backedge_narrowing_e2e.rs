@@ -6,8 +6,8 @@
 //! krusty used to ACCEPT, and then compiled to a cast that failed at run time on both backends
 //! (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
 //!
-//! Every program below was run through kotlinc 2.4.10 first; the accept/reject each asserts is
-//! that compiler's answer, not a reading of the rule.
+//! Every rejection below is kotlinc's own answer, recorded per Kotlin version (see
+//! `tests/common/recorded.rs`), not a reading of the rule.
 //!
 //! The narrowing the loop's own CONDITION proves is the one that must survive, and does: the
 //! condition is re-evaluated on every iteration, so it holds on entry to each of them.
@@ -21,12 +21,31 @@
 
 use super::common;
 
+/// krusty rejects `src` with exactly the messages kotlinc reports, recorded per Kotlin version.
 fn rejects(src: &str, context: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[], None);
+    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    assert!(!expected.is_empty(), "{context}: kotlinc must reject");
+    assert_eq!(diagnostics, expected, "{context}: exact diagnostics");
+}
+
+/// [`rejects`] where kotlinc 2.4.20 names no receiver type because the read's flow type is the
+/// intersection its merged assignments leave (`Comparable<*> & Serializable` after `""` and `42`),
+/// which is not class-like. krusty keeps the declared `Any` there and names it, so only the
+/// rejection and kotlinc's text up to the receiver clause are pinned.
+fn rejects_naming_the_declared_receiver(src: &str, context: &str) {
+    let diagnostics = common::front_end_diagnostics(src, &[], None);
+    let expected = common::recorded(|| common::reference_error_messages("Main", src));
     assert_eq!(
-        diagnostics,
-        ["unresolved reference 'length'."],
-        "{context}: exact diagnostics"
+        expected.len(),
+        1,
+        "{context}: kotlinc must reject once: {expected:?}"
+    );
+    assert_eq!(diagnostics.len(), 1, "{context}: {diagnostics:?}");
+    let reference = expected[0].trim_end_matches('.');
+    assert!(
+        diagnostics[0].starts_with(reference),
+        "{context}: {diagnostics:?} against kotlinc's {expected:?}"
     );
 }
 
@@ -84,7 +103,7 @@ fn a_do_while_body_is_invalidated_though_its_first_turn_precedes_the_back_edge()
 
 #[test]
 fn a_proof_does_not_survive_a_loop_that_overwrites_it() {
-    rejects(
+    rejects_naming_the_declared_receiver(
         "fun f() {\n\
          \x20   var x: Any\n\
          \x20   x = \"\"\n\

@@ -4357,3 +4357,20 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
 - ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
   realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
   same provenance with their own separators and container rules.
+
+## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
+- ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
+- ✅ One target release per process (`src/kotlin_version.rs`): `-Xkotlin-reference-version=`,
+  else `KRUSTY_LANGUAGE_VERSION`, else the newest manifest entry.
+- ✅ Version-keyed diagnostic wording and positions (`src/diagnostic_wording.rs`).
+- ✅ Test expectations recorded per version range from kotlinc (`tests/recorded/`,
+  `tests/common/recorded.rs`): a missing version records locally and fails under CI.
+- ✅ 2.4.20 backend deltas gated on the target: `@Metadata.xi` visibility bits for synthetic
+  classes, no nullability annotations on annotation implementation classes.
+- ⬜ CI runs the full suite on the newest version only; older versions run box conformance in CI
+  and the full suite locally through `just test-all`.
+- ⬜ A deferred builder-inference member error names no receiver; kotlinc 2.4.20 renders the
+  unfixed variable (`MutableList<TypeVariable(E)>`).
+- ⬜ A read whose flow type is the intersection of merged assignments (`x` after a loop writes `""`
+  and `42`) names krusty's declared `Any` as the receiver; kotlinc 2.4.20 names none, since the
+  intersection is not class-like (`a_proof_does_not_survive_a_loop_that_overwrites_it`).

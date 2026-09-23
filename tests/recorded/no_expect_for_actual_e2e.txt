@@ -1,0 +1,36 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_member_names_its_own_file_when_several_are_compiled]
+2.4.0..2.4.10:
+  First.kt:5:14: 'public final actual class Holder : Any' has no corresponding expected declaration
+  First.kt:6:16: 'public final actual fun held(): Int' has no corresponding expected declaration
+  First.kt:7:22: 'public final actual val Tally.tallied: Int' has no corresponding expected declaration
+  Last.kt:3:14: 'public final actual class Trailing : Any' has no corresponding expected declaration
+  Last.kt:4:16: 'public final actual fun trailed(): Int' has no corresponding expected declaration
+2.4.20..:
+  First.kt:5:14: 'public final actual class Holder : Any' has no corresponding 'expect' declaration
+  First.kt:6:16: 'public final actual fun held(): Int' has no corresponding 'expect' declaration
+  First.kt:7:22: 'public final actual val Tally.tallied: Int' has no corresponding 'expect' declaration
+  Last.kt:3:14: 'public final actual class Trailing : Any' has no corresponding 'expect' declaration
+  Last.kt:4:16: 'public final actual fun trailed(): Int' has no corresponding 'expect' declaration
+
+[a_member_that_actualizes_nothing_under_a_matched_owner_is_reported]
+2.4.0..2.4.10:
+  PlatformBody.kt:5:16: 'public final actual fun extra(): Int' has no corresponding expected declaration
+  PlatformBody.kt:6:16: 'public final actual val spare: Int' has no corresponding expected declaration
+2.4.20..:
+  PlatformBody.kt:5:16: 'public final actual fun extra(): Int' has no corresponding 'expect' declaration
+  PlatformBody.kt:6:16: 'public final actual val spare: Int' has no corresponding 'expect' declaration
+
+[an_actual_matched_through_an_alias_is_silent]
+2.4.0..2.4.10:
+  AliasMatchedPlatform.kt:6:12: 'public final actual fun stray(): Int' has no corresponding expected declaration
+2.4.20..:
+  AliasMatchedPlatform.kt:6:12: 'public final actual fun stray(): Int' has no corresponding 'expect' declaration
+
+[the_expect_may_live_in_another_file]
+2.4.0..2.4.10:
+  CrossFileMatchPlatform.kt:5:12: 'public final actual fun stray(): Int' has no corresponding expected declaration
+2.4.20..:
+  CrossFileMatchPlatform.kt:5:12: 'public final actual fun stray(): Int' has no corresponding 'expect' declaration

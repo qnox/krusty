@@ -1,0 +1,38 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[closure_mutated_value_does_not_smart_cast_after_as_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[closure_mutated_value_does_not_smart_cast_after_as_statement]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[conditional_as_in_statement_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[conditionally_evaluated_as_cast_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[safe_as_cast_in_condition_does_not_smart_cast_on_fallthrough]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[safe_as_statement_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20..:
+  unresolved reference 'length' on receiver of type 'Any?'.

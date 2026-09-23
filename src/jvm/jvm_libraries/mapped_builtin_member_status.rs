@@ -6,7 +6,7 @@
 //! members are still provider-owned; core resolution receives only the normalized result.
 //! The checked-in policy mirrors the collection-facing subset of
 //! `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES` and is verified against the supported Kotlin
-//! 2.4.0 and 2.4.10 toolchains.
+//! 2.4.0, 2.4.10 and 2.4.20 toolchains.
 
 use crate::libraries::LibraryMember;
 use crate::types::{type_name, TypeName};

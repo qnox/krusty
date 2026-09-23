@@ -12,7 +12,7 @@ parameters.
   recipe is a plain download, so do what it does:
 
   ```sh
-  ver=2.4.10
+  ver=2.4.20
   dest="$PWD/target/cache/kotlinc/$ver"
   mkdir -p "$dest"
   curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
@@ -105,6 +105,25 @@ uses the same configurable process-group conformance deadline as the local harne
 spawned compiler and runner JVMs. Each leg must score at least 55% of backend-applicable cases before
 a release can publish. Unsupported and miscompiled applicable cases count against that floor; cases
 excluded solely by the selected backend do not.
+
+The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
+every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
+whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
+does it for every manifest version at once.
+
+A test that pins what kotlinc reports does not write it down: it states what it observes and reads
+the value from `tests/recorded/<test module>.txt`, keyed by the running test's path and by Kotlin
+version range (`tests/common/recorded.rs`). `common::assert_errors_match_kotlinc` (the whole
+`file:line:column: message` ledger through both CLIs) and `common::assert_messages_match_kotlinc`
+(the frontend's messages) cover the usual shapes; `common::recorded(|| …)`,
+`common::recorded_named(label, || …)` and `common::recorded_line(|| …)` take any value computed from
+kotlinc's run. When the file has no value for the version under test, a local run computes it from
+that kotlinc, writes it and passes; commit the diff. Ranges are merged across adjacent versions and
+the newest one is open-ended (`2.4.20..:`), so a new release inherits the latest value and only a
+real change re-records. Under CI (`CI` set) a missing value fails instead of recording.
+`KRUSTY_RECORD=1` re-records every value the run reaches, e.g. after a kotlinc patch update:
+`KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
+output is ever recorded, so a recorded value stays an oracle for krusty.
 
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard

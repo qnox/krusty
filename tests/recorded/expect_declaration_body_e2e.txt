@@ -1,0 +1,80 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_body_error_suppresses_the_unmatched_expect_report_everywhere]
+2.4.0..2.4.10:
+  A.kt:2:1: error: expected declaration cannot have a body.
+2.4.20..:
+  A.kt:2:1: error: 'expect' declaration cannot have a body.
+
+[a_body_less_expect_is_untouched]
+2.4.0..2.4.10:
+  Main.kt:7:1: error: expected Holder has no actual declaration in module <main> for JVM
+  Main.kt:3:1: error: expected helper has no actual declaration in module <main> for JVM
+  Main.kt:5:1: error: expected prop has no actual declaration in module <main> for JVM
+2.4.20..:
+  Main.kt:7:1: error: the 'expect' declaration 'Holder' has no 'actual' declaration in module '<main> for JVM'.
+  Main.kt:3:1: error: the 'expect' declaration 'helper' has no 'actual' declaration in module '<main> for JVM'.
+  Main.kt:5:1: error: the 'expect' declaration 'prop' has no 'actual' declaration in module '<main> for JVM'.
+
+[a_lazy_delegate_on_an_expect_property_is_reported_too]
+2.4.0..2.4.10:
+  Main.kt:3:30: error: expected property cannot be delegated.
+2.4.20..:
+  Main.kt:3:30: error: 'expect' property cannot be delegated.
+
+[a_member_of_an_expect_classifier_may_not_implement_itself_either]
+2.4.0..2.4.10:
+  Main.kt:4:27: error: expected property cannot have an initializer.
+  Main.kt:6:9: error: expected declaration cannot have a body.
+  Main.kt:8:9: error: expected declaration cannot have a body.
+  Main.kt:9:5: error: expected declaration cannot have a body.
+  Main.kt:14:5: error: expected declaration cannot have a body.
+2.4.20..:
+  Main.kt:4:27: error: 'expect' property cannot have an initializer.
+  Main.kt:6:9: error: 'expect' declaration cannot have a body.
+  Main.kt:8:9: error: 'expect' declaration cannot have a body.
+  Main.kt:9:5: error: 'expect' declaration cannot have a body.
+  Main.kt:14:5: error: 'expect' declaration cannot have a body.
+
+[a_nested_classifier_and_a_companion_are_headers_too]
+2.4.0..2.4.10:
+  Main.kt:5:9: error: expected declaration cannot have a body.
+  Main.kt:8:9: error: expected declaration cannot have a body.
+2.4.20..:
+  Main.kt:5:9: error: 'expect' declaration cannot have a body.
+  Main.kt:8:9: error: 'expect' declaration cannot have a body.
+
+[a_secondary_constructor_body_is_not_this_diagnostic]
+2.4.0..2.4.10:
+  Main.kt:3:1: error: expected A has no actual declaration in module <main> for JVM
+2.4.20..:
+  Main.kt:3:1: error: the 'expect' declaration 'A' has no 'actual' declaration in module '<main> for JVM'.
+
+[a_top_level_expect_declaration_may_not_implement_itself]
+2.4.0..2.4.10:
+  Main.kt:3:1: error: expected declaration cannot have a body.
+  Main.kt:5:1: error: expected declaration cannot have a body.
+  Main.kt:7:31: error: expected property cannot have an initializer.
+  Main.kt:10:5: error: expected declaration cannot have a body.
+2.4.20..:
+  Main.kt:3:1: error: 'expect' declaration cannot have a body.
+  Main.kt:5:1: error: 'expect' declaration cannot have a body.
+  Main.kt:7:31: error: 'expect' property cannot have an initializer.
+  Main.kt:10:5: error: 'expect' declaration cannot have a body.
+
+[an_expect_property_may_not_be_delegated]
+2.4.0..2.4.10:
+  Main.kt:9:30: error: expected property cannot be delegated.
+  Main.kt:12:24: error: expected property cannot be delegated.
+2.4.20..:
+  Main.kt:9:30: error: 'expect' property cannot be delegated.
+  Main.kt:12:24: error: 'expect' property cannot be delegated.
+
+[the_body_is_rejected_with_or_without_the_multiplatform_feature]
+2.4.0..2.4.10:
+  Main.kt:3:1: error: 'expect' and 'actual' declarations can be used only in multiplatform projects. Learn more about Kotlin Multiplatform: https://kotl.in/multiplatform-setup
+  Main.kt:3:1: error: expected declaration cannot have a body.
+2.4.20..:
+  Main.kt:3:1: error: 'expect' and 'actual' declarations can be used only in multiplatform projects. Learn more about Kotlin Multiplatform: https://kotl.in/multiplatform-setup
+  Main.kt:3:1: error: 'expect' declaration cannot have a body.

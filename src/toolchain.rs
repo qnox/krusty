@@ -104,14 +104,6 @@ fn collect_named_jars(
     }
 }
 
-fn max_reference_version() -> &'static str {
-    include_str!("../kotlin-versions")
-        .lines()
-        .filter_map(|line| line.split('#').next()?.split_whitespace().next())
-        .next_back()
-        .unwrap_or("2.0.21")
-}
-
 fn nonempty_path(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
@@ -123,13 +115,9 @@ fn jdk_home_from(java_home: Option<OsString>, reference_home: Option<OsString>) 
     nonempty_path(java_home).or_else(|| nonempty_path(reference_home))
 }
 
-fn reference_version_from(env: Option<String>) -> String {
-    env.filter(|v| !v.is_empty())
-        .unwrap_or_else(|| max_reference_version().to_string())
-}
-
+/// The reference version whose provisioned toolchain this process uses: the one it reproduces.
 fn reference_version() -> String {
-    reference_version_from(std::env::var("KRUSTY_LANGUAGE_VERSION").ok())
+    crate::kotlin_version::target().to_string()
 }
 
 fn find_ancestor(start: &Path, mut matches: impl FnMut(&Path) -> bool) -> Option<PathBuf> {
@@ -219,7 +207,7 @@ pub fn kotlin_version() -> String {
                 .and_then(|s| s.strip_suffix(".jar"))
                 .map(String::from)
         })
-        .unwrap_or_else(|| max_reference_version().to_string())
+        .unwrap_or_else(|| crate::kotlin_version::KotlinVersion::newest().to_string())
 }
 
 /// The provisioned Kotlin codegen/box corpus root. `KRUSTY_KOTLIN_BOX_DIR` overrides the
@@ -475,17 +463,6 @@ fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reference_version_prefers_env() {
-        assert_eq!(reference_version_from(Some("1.9.24".to_string())), "1.9.24");
-        // Empty env var counts as unset -> compile-time max.
-        assert_eq!(
-            reference_version_from(Some(String::new())),
-            max_reference_version()
-        );
-        assert_eq!(reference_version_from(None), max_reference_version());
-    }
 
     #[test]
     fn provisioned_paths_share_versioned_cache_layout() {

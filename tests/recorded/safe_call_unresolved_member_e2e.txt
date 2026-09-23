@@ -1,0 +1,38 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[class_receiver_unresolved_call_is_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExistAnywhere'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'C'.
+
+[nothing_nullable_receiver_unresolved_call_is_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExistAnywhere'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Nothing'.
+
+[null_receiver_unresolved_call_is_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExistAnywhere'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Nothing'.
+
+[nullable_primitive_receiver_unresolved_call_is_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExistAnywhere'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Int'.
+
+[nullable_string_receiver_unresolved_call_is_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExistAnywhere'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'String'.
+
+[unresolved_property_behind_safe_call_still_reported]
+2.4.0..2.4.10:
+  unresolved reference 'thisDoesNotExist'.
+2.4.20..:
+  unresolved reference 'thisDoesNotExist' on receiver of type 'Nothing'.

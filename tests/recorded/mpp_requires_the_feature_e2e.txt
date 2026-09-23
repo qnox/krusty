@@ -1,0 +1,18 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[an_unmatched_expect_names_the_module_it_looked_in]
+2.4.0..2.4.10:
+  Main.kt:3:1: expected helper has no actual declaration in module <main> for JVM
+  Main.kt:5:1: expected Holder has no actual declaration in module <main> for JVM
+  Main.kt:9:1: expected prop has no actual declaration in module <main> for JVM
+2.4.20..:
+  Main.kt:3:1: the 'expect' declaration 'helper' has no 'actual' declaration in module '<main> for JVM'.
+  Main.kt:5:1: the 'expect' declaration 'Holder' has no 'actual' declaration in module '<main> for JVM'.
+  Main.kt:9:1: the 'expect' declaration 'prop' has no 'actual' declaration in module '<main> for JVM'.
+
+[the_module_a_diagnostic_names_is_the_declared_one]
+2.4.0..2.4.10:
+  Main.kt:3:1: expected helper has no actual declaration in module <mylib> for JVM
+2.4.20..:
+  Main.kt:3:1: the 'expect' declaration 'helper' has no 'actual' declaration in module '<mylib> for JVM'.

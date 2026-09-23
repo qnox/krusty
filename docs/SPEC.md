@@ -194,6 +194,29 @@ LongArray`. krusty answers `true` there because it does not box; that is krusty'
 kotlinc bug to match. Running the reference compiler is what separated the two, which is why
 `docs/TEST_HARNESS.md` now insists on provisioning it.
 
+**Every supported reference version is an oracle, one at a time.** The `kotlin-versions` manifest
+lists several kotlinc releases, and they do not all agree: kotlinc 2.4.20 rewords about sixty
+diagnostics (`expected declaration` becomes `'expect' declaration`, an unresolved member names its
+receiver's type), reports NO_VALUE_FOR_PARAMETER at the callee's name instead of the argument list,
+lists every rung's candidates in a failed `getValue`, drops `@NotNull`/`@Nullable` from annotation
+implementation classes, and packs a synthetic class's visibility into bits 8–10 of `@Metadata.xi`.
+krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
+it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
+part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The
+provisioned toolchain follows the same target. Where releases differ, code asks the target rather
+than hardcoding either answer; diagnostic text and positions live in one version-keyed table,
+`src/diagnostic_wording.rs`, so the next release adds rows there. The 2.4.20 receiver clause
+follows kotlinc's `FOR_OPTIONAL_RECEIVER` rule: it names the type of a receiver VALUE of class-like
+type (`null?.x` says `Nothing`, `null.x` says `Nothing?`, a smart cast to an intersection says its
+first class type), and is absent for a classifier qualifier (`Limits.MISSING` through a companion,
+`Obj.MISSING`), a type-parameter receiver, a callable reference, and a HIDDEN-deprecated candidate
+(`List.getFirst()`, reported as a bare unresolved name). Tests follow the same target:
+differential tests compare against whichever kotlinc the run provisions, and a test that pins what
+kotlinc says reads it from a values file recorded per version from kotlinc itself
+(`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
+`tests/diagnostic_wording_versions_e2e.rs`, plus `kotlin_version` unit tests and
+`the_reference_version_flag_accepts_only_supported_releases`.
+
 The harness (`harness/`) is a Rust integration test shelling out to the reference compiler,
 `javap`/a class-file parser, and `java`. Edge-case suite (§7) lives in `tests/cases/`.
 
@@ -3106,8 +3129,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
 
   Mapped collection scopes also admit the exact physical signatures in the provider-owned,
-  versioned `visible_methods_2_4.tsv` policy (verified identical for the supported Kotlin 2.4.0 and
-  2.4.10 toolchains), matching
+  versioned `visible_methods_2_4.tsv` policy (verified identical for the supported Kotlin 2.4.0,
+  2.4.10 and 2.4.20 toolchains), matching
   `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`. Read-only signatures such as `stream` and
   `getOrDefault` attach to the read-only declaration and are inherited by its mutable sibling;
   mutating signatures such as `removeIf`, `computeIfAbsent`, and `merge` attach directly to the
@@ -4584,10 +4607,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   artifact that could not link — a call to an unmatched `expect fun` was written as an
   `invokestatic` of a method the facade does not declare. (2) An `expect` declaration that carries
   an implementation is an error regardless of the feature, so a file without the feature gets BOTH
-  sentences, the gate first. `expected declaration cannot have a body.` covers a function with an
+  sentences, the gate first (worded per reference version: 2.4.20 says `'expect'` where earlier
+  releases say `expected`). `'expect' declaration cannot have a body.` covers a function with an
   expression or block body, a property ACCESSOR with a body, an `init` block, and any of these on a
-  member of an `expect` classifier; `expected property cannot have an initializer.` covers an
-  initializer; `expected property cannot be delegated.` covers a `by` delegate. Positions are
+  member of an `expect` classifier; `'expect' property cannot have an initializer.` covers an
+  initializer; `'expect' property cannot be delegated.` covers a `by` delegate. Positions are
   measured, not derived: a top-level declaration is reported at its
   `expect` keyword, a member at its own declaration, an accessor at its header (`get()` / `set(v)`,
   hence `PropDecl::getter_span` and `PropAccessor::span`), an `init` block at the KEYWORD (hence
@@ -4598,13 +4622,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same position is. Once any body error exists the reference compiler never reaches actualization,
   so the unmatched-expect report is suppressed for the WHOLE compilation, not per file (measured
   with two files: a body error in one silenced a clean unmatched `expect` in the other). An
-  unmatched `expect` with the feature ON reports `expected <name> has no actual declaration in
-  module <name> for JVM` at the `expect` keyword, naming the `-module-name` it looked in. Tests:
+  unmatched `expect` with the feature ON reports `the 'expect' declaration '<name>' has no 'actual'
+  declaration in module '<name> for JVM'.` (2.4.20; earlier releases say `expected <name> has no
+  actual declaration in module <name> for JVM`) at the `expect` keyword, naming the `-module-name`
+  it looked in. Tests:
   `mpp_requires_the_feature_e2e`, `expect_declaration_body_e2e`.
 
 - **An `actual` with no `expect` to actualize is an error, named by a declaration renderer.** With
   `+MultiPlatformProjects` on, a top-level `actual` that actualizes nothing reports
-  `'<rendered declaration>' has no corresponding expected declaration` at the declaration's NAME
+  `'<rendered declaration>' has no corresponding 'expect' declaration` (2.4.20; `expected
+  declaration` before it) at the declaration's NAME
   (`actual fun simple(): Int = 1` → column 12, under `simple`). krusty used to accept it and emit.
   The message names the declaration the way the reference compiler's own renderer does — the full
   measured grammar is in `docs/PARITY_PROTOCOL.md` — and that rendering is a HYBRID by necessity:

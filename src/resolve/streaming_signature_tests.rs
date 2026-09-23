@@ -5835,6 +5835,12 @@ fun destructured(line: String) = run {
         &LangFeatures::new(),
         &mut diagnostics,
     );
+    // The receiver clause 2.4.20 adds is checked against kotlinc per version in `tests/`; this test
+    // is about which reads fail, so it compares the reference alone.
+    let without_receiver = |message: &str| match message.split_once(" on receiver of type '") {
+        Some((reference, _)) => format!("{reference}."),
+        None => message.to_string(),
+    };
     assert_eq!(
         diagnostics
             .diags
@@ -5845,7 +5851,7 @@ fun destructured(line: String) = run {
                 diagnostic.editor_span,
                 diagnostic.severity,
                 diagnostic.kind,
-                diagnostic.msg.as_str(),
+                without_receiver(&diagnostic.msg),
                 diagnostic.identity,
             ))
             .collect::<Vec<_>>(),
@@ -5856,7 +5862,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "unresolved reference 'undefinedCall'.",
+                "unresolved reference 'undefinedCall'.".to_string(),
                 None,
             ),
             (
@@ -5865,7 +5871,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "unresolved reference 'undefinedMember'.",
+                "unresolved reference 'undefinedMember'.".to_string(),
                 None,
             ),
             (
@@ -5874,7 +5880,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "krusty: cannot destructure this type (no operator 'component1')",
+                "krusty: cannot destructure this type (no operator 'component1')".to_string(),
                 None,
             ),
             (
@@ -5883,7 +5889,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "krusty: cannot destructure this type (no operator 'component2')",
+                "krusty: cannot destructure this type (no operator 'component2')".to_string(),
                 None,
             ),
         ],
@@ -6109,16 +6115,8 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
                 diagnostic.identity,
             ))
             .collect::<Vec<_>>(),
+        // kotlinc reports the unsafe call alone: `status` exists on `Runtime`.
         vec![
-            (
-                0,
-                crate::diag::Span::new(125, 131),
-                None,
-                crate::diag::Severity::Error,
-                crate::diag::DiagnosticKind::Compiler,
-                "unresolved reference 'status'.",
-                None,
-            ),
             (
                 0,
                 crate::diag::Span::new(124, 131),

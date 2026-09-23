@@ -5752,7 +5752,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     /// The token the reference compiler writes for this target, as in
-    /// `expected foo has no actual declaration in module <m> for JVM`.
+    /// `the 'expect' declaration 'foo' has no 'actual' declaration in module '<m> for JVM'.`
     fn diagnostic_target_name(&self) -> Option<&str> {
         Some("JVM")
     }

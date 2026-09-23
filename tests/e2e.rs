@@ -8,10 +8,13 @@ mod cast_operand_reread_e2e;
 mod common_core;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "common/recorded.rs"]
+mod recorded_support;
 
 mod common {
     pub use super::common_core::*;
     pub use super::e2e_support::*;
+    pub use super::recorded_support::{recorded, recorded_line, recorded_named};
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -1051,6 +1054,8 @@ mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
 
+#[path = "diagnostic_wording_versions_e2e.rs"]
+mod diagnostic_wording_versions_e2e;
 #[path = "expect_declaration_body_e2e.rs"]
 mod expect_declaration_body_e2e;
 

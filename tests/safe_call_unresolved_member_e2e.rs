@@ -16,13 +16,23 @@ fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
+/// krusty reports the unresolved `name` behind `?.` exactly as kotlinc does (recorded per Kotlin
+/// version: 2.4.20 names the non-null receiver type, `Nothing` for a `null` receiver).
 fn assert_unresolved(src: &str, name: &str) {
     let d = diags(src);
+    let expected = common::recorded(|| common::reference_error_messages("Main", src));
     assert!(
-        d.iter()
-            .any(|m| m.contains(&format!("unresolved reference '{name}'."))),
-        "expected `unresolved reference '{name}'.` for {src:?}, got {d:?}"
+        expected
+            .iter()
+            .any(|message| message.contains(&format!("'{name}'"))),
+        "kotlinc must report `{name}` unresolved: {expected:?}"
     );
+    for message in &expected {
+        assert!(
+            d.contains(message),
+            "expected `{message}` for {src:?}, got {d:?}"
+        );
+    }
 }
 
 fn assert_accepted(src: &str) {
