@@ -1108,7 +1108,7 @@ pub(crate) fn lower_value_classes(
         }
     }
     for function in lowered_value_members.iter().copied() {
-        super::method_parameters::prepend_compiler_generated(ir, function, "arg0");
+        super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its

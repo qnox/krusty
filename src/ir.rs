@@ -2517,6 +2517,12 @@ pub struct IrFile {
     /// private primary constructor. The JVM value-class pass records the function identities when
     /// it creates them; emission must not recover their roles from generated method spellings.
     pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
+    /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
+    /// pass records exact function identities; common lowering does not interpret this set.
+    pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
+    /// JVM value-class member implementations whose leading physical carrier parameter realizes a
+    /// source dispatch receiver and therefore carries no nullability annotation.
+    pub(crate) jvm_value_class_receiver_impls: std::collections::HashSet<u32>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,

@@ -67,7 +67,7 @@ pub(super) fn synth_value_members(
                 function.is_static = true;
                 function.ret
             };
-            crate::jvm::method_parameters::prepend_compiler_generated(ir, getter, "arg0");
+            crate::jvm::method_parameters::prepend_value_class_receiver(ir, getter, "arg0");
             ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
                 Some(jvm_name.clone());
             // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
@@ -121,7 +121,7 @@ pub(super) fn synth_value_members(
                 function.params.insert(0, u_ir);
                 function.is_static = true;
             }
-            crate::jvm::method_parameters::prepend_compiler_generated(ir, setter, "arg0");
+            crate::jvm::method_parameters::prepend_value_class_receiver(ir, setter, "arg0");
             ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
                 Some(jvm_name);
         }
@@ -162,7 +162,7 @@ pub(super) fn synth_value_members(
         }
     }
     for function in custom_carrier_functions {
-        crate::jvm::method_parameters::prepend_compiler_generated(ir, function, "arg0");
+        crate::jvm::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
 
     let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
@@ -357,6 +357,7 @@ pub(super) fn synth_value_members(
         let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
         crate::jvm::method_parameters::record_function(ir, function, &["p1", "p2"], &[]);
         ir.jvm_value_class_representation_order.insert(function, 3);
+        ir.jvm_nullability_unannotated_methods.insert(function);
     }
     // kotlinc emits the logic in a static `<name>-impl(U)` operating on the unboxed value, and the
     // instance method delegates to it (`toString()` → `toString-impl(this.field)`). The instance methods
@@ -379,6 +380,7 @@ pub(super) fn synth_value_members(
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
@@ -394,6 +396,9 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         if let Some(fid) = add_inst(ir, "toString", vec![], str_ir, ibody) {
             ir.open_methods.insert(fid);
+            if !custom_to_string {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
@@ -417,6 +422,7 @@ pub(super) fn synth_value_members(
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
@@ -432,6 +438,9 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         if let Some(fid) = add_inst(ir, "hashCode", vec![], int_ir, ibody) {
             ir.open_methods.insert(fid);
+            if !custom_hash_code {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
@@ -481,6 +490,7 @@ pub(super) fn synth_value_members(
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0", "other"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         // instance equals(other) → return equals-impl(this.field, other)
         let fv = this_field(ir);
@@ -499,6 +509,9 @@ pub(super) fn synth_value_members(
         if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
             crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
             ir.open_methods.insert(fid);
+            if !custom_equals {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
 

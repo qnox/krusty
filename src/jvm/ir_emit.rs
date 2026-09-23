@@ -3191,9 +3191,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         .map(|f| ann(&f.name, f.ty))
         .collect();
     let ctor_desc = format!("({})V", ctor_field_descs(c));
-    // A primary hidden behind its marker accessor is private, and kotlinc annotates neither it nor the
-    // synthetic accessor.
-    if ctor_params.iter().any(|p| p.is_some()) && !ir.has_value_param_ctor(&c.fq_name()) {
+    // A value class's synthetic primary and an ordinary primary hidden behind a marker accessor are
+    // private JVM realization details; kotlinc annotates neither them nor their accessors.
+    if ctor_params.iter().any(|p| p.is_some())
+        && !c.is_value
+        && !ir.has_value_param_ctor(&c.fq_name())
+    {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -3290,7 +3293,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         if let Some(f0) = c.fields.first() {
             if let Some(a) = ann(&f0.name, f0.ty) {
                 let u = desc(f0.ty);
-                cw.set_method_nullability("constructor-impl", &format!("({u}){u}"), Some(a), &[]);
+                cw.set_method_nullability(
+                    "constructor-impl",
+                    &format!("({u}){u}"),
+                    Some(a),
+                    &[Some(a)],
+                );
             }
         }
     }
@@ -10913,7 +10921,8 @@ fn emit_method_inner_with_holder(
         .map(|(i, t)| {
             let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
                 || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
-            if lambda_impl || reified_body || is_tparam {
+            let carrier_receiver = i == 0 && ir.jvm_value_class_receiver_impls.contains(&fid);
+            if lambda_impl || reified_body || is_tparam || carrier_receiver {
                 None
             } else if declared_nullable
                 .and_then(|v| v.get(i))
@@ -10948,7 +10957,8 @@ fn emit_method_inner_with_holder(
     // nullability annotation, the same way it gets no generic `Signature`.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
         && !ir.private_methods.contains(&fid)
-        && !ir.synthetic_methods.contains(&fid);
+        && !ir.synthetic_methods.contains(&fid)
+        && !ir.jvm_nullability_unannotated_methods.contains(&fid);
     // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
     // annotations, then the whole `RuntimeVisibleParameterAnnotations` attribute, then
     // `RuntimeInvisible…`, interning each type as it writes it. `reserve_method_pool_with_annotations`
