@@ -2698,6 +2698,30 @@ fn consuming_sink_retains_member_function_context_arity() {
 }
 
 #[test]
+fn consuming_sink_records_context_tailrec_it_cannot_loop() {
+    let ir = lower_single_source(
+        "// LANGUAGE: +ContextReceivers\n\
+         context(Int)\n\
+         tailrec fun down(n: Int): Int = if (n == 0) 0 else down(n - 1)\n\
+         tailrec fun ordinary(n: Int): Int = if (n == 0) 0 else ordinary(n - 1)\n",
+        "ContextTailrec",
+    );
+    let function = |name: &str| {
+        ir.functions
+            .iter()
+            .enumerate()
+            .find_map(|(id, function)| (function.name == name).then_some(id as u32))
+            .unwrap_or_else(|| panic!("missing lowered function {name}"))
+    };
+
+    assert_eq!(
+        ir.unlooped_tailrec.iter().copied().collect::<Vec<_>>(),
+        vec![function("down")]
+    );
+    assert!(!ir.unlooped_tailrec.contains(&function("ordinary")));
+}
+
+#[test]
 fn consuming_sink_lowers_member_extension_iterator_protocol() {
     let ir = lower_single_source(
         "class It { operator fun hasNext(): Boolean = false }\n\

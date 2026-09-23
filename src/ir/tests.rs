@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn external_callable_reference_target_keeps_only_provider_identity() {
+    let declaration = crate::fir::ExternalCallableId::from_raw(37);
+    let target = IrCallableReferenceTarget::External { declaration };
+
+    let IrCallableReferenceTarget::External { declaration } = target else {
+        panic!("dependency reference must remain an opaque external target");
+    };
+    assert_eq!(declaration.raw(), 37);
+}
+
+#[test]
 fn build_trivial_function_ir() {
     // Model `fun answer(): Int = 42` in the IR by hand (lowering comes in a later phase).
     let mut f = IrFile::default();

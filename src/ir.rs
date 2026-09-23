@@ -655,6 +655,12 @@ pub enum IrCallableReferenceTarget {
         owner: Option<TypeName>,
         name: Box<str>,
     },
+    /// A DEPENDENCY declaration, by the provider-owned identity that names it. Kept opaque, as
+    /// every other dependency edge is: the owner spelling, the published name and whatever the
+    /// declaration is realized as are the target's to read from its provider.
+    External {
+        declaration: crate::fir::ExternalCallableId,
+    },
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact
@@ -2552,6 +2558,18 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
+    /// The declaration promises constant stack and the body still recurses, so a backend that
+    /// cannot supply the guarantee itself must decline the function rather than emit a program that
+    /// overflows the stack at a depth the source expects to survive. (The JVM lane reaches the same
+    /// conclusion by skipping the file in `ir_lower`; this table is how the CHECKED lowering states
+    /// the same fact to its own consumers.)
+    ///
+    /// Only the context-parameter shape qualifies. A `tailrec` that was loop-transformed is absent,
+    /// and so are the two shapes that look like failures and are not: an overridable member, which
+    /// kotlinc refuses to loop as well, and a self-call the sweep leaves behind, which kotlinc also
+    /// leaves — it reports NON_TAIL_RECURSIVE_CALL for exactly those and emits the call.
+    pub unlooped_tailrec: std::collections::HashSet<u32>,
     /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
     /// supertype member. A language fact nothing else in the IR records: `IrFunction` carries a signature,
     /// not the modifier, and a SYNTHESIZED method (absent here) is deliberately indistinguishable from an
