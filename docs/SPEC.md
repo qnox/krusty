@@ -6221,6 +6221,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native code generator: what the spine declines.** A file declaring a class or a top-level
+  property declines as a whole — a class's layout, descriptor and members are one piece, and a
+  top-level property's storage and initialization order are the classes tier's. An entry
+  `fun main(args: Array<String>)` declines by name: this target does not pass a program its
+  arguments yet, and lowering the file without an entry would fail at link time on a symbol that
+  says nothing about `main`. A `try` whose value lands where a reference is required is boxed at
+  its checked result type (`fun f(): Any = try { 5L } …` answers `5`, not a pointer).
+  Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
+  `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
+  `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
 
 ## 8. Success criteria for the PoC
 

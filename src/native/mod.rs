@@ -18,11 +18,15 @@
 //! prebuilt runtime that target's link draws on, and the LINKER that draws on it. The code
 //! generator whose objects it links follows.
 
+mod codegen;
+mod intrinsics;
 mod linker;
 mod prebuilt;
 pub mod runtime;
+mod symbols;
 mod target;
 
+pub use codegen::{CraneliftBackend, Entry};
 pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};
