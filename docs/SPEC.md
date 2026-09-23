@@ -6107,6 +6107,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty kept them and reset what the override wrote.
   Tests: `tests/unsigned_default_store_e2e.rs` (cross-checked against the reference compiler) and
   `jvm::property_storage::tests::an_unsigned_zero_is_a_jvm_default`.
+- **A `Unit` tailrec's `f(x); return` is a tail call in any block.** Nothing of the function runs
+  after a `return`, so the statement right before one is in tail position whether the block ends
+  the body or sits inside an `if`, a `when` arm or a loop. Only the body's own last block was
+  rewritten, so `if (n > 0) { …; f(n - 1); return }` followed by more code kept recursing and
+  overflowed at a depth kotlinc runs flat. The sweep over `return`s now rewrites that statement
+  wherever it finds the pair, under the same ownership rules as a `return f(x)`: not inside a
+  `try` or an inlined lambda, and only on a singly reached node.
+  Tests: `tests/tailrec_e2e.rs` (`a_unit_tailrec_bare_return_loops_wherever_it_stands`,
+  cross-checked against the reference compiler).
 
 ## 8. Success criteria for the PoC
 
