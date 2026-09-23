@@ -24,11 +24,10 @@
 //! the slot is a synthesized field access, so `x.v` through an `A`-typed `x` reads `B`'s `v` when
 //! `B` overrides it. A property that is neither open nor an override is a direct field access.
 //!
-//! **Refusals.** Constructs not lowered yet — interfaces, data classes, `inner` classes, enums,
-//! secondary constructors, constructor defaults, a superclass declared in another file, an override
-//! that changes a parameter's machine representation (which would need a bridge) — are reported by
-//! name from [`check_supported`] so the file declines with a diagnostic instead of emitting
-//! something unverified.
+//! **Refusals.** [`check_supported`] declines, by name, the two class kinds this model does not lay
+//! out — an annotation's implementation class and a callable reference's class — and layout
+//! declines a superclass declared in another file and an override of a method declared outside it,
+//! so the file declines with a diagnostic instead of emitting something unverified.
 
 use std::collections::{HashMap, HashSet};
 
@@ -233,6 +232,12 @@ pub(super) enum Slot {
         target_slot: u32,
         target: FunId,
     },
+    /// `kotlin.Any`'s three for an ANNOTATION instance. Kotlin defines all three over the
+    /// annotation's members, and an ARRAY member is compared, hashed and rendered by CONTENT —
+    /// which is what separates it from a data class, where an array member is compared by
+    /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
+    /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
+    AnnotationMember { class: ClassId, member: ValueMember },
     /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
     /// a different representation: `interface C<T> { var size: T }` erases its accessors to a
     /// reference while `class B : C<Int>, A()` inherits an unboxed machine integer. The
@@ -242,12 +247,6 @@ pub(super) enum Slot {
     /// It carries TYPES where [`Slot::Bridge`] carries function ids, because neither end need be
     /// a source accessor: either may be a synthesized field access, which has no declaration to
     /// name. It forwards by DISPATCH for the same reason the method bridge does.
-    /// `kotlin.Any`'s three for an ANNOTATION instance. Kotlin defines all three over the
-    /// annotation's members, and an ARRAY member is compared, hashed and rendered by CONTENT —
-    /// which is what separates it from a data class, where an array member is compared by
-    /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
-    /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
-    AnnotationMember { class: ClassId, member: ValueMember },
     AccessorBridge {
         /// The property type as the INTERFACE declares it: the carrier this entry wears.
         declared: Ty,
@@ -340,14 +339,22 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
     (vtable, slots)
 }
 
-/// The `kotlin.Any` slot a method overrides, decided by name and arity — the frontend does not
-/// record an override of a dependency member in `function_overrides`, and Kotlin admits no other
-/// member with these names and arities in a class.
+/// The `kotlin.Any` slot a method overrides, decided by name and signature — the frontend does not
+/// record an override of a dependency member in `function_overrides`. `hashCode()` and
+/// `toString()` cannot be declared again without overriding, but `equals` can be OVERLOADED:
+/// `fun equals(other: String)` is a new member, so only an `equals` taking exactly `Any?` is the
+/// override.
 fn any_slot(function: &IrFunction) -> Option<u32> {
-    match (function.name.as_str(), function.params.len()) {
-        ("equals", 1) => Some(0),
-        ("hashCode", 0) => Some(1),
-        ("toString", 0) => Some(2),
+    match (function.name.as_str(), function.params.as_slice()) {
+        ("equals", [other])
+            if other.is_nullable()
+                && matches!(other.non_null(), Ty::Obj(name, _)
+                    if crate::types::same(name, crate::types::wk::any())) =>
+        {
+            Some(0)
+        }
+        ("hashCode", []) => Some(1),
+        ("toString", []) => Some(2),
         _ => None,
     }
 }
@@ -1038,6 +1045,14 @@ fn layout_class(
         }
         (None, None) => any_vtable(),
     };
+    // The FUNCTION SLOT follows `kotlin.Any`'s three in every table, whether or not the class is a
+    // function. A class that becomes one lower in the hierarchy — `class B : A(), () -> String` —
+    // inherits its superclass's table, and a member of `A` already standing at that number would be
+    // overwritten by `invoke` while every call through `A` still expected it there. Reserved at the
+    // root, the number is never anyone else's.
+    if vtable.len() <= FUNCTION_SLOT as usize {
+        vtable.resize(FUNCTION_SLOT as usize + 1, Slot::Abstract);
+    }
 
     // A class implementing MORE THAN ONE function type has more `invoke`s than there are fixed
     // numbers to put them in. `KT_SLOT_INVOKE` is one number, and `object Test : () -> Unit,
@@ -1209,11 +1224,12 @@ fn layout_class(
         }
         // A member EXTENSION's override is not in the override tables — the frontend records none
         // for one — so an override of it would take a new slot and a call through the base's type
-        // would reach the base's body. The IR still says which it is: a method the source declares
-        // WITHOUT `override` is listed in `fresh_method_decls`, so one that is absent from that
-        // list and matches an inherited member by name and machine signature is that member's
-        // override. This is name matching, and it is sound only because the IR has already
-        // answered the question name matching cannot: whether this declaration is an override.
+        // would reach the base's body. `fresh_method_decls` lists property accessors only, so it
+        // cannot say whether a METHOD is an override; the language can. A member that is open,
+        // visible to this class and declared with exactly these parameter types cannot be
+        // redeclared without `override` ("hides member of supertype"), so matching one is reading
+        // that rule — and `inherited_slot` matches nothing else, not an overload that merely
+        // shares the machine signature and not a private member this class cannot see.
         let inherited_replaces = match class_replaces {
             Some(slot) => Some(slot),
             None if !ir.fresh_method_decls.contains(&fid) => {
@@ -1274,15 +1290,6 @@ fn layout_class(
                 },
             },
         };
-        // The FUNCTION SLOT is the fourth entry and `kotlin.Any`'s three are all a class starts
-        // with, so a class whose `invoke` wants that number has to GROW the table to reach it —
-        // whether the method stands there itself or a converting stand-in does. Growing it before
-        // the method takes a slot of its own is also what keeps the two numbers apart in the
-        // second case: the method would otherwise be pushed at exactly the index the stand-in
-        // wants, and a stand-in forwarding through its own number dispatches to itself.
-        if invoke_edge.is_some() && vtable.len() <= FUNCTION_SLOT as usize {
-            vtable.resize(FUNCTION_SLOT as usize + 1, Slot::Abstract);
-        }
         let slot = match replaces {
             Some(slot) => {
                 vtable[slot as usize] = entry;
@@ -1294,8 +1301,8 @@ fn layout_class(
             }
         };
         slots.insert(own_key, slot);
-        // The FUNCTION SLOT, once this method's own is known — reserved just above, so the two
-        // are never the same number.
+        // The FUNCTION SLOT, once this method's own is known — reserved when the table began, so
+        // the two are never the same number.
         if let Some(arity) = function_bridge {
             debug_assert_ne!(
                 slot, FUNCTION_SLOT,
@@ -1507,7 +1514,9 @@ fn layout_class(
 /// these accessors fill — which is why matching by name is reading the language's rule rather than
 /// guessing, the same ground `inherited_open_slot` stands on.
 ///
-/// `or_insert` throughout: a source `override val` has an edge, and that edge's answer wins.
+/// A source `override val` has an edge, and that edge's answer wins, so these entries are
+/// `or_insert`ed — except where a delegation supplies again a member an edge already placed, which
+/// takes that member's slot outright.
 fn register_accessors_without_an_edge(
     ir: &IrFile,
     id: ClassId,
@@ -1777,7 +1786,16 @@ fn inherited_slot(
     while let Some(class) = at {
         for &candidate in &ir.classes[class as usize].methods {
             let other = &ir.functions[candidate as usize];
-            if other.name != function.name || signature(other) != mine {
+            // Only a member that CAN be overridden is: an open, non-private one, declared with
+            // exactly these parameter types. The machine signature alone would take `foo(x: Any)`
+            // for `foo(x: String)` — an overload, not an override — and a private base member is
+            // invisible to the subclass, which declares a new one of the same name.
+            if other.name != function.name
+                || signature(other) != mine
+                || other.params != function.params
+                || !ir.open_methods.contains(&candidate)
+                || ir.private_methods.contains(&candidate)
+            {
                 continue;
             }
             if let Some(&slot) = slots.get(&function_key(ir, class, candidate)) {
@@ -2269,6 +2287,8 @@ mod tests {
                 Slot::Runtime("kt_any_equals"),
                 Slot::Runtime("kt_any_hash_code"),
                 Slot::Runtime("kt_any_to_string"),
+                // The function slot, reserved in every table so no member ever stands there.
+                Slot::Abstract,
             ]
         );
         assert_eq!(layout.instance_size, HEADER_SIZE);
@@ -2286,32 +2306,32 @@ mod tests {
         record_override(&mut ir, b, b_name, a_name);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(3));
-        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(4));
-        assert_eq!(model.layout(a).vtable[3], Slot::Function(a_name));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(4));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(5));
+        assert_eq!(model.layout(a).vtable[4], Slot::Function(a_name));
 
         let b_layout = model.layout(b);
         assert_eq!(
-            b_layout.vtable[3],
+            b_layout.vtable[4],
             Slot::Function(b_name),
             "the override takes the slot its base assigned"
         );
         assert_eq!(
-            b_layout.vtable[4],
+            b_layout.vtable[5],
             Slot::Function(a_other),
             "inherited unchanged"
         );
         assert_eq!(
-            b_layout.vtable[5],
+            b_layout.vtable[6],
             Slot::Function(b_extra),
             "new members append"
         );
         assert_eq!(
             model.slot(b, &SlotKey::Function(a_name)),
-            Some(3),
+            Some(4),
             "a call naming the base method finds the same slot on the subclass"
         );
-        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(3));
+        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(4));
     }
 
     #[test]
@@ -2326,16 +2346,16 @@ mod tests {
         record_override(&mut ir, c, c_f, a_f);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.layout(a).vtable[3], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[3], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[4], Slot::Function(b_g));
+        assert_eq!(model.layout(a).vtable[4], Slot::Abstract);
+        assert_eq!(model.layout(b).vtable[4], Slot::Abstract);
+        assert_eq!(model.layout(b).vtable[5], Slot::Function(b_g));
         assert_eq!(
-            model.layout(c).vtable[3],
+            model.layout(c).vtable[4],
             Slot::Function(c_f),
             "an override two levels down replaces the slot the root declared"
         );
-        assert_eq!(model.layout(c).vtable[4], Slot::Function(b_g));
-        assert_eq!(model.layout(c).vtable.len(), 5);
+        assert_eq!(model.layout(c).vtable[5], Slot::Function(b_g));
+        assert_eq!(model.layout(c).vtable.len(), 6);
         assert_eq!(model.order, vec![a, b, c]);
     }
 
@@ -2356,7 +2376,7 @@ mod tests {
         );
         let model = build(&ir).expect("layout");
         assert_eq!(model.layout(p).vtable[2], Slot::Function(to_string));
-        assert_eq!(model.layout(p).vtable[3], Slot::Function(overload));
+        assert_eq!(model.layout(p).vtable[4], Slot::Function(overload));
     }
 
     #[test]
@@ -2511,10 +2531,10 @@ mod tests {
         }];
         let model = build(&ir).expect("layout");
         assert_eq!(
-            model.layout(a).vtable[3],
+            model.layout(a).vtable[4],
             Slot::FieldGetter { class: a, field: 0 }
         );
-        assert_eq!(model.slot(a, &SlotKey::Getter(a, "v".to_string())), Some(3));
+        assert_eq!(model.slot(a, &SlotKey::Getter(a, "v".to_string())), Some(4));
     }
 
     #[test]
@@ -2562,5 +2582,137 @@ mod tests {
         assert!(build(&ir)
             .expect_err("declined")
             .contains("an annotation implementation class"));
+    }
+
+    /// Record that `implementation` is `kotlin.Function{N}.invoke`, as the frontend does: an edge to
+    /// an EXTERNAL declaration on a function type.
+    fn record_invoke(ir: &mut IrFile, class: ClassId, implementation: FunId, arity: usize) {
+        use crate::fir::{CallableId, ExternalCallableId};
+        let owner = ir.classes[class as usize].fq_name_id();
+        ir.function_overrides
+            .entry(owner)
+            .or_default()
+            .push(crate::ir::IrFunctionOverride {
+                implementation: ResolvedFunctionOverrideTarget::Module(CallableId::from_raw(
+                    2000 + implementation,
+                )),
+                implementation_function: Some(implementation),
+                implementation_owner: owner,
+                overridden: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(
+                    1,
+                )),
+                overridden_owner: crate::types::type_name(&format!("kotlin/Function{arity}")),
+                overridden_is_interface: true,
+                name: "invoke".to_string(),
+                declared_parameters: Vec::new(),
+                declared_result: Ty::Unit,
+                applied_parameters: Vec::new(),
+                applied_result: Ty::Unit,
+                implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
+                implementation_result: Ty::Unit,
+                suspend: false,
+                depth: 1,
+            });
+    }
+
+    #[test]
+    fn a_function_class_never_takes_the_slot_of_a_member_it_inherits() {
+        // `open class A { open fun foo(): String }` and `class B : A(), () -> String`: `invoke`
+        // belongs at the function slot, and `A.foo` must still be where every call through `A`
+        // looks for it.
+        let mut ir = IrFile::default();
+        let a = class(&mut ir, "A", "kotlin/Any", 0);
+        let b = class(&mut ir, "B", "A", 1);
+        let foo = add_method(&mut ir, a, function("foo", "A", vec![], Ty::String, false));
+        let invoke = add_method(
+            &mut ir,
+            b,
+            function("invoke", "B", vec![], Ty::String, false),
+        );
+        record_invoke(&mut ir, b, invoke, 0);
+
+        let model = build(&ir).expect("layout");
+        let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
+        assert_ne!(foo_slot, FUNCTION_SLOT);
+        assert_eq!(
+            model.layout(b).vtable[foo_slot as usize],
+            Slot::Function(foo)
+        );
+        assert_eq!(
+            model.layout(b).vtable[FUNCTION_SLOT as usize],
+            Slot::Function(invoke)
+        );
+    }
+
+    #[test]
+    fn an_overload_or_a_private_base_member_is_not_overridden_by_name() {
+        let mut ir = IrFile::default();
+        let a = class(&mut ir, "A", "kotlin/Any", 0);
+        let b = class(&mut ir, "B", "A", 1);
+        // `open fun take(x: Any)` in A and `fun take(x: String)` in B share a machine signature,
+        // but B's is an overload.
+        let a_take = add_method(
+            &mut ir,
+            a,
+            function(
+                "take",
+                "A",
+                vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                Ty::Int,
+                false,
+            ),
+        );
+        ir.open_methods.insert(a_take);
+        let b_take = add_method(
+            &mut ir,
+            b,
+            function("take", "B", vec![Ty::String], Ty::Int, false),
+        );
+        // `private fun hidden()` in A is invisible to B, whose `hidden()` is a new member.
+        let a_hidden = add_method(&mut ir, a, function("hidden", "A", vec![], Ty::Int, false));
+        ir.open_methods.insert(a_hidden);
+        ir.private_methods.insert(a_hidden);
+        let b_hidden = add_method(&mut ir, b, function("hidden", "B", vec![], Ty::Int, false));
+
+        let model = build(&ir).expect("layout");
+        for (base, own) in [(a_take, b_take), (a_hidden, b_hidden)] {
+            let base_slot = model.slot(b, &SlotKey::Function(base)).expect("base slot");
+            assert_eq!(
+                model.layout(b).vtable[base_slot as usize],
+                Slot::Function(base)
+            );
+            assert_ne!(model.slot(b, &SlotKey::Function(own)), Some(base_slot));
+        }
+    }
+
+    #[test]
+    fn only_an_equals_over_any_overrides_kotlin_any() {
+        let mut ir = IrFile::default();
+        let p = class(&mut ir, "P", "kotlin/Any", 0);
+        add_method(
+            &mut ir,
+            p,
+            function("equals", "P", vec![Ty::String], Ty::Boolean, false),
+        );
+        let q = class(&mut ir, "Q", "kotlin/Any", 0);
+        let equals = add_method(
+            &mut ir,
+            q,
+            function(
+                "equals",
+                "Q",
+                vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                Ty::Boolean,
+                false,
+            ),
+        );
+        let model = build(&ir).expect("layout");
+        assert_eq!(
+            model.layout(p).vtable[0],
+            Slot::Runtime("kt_any_equals"),
+            "`equals(String)` is an overload"
+        );
+        assert_eq!(model.layout(q).vtable[0], Slot::Function(equals));
     }
 }
