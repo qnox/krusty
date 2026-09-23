@@ -556,3 +556,40 @@ fun box(): String = if (test() == 1000007) \"OK\" else \"FAIL \" + test()\n";
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+#[test]
+fn a_unit_tailrec_ending_in_a_bare_return_still_loops() {
+    // `f(x); return` is a tail call in Kotlin: nothing of the function runs after the `return`, so
+    // the statement immediately before it is in tail position just as it would be at the end of the
+    // block. The source wrote `tailrec` because the call recurses to a depth no stack survives, so
+    // leaving it recursive is not a missed optimization — it is a program that overflows where the
+    // declaration promised it would not.
+    //
+    // Only the statement immediately before the `return` qualifies. Anything earlier has code after
+    // it, which is what `walking` pins: its self-call is followed by another statement, so it stays
+    // recursive and is called at a depth a stack survives.
+    const SRC: &str = "val seen: IntArray = intArrayOf(0)\n\
+tailrec fun down(n: Int) {\n\
+    if (n == 0) return\n\
+    seen[0] = seen[0] + 1\n\
+    down(n - 1)\n\
+    return\n\
+}\n\
+val walked: IntArray = intArrayOf(0)\n\
+tailrec fun walking(n: Int) {\n\
+    if (n == 0) return\n\
+    walking(n - 1)\n\
+    walked[0] = walked[0] + 1\n\
+}\n\
+fun box(): String {\n\
+    down(1000000)\n\
+    if (seen[0] != 1000000) return \"fail down \" + seen[0]\n\
+    walking(1000)\n\
+    if (walked[0] != 1000) return \"fail walking \" + walked[0]\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
