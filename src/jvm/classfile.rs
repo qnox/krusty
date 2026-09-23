@@ -197,11 +197,31 @@ pub struct DataAccessorInfo {
     pub signature: Option<String>,
 }
 
+/// A property's `$annotations` marker at its interning position: the method's own name, and the
+/// annotations whose pool entries it brings with it.
+///
+/// The annotations are carried whole rather than pre-rendered to strings, so the seeder interns them
+/// through the SAME encoder the real emission uses. A hand-listed set of utf8s would be a second
+/// answer to what an annotation puts in the pool, and would drift the first time one gained an
+/// element kind.
+pub struct PropertyMarkerSeed {
+    pub name: String,
+    pub annotations: crate::ir::DeclarationAnnotations,
+}
+
+/// One declared data-class property event in JVM emission order. A marker is its own event because
+/// a private property emits no accessor but still emits its `$annotations` method.
+pub enum DataDeclaredMemberSeed {
+    Accessor(DataAccessorInfo),
+    PropertyMarker(PropertyMarkerSeed),
+}
+
 /// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
 /// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
 pub struct DataMemberInfo<'a> {
-    /// Declared property accessors in emission order. These precede `componentN` in a data class.
-    pub accessors: &'a [DataAccessorInfo],
+    /// Declared property accessors and annotation markers in exact emission order. These precede
+    /// `componentN` in a data class; a private property contributes only its marker event.
+    pub declared_members: &'a [DataDeclaredMemberSeed],
     /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
     /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
     pub hashcode_owners: &'a [Option<String>],
@@ -2016,17 +2036,31 @@ impl ClassWriter {
         // Declared property accessors precede the synthesized data members. Ordinary classes intern
         // accessors at their exact declaration sites, but a data class's synthetic-member seeder must
         // preserve this boundary before it interns `componentN`/`copy`/the Object overrides.
-        for accessor in info.accessors {
-            self.cp.utf8(&accessor.name);
-            self.cp.utf8(&accessor.desc);
-            if let Some(signature) = &accessor.signature {
-                self.cp.utf8(signature);
-            }
-            if accessor.setter_kind >= 1 {
-                self.cp.utf8("<set-?>");
-            }
-            if accessor.setter_kind == 2 {
-                self.cp.string("<set-?>");
+        for member in info.declared_members {
+            match member {
+                DataDeclaredMemberSeed::Accessor(accessor) => {
+                    self.cp.utf8(&accessor.name);
+                    self.cp.utf8(&accessor.desc);
+                    if let Some(signature) = &accessor.signature {
+                        self.cp.utf8(signature);
+                    }
+                    if accessor.setter_kind >= 1 {
+                        self.cp.utf8("<set-?>");
+                    }
+                    if accessor.setter_kind == 2 {
+                        self.cp.string("<set-?>");
+                    }
+                }
+                // kotlinc visits the property's `$annotations` marker as soon as it has finished
+                // that property's accessors — or directly at the property for a private one.
+                // Encoding through the real annotation encoder keeps this from becoming a second
+                // description of an annotation's pool footprint.
+                DataDeclaredMemberSeed::PropertyMarker(marker) => {
+                    self.cp.utf8(&marker.name);
+                    self.cp.utf8("()V");
+                    let annotations = marker.annotations.clone();
+                    let _ = self.encode_declaration_annotations(&annotations);
+                }
             }
         }
 
