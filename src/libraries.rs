@@ -3,7 +3,9 @@
 mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
+pub(crate) mod builtin_top_level_realization;
 mod core_builtins;
+pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod platform_contract;
@@ -3096,7 +3098,19 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
     }
 }
 
-impl SemanticPlatform for EmptySymbolSource {}
+impl SemanticPlatform for EmptySymbolSource {
+    fn function_type(&self, arity: usize) -> Option<Ty> {
+        Some(function_classifiers::function_type(arity))
+    }
+
+    fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
+        function_classifiers::property_reference_type(arity, mutable, args)
+    }
+
+    fn function_reference_type(&self, function: Ty) -> Option<Ty> {
+        function_classifiers::function_reference_type(function)
+    }
+}
 
 #[cfg(test)]
 mod tests {
