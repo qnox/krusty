@@ -48,25 +48,37 @@ static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_c
 
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
-const KType kt_type_any = {"kotlin.Any", 10,   sizeof(KObjectHeader), 0, 0, NULL, NULL,
-                           kt_any_vtable, 3, 0};
+const KType kt_type_any = {.name = "kotlin.Any",
+                           .name_length = 10,
+                           .instance_size = sizeof(KObjectHeader),
+                           .vtable = kt_any_vtable,
+                           .vtable_length = 3};
+
+/* A type with no instances of its own: the root's three slots, `kotlin.Any` as its super, and
+   nothing else. Every descriptor names its fields, because a positional initializer silently
+   shifts when `KType` gains a field and leaves every field after the last one written to a
+   default nobody chose. */
+#define KT_MARKER_TYPE(identifier, kotlin_name)                                                    \
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = sizeof(KObjectHeader),                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3};
 
 /* `kotlin.Number` and `kotlin.Comparable` have no instances of their OWN — every value that is one
    is a boxed primitive or a string. They exist as descriptors for those to point at, so that an `is`
    against them has something to compare. Kotlin's own hierarchy decides which points at which, and
    it is asymmetric: `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer
    is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
-const KType kt_type_number = {"kotlin.Number", 13,  sizeof(KObjectHeader), 0, 0, NULL, &kt_type_any,
-                              kt_any_vtable,   3,   0};
-const KType kt_type_comparable = {"kotlin.Comparable", 17, sizeof(KObjectHeader), 0, 0, NULL,
-                                  &kt_type_any,        kt_any_vtable, 3, 0};
+KT_MARKER_TYPE(kt_type_number, "kotlin.Number")
+KT_MARKER_TYPE(kt_type_comparable, "kotlin.Comparable")
 
 /* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
    it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
-const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHeader), 0, 0, NULL,
-                                     &kt_type_any,         kt_any_vtable, 3, 0};
+KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.CharSequence")
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -75,20 +87,9 @@ const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHe
 
    None of them has instances, exactly like `Number` and `Comparable` above. 22 is Kotlin's largest
    function arity, so the set is complete rather than open-ended. */
-const KType kt_type_function = {"kotlin.Function", 15,            sizeof(KObjectHeader), 0, 0, NULL,
-                                &kt_type_any,      kt_any_vtable, 3,                     0};
+KT_MARKER_TYPE(kt_type_function, "kotlin.Function")
 
-#define KT_FUNCTION_TYPE(arity)                                                                    \
-    const KType kt_type_function##arity = {"kotlin.Function" #arity,                               \
-                                           sizeof("kotlin.Function" #arity) - 1,                   \
-                                           sizeof(KObjectHeader),                                  \
-                                           0,                                                      \
-                                           0,                                                      \
-                                           NULL,                                                   \
-                                           &kt_type_any,                                           \
-                                           kt_any_vtable,                                          \
-                                           3,                                                      \
-                                           0};
+#define KT_FUNCTION_TYPE(arity) KT_MARKER_TYPE(kt_type_function##arity, "kotlin.Function" #arity)
 
 KT_FUNCTION_TYPE(0)
 KT_FUNCTION_TYPE(1)
@@ -117,12 +118,7 @@ KT_FUNCTION_TYPE(22)
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
    its own — a reference object's type is one the generator emits per property — so these are what
    an `is` against `KProperty0` or `KMutableProperty` compares with. */
-#define KT_REFLECT_TYPE(identifier, kotlin_name)                                                   \
-    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
-                              sizeof(KObjectHeader), 0,                                            \
-                              0,                 NULL,                                             \
-                              &kt_type_any,      kt_any_vtable,                                    \
-                              3,                 0};
+#define KT_REFLECT_TYPE(identifier, kotlin_name) KT_MARKER_TYPE(identifier, kotlin_name)
 
 KT_REFLECT_TYPE(kt_type_kcallable, "kotlin.reflect.KCallable")
 KT_REFLECT_TYPE(kt_type_kproperty, "kotlin.reflect.KProperty")
@@ -142,24 +138,38 @@ static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_
 static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
 
 #define KT_TYPE_WITH(identifier, kotlin_name, size, count, offsets, ifaces)                        \
-    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
-                              size,              count,                                            \
-                              0,                 offsets,                                          \
-                              &kt_type_any,      kt_builtin_vtable,                                \
-                              3,                 0,                                                \
-                              ifaces,            (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = size,                                               \
+                              .reference_count = count,                                            \
+                              .reference_offsets = offsets,                                        \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_builtin_vtable,                                         \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = ifaces,                                                \
+                              .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
 
 #define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
-    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size,  count,                  \
-                              0,           offsets,                 &kt_type_any,                  \
-                              kt_builtin_vtable, 3, 0};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = size,                                               \
+                              .reference_count = count,                                            \
+                              .reference_offsets = offsets,                                        \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_builtin_vtable,                                         \
+                              .vtable_length = 3};
 
 /* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
    so it takes `kotlin.Any`'s vtable rather than the built-in value one. */
 #define KT_ARRAY_TYPE(identifier, kotlin_name, stride, references)                                 \
-    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, sizeof(KArray), 0,             \
-                              stride,      NULL,                    &kt_type_any,                  \
-                              kt_any_vtable, 3, references};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = sizeof(KArray),                                     \
+                              .element_size = stride,                                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .element_references = references};
 
 /* Every array, including the raw bytes behind a string's text. `KArray` says where the elements
    begin; the type says how wide they are and whether the collector looks inside. */
@@ -185,8 +195,14 @@ KRef kt_array_new(const KType *type, kt_int length) {
     if (length < 0) {
         KT_FAIL("krusty: negative array size\n");
     }
-    KArray *array = (KArray *)kt_gc_allocate(
-        type, (uint32_t)sizeof(KArray) + (uint32_t)length * type->element_size);
+    /* Sized in 64 bits: a length Kotlin allows can need more bytes than the allocator's 32-bit
+       request holds, and a size that wrapped would hand back an array far smaller than its length
+       says. Memory the request cannot express is memory the runtime cannot provide. */
+    uint64_t size = (uint64_t)sizeof(KArray) + (uint64_t)length * type->element_size;
+    if (size > UINT32_MAX) {
+        kt_fail_oom();
+    }
+    KArray *array = (KArray *)kt_gc_allocate(type, (uint32_t)size);
     array->length = length;
     return (KRef)array;
 }
@@ -345,6 +361,13 @@ kt_char kt_string_get(KRef self, kt_int index) {
     if (self != NULL && self->header.type->walk_char_at != NULL) {
         return self->header.type->walk_char_at(self, index);
     }
+    /* The walk below finds the character `index` falls BEFORE the end of, which a negative index
+       does on the first one; only the end of the walk raises, and that covers indices past the
+       end. */
+    if (index < 0) {
+        kt_index_out_of_bounds(index, kt_string_length(self));
+        return 0;
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
@@ -451,10 +474,17 @@ kt_int kt_string_compare_to(KRef a, KRef b) {
 }
 
 /* The BYTE offset at which UTF-16 unit `index` begins; `index` equal to the length answers the end
-   of the text. */
+   of the text. An index outside the text raises Kotlin's `IndexOutOfBoundsException` and answers
+   -1, which is the caller's signal to return rather than slice: `kt_throw` comes back. */
 static kt_int kt_string_offset(KRef self, kt_int index) {
     const char *bytes = self->as.string.bytes;
     kt_int byte_length = self->as.string.byte_length;
+    /* Before the walk, which would otherwise take a negative index for one that falls inside the
+       first character and report a surrogate pair the text does not have. */
+    if (index < 0) {
+        kt_index_out_of_bounds(index, kt_string_length(self));
+        return -1;
+    }
     kt_int unit = 0;
     kt_int at = 0;
     while (at < byte_length) {
@@ -477,15 +507,25 @@ static kt_int kt_string_offset(KRef self, kt_int index) {
         return at;
     }
     kt_index_out_of_bounds(index, unit);
-    return 0;
+    return -1;
 }
 
+/* After a raise these return the receiver rather than a slice, for the reason `kt_string_first`
+   gives: the call site tests for the exception before it reads the answer, and a slice cut from
+   bounds that were refused would be text of negative length. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
     if (start < 0 || end < start) {
         kt_index_out_of_bounds(start, end);
+        return self;
     }
     kt_int from = kt_string_offset(self, start);
+    if (from < 0) {
+        return self;
+    }
     kt_int to = kt_string_offset(self, end);
+    if (to < 0) {
+        return self;
+    }
     /* The storage is shared, not copied: the receiver's own text already holds these bytes, and
        the collector keeps it alive through the field the new string names. */
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, to - from);
@@ -493,6 +533,9 @@ KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
 
 KRef kt_string_substring_from(KRef self, kt_int start) {
     kt_int from = kt_string_offset(self, start);
+    if (from < 0) {
+        return self;
+    }
     kt_int length = self->as.string.byte_length;
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length - from);
 }
@@ -554,7 +597,9 @@ static kt_boolean kt_is_whitespace(uint32_t code) {
     if (code >= 0x2000u && code <= 0x200Au) {
         return 1;
     }
-    return code == 0x85u || code == 0xA0u || code == 0x1680u || code == 0x2028u
+    /* Not U+0085 (NEXT LINE): it is a control character outside Java's list of whitespace controls
+       and not a space character either, so the JVM answers false for it. */
+    return code == 0xA0u || code == 0x1680u || code == 0x2028u
            || code == 0x2029u || code == 0x202Fu || code == 0x205Fu || code == 0x3000u;
 }
 
@@ -715,11 +760,19 @@ KRef kt_string_repeat(KRef self, kt_int count) {
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
-    KByteArray *joined = kt_bytes_new(byte_length * count);
-    for (kt_int time = 0; time < count; time++) {
-        memcpy(kt_bytes_of(joined) + time * byte_length, bytes, (size_t)byte_length);
+    /* Multiplied out in 64 bits: the product of two lengths need not fit in one, and a length that
+       wrapped would either be negative or name a buffer smaller than the copies written into it.
+       Text longer than any array can hold is memory the runtime cannot provide. */
+    uint64_t total = (uint64_t)byte_length * (uint64_t)count;
+    if (total > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
     }
-    return kt_string_of((KRef)joined, kt_bytes_of(joined), byte_length * count);
+    KByteArray *joined = kt_bytes_new((kt_int)total);
+    for (kt_int time = 0; time < count; time++) {
+        memcpy(kt_bytes_of(joined) + (size_t)time * (size_t)byte_length, bytes,
+               (size_t)byte_length);
+    }
+    return kt_string_of((KRef)joined, kt_bytes_of(joined), (kt_int)total);
 }
 
 /* `s.reversed()`. Reversal is by CHARACTER, not by UTF-16 unit: Kotlin's own answer keeps a
@@ -794,7 +847,10 @@ static kt_int kt_render_long(kt_long value, char *buffer) {
     return length;
 }
 
-/* A `Char` is one UTF-16 code unit; the BMP subset encodes directly as UTF-8. */
+/* A `Char` is one UTF-16 code unit; the BMP subset encodes directly as UTF-8. A SURROGATE is half
+   of a character above U+FFFF and UTF-8 has no form for half a character, so one is written as the
+   three bytes its code unit would encode to — and `kt_string_plus` joins such a high half with the
+   low half that follows it into the character they spell. */
 static kt_int kt_render_char(kt_char unit, char *buffer) {
     if (unit < 0x80) {
         buffer[0] = (char)unit;
@@ -909,6 +965,15 @@ KRef kt_to_string(KRef value) {
     return kt_string_of(storage, bytes, length);
 }
 
+/* Whether the three bytes at `bytes` are a lone surrogate as `kt_render_char` writes one: a high
+   half (D800–DBFF) is `ED A0..AF xx` and a low half (DC00–DFFF) is `ED B0..BF xx`. `ED` is a lead
+   byte, so three bytes that begin with it are one whole encoding and never the tail of another. */
+static kt_boolean kt_is_surrogate_half(const char *bytes, kt_boolean high) {
+    unsigned char second = (unsigned char)bytes[1];
+    return (unsigned char)bytes[0] == 0xEDu && (high ? second >= 0xA0u && second <= 0xAFu
+                                                     : second >= 0xB0u && second <= 0xBFu);
+}
+
 KRef kt_string_plus(KRef a, KRef b) {
     kt_int left_length = 0;
     kt_int right_length = 0;
@@ -917,9 +982,32 @@ KRef kt_string_plus(KRef a, KRef b) {
     KRef right_storage = NULL;
     const char *left = kt_render(a, &left_length, &left_storage);
     const char *right = kt_render(b, &right_length, &right_storage);
-    KByteArray *joined = kt_bytes_new(left_length + right_length);
-    memcpy(kt_bytes_of(joined), left, (size_t)left_length);
-    memcpy(kt_bytes_of(joined) + left_length, right, (size_t)right_length);
-    return kt_string_of((KRef)joined, kt_bytes_of(joined), left_length + right_length);
+    /* A text ending in a high half followed by one beginning with a low half is a character above
+       U+FFFF assembled one `Char` at a time, as `"" + high + low` and `for (c in s) t += c` build
+       it. Kotlin's answer is that character, equal to the literal that spells it; the two halves
+       side by side are six bytes no literal holds, and not UTF-8 on output. The pair's six bytes
+       become the character's four. */
+    kt_boolean pair = left_length >= 3 && right_length >= 3
+                      && kt_is_surrogate_half(left + left_length - 3, 1)
+                      && kt_is_surrogate_half(right, 0);
+    kt_int kept_left = pair ? left_length - 3 : left_length;
+    kt_int skipped_right = pair ? 3 : 0;
+    kt_int length = kept_left + (pair ? 4 : 0) + right_length - skipped_right;
+    KByteArray *joined = kt_bytes_new(length);
+    char *out = kt_bytes_of(joined);
+    memcpy(out, left, (size_t)kept_left);
+    if (pair) {
+        kt_int width = 0;
+        uint32_t high = kt_code_point_at(left, kept_left, &width);
+        uint32_t low = kt_code_point_at(right, 0, &width);
+        uint32_t code = 0x10000u + ((high - 0xD800u) << 10) + (low - 0xDC00u);
+        out[kept_left] = (char)(0xF0u | (code >> 18));
+        out[kept_left + 1] = (char)(0x80u | ((code >> 12) & 0x3Fu));
+        out[kept_left + 2] = (char)(0x80u | ((code >> 6) & 0x3Fu));
+        out[kept_left + 3] = (char)(0x80u | (code & 0x3Fu));
+    }
+    memcpy(out + length - (right_length - skipped_right), right + skipped_right,
+           (size_t)(right_length - skipped_right));
+    return kt_string_of((KRef)joined, out, length);
 }
 
