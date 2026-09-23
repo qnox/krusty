@@ -280,6 +280,9 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
             reject("local property reference", *property_type)
         }
         IrExpr::Call { callee, .. } => validate_callee(callee),
+        IrExpr::PluginPlaceholder { types, .. } => {
+            reject_all("plugin operation type", types.iter().copied())
+        }
         IrExpr::TypeOp { type_operand, .. } => reject("type operation", *type_operand),
         IrExpr::Variable { ty, .. } => reject("local variable", *ty),
         IrExpr::PrimitiveNeg { ty, .. } => reject("primitive negation", *ty),
@@ -310,7 +313,6 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
         | IrExpr::SetValue { .. }
-        | IrExpr::PluginPlaceholder { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }

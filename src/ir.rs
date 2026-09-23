@@ -770,6 +770,9 @@ pub enum IrExpr {
         exprs: Vec<ExprId>,
         /// Resolved name ids the plugin needs.
         data: Vec<TypeName>,
+        /// Resolved semantic types the plugin needs. Kept separately from names so generic
+        /// arguments and nullability remain semantic data across the plugin boundary.
+        types: Vec<Ty>,
     },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),
@@ -2717,7 +2720,6 @@ pub struct IrFile {
     /// after it. Both are generated, so neither carries a source order to sort by; the constructor
     /// is already placed explicitly and these follow it.
     pub members_after_serialization_ctor: std::collections::HashSet<u32>,
-
     /// Extension-call `ExprId` → the extension's DECLARED (un-erased) receiver source type, forwarded
     /// verbatim from the checked callable's `source_receiver`. Common lowering records it with no
     /// value-class reasoning; the value-class pass reads it to decide box/unbox at the receiver. The signal

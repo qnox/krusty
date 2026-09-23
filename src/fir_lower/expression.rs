@@ -235,6 +235,7 @@ impl BodyLowering<'_> {
                 plugin,
                 operation,
                 data,
+                types,
                 operands,
             } => {
                 let operands = operands
@@ -248,6 +249,7 @@ impl BodyLowering<'_> {
                     kind: operation,
                     exprs: operands,
                     data: data.to_vec(),
+                    types: types.iter().map(|ty| ty.get()).collect(),
                 })
             }
             FirExprKind::Call(call) => {
