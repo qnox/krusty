@@ -4,7 +4,117 @@
 //! rules about which mark wins at a given offset live here, beside the table they produce, rather
 //! than at the emission sites that call them.
 
-use super::CodeBuilder;
+use super::{ClassWriter, CodeBuilder, LvtEntry};
+
+impl ClassWriter {
+    /// Position of the implicit void return recorded by declared-function emission. `None` for an
+    /// abstract, diverging, value-returning, or otherwise non-fallthrough method.
+    pub fn method_implicit_void_return_pc(&self, name: &str, desc: &str) -> Option<u16> {
+        let (n, d) = (self.cp.lookup_utf8(name)?, self.cp.lookup_utf8(desc)?);
+        self.methods
+            .iter()
+            .find(|method| method.name == n && method.desc == d)?
+            .implicit_void_return_pc
+    }
+
+    /// Attach kotlinc-style debug tables to a previously-added method (matched by name+descriptor):
+    /// a `LineNumberTable` plus a whole-method `LocalVariableTable`. Interns each local's name and
+    /// descriptor here so per-method visitation fixes constant-pool order.
+    pub fn set_method_debug(
+        &mut self,
+        name: &str,
+        desc: &str,
+        lnt: Option<(u16, u32)>,
+        locals: &[(String, String, u16)],
+    ) {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if !self
+            .methods
+            .iter()
+            .any(|method| method.name == n && method.desc == d && method.code.is_some())
+        {
+            return;
+        }
+        let (needs_lnt, needs_lvt) = match self
+            .methods
+            .iter()
+            .find(|method| method.name == n && method.desc == d)
+        {
+            Some(method) => (method.lnt.is_empty(), method.lvt.is_empty()),
+            None => return,
+        };
+        if !needs_lnt {
+            if let Some((0, line)) = lnt {
+                if let Some(method) = self
+                    .methods
+                    .iter_mut()
+                    .find(|method| method.name == n && method.desc == d)
+                {
+                    let line = line.min(u16::MAX as u32) as u16;
+                    match method.lnt.first() {
+                        Some(&(0, _)) => {}
+                        Some(&(_, first)) if first == line => {}
+                        _ => method.lnt.insert(0, (0, line)),
+                    }
+                }
+            }
+        }
+        if !needs_lnt && !needs_lvt {
+            return;
+        }
+        let lvt: Vec<LvtEntry> = if needs_lvt {
+            locals
+                .iter()
+                .map(|(name, descriptor, slot)| {
+                    (
+                        self.cp.utf8(name),
+                        self.cp.utf8(descriptor),
+                        *slot,
+                        None,
+                        None,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == n && method.desc == d)
+        {
+            if needs_lnt {
+                method.lnt = lnt
+                    .map(|(pc, line)| (pc, line as u16))
+                    .into_iter()
+                    .collect();
+            }
+            if needs_lvt {
+                method.lvt = lvt;
+            }
+        }
+    }
+
+    /// Replace a method's `LineNumberTable` with exact `(start_pc, line)` entries. Lookup-only:
+    /// describing a missing method does not perturb the constant pool.
+    pub fn set_method_lines(&mut self, name: &str, desc: &str, entries: &[(u16, u32)]) {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == n && method.desc == d && method.code.is_some())
+        {
+            method.lnt = entries
+                .iter()
+                .map(|&(pc, line)| (pc, line as u16))
+                .collect();
+        }
+    }
+}
 
 impl CodeBuilder {
     /// Record a `LineNumberTable` entry for `line` starting at the CURRENT pc. Deduped: a re-mark
@@ -121,11 +231,41 @@ impl CodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CodeBuilder;
+    use super::super::{ClassWriter, CodeBuilder, ACC_PUBLIC, ACC_STATIC};
 
     /// One instruction, so the next mark lands at a different pc.
     fn advance(code: &mut CodeBuilder) {
         code.aconst_null();
+    }
+
+    #[test]
+    fn implicit_void_return_provenance_is_not_inferred_from_the_last_opcode() {
+        let mut writer = ClassWriter::new("FooKt", "java/lang/Object");
+
+        let mut implicit = CodeBuilder::new(0);
+        implicit.implicit_ret_void();
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "implicit", "()V", &implicit);
+        assert_eq!(
+            writer.method_implicit_void_return_pc("implicit", "()V"),
+            Some(0)
+        );
+
+        let mut explicit = CodeBuilder::new(0);
+        explicit.ret_void();
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "explicit", "()V", &explicit);
+        assert_eq!(
+            writer.method_implicit_void_return_pc("explicit", "()V"),
+            None
+        );
+
+        let mut diverging = CodeBuilder::new(0);
+        diverging.aconst_null();
+        diverging.athrow();
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "diverging", "()V", &diverging);
+        assert_eq!(
+            writer.method_implicit_void_return_pc("diverging", "()V"),
+            None
+        );
     }
 
     /// The shape the retained operation exists for: a call site and the first instruction of what

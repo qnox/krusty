@@ -2973,6 +2973,22 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .iter()
                         .filter_map(|annotation| table.resolved_annotation(i as u32, annotation))
                         .collect();
+                    // A class-valued annotation argument is resolved here, next to the annotation's
+                    // own name and through the same classifier rules. Another file of this module
+                    // reads the result from the stable index; it never sees this declaration's
+                    // syntax, and recovering the identity from a spelling later is not available to
+                    // it.
+                    let resolved_annotation_class_arguments: Vec<(u32, TypeName)> = compact_headers
+                        .zip(compact_classifier)
+                        .map(|(headers, stub)| {
+                            streamed_declaration_annotation_class_literals(headers, stub.id)
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|(ordinal, path)| {
+                            Some((ordinal, class_names.classifier_binding(&path).ok()?))
+                        })
+                        .collect();
                     let semantic_tparam_names = classifier_header
                         .type_parameters
                         .iter()
@@ -3012,25 +3028,33 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .chain(captured_type_parameters.type_params.iter())
                         .cloned()
                         .collect::<Vec<_>>();
+                    let frontend_plugin_context = crate::plugins::FrontendClassContext {
+                        classifier: type_name(&internal),
+                        kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
+                            crate::libraries::TypeKind::Annotation
+                        } else if classifier_flags.has(ClassFlags::OBJECT) {
+                            crate::libraries::TypeKind::Object
+                        } else if classifier_is_enum {
+                            crate::libraries::TypeKind::Enum
+                        } else if classifier_flags.has(ClassFlags::INTERFACE) {
+                            crate::libraries::TypeKind::Interface
+                        } else {
+                            crate::libraries::TypeKind::Class
+                        },
+                        is_sealed: classifier_flags.has(ClassFlags::SEALED),
+                        type_parameters: &class_type_parameters,
+                        annotations: &resolved_annotations,
+                        annotation_class_arguments: &resolved_annotation_class_arguments,
+                    };
                     let mut contributed_members = Vec::new();
                     frontend_plugins.generate_frontend_declarations(
-                        &crate::plugins::FrontendClassContext {
-                            classifier: type_name(&internal),
-                            kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
-                                crate::libraries::TypeKind::Annotation
-                            } else if classifier_flags.has(ClassFlags::OBJECT) {
-                                crate::libraries::TypeKind::Object
-                            } else if classifier_is_enum {
-                                crate::libraries::TypeKind::Enum
-                            } else if classifier_flags.has(ClassFlags::INTERFACE) {
-                                crate::libraries::TypeKind::Interface
-                            } else {
-                                crate::libraries::TypeKind::Class
-                            },
-                            type_parameters: &class_type_parameters,
-                            annotations: &resolved_annotations,
-                        },
+                        &frontend_plugin_context,
                         &mut contributed_members,
+                    );
+                    let mut generated_nested_classifiers = Vec::new();
+                    frontend_plugins.publish_frontend_generated_classifiers(
+                        &frontend_plugin_context,
+                        &mut generated_nested_classifiers,
                     );
                     let mut contributed_companion_methods = MethodMap::new();
                     let mut contributed_companion_order = Vec::new();
@@ -3420,6 +3444,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             source_decl: Some(d),
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
+                            annotation_class_arguments: resolved_annotation_class_arguments,
+                            generated_nested_classifiers,
                             props,
                             declared_props,
                             contextual_props,
@@ -3561,6 +3587,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     source_decl: None,
                                     visibility: Visibility::Public,
                                     annotations: Vec::new(),
+                                    annotation_class_arguments: Vec::new(),
+                                    generated_nested_classifiers: Vec::new(),
                                     props: Vec::new(),
                                     declared_props: HashMap::new(),
                                     contextual_props: HashMap::new(),

@@ -83,6 +83,8 @@ fn an_anonymous_sibling_method_preinfers_a_lexically_nested_return() {
 
 #[test]
 fn deeply_nested_anonymous_objects_keep_the_source_class_classifier_scope() {
+    // Capture finalization must remain one bounded structural walk. Rechecking each anonymous
+    // class after recursively checking its descendants makes this depth exponential.
     let mut source = String::from(
         "open class Base(value: Any? = null)\n\
          class Outer {\n\

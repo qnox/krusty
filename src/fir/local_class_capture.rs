@@ -2,6 +2,7 @@
 
 use super::header::{DeclarationId, FirExprId, LocalValueId, OriginId};
 use super::signature::ResolvedTy;
+use super::ClassCaptureIdentity;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirLocalClassCaptureSource {
@@ -76,5 +77,9 @@ pub struct FirLocalClassCapture {
     pub name: Box<str>,
     pub ty: ResolvedTy,
     pub shared_cell: bool,
+    /// Stable semantic identity of the closure field this capture forwards. A direct capture owns
+    /// its current classifier/field coordinate; a transitive capture retains the upstream one.
+    /// Common lowering uses this edge instead of joining constructor prefixes by field spelling.
+    pub(crate) capture_identity: Option<ClassCaptureIdentity>,
     pub source: FirLocalClassCaptureSource,
 }

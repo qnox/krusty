@@ -41,6 +41,7 @@ pub(super) fn emit_ctor_default_stub(
         real_params,
         defaults,
         None,
+        false,
         deprecated,
         0x1001,
         cw,
@@ -66,6 +67,9 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     // different declaration and must not borrow those — `Some` carries its own entry line and, per
     // parameter, the line of the default expression being filled.
     secondary_lines: Option<(u32, &[Option<u32>], u32)>,
+    // Whether this exact constructor declaration is hidden behind its marker accessor. The caller
+    // owns constructor selection; this emitter must not infer the target from its owner or shape.
+    target_uses_marker_accessor: bool,
     deprecated: bool,
     access: u16,
     cw: &mut ClassWriter,
@@ -204,8 +208,15 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .chain(real_params)
         .copied()
         .collect::<Vec<_>>();
-    let init_desc = method_descriptor(&physical_params, Ty::Unit);
-    let aw: i32 = 1 + physical_params
+    // A constructor hidden for its value-class parameters is reached through its marker accessor,
+    // as every construction outside the accessor is.
+    let mut target_params = physical_params.clone();
+    if target_uses_marker_accessor {
+        code.aconst_null();
+        target_params.push(marker);
+    }
+    let init_desc = method_descriptor(&target_params, Ty::Unit);
+    let aw: i32 = 1 + target_params
         .iter()
         .map(|t| slot_words(*t) as i32)
         .sum::<i32>();
@@ -234,6 +245,15 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     ));
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
+    // Once constructor selection recorded that this declaration is reached through a public
+    // marker accessor, its default-argument realization is public as well. This is the same exact
+    // declaration fact used for the delegation above; do not rediscover it from the owner or the
+    // erased descriptor. Ordinary private constructors keep their synthetic-only default stub.
+    let access = if target_uses_marker_accessor {
+        access | 0x0001
+    } else {
+        access
+    };
     e.cw.add_method(access, "<init>", &desc, &code);
     if class_line != 0 {
         lines.dedup_by_key(|(_, line)| *line);
@@ -249,7 +269,17 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
 /// `<init>` — `this` at slot 0, the real params, then the marker (unused); `invokespecial` the primary,
 /// return. Straight-line (no branches ⇒ no StackMapTable). Distinct from the default-arg overload, which
 /// carries the extra `int mask` and fills defaults.
-pub(super) fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mut ClassWriter) {
+pub(super) fn emit_ctor_marker_accessor(
+    owner: &str,
+    real_params: &[Ty],
+    real_parameter_identities: &[String],
+    cw: &mut ClassWriter,
+) {
+    assert_eq!(
+        real_parameter_identities.len(),
+        real_params.len(),
+        "marker-accessor identities must match its selected constructor"
+    );
     let mut slot = 1u16; // slot 0 = `this`
     let mut param_slots: Vec<(u16, Ty)> = Vec::new();
     for t in real_params {
@@ -259,8 +289,9 @@ pub(super) fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mu
     let total = slot + 1; // + the marker local
                           // The accessor's OWN descriptor interns before its body's Methodref — kotlinc visits a method's
                           // signature before its code, so the private ctor this delegates to must not claim the earlier slot.
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     let mut stub_params = real_params.to_vec();
-    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+    stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
     cw.reserve_descriptor(&desc);
     let mut code = CodeBuilder::new(total);
@@ -280,4 +311,17 @@ pub(super) fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mu
     code.link();
 
     cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
+    let mut locals = vec![("this".to_string(), format!("L{owner};"), 0)];
+    locals.extend(
+        real_parameter_identities
+            .iter()
+            .zip(&param_slots)
+            .map(|(name, &(slot, ty))| (name.clone(), super::type_descriptor(ty), slot)),
+    );
+    locals.push((
+        "$constructor_marker".to_string(),
+        super::type_descriptor(marker),
+        slot,
+    ));
+    cw.set_method_debug("<init>", &desc, None, &locals);
 }

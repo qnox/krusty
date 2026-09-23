@@ -5,8 +5,7 @@ use super::{
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
     serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
-use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
-use crate::libraries::InlineKind;
+use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
 use crate::types::{type_name, Ty, TypeName};
 
@@ -17,7 +16,7 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Collection {
-        builder: &'static str,
+        builder: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
@@ -32,6 +31,50 @@ pub(super) enum ElementSerializerPlan {
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
     Builtin(TypeName),
+}
+
+/// The type requires a child-cache slot, but no complete serializer plan can be selected for it.
+/// Keeping this distinct from `Ok(None)` prevents an invalid cached element from being silently
+/// reclassified as an uncached one.
+pub(super) struct UnderivableChildCacheElement;
+
+/// Select the one serializer plan a child-cache slot will emit.
+///
+/// `Ok(None)` means the type does not use the cache. `Err` means it does require a cache (a
+/// collection or same-file enum), but its complete serializer is underivable. The cache builder
+/// publishes that invalid state as an unsupported residual rather than trying an uncached path.
+pub(super) fn child_cache_element_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
+    let Some(classifier) = ty.kotlin_class_internal() else {
+        return Ok(None);
+    };
+    let cacheable = collection_serializer_builder(classifier).is_some()
+        || ir
+            .classes
+            .iter()
+            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty());
+    if !cacheable {
+        return Ok(None);
+    }
+    element_serializer_plan(ir, ctx, ty)
+        .map(Some)
+        .ok_or(UnderivableChildCacheElement)
+}
+
+/// Preserve an element whose required serializer could not be emitted as an explicit plugin-owned
+/// residual. A literal `null` would turn the invalid state into bytecode and defer the failure to
+/// the serialization runtime; an unhandled placeholder makes every backend decline the file.
+pub(super) fn unsupported_element_serializer(ir: &mut IrFile, ty: Ty) -> ExprId {
+    ir.add_expr(IrExpr::PluginPlaceholder {
+        plugin: "serialization",
+        kind: "element-serializer",
+        exprs: Vec::new(),
+        data: ty.kotlin_class_internal().into_iter().collect(),
+        types: vec![ty],
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -213,11 +256,9 @@ pub(super) fn element_serializer_plan(
             arguments: Vec::new(),
         });
     }
-    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
-    // the kotlinx builtin collection serializer over its element serializer(s):
-    // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
-    // `BuiltinSerializersKt`). The element serializers are derived recursively; if any can't be, the whole
-    // collection can't (a clean `null`/bail, as before).
+    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes
+    // through the kotlinx collection serializer class over its element serializer(s). The element
+    // serializers are derived recursively; if any cannot be, the whole collection cannot.
     if let Some((builder, n)) = collection_serializer_builder(fq_name) {
         if type_args.len() >= n {
             let mut arguments = Vec::with_capacity(n);
@@ -384,11 +425,14 @@ pub(super) fn element_serializer_plan(
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
     // generates serializers for what this file declares.
-    // Scope: the non-generic shape. A generic dependency serializer is built through
-    // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
-    // from the classpath; until then such a field stays underivable and the caller bails cleanly.
+    // A provider-confirmed non-generic object is reachable through `INSTANCE`. A generic custom
+    // serializer class needs an ordinary checked constructor call; this post-check plugin cannot
+    // reconstruct overload selection from classifier arity, so that shape remains underivable.
     if type_args.is_empty() {
-        if let Some(serializer) = ctx.external_serializer(fq_name) {
+        if let Some(serializer) = ctx
+            .external_serializer(fq_name)
+            .filter(|&serializer| ctx.external_serializer_is_singleton(serializer))
+        {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
         }
     }
@@ -404,6 +448,45 @@ pub(super) fn element_serializer_plan(
         return Some(ElementSerializerPlan::Builtin(builtin.serializer));
     }
     None
+}
+
+fn emit_collection_serializer(
+    ir: &mut IrFile,
+    builder: TypeName,
+    arguments: Vec<ElementSerializerPlan>,
+    narrow_arguments: bool,
+) -> ExprId {
+    let arity = arguments.len();
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| {
+            let argument = emit_element_serializer(ir, argument);
+            if narrow_arguments {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: argument,
+                    type_operand: class_ty(KSERIALIZER_FQ),
+                })
+            } else {
+                argument
+            }
+        })
+        .collect();
+    // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the same
+    // thing: `ListSerializer(x)` is an inline stdlib function over `ArrayListSerializer(x)`, and
+    // kotlinc's plugin emits the construction.
+    ir.add_expr(IrExpr::New {
+        internal: builder,
+        args: arguments,
+        ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
+        ctor_desc: Some(format!(
+            "({})V",
+            "Lkotlinx/serialization/KSerializer;".repeat(arity)
+        )),
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    })
 }
 
 fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
@@ -426,22 +509,7 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             )
         }
         ElementSerializerPlan::Collection { builder, arguments } => {
-            let arity = arguments.len();
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| emit_element_serializer(ir, argument))
-                .collect();
-            let parameters = "Lkotlinx/serialization/KSerializer;".repeat(arity);
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
-                    name: builder.to_string(),
-                    descriptor: format!("({parameters})Lkotlinx/serialization/KSerializer;"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: arguments,
-            })
+            emit_collection_serializer(ir, builder, arguments, false)
         }
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
@@ -490,6 +558,28 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             field: "INSTANCE".to_string(),
         }),
     }
+}
+
+/// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
+///
+/// kotlinc narrows each direct collection-constructor operand and the resulting serializer to
+/// `KSerializer`. Keeping that representation detail here lets the emitter build the intended IR
+/// once; callers never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
+pub(super) fn emit_cached_element_serializer(
+    ir: &mut IrFile,
+    plan: ElementSerializerPlan,
+) -> ExprId {
+    let serializer = match plan {
+        ElementSerializerPlan::Collection { builder, arguments } => {
+            emit_collection_serializer(ir, builder, arguments, true)
+        }
+        plan => emit_element_serializer(ir, plan),
+    };
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(KSERIALIZER_FQ),
+    })
 }
 
 pub(super) fn element_serializer_expr(

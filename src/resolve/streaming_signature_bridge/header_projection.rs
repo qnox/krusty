@@ -784,6 +784,34 @@ pub(in crate::resolve) fn streamed_constructor_declaration(
 /// here: annotation resolution already reported an unresolvable reference, and the source-role gate
 /// in signature collection withdraws a target-less optional expectation from a platform file. This
 /// matches what the non-streamed source lookup drops, so the two paths agree on the same set.
+/// The class literals written on a declaration's annotations, as `(annotation ordinal, dotted
+/// source path)`. The twin of the value-parameter projection above, for a class-level
+/// `@Serializable(with = X::class)`; the path is resolved by the caller through the ordinary
+/// classifier rules, exactly as the annotation's own name is.
+pub(in crate::resolve) fn streamed_declaration_annotation_class_literals(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+) -> Vec<(u32, String)> {
+    let Some(header) = headers.syntax.declaration(declaration) else {
+        return Vec::new();
+    };
+    headers
+        .syntax
+        .declaration_annotation_class_literals(header.annotation_class_literals)
+        .iter()
+        .filter_map(|argument| {
+            let path = headers
+                .syntax
+                .type_path(argument.classifier)
+                .iter()
+                .map(|segment| headers.lookup_names.get(*segment))
+                .collect::<Option<Vec<_>>>()?
+                .join(".");
+            Some((argument.annotation_ordinal, path))
+        })
+        .collect()
+}
+
 pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
