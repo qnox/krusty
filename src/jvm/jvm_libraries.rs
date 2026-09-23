@@ -873,27 +873,6 @@ impl JvmLibraries {
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
             function.context_count = builtin.context_count;
             function.callable.context_count = builtin.context_count;
-            function.callable.compiler_intrinsic = match (
-                pkg.matches("kotlin"),
-                name,
-                function.kind,
-                function
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|signature| signature.receiver),
-            ) {
-                (true, "plus", FnKind::Extension, Some(receiver))
-                    if receiver == Ty::nullable(Ty::String) =>
-                {
-                    Some(crate::libraries::CompilerIntrinsic::StringPlus)
-                }
-                (true, "toString", FnKind::Extension, Some(receiver))
-                    if receiver == Ty::nullable(Ty::obj("kotlin/Any")) =>
-                {
-                    Some(crate::libraries::CompilerIntrinsic::NullableAnyToString)
-                }
-                _ => None,
-            };
             function.visibility = builtin.visibility;
             function.flags = FnFlags {
                 inline,
@@ -905,6 +884,10 @@ impl JvmLibraries {
                 is_final: true,
             };
             function.annotations = Vec::new();
+            function.callable.compiler_intrinsic =
+                crate::libraries::builtin_top_level_realization::normalized_function_realization(
+                    pkg, name, &function,
+                );
             overloads.push(function);
         }
         overloads
@@ -4856,14 +4839,6 @@ impl JvmLibraries {
             // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
             // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
             let mprops = self.cp.meta_properties_name(facade);
-            let property_intrinsic = match namespace {
-                SymbolNamespace::Package(package)
-                    if package.matches("kotlin/coroutines") && name == "coroutineContext" =>
-                {
-                    Some(crate::libraries::CompilerIntrinsic::CoroutineContext)
-                }
-                _ => None,
-            };
             let matching_properties = mprops
                 .iter()
                 .filter(|property| property.name == name)
@@ -4907,13 +4882,6 @@ impl JvmLibraries {
                     );
                     continue;
                 };
-                // An exact compiler intrinsic may deliberately have no callable public accessor.
-                // `coroutineContext` is a public `@InlineOnly` suspend property whose private JVM
-                // getter throws; the provider publishes its semantic declaration and marks the
-                // compiler realization instead of exposing that physical method as a fallback.
-                if !getter_method.public && property_intrinsic.is_none() {
-                    continue;
-                }
                 let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -4953,6 +4921,37 @@ impl JvmLibraries {
                     },
                     |gsig| gsig.ret,
                 );
+                let property_kind = if mp.is_extension {
+                    PropKind::Extension
+                } else {
+                    PropKind::TopLevel
+                };
+                let property_intrinsic = match namespace {
+                    SymbolNamespace::Package(package) => {
+                        crate::libraries::builtin_top_level_realization::property_realization(
+                            crate::libraries::builtin_declaration::BuiltinPropertyDeclaration {
+                                package,
+                                name,
+                                kind: property_kind,
+                                receiver,
+                                ty: property_ty,
+                                context_count,
+                                type_parameter_count: property_gsig
+                                    .as_ref()
+                                    .map_or(0, |signature| signature.formals.len()),
+                                mutable: mp.setter.is_some(),
+                            },
+                        )
+                    }
+                    SymbolNamespace::Classifier(_) => None,
+                };
+                // An exact compiler intrinsic may deliberately have no callable public accessor.
+                // `coroutineContext` is a public `@InlineOnly` suspend property whose private JVM
+                // getter throws; the provider publishes its semantic declaration and marks the
+                // compiler realization instead of exposing that physical method as a fallback.
+                if !getter_method.public && property_intrinsic.is_none() {
+                    continue;
+                }
                 let mut getter = LibraryCallable::library(
                     getter_method.owner,
                     getter_sig.name,
@@ -4997,11 +4996,7 @@ impl JvmLibraries {
                 });
                 props.push(PropertyInfo {
                     name: name.to_string(),
-                    kind: if mp.is_extension {
-                        PropKind::Extension
-                    } else {
-                        PropKind::TopLevel
-                    },
+                    kind: property_kind,
                     receiver,
                     formals: property_gsig
                         .as_ref()
@@ -5033,124 +5028,23 @@ impl JvmLibraries {
                 });
             }
         }
-        if matches!(namespace, SymbolNamespace::Package(package)
-            if package.matches("kotlin/coroutines/intrinsics"))
-            && name == "COROUTINE_SUSPENDED"
-        {
-            for property in &mut props {
-                if property.kind == PropKind::TopLevel {
-                    property.getter.compiler_intrinsic =
-                        Some(crate::libraries::CompilerIntrinsic::CoroutineSuspended);
-                }
-            }
-        }
-        if matches!(namespace, SymbolNamespace::Package(package) if package.matches("kotlin"))
-            && name == "code"
-        {
-            for property in &mut props {
-                if property.kind == PropKind::Extension && property.receiver == Some(Ty::Char) {
-                    property.getter.compiler_intrinsic =
-                        Some(crate::libraries::CompilerIntrinsic::CharCode);
-                }
-            }
-        }
-        let compiler_intrinsic = match namespace {
-            SymbolNamespace::Package(package) if package.matches("kotlin/coroutines") => match name
-            {
-                "suspendCoroutine" => Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine),
-                "startCoroutine" => Some(crate::libraries::CompilerIntrinsic::StartCoroutine),
-                _ => None,
-            },
-            SymbolNamespace::Package(package)
-                if package.matches("kotlin/coroutines/intrinsics") =>
-            {
-                match name {
-                    "suspendCoroutineUninterceptedOrReturn" => Some(
-                        crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn,
-                    ),
-                    _ => None,
-                }
-            }
-            SymbolNamespace::Package(package) if package.matches("kotlin/io") => match name {
-                "print" => Some(crate::libraries::CompilerIntrinsic::Print),
-                "println" => Some(crate::libraries::CompilerIntrinsic::Println),
-                _ => None,
-            },
-            SymbolNamespace::Package(package) if package.matches("kotlin") => match name {
-                "assert" => Some(crate::libraries::CompilerIntrinsic::Assert),
-                "enumValues" => Some(crate::libraries::CompilerIntrinsic::EnumValues),
-                "enumValueOf" => Some(crate::libraries::CompilerIntrinsic::EnumValueOf),
-                _ => crate::libraries::kotlin_array_factory_kind(name)
-                    .map(crate::libraries::CompilerIntrinsic::ArrayFactory),
-            },
-            SymbolNamespace::Package(package) if package.matches("kotlin/test") => match name {
-                "assertFailsWith" => Some(crate::libraries::CompilerIntrinsic::AssertFailsWith),
-                _ => None,
-            },
-            SymbolNamespace::Package(package)
-                if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
-            {
-                match name {
-                    "isEmpty" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::IsEmpty)
-                    }
-                    "isNotEmpty" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::IsNotEmpty)
-                    }
-                    "count" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::Count)
-                    }
-                    "trimIndent" if package.matches("kotlin/text") => {
-                        Some(crate::libraries::CompilerIntrinsic::TrimIndent)
-                    }
-                    "trimMargin" if package.matches("kotlin/text") => {
-                        Some(crate::libraries::CompilerIntrinsic::TrimMargin)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        if let Some(intrinsic) = compiler_intrinsic {
+        if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
-                let selected_declaration_kind = match intrinsic {
-                    crate::libraries::CompilerIntrinsic::ArrayFactory(_)
-                    | crate::libraries::CompilerIntrinsic::Print
-                    | crate::libraries::CompilerIntrinsic::Println
-                    | crate::libraries::CompilerIntrinsic::Assert
-                    | crate::libraries::CompilerIntrinsic::AssertFailsWith
-                    | crate::libraries::CompilerIntrinsic::CoroutineContext
-                    | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-                    | crate::libraries::CompilerIntrinsic::SuspendCoroutine
-                    | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                    | crate::libraries::CompilerIntrinsic::EnumValues
-                    | crate::libraries::CompilerIntrinsic::EnumValueOf => FnKind::TopLevel,
-                    crate::libraries::CompilerIntrinsic::ArraySize
-                    | crate::libraries::CompilerIntrinsic::CharCode
-                    | crate::libraries::CompilerIntrinsic::StringLength
-                    | crate::libraries::CompilerIntrinsic::NumericConversion
-                    | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
-                    | crate::libraries::CompilerIntrinsic::PrimitiveCompare
-                    | crate::libraries::CompilerIntrinsic::PrimitiveBitAnd
-                    | crate::libraries::CompilerIntrinsic::PrimitiveBitOr
-                    | crate::libraries::CompilerIntrinsic::PrimitiveBitXor
-                    | crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
-                    | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
-                    | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
-                    | crate::libraries::CompilerIntrinsic::BooleanNot
-                    | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
-                    | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => continue,
-                    crate::libraries::CompilerIntrinsic::StartCoroutine
-                    | crate::libraries::CompilerIntrinsic::IsEmpty
-                    | crate::libraries::CompilerIntrinsic::IsNotEmpty
-                    | crate::libraries::CompilerIntrinsic::Count
-                    | crate::libraries::CompilerIntrinsic::TrimIndent
-                    | crate::libraries::CompilerIntrinsic::TrimMargin
-                    | crate::libraries::CompilerIntrinsic::StringPlus
-                    | crate::libraries::CompilerIntrinsic::NullableAnyToString => FnKind::Extension,
-                };
-                if overload.kind == selected_declaration_kind {
+                if let Some(intrinsic) =
+                    crate::libraries::builtin_top_level_realization::normalized_function_realization(
+                        package, name, overload,
+                    )
+                {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
+                }
+            }
+            for property in &mut props {
+                if let Some(intrinsic) =
+                    crate::libraries::builtin_top_level_realization::normalized_property_realization(
+                        package, name, property,
+                    )
+                {
+                    property.getter.compiler_intrinsic = Some(intrinsic);
                 }
             }
         }
@@ -5904,9 +5798,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn function_type(&self, arity: usize) -> Option<Ty> {
-        Some(Ty::obj(
-            &crate::jvm::names::function_interface_internal_name(arity),
-        ))
+        Some(crate::libraries::function_classifiers::function_type(arity))
     }
 
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
@@ -6102,46 +5994,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
-        let internal = match (arity, mutable) {
-            (0, false) => "kotlin/reflect/KProperty0",
-            (0, true) => "kotlin/reflect/KMutableProperty0",
-            (1, false) => "kotlin/reflect/KProperty1",
-            (1, true) => "kotlin/reflect/KMutableProperty1",
-            _ => return None,
-        };
-        // `KProperty0<V>` / `KProperty1<T, V>` has no useful raw semantic form: raw `get()` exposes
-        // the declaration's unbound `V` to the checker. Require the complete source signature.
-        if args.len() != arity + 1 || args.contains(&Ty::Error) {
-            return None;
-        }
-        Some(Ty::obj_args(internal, args))
+        crate::libraries::function_classifiers::property_reference_type(arity, mutable, args)
     }
 
     fn function_reference_type(&self, function: Ty) -> Option<Ty> {
-        let Ty::Fun(signature) = function else {
-            return None;
-        };
-        if signature.context_count != 0 {
-            return None;
-        }
-        // An extension receiver is already the first semantic parameter of `FnSig`; `has_receiver`
-        // describes invocation syntax, not a different reflective arity. Thus `Int::extension` has
-        // the ordinary reflection type `KFunction1<Int, R>`.
-        let mut arguments = signature.params.to_vec();
-        arguments.push(signature.ret);
-        let classifier = crate::types::type_name_child(
-            type_name("kotlin/reflect"),
-            &format!(
-                "{}{}",
-                if signature.suspend {
-                    "KSuspendFunction"
-                } else {
-                    "KFunction"
-                },
-                signature.params.len()
-            ),
-        );
-        Some(Ty::obj_args_name(classifier, &arguments))
+        crate::libraries::function_classifiers::function_reference_type(function)
     }
 
     fn class_literal_type(&self) -> Option<Ty> {
