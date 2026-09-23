@@ -124,26 +124,37 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
-            let (target_class, mut target_jvm_tys, default_masks): (String, Vec<Ty>, &[i32]) =
-                match &sc.delegate {
-                    CtorDelegateTarget::This {
-                        target_params,
-                        default_masks,
-                        ..
-                    } => (fq_name.to_string(), jvm_tys(target_params), default_masks),
-                    CtorDelegateTarget::Super {
-                        owner,
-                        target_params,
-                        default_masks,
-                    } => {
-                        let owner =
-                            crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
-                        (owner, jvm_tys(target_params), default_masks)
-                    }
-                    CtorDelegateTarget::ImplicitEnumBase => {
-                        ("java/lang/Enum".to_string(), Vec::new(), &[])
-                    }
-                };
+            let (target_class, mut target_jvm_tys, target_is_primary, default_masks): (
+                String,
+                Vec<Ty>,
+                bool,
+                &[i32],
+            ) = match &sc.delegate {
+                CtorDelegateTarget::This {
+                    target_params,
+                    to_primary,
+                    default_masks,
+                    ..
+                } => (
+                    fq_name.to_string(),
+                    jvm_tys(target_params),
+                    *to_primary,
+                    default_masks,
+                ),
+                CtorDelegateTarget::Super {
+                    owner,
+                    target_params,
+                    to_primary,
+                    default_masks,
+                } => {
+                    let owner =
+                        crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
+                    (owner, jvm_tys(target_params), *to_primary, default_masks)
+                }
+                CtorDelegateTarget::ImplicitEnumBase => {
+                    ("java/lang/Enum".to_string(), Vec::new(), true, &[])
+                }
+            };
             let delegates_to_this = matches!(sc.delegate, CtorDelegateTarget::This { .. });
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
@@ -231,18 +242,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
-            // A cross-class delegation target (`super(…)` to a base) whose primary ctor takes a value-class
-            // param has a PRIVATE primary — reach it through the `(…args, DefaultConstructorMarker)`
-            // accessor. A same-class `this(…)` to the own private primary stays direct (accessible).
-            let target_sealed = target_class != fq_name
+            // A delegation target whose primary ctor takes a value-class param has a PRIVATE primary —
+            // reach it through the `(…args, DefaultConstructorMarker)` accessor, from a subclass's
+            // `super(…)` and from the class's own `this(…)` alike.
+            let targets_hidden_primary =
+                target_is_primary && e.ir.has_value_param_ctor(&target_class);
+            let target_sealed = target_is_primary
+                && target_class != fq_name
                 && e.ir
                     .classes
                     .iter()
                     .any(|o| o.fq_name_matches(&target_class) && o.is_sealed);
-            if emitted_default_masks.is_empty()
-                && ((target_class != fq_name && e.ir.has_value_param_ctor(&target_class))
-                    || target_sealed)
-            {
+            if emitted_default_masks.is_empty() && (targets_hidden_primary || target_sealed) {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
@@ -350,8 +361,17 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         // precisely to say what a descriptor cannot, so concatenating descriptors would drop every
         // type argument and type variable — `constructor(values: List<String>)` would sign
         // `(Ljava/util/List;)V` where kotlinc signs `(Ljava/util/List<Ljava/lang/String;>;)V`.
+        // A COMPILER-GENERATED constructor records none, for the same reason a compiler-invented
+        // accessor does not: the attribute exists for a source or Java caller, and nothing in
+        // source can name this constructor to call it. kotlinc declares the serialization
+        // plugin's deserialization constructor with its erased descriptor alone.
+        let generated =
+            ir.is_generated_secondary_constructor(c.fq_name_id(), secondary_ordinal as u32);
         let formatter = super::JvmSignatureFormatter::new(ir, env);
         let sc_signature = (|| -> Option<String> {
+            if generated {
+                return None;
+            }
             let mut signature = String::from("(");
             for (_, semantic) in &sc.named_params {
                 signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);
@@ -389,6 +409,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         if let Some(locals) = &debug_locals {
             cw.reserve_method_lvt(locals);
         }
+        let body_line_marks = sctor.line_marks().to_vec();
         cw.add_method_sig(
             sc_access,
             "<init>",
@@ -409,6 +430,36 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sc.generated_debug.line().map(|line| (0, line)),
                 locals,
             );
+        }
+        // A constructor's line table is CURATED: `add_method` drops the marks a body emitted,
+        // because an ordinary `<init>` builds its table from the class declaration and its property
+        // initializers instead. A GENERATED constructor has no such curation to fall back on, and
+        // its body's marks are exactly the table kotlinc writes — the default value of each
+        // defaulted property on that property's own line, the store after it back on the class's.
+        // So they are handed back explicitly here rather than left dropped.
+        if sc.generated_debug.records_locals() && !body_line_marks.is_empty() {
+            // The declaration's own entry opens the table: the constructor's prologue runs before
+            // any statement the body marked, so its first mark is not at pc 0.
+            let opening = sc
+                .generated_debug
+                .line()
+                .filter(|_| body_line_marks.first().is_none_or(|&(pc, _)| pc != 0))
+                .map(|line| (0u16, line));
+            // Consecutive entries for the SAME line collapse, exactly as `CodeBuilder::mark_line`
+            // collapses them within one body: the opening entry and the body's first mark are both
+            // the declaration's line, and kotlinc writes it once.
+            let mut entries: Vec<(u16, u32)> = Vec::new();
+            for (pc, line) in opening.into_iter().chain(
+                body_line_marks
+                    .iter()
+                    .map(|&(pc, line)| (pc, u32::from(line))),
+            ) {
+                if entries.last().is_some_and(|&(_, last)| last == line) {
+                    continue;
+                }
+                entries.push((pc, line));
+            }
+            cw.set_method_lines("<init>", &sc_desc, &entries);
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
@@ -452,6 +503,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &sc_source_tys,
                 &sc.defaults,
                 Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
+                sc.vc_params,
                 sc.annotations.deprecated(),
                 stub_access,
                 cw,
@@ -459,7 +511,19 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             );
         }
         if c.is_sealed || sc.vc_params {
-            super::constructor_defaults::emit_ctor_marker_accessor(fq_name, &sc_param_tys, cw);
+            let parameter_identities =
+                crate::jvm::method_parameters::secondary_constructor_identities(
+                    c,
+                    sc,
+                    self.owner_prefix,
+                    &sc_param_tys,
+                );
+            super::constructor_defaults::emit_ctor_marker_accessor(
+                fq_name,
+                &sc_param_tys,
+                &parameter_identities,
+                cw,
+            );
         }
     }
 }

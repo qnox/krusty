@@ -28,6 +28,7 @@ pub enum FirFileLoweringFailure {
     MissingCallable(DeclarationId),
     MissingProperty(DeclarationId),
     MissingSourceOrder(DeclarationId),
+    MissingContinuationOrdinal(DeclarationId),
     MissingClassSourceQualifiedName(DeclarationId),
     MissingSourcePackage(crate::fir::SourceFileId),
     UnsupportedPropertyShape(DeclarationId),
@@ -100,6 +101,7 @@ fn lower_function_override_plans(
                 .iter()
                 .map(|ty| ty.get())
                 .collect(),
+            implementation_parameter_identities: edge.implementation_parameter_identities.to_vec(),
             implementation_result: edge.implementation_result.get(),
             suspend: edge.suspend,
             depth: edge.depth,
@@ -187,6 +189,7 @@ impl<'a> CommonIrBodySink<'a> {
         )?;
         self.predeclare_functions(index)?;
         finalize_constructors(index, self.ir)?;
+        super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
         finalize_constructor_field_indices(index, self.ir)?;
@@ -1108,6 +1111,10 @@ impl<'a> CommonIrBodySink<'a> {
                 .flags
                 .has(crate::fir::DeclarationFlags::SUSPEND)
             {
+                let ordinal = index.continuation_ordinal(declaration).ok_or(
+                    FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
+                )?;
+                self.ir.fn_continuation_ordinal.insert(function, ordinal);
                 self.ir.suspend_funs.push(function);
             }
             if declaration_header
@@ -1309,14 +1316,22 @@ impl<'a> CommonIrBodySink<'a> {
                 || declaration_header
                     .flags
                     .has(crate::fir::DeclarationFlags::ABSTRACT));
-        let tailrec = declaration_header
+        let tailrec_declared = declaration_header
             .flags
-            .has(crate::fir::DeclarationFlags::TAILREC)
-            && callable.shape.context_parameter_count == 0
-            && !overridable;
+            .has(crate::fir::DeclarationFlags::TAILREC);
+        let tailrec =
+            tailrec_declared && callable.shape.context_parameter_count == 0 && !overridable;
         let parameter_count = self.ir.functions[function as usize].params.len();
         let frame =
             tailrec.then(|| TailrecFrame::of_body(function, lowered.slots, parameter_count));
+        // A `tailrec` KOTLIN loops and this lowering does not. Only the context-parameter shape
+        // is one: an overridable member is one kotlinc refuses to loop as well, and a self-call
+        // the sweep leaves behind is one kotlinc leaves too — it reports NON_TAIL_RECURSIVE_CALL
+        // and emits the call. Recording either of those would have a backend decline programs
+        // kotlinc compiles, and compiles the same way.
+        if tailrec_declared && callable.shape.context_parameter_count != 0 {
+            self.ir.unlooped_tailrec.insert(function);
+        }
         let body = if let Some(frame) = frame {
             finish_tailrec_body(self.ir, roots, frame, origin)
                 .map_err(FirFileLoweringFailure::Body)?

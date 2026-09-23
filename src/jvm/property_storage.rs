@@ -41,7 +41,7 @@ pub fn realize_top_level_jvm_fields(ir: &mut IrFile) {
 }
 
 /// Whether `expression` is a constant the JVM already supplies as a field's initial value (`null`,
-/// zero of any width, `false`) — so a store of it is pure redundancy the emitter may drop.
+/// zero of any width — signed or unsigned, whose carrier is the same primitive — `false`) — so a store of it is pure redundancy the emitter may drop.
 pub(crate) fn is_jvm_default(ir: &IrFile, expression: ExprId) -> bool {
     match ir.expr(expression) {
         IrExpr::Const(IrConst::Boolean(false))
@@ -50,6 +50,10 @@ pub(crate) fn is_jvm_default(ir: &IrFile, expression: ExprId) -> bool {
         | IrExpr::Const(IrConst::Int(0))
         | IrExpr::Const(IrConst::Long(0))
         | IrExpr::Const(IrConst::Char(0))
+        | IrExpr::Const(IrConst::UByte(0))
+        | IrExpr::Const(IrConst::UShort(0))
+        | IrExpr::Const(IrConst::UInt(0))
+        | IrExpr::Const(IrConst::ULong(0))
         | IrExpr::Const(IrConst::Null) => true,
         IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
         IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
@@ -121,5 +125,22 @@ mod tests {
             panic!("body must remain a block");
         };
         assert_eq!(stmts, &[later_assignment]);
+    }
+
+    /// An unsigned zero is its carrier's zero: `0u` is the `int` the field already holds.
+    #[test]
+    fn an_unsigned_zero_is_a_jvm_default() {
+        let mut ir = IrFile::default();
+        for zero in [
+            IrConst::UByte(0),
+            IrConst::UShort(0),
+            IrConst::UInt(0),
+            IrConst::ULong(0),
+        ] {
+            let expression = ir.add_expr(IrExpr::Const(zero));
+            assert!(is_jvm_default(&ir, expression));
+        }
+        let one = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
+        assert!(!is_jvm_default(&ir, one));
     }
 }
