@@ -131,3 +131,13 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
         "the payload arrives in order"
     );
 }
+
+#[test]
+fn a_double_or_float_renders_as_the_jvm_renders_it() {
+    run_driver("fp_render_known_answers");
+}
+
+#[test]
+fn a_floating_remainder_is_exact_and_a_nan_comes_back_quiet() {
+    run_driver("fp_remainder_known_answers");
+}
