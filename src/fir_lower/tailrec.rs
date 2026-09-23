@@ -253,6 +253,26 @@ fn rewrite_returned_tail_calls(
                     continue;
                 }
             }
+            // A `Unit` function's `f(x); return` is a tail call in ANY block, not only in the one
+            // that ends the body: nothing of this function runs after that `return` either. The
+            // body's own last block went through `tail_value` already; this is the same rewrite
+            // for a block the sweep finds inside an `if`, a `when` arm or a loop. The statement
+            // before the `return` is rebuilt as a tail and keeps its id; the `return` stays behind
+            // it, unreached once the statement ends in a step.
+            IrExpr::Block { stmts, value: None }
+                if result == Ty::Unit && stmts.len() > 1 && paths.get(&expression) == Some(&1) =>
+            {
+                let (tail, returned) = (stmts[stmts.len() - 2], stmts[stmts.len() - 1]);
+                if matches!(ir.expr(returned), IrExpr::Return(None))
+                    && returns_from_here(ir, returned)
+                    && !matches!(ir.expr(tail), IrExpr::Return(_))
+                    && paths.get(&tail) == Some(&1)
+                    && reaches_self_call(ir, tail, frame)
+                {
+                    let rebuilt = tail_value(ir, tail, frame, result, origin)?;
+                    ir.exprs[tail as usize] = ir.expr(rebuilt).clone();
+                }
+            }
             _ => {}
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
