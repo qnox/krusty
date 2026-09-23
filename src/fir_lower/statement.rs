@@ -30,14 +30,11 @@ impl BodyLowering<'_> {
             FirStatementKind::Local {
                 target,
                 ty,
-                mutable,
+                mutable: _,
                 lateinit,
                 initializer,
                 conversion,
             } => {
-                if !*mutable && !*lateinit {
-                    self.immutable_values.insert(*target);
-                }
                 let mut init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
                     .transpose()?;
