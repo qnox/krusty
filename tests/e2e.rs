@@ -1369,6 +1369,8 @@ mod secondary_constructor_member_order_e2e;
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]
 mod secondary_ctor_this_sibling_e2e;
+#[path = "serializer_bridge_parameter_names_e2e.rs"]
+mod serializer_bridge_parameter_names_e2e;
 #[path = "serialization_companion_byte_parity_e2e.rs"]
 mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_constructor_pool_order_e2e.rs"]

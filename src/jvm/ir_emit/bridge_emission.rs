@@ -362,10 +362,20 @@ fn attach_bridge_debug_tables(
     };
     let this_desc = format!("L{};", c.fq_name());
     {
+        // A bridge's locals take the names the method it forwards to has. A SOURCE method publishes
+        // them through `fn_params`; a plugin-generated one has no entry there — its exact parameter
+        // identities live in its generated-member publication, which is the only place they exist.
         let target_names = bridge
             .target_function
-            .and_then(|function| ir.fn_params.get(&function))
-            .map(|parameters| parameters.names.as_slice())
+            .and_then(|function| {
+                ir.fn_params
+                    .get(&function)
+                    .map(|parameters| parameters.names.as_slice())
+                    .or_else(|| {
+                        ir.generated_function_publication(function)
+                            .map(|publication| publication.parameter_names.as_slice())
+                    })
+            })
             .unwrap_or_default();
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
