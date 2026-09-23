@@ -253,10 +253,12 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
                 // Return is COVARIANT.
                 && assignable_inner(cx, oracle, a.ret, b.ret)
         }
-        (Ty::Obj(_, _), Ty::Obj(_, _)) => obj_assignable(cx, oracle, sub, sup),
+        // A function type projects onto `kotlin/Function<R>` with its own result as the
+        // type argument, so the argument check applies: `() -> String` is not a `Function<Int>`.
+        (Ty::Obj(_, _) | Ty::Fun(_), Ty::Obj(_, _)) => obj_assignable(cx, oracle, sub, sup),
         _ => {
-            // Mixed reference shapes (`Ty::String` vs `Ty::Obj("kotlin/CharSequence")`, `Fun` vs `Obj`
-            // FunctionN) compare through their Kotlin class identity.
+            // Remaining mixed reference shapes (`Ty::String` vs `Ty::Obj("kotlin/CharSequence")`) compare
+            // through their Kotlin class identity.
             class_assignable(oracle, sub, sup)
         }
     }
@@ -492,6 +494,11 @@ mod tests {
     struct Fake;
     impl TypeOracle for Fake {
         fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+            // What `hierarchy_projection` states for the real oracle: `(P) -> R` is a
+            // `kotlin.Function<R>`.
+            if let Ty::Fun(signature) = ty.non_null() {
+                return vec![Ty::obj_args("kotlin/Function", &[signature.ret])];
+            }
             let Some(internal) = ty.kotlin_class_internal() else {
                 return Vec::new();
             };
@@ -538,6 +545,7 @@ mod tests {
                 crate::types::TypeVariance::In
             } else if internal.matches("kotlin/collections/List")
                 || internal.matches("kotlin/collections/Iterable")
+                || internal.matches("kotlin/Function")
                 || internal.matches("app/Source")
             {
                 crate::types::TypeVariance::Out
@@ -794,6 +802,31 @@ mod tests {
             Ty::fun(vec![], Ty::Int),
             Ty::fun(vec![Ty::Int], Ty::Int)
         ));
+    }
+
+    /// A function type is a `kotlin.Function<R>` for its OWN result `R`, not for every `R`. Reaching
+    /// `Function` in the hierarchy is not enough: the argument must match too, covariantly, since
+    /// `Function` is declared `Function<out R>`. Without the argument check `(Int) -> String` was
+    /// assignable to `Function<Int>`, a program kotlinc rejects with an argument type mismatch.
+    #[test]
+    fn a_function_type_is_a_function_of_its_own_result() {
+        let lambda = Ty::fun(vec![Ty::Int], s("kotlin/String"));
+        let function = |result: Ty| Ty::obj_args("kotlin/Function", &[result]);
+
+        assert!(ok(lambda, function(s("kotlin/String"))), "its own result");
+        assert!(
+            ok(lambda, function(s("kotlin/Any"))),
+            "a supertype of it: `out R`"
+        );
+        assert!(
+            ok(lambda, s("kotlin/Any")),
+            "a function type is still an `Any`"
+        );
+        assert!(
+            ok(lambda, function(s("kotlin/CharSequence"))),
+            "String is a CharSequence: `out R` admits a supertype of the result"
+        );
+        assert!(!ok(lambda, function(Ty::Int)), "an unrelated result");
     }
 
     #[test]
