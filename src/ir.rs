@@ -2709,10 +2709,11 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
-    /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
-    /// this file. The JVM value-class pass merges these into its erasure map so a dependency value class
-    /// unboxes exactly like a same-file declaration. Populated from checked external classifier facts;
-    /// native unsigned builtins keep their dedicated `Ty`/runtime handling and are not recorded here.
+    /// Value classes REFERENCED in this file but declared elsewhere (fq identity → declared
+    /// underlying semantic type): sibling-file declarations and dependencies share this one table.
+    /// Checked classifier facts populate it before plugins run, and a representation backend may
+    /// extend it while inventorying the rest of the file. Native unsigned builtins keep their
+    /// dedicated `Ty`/runtime handling and are not recorded here.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
     /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
@@ -3367,6 +3368,13 @@ impl IrFile {
     }
 
     pub fn insert_external_value_class_name(&mut self, internal: TypeName, underlying: Ty) {
+        if let Some(recorded) = self.external_value_classes.get(&internal) {
+            assert_eq!(
+                *recorded, underlying,
+                "checked providers disagreed about one value-class declaration"
+            );
+            return;
+        }
         self.external_value_classes.insert(internal, underlying);
     }
 
@@ -3378,8 +3386,8 @@ impl IrFile {
         self.external_value_class_name(internal).is_some()
     }
 
-    /// Resolve a value class's erased underlying type without making callers branch on whether the
-    /// declaration belongs to this source file or was recovered from dependency metadata.
+    /// Return a value class's declared, one-level underlying semantic type without making callers
+    /// branch on whether the declaration belongs to this source file or external checked facts.
     pub(crate) fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
         self.external_value_class_name(internal)
             .copied()

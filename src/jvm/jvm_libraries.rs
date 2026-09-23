@@ -5231,7 +5231,7 @@ impl SymbolSource for JvmLibraries {
     }
 }
 
-impl crate::types::ClassifierAnnotationSource for JvmLibraries {
+impl crate::types::ClassifierFactSource for JvmLibraries {
     fn classifier_annotations(
         &self,
         classifier: TypeName,
@@ -5242,6 +5242,15 @@ impl crate::types::ClassifierAnnotationSource for JvmLibraries {
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
         SymbolSource::classifier(self, classifier)
             .map(|shape| shape.kind == crate::libraries::TypeKind::Object)
+    }
+
+    fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+        SymbolSource::classifier(self, classifier).and_then(|shape| shape.value_underlying)
+    }
+
+    fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
+        SymbolSource::classifier(self, classifier)
+            .and_then(|shape| shape.value_underlying_property.clone())
     }
 }
 

@@ -19,6 +19,7 @@ mod enum_serializer;
 mod generated_classifier;
 mod generated_members;
 mod serialize_body;
+mod value_class_types;
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
@@ -39,6 +40,7 @@ use generated_members::{add_serializer_members, publish_write_self, GeneratedSer
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use value_class_types::{inline_prim_methods, value_class_underlying};
 
 mod child_serializer_cache;
 use child_serializer_cache::{
@@ -925,64 +927,6 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
         "(Lkotlin/reflect/KClass;)V",
         vec![kclass],
     )
-}
-
-fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
-    fn rec(ir: &IrFile, ty: &Ty, depth: u32) -> Option<Ty> {
-        if depth > 32 {
-            return None;
-        }
-        let fq = ty.kotlin_class_internal()?;
-        // A same-file value class: recurse through its declared single field.
-        if let Some(c) = ir.classes.iter().find(|c| c.fq_name_id() == fq) {
-            if !c.is_value {
-                return None;
-            }
-            let u = c.fields.first()?.ty;
-            return Some(rec(ir, &u, depth + 1).unwrap_or(u));
-        }
-        // A CROSS-FILE `@JvmInline value class` (its `@Metadata`-decoded underlying, carrying nullability)
-        // — so a serialized data class with an imported value-class field still recognizes it.
-        if let Some(u) = ir.external_value_class_name(fq) {
-            return Some(rec(ir, u, depth + 1).unwrap_or(*u));
-        }
-        None
-    }
-    rec(ir, ty, 0)
-}
-
-/// Plain `Encoder.encode*` / `Decoder.decode*` for a value class's underlying type (`encodeInt` /
-/// `decodeInt`), as `(enc_name, enc_desc, dec_name, dec_desc)`. `None` for an unsupported underlying.
-fn inline_prim_methods(
-    ty: &Ty,
-) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    let classifier = element_serializer::builtin_element_key(ty)?;
-    Some(if classifier == type_name("kotlin/Int") {
-        ("encodeInt", "(I)V", "decodeInt", "()I")
-    } else if classifier == type_name("kotlin/Long") {
-        ("encodeLong", "(J)V", "decodeLong", "()J")
-    } else if classifier == type_name("kotlin/Boolean") {
-        ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z")
-    } else if classifier == type_name("kotlin/Double") {
-        ("encodeDouble", "(D)V", "decodeDouble", "()D")
-    } else if classifier == type_name("kotlin/Float") {
-        ("encodeFloat", "(F)V", "decodeFloat", "()F")
-    } else if classifier == type_name("kotlin/Char") {
-        ("encodeChar", "(C)V", "decodeChar", "()C")
-    } else if classifier == type_name("kotlin/Byte") {
-        ("encodeByte", "(B)V", "decodeByte", "()B")
-    } else if classifier == type_name("kotlin/Short") {
-        ("encodeShort", "(S)V", "decodeShort", "()S")
-    } else if classifier == type_name("kotlin/String") {
-        (
-            "encodeString",
-            "(Ljava/lang/String;)V",
-            "decodeString",
-            "()Ljava/lang/String;",
-        )
-    } else {
-        return None;
-    })
 }
 
 impl SerializationPlugin {

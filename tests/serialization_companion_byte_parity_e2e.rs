@@ -165,7 +165,7 @@ pub(super) fn compare_with_kotlinc_plugin(
 
 /// Multi-file form of [`compare_with_kotlinc_plugin`], used for module facts that cannot be tested
 /// by compiling declarations in one source unit.
-fn compare_files_with_kotlinc_plugin(
+pub(super) fn compare_files_with_kotlinc_plugin(
     sources: &[(&str, &str)],
     class: &str,
     cp_jars: &[PathBuf],

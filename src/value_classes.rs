@@ -91,6 +91,42 @@ pub(crate) fn nullable_value_requires_distinct_null(
         .is_some_and(|underlying| underlying_chain_accepts_null(underlying, declarations))
 }
 
+/// Whether every declared underlying chain terminates outside the value-class declaration graph.
+/// Providers/backends must reject a cyclic graph before asking a target policy to project it; an
+/// arbitrary cycle edge is not a valid carrier choice on any target.
+pub(crate) fn declarations_are_acyclic(declarations: &UnderlyingTypes) -> bool {
+    fn visit(
+        classifier: TypeName,
+        declarations: &UnderlyingTypes,
+        visiting: &mut HashSet<TypeName>,
+        complete: &mut HashSet<TypeName>,
+    ) -> bool {
+        if complete.contains(&classifier) {
+            return true;
+        }
+        if !visiting.insert(classifier) {
+            return false;
+        }
+        let valid = declarations
+            .get(&classifier)
+            .and_then(|underlying| underlying.non_null().obj_internal())
+            .filter(|underlying| declarations.contains_key(underlying))
+            .is_none_or(|underlying| visit(underlying, declarations, visiting, complete));
+        visiting.remove(&classifier);
+        if valid {
+            complete.insert(classifier);
+        }
+        valid
+    }
+
+    let mut visiting = HashSet::new();
+    let mut complete = HashSet::new();
+    declarations
+        .keys()
+        .copied()
+        .all(|classifier| visit(classifier, declarations, &mut visiting, &mut complete))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +188,16 @@ mod tests {
             crate::types::type_name("sample/Plain"),
             &declarations,
         ));
+    }
+
+    #[test]
+    fn a_cycle_is_not_a_target_representation() {
+        let first = crate::types::type_name("fixture/First");
+        let second = crate::types::type_name("fixture/Second");
+        let declarations = [(first, Ty::obj_name(second)), (second, Ty::obj_name(first))]
+            .into_iter()
+            .collect();
+
+        assert!(!declarations_are_acyclic(&declarations));
     }
 }

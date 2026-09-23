@@ -17,6 +17,7 @@
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
 mod bridge_returns;
+mod declaration_inventory;
 mod property_references;
 mod synth_members;
 
@@ -91,173 +92,6 @@ fn is_value_class_internal(internal: TypeName, under: &Under) -> bool {
 /// coincidentally-named boxing override does not collide.
 type FieldGetters = HashMap<(u32, u32), Ty>;
 
-/// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
-/// value-class type to its single field's type, rewrite construction/sole-property access, and insert
-/// box/unbox at the representation boundaries this pass models. The `bool` result is reserved for a
-/// future structural bail; today it always returns `true` (the pass never skips a value-class file —
-/// shapes it does not yet handle are emitted as-is, surfacing as a conformance FAIL to be fixed, not a
-/// silent skip).
-/// Every `Obj` class-internal name occurring anywhere in a `Ty` (recursing type arguments, arrays,
-/// nullables, function types) pushed to `out`.
-fn collect_obj_names(t: Ty, out: &mut Vec<TypeName>) {
-    match t {
-        Ty::Obj(n, args) => {
-            out.push(n);
-            for a in args {
-                collect_obj_names(*a, out);
-            }
-        }
-        Ty::Nullable(inner) => collect_obj_names(*inner, out),
-        Ty::Fun(s) => {
-            for p in &s.params {
-                collect_obj_names(*p, out);
-            }
-            collect_obj_names(s.ret, out);
-        }
-        _ => {}
-    }
-}
-
-/// Every class name referenced by a `Ty` anywhere in the IR — function signatures, class fields, recorded
-/// logical types, and `TypeOp`/`Variable`/`InvokeFunction` type operands. The value-class pass probes each
-/// against the `SymbolSource` to find the classpath value classes this file uses, without a lowerer-built
-/// side map.
-fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for f in &ir.functions {
-        for p in &f.params {
-            collect_obj_names(*p, &mut out);
-        }
-        collect_obj_names(f.ret, &mut out);
-    }
-    for c in &ir.classes {
-        for fld in &c.fields {
-            collect_obj_names(fld.ty, &mut out);
-        }
-        for s in &c.supertypes {
-            collect_obj_names(*s, &mut out);
-        }
-        for (_, b) in &c.type_param_bounds {
-            collect_obj_names(*b, &mut out);
-        }
-        for a in &c.ctor_args {
-            collect_obj_names(a.ty, &mut out);
-        }
-        for constructor in &c.secondary_ctors {
-            constructor
-                .prefix_params
-                .iter()
-                .chain(&constructor.params)
-                .for_each(|ty| collect_obj_names(*ty, &mut out));
-        }
-        for entry in &c.enum_entries {
-            entry
-                .constructor_parameter_types
-                .iter()
-                .for_each(|ty| collect_obj_names(*ty, &mut out));
-        }
-        if let Some(parameters) = &c.enum_entry_of {
-            parameters
-                .iter()
-                .for_each(|ty| collect_obj_names(*ty, &mut out));
-        }
-        // A dependency callable reference may be the only place a classpath value class occurs.
-        // Its synthetic carrier owns both the logical FunctionN signature and the already-selected
-        // declaration signature; include those types so this JVM representation pass can realize
-        // mangling/erasure from the provider's value-class declaration.
-        if let Some(reference) = &c.func_ref {
-            reference
-                .param_tys
-                .iter()
-                .chain(&reference.target_param_tys)
-                .for_each(|ty| collect_obj_names(*ty, &mut out));
-            collect_obj_names(reference.ret_ty, &mut out);
-            collect_obj_names(reference.target_ret_ty, &mut out);
-            if let Some(parameters) = &reference.reflection_target_param_tys {
-                parameters
-                    .iter()
-                    .for_each(|ty| collect_obj_names(*ty, &mut out));
-            }
-            if let Some(result) = reference.reflection_target_ret_ty {
-                collect_obj_names(result, &mut out);
-            }
-        }
-    }
-    for t in ir.logical_types.values() {
-        collect_obj_names(*t, &mut out);
-    }
-    for e in &ir.exprs {
-        match e {
-            IrExpr::TypeOp { type_operand, .. } => collect_obj_names(*type_operand, &mut out),
-            IrExpr::Variable { ty, .. } => collect_obj_names(*ty, &mut out),
-            IrExpr::InvokeFunction { params, ret, .. } => {
-                params
-                    .iter()
-                    .for_each(|ty| collect_obj_names(*ty, &mut out));
-                collect_obj_names(*ret, &mut out);
-            }
-            IrExpr::PropertyRead { owner, ty, .. } | IrExpr::PropertyWrite { owner, ty, .. } => {
-                // Semantic property nodes replaced realization-shaped calls, so both the declaring
-                // owner (needed to recognize a value class's sole-property identity read) and logical
-                // value type (needed to mangle/erase another class's accessor) are type references in
-                // their own right. Omitting either makes value-class handling depend on some unrelated
-                // signature also mentioning the class.
-                out.push(*owner);
-                collect_obj_names(*ty, &mut out);
-            }
-            IrExpr::New {
-                internal,
-                ctor_params,
-                ..
-            } => {
-                // The constructed class itself — so a value class being constructed (`Id(x)`, incl. a
-                // classpath/other-module one) enters `under` and its `New` is rewritten to
-                // `constructor-impl` rather than emitted as a raw (private-`<init>`) `new`.
-                out.push(*internal);
-                if let Some(ps) = ctor_params {
-                    for p in ps {
-                        collect_obj_names(*p, &mut out);
-                    }
-                }
-            }
-            IrExpr::RefNew { elem, .. }
-            | IrExpr::RefGet { elem, .. }
-            | IrExpr::RefSet { elem, .. } => collect_obj_names(*elem, &mut out),
-            IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
-                collect_obj_names(*array_type, &mut out)
-            }
-            IrExpr::Call {
-                callee:
-                    Callee::CrossFile { params, ret, .. }
-                    | Callee::ModuleWithDefaults { params, ret, .. },
-                ..
-            } => {
-                for parameter in params {
-                    collect_obj_names(*parameter, &mut out);
-                }
-                collect_obj_names(*ret, &mut out);
-            }
-            IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        params: Some((ps, ret)),
-                        ..
-                    },
-                ..
-            } => {
-                for p in ps {
-                    collect_obj_names(*p, &mut out);
-                }
-                collect_obj_names(*ret, &mut out);
-            }
-            _ => {}
-        }
-    }
-    out.retain(|name| seen.insert(*name));
-    out
-}
-
 fn supplied_constructor_parameters<'a>(
     parameters: &'a [Ty],
     defaults: &'a [u32],
@@ -315,14 +149,17 @@ pub(crate) fn apply_override_final_drop(ir: &mut IrFile) {
 }
 
 #[must_use]
+/// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
+/// value-class type to its single field's type, rewrite construction/sole-property access, and insert
+/// box/unbox at the representation boundaries this pass models. The `bool` result is reserved for a
+/// future structural bail; today it always returns `true`.
 pub(crate) fn lower_value_classes(
     ir: &mut IrFile,
-    classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierFactSource,
     // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
-    // frontend symbols. A value class declared in ANOTHER file of this module is neither in `ir.classes`
-    // (a different file) nor reported by the resolver (whose `value_underlying` only decodes classpath
-    // `@Metadata`), so its erasure/mangle map entry comes from here — without leaking value-class-ness
-    // into the CHECKER's library view (which drives construction/member resolution).
+    // frontend symbols. A value class declared in ANOTHER file of this module is not in `ir.classes`;
+    // the normalized classifier provider supplies its declaration facts without leaking provider
+    // origin into representation decisions.
     module_value_classes: &std::collections::HashMap<TypeName, Ty>,
     // Subset whose stable declaration headers describe a value-class shape supported by metadata
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
@@ -390,44 +227,14 @@ pub(crate) fn lower_value_classes(
     // Merge classpath `@JvmInline value class`es referenced by this file (`Result` → `Object`). They are
     // NOT in `ir.classes` (no synthesized members — their `-impl`/`box-impl` live on the classpath), so
     // they only contribute to the erasure map: every occurrence of their type erases to the underlying.
-    // Value-class-ness is resolved through the federated `SymbolSource` (`is_value`), NOT a side map built
-    // in the lowerer — the lowerer carries no value-class knowledge. Every referenced class name in the IR
-    // is probed; a classpath value class contributes its `value_underlying`.
+    // Every referenced classifier is probed through the normalized checked-fact boundary; the JVM
+    // pass never opens source, metadata, or a classpath to rediscover semantic declarations.
     let mut under = under;
-    let mut external_underlying_properties = HashMap::new();
-    for fq in referenced_class_names(ir) {
-        if under.contains_key(&fq) || is_native_unsigned(fq) {
-            continue;
-        }
-        if crate::types::prim_array_element(fq).is_some() {
-            continue;
-        }
-        let dependency = classpath.value_class_declaration(fq);
-        if let Some(property) = dependency
-            .as_ref()
-            .and_then(|declaration| declaration.property.clone())
-        {
-            crate::trace_compiler!(
-                "value_classes",
-                "external value class {} underlying property {}",
-                fq,
-                property
-            );
-            external_underlying_properties.insert(fq, property);
-        }
-        if let Some(u) = dependency
-            .map(|declaration| declaration.underlying)
-            .or_else(|| module_value_classes.get(&fq).copied())
-        {
-            // The underlying carries its own declared nullability — trust it: a NON-NULL reference
-            // underlying (`ItemId(val value: String)`) means `ItemId?` stays UNBOXED (null carried by
-            // the reference), exactly like a same-file value class. Classpath VCs come from the resolver
-            // (decoded from `@Metadata`); same-module source VCs from `module_value_classes`.
-            let u = u.canonical_semantic();
-            let ir_under = u.scalar_value_repr().unwrap_or(u);
-            under.insert(fq, ir_under);
-        }
-    }
+    let Some(external_underlying_properties) =
+        declaration_inventory::merge_referenced(ir, classifiers, &mut under)
+    else {
+        return false;
+    };
     // Native unsigned classes share ordinary primitive carriers in expressions, but cross boxed
     // FunctionN/property-reference ABI slots like value classes. Keep them out of the global rewrite
     // map and add them only to the callable-boundary map.

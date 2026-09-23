@@ -61,6 +61,7 @@ pub struct BackendClassifierFact {
     pub own_type_parameter_count: usize,
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
+    pub value_underlying_property: Option<Box<str>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,6 +143,10 @@ impl BackendClassifierFact {
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
+            value_underlying_property: shape
+                .value_underlying_property
+                .as_deref()
+                .map(Box::<str>::from),
         }
     }
 
@@ -356,6 +361,7 @@ impl BackendModuleFacts {
                 ))? as usize;
             let mut surface = Vec::new();
             let mut value_underlying = None;
+            let mut value_underlying_property = None;
             for child_raw in 0..index.declaration_count() {
                 let child = crate::fir::DeclarationId::from_raw(
                     u32::try_from(child_raw).expect("too many stable declarations for a packed id"),
@@ -440,16 +446,17 @@ impl BackendModuleFacts {
                         let property = index.property(property_id).ok_or(
                             BackendFactError::IncompleteClassifier(classifier.classifier),
                         )?;
+                        let name = index.declaration_name(child).ok_or(
+                            BackendFactError::IncompleteClassifier(classifier.classifier),
+                        )?;
                         if flags.has(crate::fir::DeclarationFlags::VALUE)
                             && child_header
                                 .flags
                                 .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
                         {
                             value_underlying = Some(signature.result.get());
+                            value_underlying_property = Some(Box::<str>::from(name));
                         }
-                        let name = index.declaration_name(child).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
                         let mut parameters = signature
                             .parameters
                             .iter()
@@ -551,6 +558,7 @@ impl BackendModuleFacts {
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
+                value_underlying_property,
             };
             if let Some(underlying) = value_underlying {
                 source_value_classes.insert(classifier.classifier, underlying);
@@ -674,7 +682,7 @@ impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
     }
 }
 
-impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> {
+impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
     fn classifier_annotations(
         &self,
         classifier: TypeName,
@@ -685,6 +693,25 @@ impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> 
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
         BackendClassifierSource::classifier(self, classifier)
             .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
+    }
+
+    fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+        // A source value class of this module answers from the module's own facts — the same map
+        // the JVM value-class pass erases by. A dependency's answers from its decoded metadata.
+        self.module
+            .source_value_classes()
+            .get(&classifier)
+            .copied()
+            .or_else(|| {
+                self.dependencies
+                    .classifier(classifier)
+                    .and_then(|shape| shape.value_underlying)
+            })
+    }
+
+    fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
+        BackendClassifierSource::classifier(self, classifier)
+            .and_then(|fact| fact.value_underlying_property.as_deref().map(str::to_owned))
     }
 }
 
