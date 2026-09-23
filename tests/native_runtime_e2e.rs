@@ -353,3 +353,23 @@ fn an_array_list_of_negative_capacity_raises() {
 fn walking_a_string_is_linear_and_yields_its_utf16_units() {
     run_driver("string_iterator_linear");
 }
+
+#[test]
+fn a_map_or_set_that_holds_itself_renders_the_marker() {
+    run_driver("collection_to_string_self_reference");
+}
+
+#[test]
+fn a_stdlib_thrower_whose_message_throws_propagates_that_exception() {
+    run_driver("stdlib_thrower_keeps_first_exception");
+}
+
+#[test]
+fn map_keys_and_entries_copy_without_comparing() {
+    run_driver("map_views_do_not_compare_keys");
+}
+
+#[test]
+fn a_map_or_set_stops_where_an_element_member_threw() {
+    run_driver("map_stops_at_a_raise");
+}

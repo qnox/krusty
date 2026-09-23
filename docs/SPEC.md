@@ -6133,6 +6133,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
+  in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
+  `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered
+  ones leave order unspecified. `keys`, `values` and `entries` are snapshots rather than views, and
+  an entry is a copied pair; `keys`/`entries` copy without comparing, since the keys are distinct.
+  A collection that holds itself renders `(this Map)` / `(this Collection)` in its place, as
+  `AbstractMap`/`AbstractCollection` do. An element member that throws stops the operation there
+  and propagates: `put`/`add` insert nothing, `mapOf`/`setOf`, `toString` and `hashCode` ask no
+  later element. `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate
+  that exception, not their own. Known divergences: iterating a map walks its entries snapshot, so
+  mutating the map inside the loop raises no `ConcurrentModificationException` (a set's iteration
+  does, as on the JVM); and `values` is a `List`, so it compares equal to a list of the same
+  elements where the JVM's `values` collection compares by identity.
+  Tests: `tests/native_runtime_e2e.rs` (`collection_to_string_self_reference`,
+  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`).
 - **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
   records the exception and comes back, so each runtime raise returns at once and each walk checks
   for a pending exception after every `next` and every lambda it calls. That covers the lambda's own

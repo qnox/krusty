@@ -56,6 +56,22 @@ __attribute__((weak)) const KType kt_type_null_pointer_exception = {
     .super = &kt_type_any,
 };
 
+/* The exceptions the stdlib throwers raise. A driver tells them apart by descriptor, so each is a
+   distinct object; the real ones name their `Throwable` superclass, which no driver asks for. */
+#define LATER_TIERS_EXCEPTION(identifier, kotlin_name)                                             \
+    __attribute__((weak)) const KType identifier = {                                               \
+        .name = kotlin_name,                                                                       \
+        .name_length = sizeof(kotlin_name) - 1,                                                    \
+        .instance_size = sizeof(KObjectHeader),                                                    \
+        .super = &kt_type_any,                                                                     \
+    };
+
+LATER_TIERS_EXCEPTION(kt_type_illegal_state_exception, "kotlin.IllegalStateException")
+LATER_TIERS_EXCEPTION(kt_type_assertion_error, "kotlin.AssertionError")
+LATER_TIERS_EXCEPTION(kt_type_not_implemented_error, "kotlin.NotImplementedError")
+
+#undef LATER_TIERS_EXCEPTION
+
 /* The runtime declares this one `static` and defines it in a later tier; until then its call is an
    unresolved reference like any other, and this answers it the way the real one does. */
 __attribute__((weak)) KRef kt_object_to_string(KRef value) {
