@@ -1138,6 +1138,8 @@ mod nullable_receiver_operator_ext_e2e;
 mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
+#[path = "nullable_value_class_nullability_e2e.rs"]
+mod nullable_value_class_nullability_e2e;
 #[path = "nullable_vc_default_stub_e2e.rs"]
 mod nullable_vc_default_stub_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
