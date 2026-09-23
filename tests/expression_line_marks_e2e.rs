@@ -281,9 +281,10 @@ fn an_explicit_return_after_finally_restores_its_line() {
             "line 8: 13".to_string(),
             "line 5: 16".to_string(),
             "line 11: 20".to_string(),
-            // +7: the inline `println` splice, past everything this test pins.
-            "line 5: 37".to_string(),
-            "line 11: 38".to_string(),
+            // The finally copy's `println` keeps its argument on the stack (`getstatic; swap`)
+            // once the temporary it was spilled to is folded, as kotlinc's is.
+            "line 5: 30".to_string(),
+            "line 11: 31".to_string(),
         ],
         "complete run LineNumberTable"
     );

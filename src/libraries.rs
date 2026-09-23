@@ -3,7 +3,9 @@
 mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
+pub(crate) mod builtin_top_level_realization;
 mod core_builtins;
+pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod platform_contract;
@@ -199,6 +201,14 @@ pub enum MemberRealization {
     /// not an instance method on the receiver. The selected provider supplies the construction plan;
     /// lowering never infers this from a callable name.
     RangeConstruction { open_end: bool },
+}
+
+/// Semantic role attached by a declaration provider after exact callable selection. A target may
+/// consume it when the selected language member has no ordinary dispatch on a chosen representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticCallRole {
+    KotlinAnyHashCode,
+    KotlinAnyToString,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -912,6 +922,7 @@ impl LibraryCallable {
             name: name.into(),
             reflection_name: None,
             compiler_intrinsic: None,
+            semantic_role: None,
             plugin_expression: None,
             inline_body_plan: None,
             physical_params: params.clone(),
@@ -1027,6 +1038,9 @@ pub struct LibraryCallable {
     /// body on the target. Selection remains completely ordinary; the backend consumes this tag only
     /// after the checker has committed the call target.
     pub compiler_intrinsic: Option<CompilerIntrinsic>,
+    /// Exact language-level role of this declaration, when target realization needs more than its
+    /// stable callable identity. Providers assign it at the declaration boundary.
+    pub semantic_role: Option<SemanticCallRole>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
@@ -3096,7 +3110,19 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
     }
 }
 
-impl SemanticPlatform for EmptySymbolSource {}
+impl SemanticPlatform for EmptySymbolSource {
+    fn function_type(&self, arity: usize) -> Option<Ty> {
+        Some(function_classifiers::function_type(arity))
+    }
+
+    fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
+        function_classifiers::property_reference_type(arity, mutable, args)
+    }
+
+    fn function_reference_type(&self, function: Ty) -> Option<Ty> {
+        function_classifiers::function_reference_type(function)
+    }
+}
 
 #[cfg(test)]
 mod tests {
