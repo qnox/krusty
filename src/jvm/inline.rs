@@ -133,7 +133,7 @@ fn pool_operand(op: u8) -> Option<(usize, usize)> {
 /// A decoded instruction with branch targets resolved to *instruction indices*, not byte offsets —
 /// so transforms that change an instruction's size (local remap, `ldc`→`ldc_w`) don't invalidate
 /// jump targets: the assembler recomputes every offset from the final layout.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Insn {
     /// Opcode + verbatim operand bytes (the operands carry no branch offset).
     Plain { op: u8, operands: Vec<u8> },

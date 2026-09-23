@@ -2188,6 +2188,11 @@ pub struct IrFile {
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications:
         std::collections::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
+    /// producer records these before any backend rename; metadata and target realization consume
+    /// the identities without scanning method spellings.
+    synthesized_data_class_members:
+        std::collections::HashMap<(TypeName, IrDataClassMemberRole), FunId>,
     /// Stable checked-FIR callable identity to its realization in this file's function arena.
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
@@ -2513,6 +2518,16 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
+    /// Exact generated JVM value-class representation methods and their classfile order after the
+    /// private primary constructor. The JVM value-class pass records the function identities when
+    /// it creates them; emission must not recover their roles from generated method spellings.
+    pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
+    /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
+    /// pass records exact function identities; common lowering does not interpret this set.
+    pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
+    /// JVM value-class member implementations whose leading physical carrier parameter realizes a
+    /// source dispatch receiver and therefore carries no nullability annotation.
+    pub(crate) jvm_value_class_receiver_impls: std::collections::HashSet<u32>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,
@@ -2753,6 +2768,9 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Exact provider-selected language-member roles retained on their call expressions. This is
+    /// declaration identity data, not a spelling-based backend lookup.
+    pub semantic_call_roles: std::collections::HashMap<ExprId, crate::libraries::SemanticCallRole>,
     /// Call `ExprId` → the callee's DECLARED (un-erased, pre-substitution) return type, forwarded
     /// verbatim from the checked external call's `declared_ret`. Common lowering records it with no
     /// value-class reasoning; the value-class pass reads it to decide the RESULT's
@@ -3522,8 +3540,10 @@ impl IrFile {
     }
 }
 
+mod data_class_members;
 mod debug_locals;
 mod generated_members;
+pub(crate) use data_class_members::IrDataClassMemberRole;
 pub use debug_locals::IrCatchBinding;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
