@@ -593,3 +593,53 @@ fun box(): String {\n\
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+#[test]
+fn a_unit_tailrec_bare_return_loops_wherever_it_stands() {
+    // `f(x); return` is a tail call in any block, not only in the one that ends the body: nothing of
+    // the function runs after that `return` either. Each function here keeps a statement AFTER the
+    // block that recurses, so the body's own last statement is not the call and only the sweep over
+    // `return`s can find it — inside an `if`, a `when` arm, and a loop.
+    const SRC: &str = "val a: IntArray = intArrayOf(0, 0)\n\
+tailrec fun inIf(n: Int) {\n\
+    if (n > 0) {\n\
+        a[0] = a[0] + 1\n\
+        inIf(n - 1)\n\
+        return\n\
+    }\n\
+    a[1] = 1\n\
+}\n\
+val w: IntArray = intArrayOf(0, 0)\n\
+tailrec fun inWhen(n: Int) {\n\
+    when {\n\
+        n > 0 -> {\n\
+            w[0] = w[0] + 1\n\
+            inWhen(n - 1)\n\
+            return\n\
+        }\n\
+    }\n\
+    w[1] = 1\n\
+}\n\
+val l: IntArray = intArrayOf(0)\n\
+tailrec fun inLoop(n: Int) {\n\
+    while (true) {\n\
+        if (n == 0) return\n\
+        l[0] = l[0] + 1\n\
+        inLoop(n - 1)\n\
+        return\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    inIf(1000000)\n\
+    if (a[0] != 1000000 || a[1] != 1) return \"fail if \" + a[0] + \" \" + a[1]\n\
+    inWhen(1000000)\n\
+    if (w[0] != 1000000 || w[1] != 1) return \"fail when \" + w[0] + \" \" + w[1]\n\
+    inLoop(1000000)\n\
+    if (l[0] != 1000000) return \"fail loop \" + l[0]\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}

@@ -83,6 +83,10 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
         }
     }
 
+    for (&(class, parameter), &element) in &ir.shared_super_capture_parameters {
+        ir.classes[class as usize].super_ctor_params[parameter as usize] = holder_ty(&element);
+    }
+
     let class_names = physical
         .iter()
         .map(|(&class, slots)| (ir.classes[class as usize].fq_name_id(), slots.clone()))
@@ -169,6 +173,23 @@ mod tests {
         assert_eq!(
             holder_class(&Ty::nullable(Ty::Int)).0,
             "kotlin/jvm/internal/Ref$ObjectRef"
+        );
+    }
+
+    #[test]
+    fn realizes_only_the_exact_shared_super_capture_parameter() {
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(crate::types::type_name("Derived"));
+        class.super_ctor_params = vec![Ty::String, Ty::String];
+        let class = ir.add_class(class);
+        ir.shared_super_capture_parameters
+            .insert((class, 0), Ty::String);
+
+        lower_class_capture_slots(&mut ir);
+
+        assert_eq!(
+            ir.classes[class as usize].super_ctor_params,
+            [Ty::obj("kotlin/jvm/internal/Ref$ObjectRef"), Ty::String]
         );
     }
 }

@@ -2,6 +2,7 @@
 
 mod array_factories;
 pub(crate) mod builtin_declaration;
+pub(crate) mod builtin_member_realization;
 mod core_builtins;
 mod generic_signature;
 mod inline_body;

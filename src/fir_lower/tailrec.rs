@@ -253,6 +253,37 @@ fn rewrite_returned_tail_calls(
                     continue;
                 }
             }
+            // A `Unit` function's `f(x); return` is a tail call in ANY block, not only in the one
+            // that ends the body: nothing of this function runs after that `return` either. The
+            // body's own last block went through `tail_value` already; this is the same rewrite
+            // for a block the sweep finds inside an `if`, a `when` arm or a loop. The statement
+            // before the `return` is rebuilt as a tail and the block's exact child edge is updated;
+            // the selected call keeps its identity and side-table facts, while the generated step
+            // keeps its own synthetic provenance. The `return` stays behind it, unreached once the
+            // statement ends in a step.
+            IrExpr::Block { stmts, value: None }
+                if result == Ty::Unit && stmts.len() > 1 && paths.get(&expression) == Some(&1) =>
+            {
+                let (tail, returned) = (stmts[stmts.len() - 2], stmts[stmts.len() - 1]);
+                if matches!(ir.expr(returned), IrExpr::Return(None))
+                    && returns_from_here(ir, returned)
+                    && !matches!(ir.expr(tail), IrExpr::Return(_))
+                    && paths.get(&tail) == Some(&1)
+                    && reaches_self_call(ir, tail, frame)
+                {
+                    let rebuilt = tail_value(ir, tail, frame, result, origin)?;
+                    let IrExpr::Block { stmts, value: None } = &mut ir.exprs[expression as usize]
+                    else {
+                        unreachable!("the matched expression remains a statement block")
+                    };
+                    let tail_slot = stmts
+                        .len()
+                        .checked_sub(2)
+                        .expect("the matched block has a call and return");
+                    debug_assert_eq!(stmts[tail_slot], tail);
+                    stmts[tail_slot] = rebuilt;
+                }
+            }
             _ => {}
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
@@ -956,6 +987,43 @@ mod tests {
         ir.checked_return_depths
             .keys()
             .all(|&expression| matches!(ir.expr(expression), IrExpr::Return(_)))
+    }
+
+    #[test]
+    fn a_bare_return_retargets_the_block_edge_without_retyping_the_selected_call() {
+        let mut ir = file();
+        ir.functions[FUNCTION as usize].ret = Ty::Unit;
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        ir.logical_types.insert(call, Ty::Unit);
+        let returned = ir.add_expr(IrExpr::Return(None));
+        let nested = ir.add_expr(IrExpr::Block {
+            stmts: vec![call, returned],
+            value: None,
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+
+        finish(&mut ir, vec![nested, tail]);
+
+        let IrExpr::Block { stmts, value: None } = ir.expr(nested) else {
+            panic!("the nested statement block remains")
+        };
+        assert_eq!(stmts.len(), 2);
+        let step = stmts[0];
+        assert_ne!(step, call);
+        assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
+        assert_eq!(ir.logical_types.get(&call), Some(&Ty::Unit));
+        assert!(matches!(
+            ir.fir_origins.get(&step),
+            Some(IrNodeOrigin::Synthetic {
+                kind: SyntheticOriginKind::GeneratedControlFlow,
+                ..
+            })
+        ));
     }
 
     #[test]
