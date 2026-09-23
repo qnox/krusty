@@ -443,9 +443,33 @@ fn delegated_function_declaration(
             .unwrap_or_else(|| function.ret.apply(function.callable.ret));
         (target, parameters, result)
     };
+    let mut names = vec![None; parameters.len()];
+    let receiver = (function.kind == FnKind::Extension)
+        .then_some(function.context_count.min(parameters.len()));
+    for (logical, name) in function.call_sig.param_names.iter().enumerate() {
+        let physical = logical + usize::from(receiver.is_some_and(|receiver| logical >= receiver));
+        if physical < names.len() && !name.is_empty() {
+            names[physical] = Some(name.clone().into_boxed_str());
+        }
+    }
+    let parameter_identities = names
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, name)| {
+            name.map_or_else(
+                || {
+                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
+                        u32::try_from(ordinal).expect("delegated parameter ordinal fits u32"),
+                    )
+                },
+                crate::fir::ResolvedParameterIdentity::Source,
+            )
+        })
+        .collect();
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,
+        parameter_identities,
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,
         interface: function.callable.owner_is_interface,

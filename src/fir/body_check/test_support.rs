@@ -39,7 +39,7 @@ pub(super) fn checked_function_body_with_features(
     )
 }
 
-fn checked_function_body_with_platform_and_features(
+pub(super) fn checked_function_body_with_platform_and_features(
     source: &str,
     function_name: &str,
     platform: Box<dyn SemanticPlatform>,

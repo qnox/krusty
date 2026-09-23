@@ -280,6 +280,9 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
             reject("local property reference", *property_type)
         }
         IrExpr::Call { callee, .. } => validate_callee(callee),
+        IrExpr::PluginPlaceholder { types, .. } => {
+            reject_all("plugin operation type", types.iter().copied())
+        }
         IrExpr::TypeOp { type_operand, .. } => reject("type operation", *type_operand),
         IrExpr::Variable { ty, .. } => reject("local variable", *ty),
         IrExpr::PrimitiveNeg { ty, .. } => reject("primitive negation", *ty),
@@ -310,7 +313,6 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
         | IrExpr::SetValue { .. }
-        | IrExpr::PluginPlaceholder { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
@@ -504,6 +506,10 @@ impl IrFile {
             "shared class capture field",
             self.shared_class_capture_fields.values().copied(),
         )?;
+        reject_all(
+            "shared superclass-constructor capture parameter",
+            self.shared_super_capture_parameters.values().copied(),
+        )?;
         for class in &self.classes {
             validate_class(class)?;
         }
@@ -639,7 +645,7 @@ impl IrFile {
         )?;
         reject_all(
             "value-class constructor parameter",
-            self.vc_ctor_declared_params.values().flatten().copied(),
+            self.vc_ctor_declared_param_types(),
         )?;
         for (params, ret) in self.suspend_declared_sigs.values() {
             reject_all("suspend declaration parameter", params.iter().copied())?;
