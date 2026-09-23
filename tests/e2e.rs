@@ -1171,6 +1171,8 @@ mod child_serializer_accessor_body_e2e;
 mod child_serializer_cache_e2e;
 #[path = "child_serializer_cache_member_order_e2e.rs"]
 mod child_serializer_cache_member_order_e2e;
+#[path = "child_serializer_factory_narrowing_e2e.rs"]
+mod child_serializer_factory_narrowing_e2e;
 #[path = "child_serializer_lazy_factory_e2e.rs"]
 mod child_serializer_lazy_factory_e2e;
 #[path = "class_static_signature_e2e.rs"]
