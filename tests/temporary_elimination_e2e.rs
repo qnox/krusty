@@ -179,3 +179,60 @@ fn folded_null_checks_still_run() {
         "folded null checks",
     );
 }
+
+const ELVIS: &str = "fun orDefault(s: String?): String = s ?: \"d\"\n\
+    fun printOr(s: String?) {\n\
+    \x20   println(s ?: \"x\")\n\
+    }\n";
+
+#[test]
+fn an_elvis_keeps_no_goto_to_the_next_instruction_like_kotlincs() {
+    // Folding the elvis's null check leaves its `goto` jumping to the very next instruction;
+    // kotlinc's redundant-goto pass removes it, and the join label keeps no frame of its own.
+    let Some(built) = compare_with_kotlinc_plugin(
+        "RedundantGoto",
+        ELVIS,
+        "RedundantGotoKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    for member in [
+        "java.lang.String orDefault(java.lang.String)",
+        "void printOr(java.lang.String)",
+    ] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+        let frames = stack_map(&built.reference, member)
+            .unwrap_or_else(|| panic!("{member} has no StackMapTable"));
+        assert!(!frames.is_empty(), "{member} has no StackMapTable");
+        assert_eq!(
+            stack_map(&built.krusty, member),
+            Some(frames),
+            "{member} frames"
+        );
+    }
+}
+
+#[test]
+fn an_elvis_without_its_goto_still_runs() {
+    common::expect_box_ok_with_stdlib(
+        &format!(
+            "{ELVIS}\
+             fun box(): String {{\n\
+             \x20   printOr(null)\n\
+             \x20   printOr(\"p\")\n\
+             \x20   return if (orDefault(null) == \"d\" && orDefault(\"q\") == \"q\") \"OK\" else \"FAIL\"\n\
+             }}\n"
+        ),
+        "elvis without its goto",
+    );
+}
