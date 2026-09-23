@@ -370,17 +370,11 @@ fn attach_bridge_debug_tables(
         let mut slot = 1u16;
         for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
             let descriptor = local_variable_desc(*parameter);
-            let spelling = match &bridge.parameter_identities[index] {
-                crate::fir::ResolvedParameterIdentity::Source(name) => name.to_string(),
-                crate::fir::ResolvedParameterIdentity::CompilerGenerated(ordinal) => {
-                    format!("p{ordinal}")
-                }
-                crate::fir::ResolvedParameterIdentity::PropertySetterValue => "<set-?>".to_string(),
-                crate::fir::ResolvedParameterIdentity::SuspendCompletion => {
-                    "$completion".to_string()
-                }
-            };
-            locals.push((spelling, descriptor, slot));
+            if let Some(spelling) = crate::jvm::parameter_names::resolved_local_variable(
+                &bridge.parameter_identities[index],
+            ) {
+                locals.push((spelling, descriptor, slot));
+            }
             slot += slot_words(*parameter);
         }
         cw.set_method_debug(&bridge.name, erased_desc, Some((0, line)), &locals);

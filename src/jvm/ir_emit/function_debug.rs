@@ -54,17 +54,19 @@ pub(super) fn attach_declared_function_debug(
         let identity = parameter_identities
             .and_then(|identities| identities.get(index))
             .expect("a debug-published parameter needs its canonical source identity");
-        let name = crate::jvm::parameter_names::legacy(identity, &function.name);
+        let name = crate::jvm::parameter_names::local_variable(identity, &function.name);
         if function
             .param_checks
             .get(index)
             .is_some_and(Option::is_some)
         {
-            let guarded = crate::jvm::parameter_names::assertion(identity, &function.name)
+            let guarded = crate::jvm::parameter_names::assertion(identity)
                 .expect("a checked parameter carries an assertion identity");
             body_pc += aload_len(slot) + cw.string_ldc_len(&guarded).unwrap_or(2) + 3;
         }
-        locals.push((name, crate::jvm::names::type_descriptor(*ty), slot));
+        if let Some(name) = name {
+            locals.push((name, crate::jvm::names::type_descriptor(*ty), slot));
+        }
         slot += slot_words(*ty);
     }
     cw.set_method_debug(

@@ -41,9 +41,8 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
                     .parameter_identities
                     .iter()
                     .map(|identity| {
-                        identity
-                            .source_name
-                            .clone()
+                        crate::jvm::parameter_names::metadata(identity)
+                            .map(str::to_owned)
                             .expect("generated metadata parameters carry semantic names")
                     })
                     .zip(params.iter().copied())
@@ -178,7 +177,7 @@ mod tests {
             functions: vec![IrGeneratedFunctionPublication {
                 function,
                 parameter_identities: ["self", "output", "serialDesc"]
-                    .map(crate::ir::IrParameterIdentity::source)
+                    .map(crate::ir::IrParameterIdentity::producer_value)
                     .to_vec(),
                 metadata: Some(IrGeneratedFunctionMetadata {
                     source_name: "write$Self".to_string(),

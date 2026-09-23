@@ -1,6 +1,6 @@
 //! Cross-phase contract for metadata and debug publication of generated class members.
 
-use super::{FunId, IrFile, IrParameterIdentity};
+use super::{FunId, IrFile, IrParameterIdentity, IrParameterProvenance};
 use crate::types::{TypeName, Visibility};
 use std::num::NonZeroU32;
 
@@ -123,6 +123,19 @@ impl IrFile {
                 member.parameter_identities.len(),
                 function.params.len(),
                 "generated parameter identities exactly match semantic function arity"
+            );
+            assert!(
+                member
+                    .parameter_identities
+                    .iter()
+                    .all(|identity| identity.source_name.as_deref() != Some("")),
+                "generated semantic parameter identities are never empty"
+            );
+            assert!(
+                member.parameter_identities.iter().all(|identity| {
+                    identity.provenance == IrParameterProvenance::CompilerGenerated
+                }),
+                "a generated declaration publishes generated parameter provenance"
             );
             assert!(
                 member.debug.fallthrough_line().is_none() || function.ret == crate::types::Ty::Unit,

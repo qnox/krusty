@@ -1631,9 +1631,9 @@ fn build_class_metadata(
             .iter()
             .filter_map(|&fid| {
                 let f = ir.functions.get(fid as usize)?;
-                // Real parameter NAMES — metadata is reflection-visible, so a placeholder would be an
-                // observable lie. Positional fallback only when the IR has no recorded names.
-                let names = crate::jvm::parameter_names::function(ir, fid);
+                // Real parameter identities — metadata is reflection-visible, so a placeholder
+                // would be an observable lie. A missing semantic name is rejected below.
+                let parameter_identities = ir.function_parameter_identities(fid);
                 // A function is described as SOURCE declared it: its own name, parameters and return
                 // type. Two lowerings hide that — CPS gives a `suspend fun` a trailing `Continuation`
                 // and an `Object` return, and the value-class pass mangles the name and erases the
@@ -1743,10 +1743,12 @@ fn build_class_metadata(
                     .map(|&(metadata_index, physical_index)| {
                         // `fn_params` records the extension receiver (`$this$<fn>`) at that same
                         // physical index, exactly like `param_defaults`; both are read positionally.
-                        let n = names
-                            .as_ref()
-                            .and_then(|ns| ns.get(physical_index).cloned())
-                            .unwrap_or_else(|| format!("p{physical_index}"));
+                        let identity = parameter_identities
+                            .and_then(|identities| identities.get(physical_index))
+                            .expect("a metadata parameter carries an exact identity");
+                        let n = crate::jvm::parameter_names::metadata(identity)
+                            .map(str::to_owned)
+                            .expect("a metadata value parameter carries a semantic name");
                         (
                             n,
                             apply_nullable(physical_index, metadata_params[metadata_index]),
@@ -3107,8 +3109,16 @@ fn attach_synth_debug_tables(
                     "equals-impl0".into(),
                     format!("({u}{u})Z"),
                     vec![
-                        ("p1".to_string(), u.clone(), 0),
-                        ("p2".to_string(), u.clone(), w),
+                        (
+                            crate::jvm::parameter_names::value_class_equals_operand(1).to_string(),
+                            u.clone(),
+                            0,
+                        ),
+                        (
+                            crate::jvm::parameter_names::value_class_equals_operand(2).to_string(),
+                            u.clone(),
+                            w,
+                        ),
                     ],
                 ),
             ];
@@ -9020,7 +9030,7 @@ fn emit_interface_class(
                                     .function_parameter_identities(fid)
                                     .and_then(|identities| identities.get(index))
                                     .expect("a checked compatibility parameter has an identity");
-                                crate::jvm::parameter_names::assertion(identity, &f.name)
+                                crate::jvm::parameter_names::assertion(identity)
                                     .expect("a checked compatibility parameter has a JVM label")
                             })
                         })
@@ -9028,13 +9038,16 @@ fn emit_interface_class(
                 } else {
                     Vec::new()
                 };
+                let parameter_names =
+                    crate::jvm::parameter_names::required_function_locals(ir, fid)
+                        .expect("a compatibility declaration carries exact parameter identities");
                 interface_compatibility::emit_holder_forward(
                     di,
                     c.fq_name,
                     &f.name,
                     &jvm_function_params(ir, fid),
                     &semantic_params,
-                    &crate::jvm::parameter_names::function(ir, fid).unwrap_or_default(),
+                    &parameter_names,
                     &guards,
                     jvm_declared_ty(&f.ret),
                     semantic_ret,
@@ -9189,13 +9202,15 @@ fn emit_interface_class(
     // first, then the republished surface for inherited defaults this interface does not redeclare.
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
+        let parameter_names = crate::jvm::parameter_names::required_function_locals(ir, fid)
+            .expect("an access bridge carries exact declaration parameter identities");
         emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
             &f.name,
             &jvm_function_params(ir, fid),
-            &crate::jvm::parameter_names::function(ir, fid).unwrap_or_default(),
+            &parameter_names,
             jvm_declared_ty(&f.ret),
         );
     }
@@ -10217,6 +10232,11 @@ fn emit_default_impls_forwarders(
                                target_name: &str,
                                target_descriptor: &str,
                                dispatch: ForwarderDispatch| {
+        assert_eq!(
+            param_names.len(),
+            param_tys.len(),
+            "an inherited forwarder needs every declaration parameter identity"
+        );
         let desc = method_descriptor(param_tys, ret);
         let mut code = CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
         code.aload(0);
@@ -10257,10 +10277,7 @@ fn emit_default_impls_forwarders(
         let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
         let mut slot = 1u16;
         for (index, parameter) in param_tys.iter().enumerate() {
-            let parameter_name = param_names
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| format!("p{index}"));
+            let parameter_name = param_names[index].clone();
             locals.push((parameter_name, local_variable_desc(*parameter), slot));
             slot += slot_words(*parameter);
         }
@@ -10308,6 +10325,11 @@ fn emit_default_impls_forwarders(
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>();
             let mut semantic_ret = member.ret;
+            assert_eq!(
+                param_names.len(),
+                semantic_params.len(),
+                "an inherited member needs exact metadata parameter identities"
+            );
             // A `suspend` member's PHYSICAL realization is its CPS shape — a trailing
             // `Continuation` and an `Object` return. The semantic record keeps the declared
             // params/return, so adjust here or the forwarder declares a method the interface does
@@ -10317,9 +10339,6 @@ fn emit_default_impls_forwarders(
             if member.suspend() {
                 param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
                 ret = Ty::obj("java/lang/Object");
-                while param_names.len() < semantic_params.len() {
-                    param_names.push(format!("p{}", param_names.len()));
-                }
                 param_names.push("$completion".to_string());
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
@@ -10411,6 +10430,11 @@ fn emit_holder_method(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
+    assert_eq!(
+        param_names.len(),
+        param_tys.len(),
+        "an access bridge needs every declaration parameter identity"
+    );
     emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(receiver));
 }
 
@@ -10489,10 +10513,7 @@ fn emit_jd_access_bridge(
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
-        let parameter_name = param_names
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("p{index}"));
+        let parameter_name = param_names[index].clone();
         locals.push((parameter_name, local_variable_desc(*parameter), slot));
         slot += slot_words(*parameter);
     }
@@ -10624,12 +10645,7 @@ fn emit_inherited_default_surface(
                     .map(|(index, parameter)| {
                         (jd_nullability_annotation(parameter)
                             == Some("Lorg/jetbrains/annotations/NotNull;"))
-                        .then(|| {
-                            param_names
-                                .get(index)
-                                .cloned()
-                                .unwrap_or_else(|| format!("p{index}"))
-                        })
+                        .then(|| param_names[index].clone())
                     })
                     .collect()
             } else {
@@ -10670,15 +10686,17 @@ fn emit_inherited_default_surface(
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>();
             let mut semantic_ret = member.ret;
+            assert_eq!(
+                param_names.len(),
+                semantic_params.len(),
+                "a republished member needs exact metadata parameter identities"
+            );
             // A `suspend` member republishes in its CPS shape — trailing `Continuation`
             // (`$completion`, `@NotNull`) and a `@Nullable Object` return — like the
             // implementing-class forwarders.
             if member.suspend() {
                 param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
                 physical_ret = Ty::obj("java/lang/Object");
-                while param_names.len() < semantic_params.len() {
-                    param_names.push(format!("p{}", param_names.len()));
-                }
                 param_names.push("$completion".to_string());
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
@@ -11089,7 +11107,7 @@ fn emit_method_inner_with_holder(
             let identity = parameter_identities
                 .and_then(|identities| identities.get(i))
                 .expect("a checked parameter carries an exact identity");
-            let name = crate::jvm::parameter_names::assertion(identity, &f.name)
+            let name = crate::jvm::parameter_names::assertion(identity)
                 .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
@@ -11357,12 +11375,15 @@ fn emit_method_inner_with_holder(
         for (i, t) in param_tys.iter().enumerate() {
             let pname = parameter_identities
                 .and_then(|identities| identities.get(i))
-                .map(|identity| crate::jvm::parameter_names::legacy(identity, &f.name))
-                .unwrap_or_else(|| format!("p{i}"));
-            let pdesc = local_variable_desc(*t);
-            e.cw.seed_utf8(&pname);
-            e.cw.seed_utf8(&pdesc);
-            code.add_local_entry(0, None, slot, &pname, &pdesc);
+                .and_then(|identity| {
+                    crate::jvm::parameter_names::local_variable(identity, &f.name)
+                });
+            if let Some(pname) = pname {
+                let pdesc = local_variable_desc(*t);
+                e.cw.seed_utf8(&pname);
+                e.cw.seed_utf8(&pdesc);
+                code.add_local_entry(0, None, slot, &pname, &pdesc);
+            }
             slot += slot_words(*t);
         }
     }

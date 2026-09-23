@@ -291,6 +291,26 @@ mod tests {
         let classfile =
             fs::read_to_string(source_path("src/jvm/classfile.rs")).expect("read classfile facade");
         assert!(!classfile.contains("pub fn set_method_parameters"));
+
+        for path in rust_files_under("src/jvm") {
+            let text = fs::read_to_string(&path).expect("read JVM parameter consumer");
+            let mut forbidden = vec![
+                "format!(\"p{",
+                "unwrap_or_else(|| format!(\"p",
+                "parameter_names::legacy",
+                ".param_names(",
+            ];
+            if !path.ends_with("parameter_names.rs") {
+                forbidden.extend(["\"p1\"", "\"p2\""]);
+            }
+            for forbidden in forbidden {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} must project typed parameter identity at the JVM surface, not use `{forbidden}`",
+                    path.display(),
+                );
+            }
+        }
     }
 
     #[test]

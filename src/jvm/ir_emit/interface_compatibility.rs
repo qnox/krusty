@@ -19,6 +19,11 @@ pub(super) fn emit_holder_forward(
     java_parameters: bool,
     target: JdHolderTarget<'_>,
 ) {
+    assert_eq!(
+        param_names.len(),
+        param_tys.len(),
+        "a compatibility holder needs exact declaration parameter identities"
+    );
     let fq = interface.render();
     let mut with_receiver = vec![Ty::obj_name(interface)];
     with_receiver.extend_from_slice(param_tys);
@@ -100,10 +105,7 @@ pub(super) fn emit_holder_forward(
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
-        let parameter_name = param_names
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("p{index}"));
+        let parameter_name = param_names[index].clone();
         locals.push((parameter_name, local_variable_desc(*parameter), slot));
         slot += slot_words(*parameter);
     }

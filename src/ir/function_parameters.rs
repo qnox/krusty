@@ -6,7 +6,7 @@ use super::{ExprId, FunId, IrFile};
 ///
 /// This is deliberately independent of every target spelling. In particular, captures, receivers,
 /// and unnamed context parameters do not acquire JVM `$...`, `<this>`, or positional names here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrParameterRole {
     Value,
     ContextValue,
@@ -25,6 +25,7 @@ pub enum IrGeneratedParameterRole {
     Continuation,
     HolderReceiver,
     ValueClassCarrier,
+    ValueClassEqualsOperand { ordinal: u8 },
     AccessorValue { ordinal: u32 },
 }
 
@@ -51,6 +52,14 @@ impl IrParameterIdentity {
             source_name: Some(name.into()),
             role: IrParameterRole::Value,
             provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn producer_value(name: impl Into<String>) -> Self {
+        Self {
+            source_name: Some(name.into()),
+            role: IrParameterRole::Value,
+            provenance: IrParameterProvenance::CompilerGenerated,
         }
     }
 
@@ -155,13 +164,6 @@ impl FnParamInfo {
         );
         self.identities.insert(0, identity);
     }
-
-    pub(crate) fn mark_compiler_generated(&mut self, parameter: usize) {
-        self.identities
-            .get_mut(parameter)
-            .expect("parameter provenance needs an identity")
-            .provenance = IrParameterProvenance::CompilerGenerated;
-    }
 }
 
 impl IrFile {
@@ -197,6 +199,12 @@ impl IrFile {
             identities.len(),
             semantic_arity,
             "parameter identities exactly match semantic function arity"
+        );
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.source_name.as_deref() != Some("")),
+            "published source parameter identities are never empty"
         );
         Some(identities)
     }
@@ -238,7 +246,7 @@ mod tests {
                 metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
                 functions: vec![IrGeneratedFunctionPublication {
                     function: generated,
-                    parameter_identities: vec![IrParameterIdentity::source("value")],
+                    parameter_identities: vec![IrParameterIdentity::producer_value("value")],
                     metadata: None,
                     debug: IrGeneratedDeclarationDebug::LocalsOnly,
                 }],
@@ -256,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             file.function_parameter_identities(generated),
-            Some(&[IrParameterIdentity::source("value")][..])
+            Some(&[IrParameterIdentity::producer_value("value")][..])
         );
     }
 

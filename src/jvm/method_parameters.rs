@@ -1,10 +1,10 @@
 //! JVM `MethodParameters` planning from checked declarations and backend-generated provenance.
 
 use crate::ir::{
-    IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterProvenance,
+    IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
     IrSecondaryCtor,
 };
-use crate::types::{same, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
 pub(super) type MethodParameter = (String, u16);
 
@@ -85,7 +85,12 @@ pub(super) fn record_function(
         "one function has one parameter identity list"
     );
     for &parameter in compiler_generated {
-        info.mark_compiler_generated(parameter);
+        let identity = info
+            .identities
+            .get_mut(parameter)
+            .expect("generated MethodParameters provenance needs an identity");
+        identity.role = IrParameterRole::Generated(IrGeneratedParameterRole::ValueClassCarrier);
+        identity.provenance = crate::ir::IrParameterProvenance::CompilerGenerated;
     }
 }
 
@@ -102,23 +107,12 @@ pub(super) fn function(
     if ir.synthetic_methods.contains(&function) && generated.is_none() {
         return Vec::new();
     }
-    let Some(mut identities) = ir
+    let Some(identities) = ir
         .function_parameter_identities(function)
         .map(<[IrParameterIdentity]>::to_vec)
     else {
         return Vec::new();
     };
-    if identities.len() + 1 == physical_parameters.len()
-        && physical_parameters.last().is_some_and(|ty| {
-            ty.obj_internal()
-                .is_some_and(|name| same(name, crate::types::wk::continuation()))
-        })
-    {
-        identities.push(IrParameterIdentity::generated(
-            IrGeneratedParameterRole::Continuation,
-            None,
-        ));
-    }
     assert_eq!(
         identities.len(),
         physical_parameters.len(),
@@ -130,9 +124,15 @@ pub(super) fn function(
         .enumerate()
         .map(|(_index, identity)| {
             parameter(
-                crate::jvm::parameter_names::legacy(&identity, function_name),
-                u16::from(identity.provenance == IrParameterProvenance::CompilerGenerated)
-                    * SYNTHETIC,
+                crate::jvm::parameter_names::method_parameter(&identity, function_name)
+                    .expect("an emitted MethodParameters entry needs an exact JVM name"),
+                u16::from(matches!(
+                    identity.role,
+                    IrParameterRole::Generated(
+                        IrGeneratedParameterRole::HolderReceiver
+                            | IrGeneratedParameterRole::ValueClassCarrier
+                    )
+                )) * SYNTHETIC,
             )
         })
         .collect::<Vec<_>>();

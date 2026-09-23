@@ -22,7 +22,7 @@ pub(super) fn write_self_publication(
         functions: vec![IrGeneratedFunctionPublication {
             function,
             parameter_identities: WRITE_SELF_PARAMETER_NAMES
-                .map(crate::ir::IrParameterIdentity::source)
+                .map(crate::ir::IrParameterIdentity::producer_value)
                 .to_vec(),
             metadata: Some(IrGeneratedFunctionMetadata {
                 source_name: WRITE_SELF_KOTLIN_NAME.to_string(),
@@ -66,7 +66,7 @@ impl GeneratedSerializerMembers {
                 function,
                 parameter_identities: parameter_names
                     .iter()
-                    .map(|name| crate::ir::IrParameterIdentity::source(*name))
+                    .map(|name| crate::ir::IrParameterIdentity::producer_value(*name))
                     .collect(),
                 metadata,
                 debug,
