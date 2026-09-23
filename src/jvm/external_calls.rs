@@ -405,35 +405,44 @@ pub(super) fn realize(
         } else {
             callable.descriptor.clone()
         };
-        // `Boolean.not()` is a selected Kotlin builtin declaration, but has no JVM method. Keep
-        // the provider identity through FIR/common lowering, then realize that exact declaration
-        // with the common logical operation at this target boundary. This also covers callable-
-        // reference adapters, whose bodies contain the same external-call node as an ordinary call.
-        if member_realization
-            == crate::libraries::MemberRealization::Intrinsic(
-                crate::libraries::CompilerIntrinsic::BooleanNot,
-            )
-        {
-            let receiver = match &ir.exprs[index] {
-                IrExpr::Call {
-                    dispatch_receiver: Some(receiver),
-                    args,
-                    ..
-                } if kind == ExternalCallableKind::Member
-                    && defaults.is_empty()
-                    && args.is_empty() =>
-                {
-                    *receiver
-                }
-                _ => return Err(target.into()),
-            };
-            let false_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
-            ir.exprs[index] = IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Eq,
-                lhs: receiver,
-                rhs: false_value,
-            };
-            continue;
+        // A builtin scalar member (`Int.times`, `Boolean.not()`) is a selected Kotlin declaration
+        // with no JVM method. Checked FIR publishes the operation for an ordinary call; a callable-
+        // reference adapter body keeps the provider identity in an ordinary external-call node, so
+        // realize that exact declaration with the common primitive operation at this target
+        // boundary. `String.plus` keeps its own intrinsic call below.
+        if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
+            if intrinsic != crate::libraries::CompilerIntrinsic::StringPlus {
+                let (receiver, arguments) = match &ir.exprs[index] {
+                    IrExpr::Call {
+                        dispatch_receiver: Some(receiver),
+                        args,
+                        ..
+                    } if kind == ExternalCallableKind::Member && defaults.is_empty() => {
+                        (*receiver, args.clone())
+                    }
+                    _ => return Err(target.into()),
+                };
+                let receiver_ty = ir
+                    .ext_call_source_receiver
+                    .get(&expression)
+                    .copied()
+                    .ok_or(target)?;
+                let operation = super::builtin_member_operations::operation(
+                    ir,
+                    intrinsic,
+                    super::builtin_member_operations::BuiltinMemberOperands {
+                        receiver,
+                        receiver_ty,
+                        arguments: &arguments,
+                        parameters: &semantic_params,
+                        result: semantic_ret,
+                    },
+                )
+                .ok_or(target)?;
+                ir.ext_call_source_receiver.remove(&expression);
+                ir.exprs[index] = operation;
+                continue;
+            }
         }
         if kind == ExternalCallableKind::StaticFieldRead {
             if !defaults.is_empty()

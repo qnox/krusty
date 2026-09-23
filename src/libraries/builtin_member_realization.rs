@@ -245,6 +245,44 @@ fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberReal
     (facts.ret == result).then_some(MemberRealization::RangeConstruction { open_end })
 }
 
+/// Semantic operand carriers `(receiver, argument)` of an exact primitive binary builtin. Arithmetic
+/// and bitwise declarations expose the carrier/result type after Kotlin numeric promotion
+/// (`Long.minus(Int)` returns `Long`, so both operands of the primitive subtraction are `Long`).
+/// Shift declarations deliberately keep their count parameter distinct (`Long.shl(Int)`).
+pub(crate) fn primitive_binary_operands(
+    intrinsic: CompilerIntrinsic,
+    parameter: Ty,
+    result: Ty,
+) -> Option<(Ty, Ty)> {
+    let result = result.canonical_semantic().non_null();
+    match intrinsic {
+        CompilerIntrinsic::PrimitiveShiftLeft
+        | CompilerIntrinsic::PrimitiveShiftRight
+        | CompilerIntrinsic::PrimitiveUnsignedShiftRight => {
+            Some((result, parameter.canonical_semantic().non_null()))
+        }
+        CompilerIntrinsic::PrimitiveBinary(_)
+        | CompilerIntrinsic::PrimitiveBitAnd
+        | CompilerIntrinsic::PrimitiveBitOr
+        | CompilerIntrinsic::PrimitiveBitXor => Some((result, result)),
+        _ => None,
+    }
+}
+
+/// Common comparison carrier of an exact builtin scalar `compareTo`: `Char`/`Boolean` compare as
+/// `Int`, numeric operands at their promoted type (`Int.compareTo(Long)` compares `Long`s).
+pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
+    let receiver = receiver.canonical_semantic().non_null();
+    let parameter = parameter.canonical_semantic().non_null();
+    if (receiver == Ty::Boolean && parameter == Ty::Boolean)
+        || (receiver == Ty::Char && parameter == Ty::Char)
+    {
+        Some(Ty::Int)
+    } else {
+        Ty::promote(receiver, parameter)
+    }
+}
+
 /// Attach a compiler realization only to an exact normalized builtin declaration.
 pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
     if facts.is_property {

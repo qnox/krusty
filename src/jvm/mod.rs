@@ -5,6 +5,7 @@ mod array_representation;
 pub mod backend;
 mod bridge_return_adaptations;
 pub mod bridges;
+mod builtin_member_operations;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;
