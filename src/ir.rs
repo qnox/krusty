@@ -2188,6 +2188,11 @@ pub struct IrFile {
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications:
         std::collections::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
+    /// producer records these before any backend rename; metadata and target realization consume
+    /// the identities without scanning method spellings.
+    synthesized_data_class_members:
+        std::collections::HashMap<(TypeName, IrDataClassMemberRole), FunId>,
     /// Stable checked-FIR callable identity to its realization in this file's function arena.
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
@@ -3535,8 +3540,10 @@ impl IrFile {
     }
 }
 
+mod data_class_members;
 mod debug_locals;
 mod generated_members;
+pub(crate) use data_class_members::IrDataClassMemberRole;
 pub use debug_locals::IrCatchBinding;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
