@@ -19701,6 +19701,11 @@ impl<'a> Emitter<'a> {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::PropertyRead { ty, .. } => {
+                // A read keeps its LOGICAL type in the IR; a value-class property's accessor returns
+                // the carrier, which the value-class pass records beside it. The stack holds that.
+                if let Some(physical) = self.ir.physical_types.get(&e) {
+                    return ir_ty_to_jvm(physical);
+                }
                 // A property read always yields a stored value. `Unit` therefore occupies the
                 // `kotlin/Unit` reference slot; only a function's control-flow return uses `V`.
                 ir_ty_to_jvm(&stored_value_ty(*ty))

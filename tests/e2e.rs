@@ -1689,6 +1689,8 @@ mod value_class_map_key_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_property_argument_e2e.rs"]
+mod value_class_property_argument_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
