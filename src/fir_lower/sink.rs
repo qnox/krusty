@@ -1368,11 +1368,11 @@ impl<'a> CommonIrBodySink<'a> {
         if declaration_header
             .flags
             .has(crate::fir::DeclarationFlags::SUSPEND)
-            && !self.ir.fn_continuation_ordinal.contains_key(&function)
         {
-            return Err(FirFileLoweringFailure::MissingContinuationOrdinal(
-                declaration,
-            ));
+            let ordinal = index.continuation_ordinal(declaration).ok_or(
+                FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
+            )?;
+            self.ir.fn_continuation_ordinal.insert(function, ordinal);
         }
         self.ir.functions[function as usize].body = Some(body);
 
