@@ -100,6 +100,7 @@ pub(crate) fn run_backend_passes(
     run_backend_passes_after_plugins(
         ir,
         facade,
+        classifiers,
         classifiers.module().source_value_classes(),
         classifiers.module().metadata_readable_value_classes(),
         classpath,
@@ -111,6 +112,7 @@ pub(crate) fn run_backend_passes(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
+    classifiers: &dyn crate::types::ClassifierFactSource,
     module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
     module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
@@ -154,7 +156,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::value_classes::apply_override_final_drop(ir);
     if !crate::jvm::value_classes::lower_value_classes(
         ir,
-        classpath,
+        classifiers,
         module_value_classes,
         module_readable_value_classes,
         &mut facts.bridge_return_adaptations,
