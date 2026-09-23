@@ -1,6 +1,6 @@
 //! JVM layout for safe-call guards and chains.
 
-use super::{when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
+use super::{discard, when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
 
 impl Emitter<'_> {
     /// Emit a discarded safe call with the discard inside its guard, as kotlinc writes it. The
@@ -27,12 +27,29 @@ impl Emitter<'_> {
                 if self.ir.null_guards.contains(&expression) && !shared {
                     let end = code.new_label();
                     let entry_height = code.stack_height().max(0) as u16;
+                    let elvis = self.ir.elvis_safe_call_guards.contains(&expression);
+                    let result_ty = elvis
+                        .then(|| self.value_ty_of_when(branches))
+                        .unwrap_or(Ty::Unit);
+                    let result_stack = elvis
+                        .then(|| self.verif_stack(result_ty))
+                        .unwrap_or_default();
                     self.emit_safe_call_guard(
                         expression,
                         (*guard, *null_result, *selector),
-                        when::Emission::new(true, Ty::Unit, &[], entry_height, end, None),
+                        when::Emission::new(
+                            !elvis,
+                            result_ty,
+                            &result_stack,
+                            entry_height,
+                            end,
+                            None,
+                        ),
                         code,
                     );
+                    if elvis && !self.diverges(expression) {
+                        discard(result_ty, code);
+                    }
                     return true;
                 }
             }

@@ -2426,6 +2426,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: std::collections::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
+    /// need this provenance when statement emission differs from a safe call's literal-null arm;
+    /// it must not recover that distinction from the lowered branch shape.
+    pub elvis_safe_call_guards: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.

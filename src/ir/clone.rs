@@ -368,6 +368,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
     }
+    if ir.elvis_safe_call_guards.contains(&source) {
+        ir.elvis_safe_call_guards.insert(target);
+    }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);
     }

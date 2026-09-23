@@ -1053,6 +1053,7 @@ impl BodyLowering<'_> {
                     );
                     if over_safe_call {
                         self.ir.null_guards.insert(result);
+                        self.ir.elvis_safe_call_guards.insert(result);
                     }
                     self.ir.add_expr(IrExpr::Block {
                         stmts: vec![variable],

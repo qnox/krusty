@@ -176,15 +176,18 @@ fn a_chain_across_lines_types_its_shared_null_path() {
 }
 
 const ELVIS_OVER_CHAINS: &str = "class Link(val name: String?, val next: Link?) {\n\
-    \x20   fun size(): Int = 1\n\
+    \x20   fun markerScore(): Int = 1\n\
     }\n\
     fun nameOr(link: Link?): String = link?.name ?: \"x\"\n\
     fun nextNameOr(link: Link?): String = link?.next?.name ?: \"x\"\n\
     fun thirdNameOr(link: Link?): String = link?.next?.next?.name ?: \"x\"\n\
-    fun nextSizeOr(link: Link?): Int = link?.next?.size() ?: 0\n\
+    fun nextScoreOr(link: Link?): Int = link?.next?.markerScore() ?: 0\n\
     fun valueOr(s: String?): String = s ?: \"d\"\n\
     fun printNextName(link: Link?) {\n\
     \x20   println(link?.next?.name ?: \"x\")\n\
+    }\n\
+    fun discardNextName(link: Link?) {\n\
+    \x20   link?.next?.name ?: \"x\"\n\
     }\n";
 
 #[test]
@@ -206,9 +209,10 @@ fn an_elvis_over_a_safe_call_chain_joins_its_null_path_like_kotlincs() {
         "java.lang.String nameOr(Link)",
         "java.lang.String nextNameOr(Link)",
         "java.lang.String thirdNameOr(Link)",
-        "int nextSizeOr(Link)",
+        "int nextScoreOr(Link)",
         "java.lang.String valueOr(java.lang.String)",
         "void printNextName(Link)",
+        "void discardNextName(Link)",
     ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
@@ -238,10 +242,12 @@ fn an_elvis_over_a_safe_call_chain_still_runs() {
              \x20   if (nameOr(null) != \"x\" || nameOr(chain) != \"a\") return \"one\"\n\
              \x20   if (nextNameOr(chain) != \"x\" || nextNameOr(Link(null, null)) != \"x\") return \"two\"\n\
              \x20   if (thirdNameOr(chain) != \"c\" || thirdNameOr(null) != \"x\") return \"three\"\n\
-             \x20   if (nextSizeOr(chain) != 1 || nextSizeOr(Link(null, null)) != 0) return \"size\"\n\
+             \x20   if (nextScoreOr(chain) != 1 || nextScoreOr(Link(null, null)) != 0) return \"score\"\n\
              \x20   if (valueOr(null) != \"d\" || valueOr(\"v\") != \"v\") return \"plain\"\n\
              \x20   printNextName(chain)\n\
              \x20   printNextName(null)\n\
+             \x20   discardNextName(chain)\n\
+             \x20   discardNextName(null)\n\
              \x20   return \"OK\"\n\
              }}\n"
         ),
