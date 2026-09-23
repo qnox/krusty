@@ -962,20 +962,12 @@ impl BodyLowering<'_> {
         } else {
             slots.into_iter().collect::<Option<Vec<_>>>()?
         };
-        // Only where an inline lambda LITERAL is among the operands: that is the expansion whose
-        // splice stores each remaining operand into the callee's own parameter slot, so a local of
-        // its own is a second copy. An expansion with no such lambda keeps its operand local —
-        // the reference compiler emits one there, and removing it changes which slot the body reads.
-        let substitutes_a_lambda = args.iter().any(|&argument| {
-            matches!(
-                self.ir.expr(argument),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            )
-        });
-        let (statements, receiver, args) = if preserve_inline_lambdas && substitutes_a_lambda {
+        // A retained-body expansion stores each operand into the callee's own parameter slot
+        // itself, so a caller local that only copies an operand into it is a second copy. kotlinc
+        // writes no such copy, with or without an inline lambda among the operands: its inliner
+        // stores the argument once, into the parameter's slot, or not at all for an `@InlineOnly`
+        // callee that reads it in place.
+        let (statements, receiver, args) = if preserve_inline_lambdas {
             self.fold_back_unneeded_operand_locals(statements, receiver, args)
         } else {
             (statements, receiver, args)
