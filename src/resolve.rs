@@ -2107,6 +2107,9 @@ pub struct ClassSig {
     /// `@Serializable(with = X::class)`. Resolved here, with the annotation's own name and through
     /// the same classifier rules, because no later phase may recover it from a spelling.
     pub annotation_class_arguments: Vec<(u32, TypeName)>,
+    /// Exact identities of plugin-generated nested classifiers. The generating frontend extension
+    /// publishes these with the source header; backends never infer them from annotations or names.
+    pub generated_nested_classifiers: Vec<crate::types::GeneratedClassifierFact>,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
     /// Context-parameter properties are overloadable by their context shape and may share a name
@@ -2293,6 +2296,7 @@ impl ClassSig {
             visibility,
             annotations: Vec::new(),
             annotation_class_arguments: Vec::new(),
+            generated_nested_classifiers: Vec::new(),
             props: Vec::new(),
             declared_props: HashMap::new(),
             contextual_props: HashMap::new(),

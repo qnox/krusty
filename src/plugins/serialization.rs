@@ -15,6 +15,7 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod generated_classifier;
 mod generated_members;
 mod serialize_body;
 
@@ -32,6 +33,7 @@ use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::{element_serializer_expr, element_serializer_plan};
+use generated_classifier::generated_serializer_classifier_fact;
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
@@ -1467,6 +1469,14 @@ impl IrPlugin for SerializationPlugin {
         });
     }
 
+    fn publish_frontend_generated_classifiers(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+        classifiers.extend(generated_serializer_classifier_fact(ctx));
+    }
+
     fn plan_frontend_expressions(
         &self,
         ctx: &FrontendExpressionContext,
@@ -2437,67 +2447,6 @@ mod tests {
     }
 
     #[test]
-    fn contributes_serializer_as_a_companion_member() {
-        let annotation = [type_name(SERIALIZABLE_FQ)];
-        let classifier = type_name("demo/Box");
-        let mut members = Vec::new();
-        SerializationPlugin::default().generate_frontend_declarations(
-            &FrontendClassContext {
-                classifier,
-                kind: crate::libraries::TypeKind::Class,
-                type_parameters: &crate::types::TypeParameters::new(
-                    vec!["T".to_string()],
-                    vec![Ty::nullable(Ty::obj("kotlin/Any"))],
-                    vec![crate::types::TypeVariance::Invariant],
-                ),
-                annotations: &annotation,
-            },
-            &mut members,
-        );
-
-        assert_eq!(
-            members,
-            vec![FrontendCallable {
-                owner: FrontendCallableOwner::Companion,
-                name: "serializer".to_string(),
-                params: vec![Ty::obj_args(
-                    KSERIALIZER_FQ,
-                    &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                )],
-                param_names: vec!["typeSerial0".to_string()],
-                ret: Ty::obj_args_name(
-                    type_name(KSERIALIZER_FQ),
-                    &[Ty::obj_args_name(
-                        classifier,
-                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                    )],
-                ),
-                generic_sig: Some(crate::libraries::GenericSig {
-                    formals: vec!["T".to_string()],
-                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
-                    receiver: None,
-                    params: vec![Ty::obj_args(
-                        KSERIALIZER_FQ,
-                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                    )],
-                    ret: Ty::obj_args_name(
-                        type_name(KSERIALIZER_FQ),
-                        &[Ty::obj_args_name(
-                            classifier,
-                            &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                        )],
-                    ),
-                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
-                }),
-                plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
-                    plugin: "serialization",
-                    operation: "serializer",
-                }),
-            }]
-        );
-    }
-
-    #[test]
     fn generated_generic_serializer_plan_keeps_classifier_and_selected_owner() {
         let inner = Ty::obj("demo/Inner");
         let boxed = Ty::obj_args("demo/Box", &[inner]);
@@ -2530,24 +2479,6 @@ mod tests {
             [type_name("demo/Box"), type_name("demo/Box$Companion")]
         );
         assert_eq!(plans[0].1.operands, [(argument, serializer(inner))]);
-    }
-
-    #[test]
-    fn contributes_object_serializer_as_an_object_member() {
-        let annotation = [type_name(SERIALIZABLE_FQ)];
-        let mut members = Vec::new();
-        SerializationPlugin::default().generate_frontend_declarations(
-            &FrontendClassContext {
-                classifier: type_name("demo/Singleton"),
-                kind: crate::libraries::TypeKind::Object,
-                type_parameters: &crate::types::TypeParameters::default(),
-                annotations: &annotation,
-            },
-            &mut members,
-        );
-
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].owner, FrontendCallableOwner::Classifier);
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.

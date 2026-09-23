@@ -1604,6 +1604,10 @@ pub struct ResolvedModuleIndex {
     /// declaration's syntax, and a class-valued argument is exactly as much a semantic fact as the
     /// string arguments beside it.
     declaration_annotation_class_arguments: HashMap<(DeclarationId, u32), Box<[TypeName]>>,
+    /// Exact plugin-generated classifier declarations published with their owning source header.
+    /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
+    /// generated name conventions.
+    generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2232,6 +2236,16 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub fn generated_classifiers(
+        &self,
+        declaration: DeclarationId,
+    ) -> &[crate::types::GeneratedClassifierFact] {
+        self.generated_classifiers
+            .get(&declaration)
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn declaration_suppresses_invisible_reference(
         &self,
         declaration: DeclarationId,
@@ -2759,6 +2773,26 @@ impl ResolvedModuleIndex {
         );
     }
 
+    pub fn publish_generated_classifiers(
+        &mut self,
+        declaration: DeclarationId,
+        classifiers: impl IntoIterator<Item = crate::types::GeneratedClassifierFact>,
+    ) {
+        let classifiers = classifiers
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if classifiers.is_empty() {
+            return;
+        }
+        assert!(
+            self.generated_classifiers
+                .insert(declaration, classifiers)
+                .is_none(),
+            "a stable declaration may publish generated classifiers only once"
+        );
+    }
+
     pub fn publish_classifier_header(
         &mut self,
         declaration: DeclarationId,
@@ -3027,6 +3061,7 @@ impl ResolvedModuleIndex {
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
+            && self.generated_classifiers.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3396,6 +3431,20 @@ impl ResolvedModuleIndex {
                 .declaration_annotation_class_arguments
                 .values()
                 .map(|arguments| arguments.len() * std::mem::size_of::<TypeName>())
+                .sum::<usize>()
+            + self.generated_classifiers.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[crate::types::GeneratedClassifierFact]>>())
+            + self
+                .generated_classifiers
+                .values()
+                .map(|classifiers| {
+                    classifiers.len() * std::mem::size_of::<crate::types::GeneratedClassifierFact>()
+                        + classifiers
+                            .iter()
+                            .map(|classifier| classifier.source_name.len())
+                            .sum::<usize>()
+                })
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
