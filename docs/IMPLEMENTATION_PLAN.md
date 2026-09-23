@@ -4335,3 +4335,46 @@ toolchain. Without clang krusty still builds; the native target then reports tha
 - Tests: `tests/native_runtime_e2e.rs` links each driver under `tests/native_runtime/` with every
   runtime source using the host's clang and runs it; CI must have clang, a local build without it
   skips with a message.
+
+### Native linker — krusty's own static ELF linker  ◐
+
+`src/native/linker/` links a program's relocatable objects with the prebuilt runtime into a static
+ELF executable, so a user's build needs no system linker (zero-toolchain cross-compilation). It is
+deliberately much less than a general linker; each limit below is a decision, not an omission.
+
+- **Fixed base, two segments.** The image is linked at `0x400000`: one read+execute `PT_LOAD`
+  (ELF header, program headers, every `.text`, then every read-only data section) and one
+  read+write `PT_LOAD` (every `.data`, then `.bss` as memory past the file), starting on the next
+  page so file offset and address stay congruent. No PIC, GOT, PLT, dynamic section or section
+  headers. The whole image must fit the 4 GiB the small code models address.
+- **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
+  when the runtime holds something worth protecting; until then `.rodata` is readable and
+  executable.
+- **No relaxation.** Every instruction stays where the assembler put it. RISC-V `RELAX`/`ALIGN` are
+  accepted as no-ops (the runtime is built with `-mno-relax`), and section alignment is honoured up
+  to a page; a larger or non-power-of-two alignment is an error.
+- **RISC-V `e_flags` = `EF_RISCV_RVC | EF_RISCV_FLOAT_ABI_DOUBLE` (0x5)**, what `rv64gc`/`lp64d`
+  objects carry; x86_64 and AArch64 use 0.
+- **Relocations** implemented: x86_64 `64`, `PC32`, `PLT32` (PC-relative to S: no PLT), `32`, `32S`;
+  AArch64 `ABS64`, `PREL32`, `ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`, `LDST{8,16,32,64,128}_ABS_LO12_NC`
+  (a target not aligned to the access size is refused, as `ld.lld` does), `CALL26`, `JUMP26`;
+  RISC-V `64`, `32`, `BRANCH`, `JAL`, `CALL`/`CALL_PLT`, `PCREL_HI20` + `PCREL_LO12_I/S` (paired by
+  the `auipc` address), `HI20`, `LO12_I/S`, `RVC_BRANCH`, `RVC_JUMP`. Every field is range-checked;
+  a `hi20` is checked as `value + 0x800`, the quantity that has to fit.
+- **Symbols.** Globals resolve by name — a strong definition over any weak one, for every
+  reference including the weak definer's own; an undefined weak reference is 0; two strong
+  definitions are an error. `SHN_ABS` symbols resolve to their value; symbols in empty sections are
+  placed. Thread-local storage and `SHN_COMMON` symbols are reported as unsupported (the runtime is
+  built `-fno-common` and has no TLS), and so is any other loadable section kind it does not place
+  (notes and `.eh_frame` are dropped: nothing reads them).
+- **Inputs are checked, never trusted.** Every object must be a 64-bit little-endian `ET_REL` for
+  the target's `e_machine`, else a `ForeignObject`/`Parse` error; a relocation or symbol offset
+  outside its section, or a relocation in `.bss`, is a `Parse` error — never a panic or a write into
+  a neighbouring section.
+- `runtime_symbols(arch)` lists what the prebuilt runtime defines, for the code generator to keep
+  Kotlin names clear of it.
+- Tests: `src/native/linker/elf.rs` links objects built in Rust (`object`'s ELF writer, a
+  dev-dependency) and asserts the patched bytes of every relocation kind on each architecture
+  (expected encodings cross-checked with `llvm-mc`) and each error above; no C toolchain needed.
+  `src/native/linker/mod.rs` links against the real prebuilt runtime on every architecture and runs
+  the result on an x86_64 Linux host; a build without the runtime skips them, except under `CI`.
