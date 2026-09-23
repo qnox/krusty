@@ -1817,6 +1817,7 @@ pub struct ResolvedDelegatedTypeParameter {
 pub struct ResolvedDelegatedFunctionDeclaration {
     pub target: super::ResolvedFunctionOverrideTarget,
     pub owner: TypeName,
+    pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
     pub interface: bool,

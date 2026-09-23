@@ -111,6 +111,10 @@ impl IrFile {
                     .is_none(),
                 "a generated function has one owning publication"
             );
+            assert!(
+                !self.fn_params.contains_key(&member.function),
+                "a generated publication is the function's sole parameter-identity contract"
+            );
             let function = self
                 .functions
                 .get(member.function as usize)

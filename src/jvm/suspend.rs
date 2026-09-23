@@ -1016,6 +1016,9 @@ fn finalize_suspend_bridges(ir: &mut IrFile) {
             }
             bridge.erased_params.push(continuation);
             bridge.concrete_params.push(continuation);
+            bridge
+                .parameter_identities
+                .push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
             if !bridge.unbox_params.is_empty() {
                 bridge.unbox_params.push(None);
             }

@@ -31,9 +31,7 @@ pub(super) fn attach_declared_function_debug(
         return;
     }
     let param_tys = jvm_function_params(ir, fid);
-    let parameter_names = generated
-        .map(|publication| publication.parameter_names.as_slice())
-        .or_else(|| ir.param_names(fid));
+    let parameter_names = ir.function_parameter_identities(fid);
     if !param_tys.is_empty() {
         let parameter_names =
             parameter_names.expect("a debug-published function carries exact parameter identities");

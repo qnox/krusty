@@ -171,6 +171,55 @@ fn resolved_types(types: impl IntoIterator<Item = Ty>, what: &str) -> Box<[Resol
         .into_boxed_slice()
 }
 
+fn module_parameter_identities(
+    index: &ResolvedModuleIndex,
+    callable: crate::fir::CallableId,
+    count: usize,
+) -> Box<[crate::fir::ResolvedParameterIdentity]> {
+    (0..count)
+        .map(|ordinal| {
+            index
+                .callable_parameter_name(callable, ordinal as u32)
+                .filter(|name| !name.is_empty())
+                .map(|name| crate::fir::ResolvedParameterIdentity::Source(name.into()))
+                .unwrap_or_else(|| {
+                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
+                        u32::try_from(ordinal).expect("parameter ordinal fits u32"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn function_parameter_identities(
+    function: &crate::libraries::FunctionInfo,
+    count: usize,
+) -> Box<[crate::fir::ResolvedParameterIdentity]> {
+    let mut names = vec![None; count];
+    let receiver = (function.kind == crate::libraries::FnKind::Extension)
+        .then_some(function.context_count.min(count));
+    for (logical, name) in function.call_sig.param_names.iter().enumerate() {
+        let physical = logical + usize::from(receiver.is_some_and(|receiver| logical >= receiver));
+        if physical < names.len() && !name.is_empty() {
+            names[physical] = Some(name.as_str());
+        }
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, name)| {
+            name.map_or_else(
+                || {
+                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
+                        u32::try_from(ordinal).expect("parameter ordinal fits u32"),
+                    )
+                },
+                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
+            )
+        })
+        .collect()
+}
+
 fn declaration_formals(
     index: &ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
@@ -298,6 +347,10 @@ fn publish_inherited_interface_function_plans(
                     implementation_parameters: resolved_types(
                         implementation_declared.semantic_params().iter().copied(),
                         "inherited implementation parameters",
+                    ),
+                    implementation_parameter_identities: function_parameter_identities(
+                        &implementation,
+                        implementation_declared.semantic_params().len(),
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -626,6 +679,11 @@ fn append_function_override_edges(
                 implementation_parameters: resolved_types(
                     implementation_parameters.iter().copied(),
                     "overriding function parameters",
+                ),
+                implementation_parameter_identities: module_parameter_identities(
+                    index,
+                    implementation_callable,
+                    implementation_parameters.len(),
                 ),
                 implementation_result: resolved_ty(
                     implementation_result,

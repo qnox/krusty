@@ -13,6 +13,9 @@
 //! every such class — and in every `@Serializable` class twice over, since a generated `$serializer`
 //! bridges both `serialize` and `deserialize`.
 use super::common;
+use super::serialization_companion_byte_parity_e2e::{
+    compare_with_kotlinc_plugin, plugin_and_runtime,
+};
 
 fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
     let Some(dir) = common::scratch_dir() else {
@@ -136,4 +139,64 @@ fn an_annotated_class_bridge_is_rooted_at_its_declaration() {
         return;
     };
     result.expect("StringSink byte-identical to kotlinc");
+}
+
+/// Plugin-generated targets publish their parameter identities through the same common-IR
+/// contract as source functions. Their erased bridges must therefore retain those exact names;
+/// inventing positional names such as `p0` would make this complete table differ.
+#[test]
+fn bridges_to_generated_members_use_their_published_parameter_identities() {
+    let (plugin, classpath) = plugin_and_runtime()
+        .expect("serialization plugin and pinned runtime are required for bridge debug parity");
+    let source = "import kotlinx.serialization.Serializable\n\
+                  @Serializable\n\
+                  data class LedgerEntry(val amount: Int)\n";
+    let comparison = compare_with_kotlinc_plugin(
+        "GeneratedBridgeParameterIdentities",
+        source,
+        "LedgerEntry$$serializer",
+        &classpath,
+        "25",
+        &[format!("-Xplugin={}", plugin.display())],
+    )
+    .expect("reference kotlinc and javap are required for bridge debug parity");
+
+    for (method, descriptor, expected_names) in [
+        (
+            "serialize",
+            "(Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V",
+            &["this", "encoder", "value"][..],
+        ),
+        (
+            "deserialize",
+            "(Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;",
+            &["this", "decoder"][..],
+        ),
+    ] {
+        let reference = krusty::jvm::classreader::read_method_code(
+            &comparison.reference_bytes,
+            method,
+            descriptor,
+        )
+        .unwrap_or_else(|| panic!("kotlinc must emit {method}{descriptor}"));
+        let actual = krusty::jvm::classreader::read_method_code(
+            &comparison.krusty_bytes,
+            method,
+            descriptor,
+        )
+        .unwrap_or_else(|| panic!("krusty must emit {method}{descriptor}"));
+        assert_eq!(
+            reference
+                .locals
+                .iter()
+                .map(|local| local.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_names,
+            "kotlinc's exact {method} local identities"
+        );
+        assert_eq!(
+            actual.locals, reference.locals,
+            "complete {method} LocalVariableTable"
+        );
+    }
 }

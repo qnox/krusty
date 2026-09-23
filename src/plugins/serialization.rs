@@ -1802,6 +1802,10 @@ impl IrPlugin for SerializationPlugin {
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
                     target_function: Some(serialize),
+                    parameter_identities: vec![
+                        crate::fir::ResolvedParameterIdentity::Source("encoder".into()),
+                        crate::fir::ResolvedParameterIdentity::Source("value".into()),
+                    ],
                     name: "serialize".to_string(),
                     erased_params: vec![
                         class_ty("kotlinx/serialization/encoding/Encoder"),
@@ -1822,6 +1826,9 @@ impl IrPlugin for SerializationPlugin {
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
                     target_function: Some(deserialize),
+                    parameter_identities: vec![crate::fir::ResolvedParameterIdentity::Source(
+                        "decoder".into(),
+                    )],
                     name: "deserialize".to_string(),
                     erased_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                     erased_ret: class_ty("kotlin/Any"),

@@ -1827,6 +1827,7 @@ pub(crate) fn lower_value_classes(
                 implementation,
                 edge.name.clone(),
                 edge.implementation_parameters.clone(),
+                edge.implementation_parameter_identities.clone(),
                 edge.implementation_result,
             );
             if !interface_entries.iter().any(|existing| existing == &entry) {
@@ -1834,7 +1835,13 @@ pub(crate) fn lower_value_classes(
             }
         }
     }
-    for (owner, implementation, name, parameters, result) in interface_entries {
+    for (owner, implementation, name, parameters, parameter_identities, result) in interface_entries
+    {
+        assert_eq!(
+            parameter_identities.len(),
+            parameters.len(),
+            "a value-class interface entry retains its semantic parameter identities"
+        );
         let class = ir
             .classes
             .iter_mut()
@@ -1850,6 +1857,7 @@ pub(crate) fn lower_value_classes(
             class.bridges.push(crate::ir::Bridge {
                 kind: crate::ir::BridgeKind::ValueClassInterfaceEntry,
                 target_function: Some(implementation),
+                parameter_identities,
                 name,
                 erased_params: parameters.clone(),
                 erased_ret: result,

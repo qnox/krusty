@@ -5,6 +5,7 @@
 //! it adapts, rather than in the file arena that merely holds them.
 
 use super::{Ty, TypeName};
+use crate::fir::ResolvedParameterIdentity;
 
 /// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +24,9 @@ pub struct Bridge {
     /// Exact same-module function this bridge delegates to. Backend realization uses this stable
     /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
     pub target_function: Option<u32>,
+    /// Exact source identities of the parameters visible on this bridge. These are frozen before a
+    /// representation pass can prepend carrier/receiver parameters to the delegated target.
+    pub parameter_identities: Vec<ResolvedParameterIdentity>,
     pub name: String,
     pub erased_params: Vec<Ty>,
     pub erased_ret: Ty,
