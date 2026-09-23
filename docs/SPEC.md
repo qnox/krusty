@@ -7350,6 +7350,29 @@ and behavior is checked by RUNNING the emitted program.
   mistakes, and Kotlin reports them as such.
   Tests: `tests/native_text_members_e2e.rs` (`text_answers_its_single_char`).
 
+- **A receiver typed `Collection` proves nothing about its LAYOUT.** `Collection` is admitted as a
+  list type, because the list entry points answer every question a list-shaped collection is asked.
+  But a `Set` is a collection too and is not shaped like a list, so `kt_list_size` read its count
+  out of fields the object does not have — a garbage number, silently, which is the one answer a
+  backend must never give. `setOf(1, 2, 3).size` was right; the same set behind a `Collection<*>`
+  was not. The runtime asks the OBJECT and counts the walk for anything that is not one of its two
+  list shapes; a real list never reaches that path. The same reasoning as the text members' string
+  receiver: a static type that names a SUPERTYPE cannot be read as a promise about storage.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_set_behind_a_collection_still_counts_itself`); the corpus case is
+  `codegen/box/collectionLiterals/stdlibCollections.kt`.
+
+- **`zip` stops at the shorter walk and asks the second only while the first has more.** Kotlin's
+  own loop is `while (first.hasNext() && second.hasNext())`, and the short-circuit is observable
+  through an iterator with a side effect.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_walk_zips_with_another_and_collects_into_a_set`).
+
+- **`getOrElse` hands the INDEX to its lambda.** Not the list and not nothing — the fallback is
+  computed from the index that was out of range.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_list_falls_back_for_an_index_it_does_not_hold`).
+
 - **A sort is STABLE, and `sortedBy` asks its selector once per COMPARISON.** The runtime sorts by
   insertion, so equal elements keep the order the walk gave them, which is what Kotlin promises.
   Kotlin's own `sortedBy` is `sortedWith(compareBy(selector))`, which calls the selector inside the

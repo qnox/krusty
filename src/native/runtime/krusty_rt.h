@@ -488,6 +488,22 @@ kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector);
 KRef kt_iterable_plus_element(KRef iterable, KRef element);
 KRef kt_iterable_plus_all(KRef iterable, KRef tail);
 
+/* `val (a, b) = list`: one per position, because the position is part of the NAME. */
+KRef kt_list_component1(KRef list);
+KRef kt_list_component2(KRef list);
+KRef kt_list_component3(KRef list);
+KRef kt_list_component4(KRef list);
+KRef kt_list_component5(KRef list);
+/* `xs.getOrElse(i) { … }`: the element, or what the lambda answers for the INDEX it is given. */
+KRef kt_list_get_or_else(KRef list, kt_int index, KRef fallback);
+/* The ends taken off a list, or null for an empty one — where `removeFirst`/`removeLast` raise. */
+KRef kt_mutable_list_remove_first_or_null(KRef list);
+KRef kt_mutable_list_remove_last_or_null(KRef list);
+/* `xs.zip(ys)`: pairs, as many as the shorter walk has. */
+KRef kt_iterable_zip(KRef iterable, KRef other);
+/* `xs.toMutableSet()`: the walk's elements, duplicates collapsed, still writable. */
+KRef kt_iterable_to_mutable_set(KRef iterable);
+
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
 /* `by lazy { … }`: the initializer until it has run, the value afterwards, and the one bit that

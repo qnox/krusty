@@ -2686,6 +2686,14 @@ kt_int kt_list_size(KRef list) {
     if (kt_is_mutable_list(list)) {
         return ((const KMutableList *)list)->size;
     }
+    /* A receiver whose static type was `Collection` proves nothing about its LAYOUT: a `Set` is a
+       collection too, and so is a class of the program's, and neither is shaped like a list. The
+       fields below would then be read off an object that has no such fields — a garbage count,
+       silently, which is the one answer a backend must never give. Counting the walk is what holds
+       for all of them, and a real list never reaches it. */
+    if (list == NULL || list->header.type != &kt_type_list) {
+        return kt_iterable_count(list);
+    }
     return kt_length_of(((const KList *)list)->elements);
 }
 
@@ -4131,6 +4139,63 @@ KRef kt_iterable_plus_element(KRef iterable, KRef element) {
 KRef kt_iterable_plus_all(KRef iterable, KRef tail) {
     KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
     return kt_frozen(kt_iterable_walked_into(tail, growing), 0);
+}
+
+/* `val (a, b) = list`: Kotlin declares one `componentN` per position, up to five. Separate entry
+   points rather than one taking the position, because the position is part of the NAME — a call
+   never computes it — and an out-of-range read is the indexed read's own complaint. */
+KRef kt_list_component1(KRef list) { return kt_list_get(list, 0); }
+KRef kt_list_component2(KRef list) { return kt_list_get(list, 1); }
+KRef kt_list_component3(KRef list) { return kt_list_get(list, 2); }
+KRef kt_list_component4(KRef list) { return kt_list_get(list, 3); }
+KRef kt_list_component5(KRef list) { return kt_list_get(list, 4); }
+
+/* `xs.getOrElse(i) { … }`: the element, or what the lambda answers for an index outside the list.
+   The lambda takes the INDEX — not the list, and not nothing — and it crosses boxed, because a
+   function value's `invoke` takes references. */
+KRef kt_list_get_or_else(KRef list, kt_int index, KRef fallback) {
+    if (index < 0 || index >= kt_list_size(list)) {
+        return kt_invoke_one(fallback, kt_box_int(index));
+    }
+    return kt_list_get(list, index);
+}
+
+/* `xs.removeFirstOrNull()` / `removeLastOrNull()`: the element taken off the end, or null for an
+   empty list — which is the whole of what separates them from `removeFirst`/`removeLast`. */
+KRef kt_mutable_list_remove_first_or_null(KRef list) {
+    return kt_list_size(list) == 0 ? NULL : kt_mutable_list_remove_at(list, 0);
+}
+
+KRef kt_mutable_list_remove_last_or_null(KRef list) {
+    kt_int size = kt_list_size(list);
+    return size == 0 ? NULL : kt_mutable_list_remove_at(list, size - 1);
+}
+
+/* `xs.zip(ys)`: pairs, as many as the SHORTER walk has — Kotlin stops at the first one that runs
+   out rather than padding. Both walks are asked in turn and the `&&` stops the second from being
+   asked once the first has ended, which is what Kotlin's own loop does and is observable through
+   an iterator with a side effect. */
+KRef kt_iterable_zip(KRef iterable, KRef other) {
+    KRef growing = kt_mutable_list_new();
+    KRef left = kt_iterable_iterator(iterable);
+    KRef right = kt_iterable_iterator(other);
+    while (kt_iterator_has_next(left) && kt_iterator_has_next(right)) {
+        KRef first = kt_iterator_next(left);
+        KRef second = kt_iterator_next(right);
+        (void)kt_mutable_list_add(growing, kt_pair_of(first, second));
+    }
+    return kt_frozen(growing, 0);
+}
+
+/* `xs.toMutableSet()`: the walk's elements with the duplicates collapsed, in a set that can still
+   be written to. */
+KRef kt_iterable_to_mutable_set(KRef iterable) {
+    KRef set = kt_set_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_set_add(set, kt_iterator_next(iterator));
+    }
+    return set;
 }
 
 /* `xs.sumOf { … }`. Kotlin declares one per width the selector may answer, and the answer's TYPE

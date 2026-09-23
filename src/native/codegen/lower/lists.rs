@@ -226,6 +226,8 @@ fn walk_symbol(
         // The same sort ordered by the elements themselves, or by what a selector answers for
         // them. `sortedBy` asks the selector once per COMPARISON, which is what Kotlin's own does.
         ("sorted", 0) => ("kt_iterable_sorted", vec![any()], any()),
+        ("zip", 1) => ("kt_iterable_zip", vec![any(), any()], any()),
+        ("toMutableSet", 0) => ("kt_iterable_to_mutable_set", vec![any()], any()),
         ("sortedBy", 1) => ("kt_iterable_sorted_by", vec![any(), any()], any()),
         ("minOrNull", 0) => ("kt_iterable_min_or_null", vec![any()], any()),
         ("maxOrNull", 0) => ("kt_iterable_max_or_null", vec![any()], any()),
@@ -370,6 +372,18 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         // are not these and fall through.
         ("first", 0) => ("kt_list_first", vec![any()], any()),
         ("last", 0) => ("kt_list_last", vec![any()], any()),
+        // `val (a, b) = list`. One member per position, because the position is part of the NAME:
+        // a call never computes it, so nothing is passed.
+        ("component1", 0) => ("kt_list_component1", vec![any()], any()),
+        ("component2", 0) => ("kt_list_component2", vec![any()], any()),
+        ("component3", 0) => ("kt_list_component3", vec![any()], any()),
+        ("component4", 0) => ("kt_list_component4", vec![any()], any()),
+        ("component5", 0) => ("kt_list_component5", vec![any()], any()),
+        // The index is an `Int` the generator must not box to hand over; the fallback is a
+        // function value and crosses as a reference.
+        ("getOrElse", 2) => ("kt_list_get_or_else", vec![any(), Ty::Int, any()], any()),
+        ("removeFirstOrNull", 0) => ("kt_mutable_list_remove_first_or_null", vec![any()], any()),
+        ("removeLastOrNull", 0) => ("kt_mutable_list_remove_last_or_null", vec![any()], any()),
         // `list.sortWith(comparator)`, which writes through the receiver and answers nothing.
         ("sortWith", 1) => ("kt_list_sort_with", vec![any(), any()], Ty::Unit),
         // `list.sort()`: the same sort ordered by the elements themselves. A LIST member rather

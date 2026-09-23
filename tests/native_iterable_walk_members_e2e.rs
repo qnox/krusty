@@ -323,3 +323,111 @@ fun box(): String {
 "#;
     every_backend_agrees_with_kotlinc("native_walk_sum", source);
 }
+
+/// `val (a, b) = list`: one member per position, up to five.
+#[test]
+fn a_list_destructures_by_position() {
+    let source = r#"
+fun box(): String {
+    val (a, b, c) = listOf(1, 2, 3)
+    if (a != 1 || b != 2 || c != 3) return "fail three"
+    val (p, q, r, s, t) = listOf("a", "b", "c", "d", "e")
+    if (p + q + r + s + t != "abcde") return "fail five"
+    val pairs = listOf(1 to "x", 2 to "y")
+    var joined = ""
+    for ((n, name) in pairs) joined += "" + n + name
+    if (joined != "1x2y") return "fail pairs " + joined
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_list_components", source);
+}
+
+/// `getOrElse` hands the INDEX to the lambda, not the list and not nothing.
+#[test]
+fn a_list_falls_back_for_an_index_it_does_not_hold() {
+    let source = r#"
+fun box(): String {
+    val xs = listOf(10, 20)
+    if (xs.getOrElse(1) { -1 } != 20) return "fail present"
+    if (xs.getOrElse(5) { it * 100 } != 500) return "fail index given"
+    if (xs.getOrElse(-1) { 7 } != 7) return "fail negative"
+    if (listOf<Int>().getOrElse(0) { 9 } != 9) return "fail empty"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_list_get_or_else", source);
+}
+
+/// The ends taken OFF a list, or null where `removeFirst`/`removeLast` would raise.
+#[test]
+fn a_mutable_list_gives_up_its_ends_or_nothing() {
+    let source = r#"
+fun box(): String {
+    val xs = mutableListOf(1, 2, 3)
+    if (xs.removeLastOrNull() != 3) return "fail last"
+    if (xs.removeFirstOrNull() != 1) return "fail first"
+    if (xs != listOf(2)) return "fail remaining " + xs
+    if (xs.removeLastOrNull() != 2) return "fail only"
+    if (xs.removeLastOrNull() != null) return "fail empty last"
+    if (xs.removeFirstOrNull() != null) return "fail empty first"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_list_remove_ends", source);
+}
+
+/// `zip` stops at the shorter walk; `toMutableSet` collapses duplicates.
+#[test]
+fn a_walk_zips_with_another_and_collects_into_a_set() {
+    let source = r#"
+fun box(): String {
+    val zipped = listOf(1, 2, 3).zip(listOf("a", "b"))
+    if (zipped != listOf(1 to "a", 2 to "b")) return "fail zip " + zipped
+    if (listOf<Int>().zip(listOf("a")).isNotEmpty()) return "fail zip empty"
+    val set = listOf(1, 2, 2, 3, 1).toMutableSet()
+    if (set.size != 3) return "fail set size " + set.size
+    if (!set.contains(2) || set.contains(9)) return "fail set members"
+    set.add(9)
+    if (!set.contains(9)) return "fail set writable"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_zip_and_set", source);
+}
+
+/// A receiver typed `Collection` proves nothing about its LAYOUT.
+///
+/// `Collection` is admitted as a list type, because the list entry points answer every question a
+/// list-shaped collection is asked. But a `Set` is a collection too and is not shaped like a list,
+/// so `kt_list_size` read a count out of fields the object does not have — silently, as a garbage
+/// number rather than a decline. `setOf(1, 2, 3).size` was right; the same set behind a
+/// `Collection<*>` was not. The runtime now asks the OBJECT and counts the walk for anything that
+/// is not one of its two list shapes.
+///
+/// The corpus case is `codegen/box/collectionLiterals/stdlibCollections.kt`, which reaches it
+/// through `Collection<*>.checkEquals(vararg es: Any?)`.
+#[test]
+fn a_set_behind_a_collection_still_counts_itself() {
+    let source = r#"
+fun Collection<*>.viaCollection(): Int = size
+fun Collection<*>.emptyViaCollection(): Boolean = isEmpty()
+
+fun box(): String {
+    val s = setOf(1, 2, 3)
+    if (s.size != 3) return "fail direct " + s.size
+    if (s.viaCollection() != 3) return "fail set via Collection " + s.viaCollection()
+    if (s.emptyViaCollection()) return "fail set empty"
+    if (setOf<Int>().viaCollection() != 0) return "fail empty set"
+    if (!setOf<Int>().emptyViaCollection()) return "fail empty set is empty"
+    val l = listOf(1, 2)
+    if (l.viaCollection() != 2) return "fail list via Collection"
+    if (mutableListOf(1, 2, 3).viaCollection() != 3) return "fail mutable list"
+    val m = mutableSetOf(1, 2)
+    m.add(3)
+    if (m.viaCollection() != 3) return "fail mutable set " + m.viaCollection()
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_collection_size", source);
+}
