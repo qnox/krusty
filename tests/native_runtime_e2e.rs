@@ -8,7 +8,9 @@
 //! `-nostdlib -static`, so nothing but the runtime itself answers its symbols — and runs it.
 //!
 //! A driver reports failure by exiting non-zero with a message on stderr (`KT_SYS_FAIL`), or by
-//! crashing; either fails the test with what it printed.
+//! crashing; either fails the test with what it printed. A driver that checks the runtime ENDS the
+//! program, as it does on exhausted memory, is instead expected to exit with the runtime's failure
+//! status and exactly the runtime's message; anything the driver prints itself fails the test.
 //!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
@@ -56,10 +58,9 @@ fn host_can_run() -> bool {
     false
 }
 
-/// Link `driver` with every runtime source and run it; the process must exit 0 and its stdout must
-/// end in `OK`. Returns the output for a driver whose test checks more than that. `None` when the
-/// host cannot run drivers at all.
-fn run_driver(driver: &str) -> Option<Output> {
+/// Link `driver` with every runtime source and run it. `None` when the host cannot run drivers at
+/// all.
+fn build_and_run(driver: &str) -> Option<Output> {
     if !host_can_run() {
         return None;
     }
@@ -84,8 +85,21 @@ fn run_driver(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
+            // The runtime's descriptor tables name their leading fields and leave the rest zero, as
+            // C initializers are meant to; every other extra warning stays an error.
+            "-Wno-missing-field-initializers",
         ])
-        .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
+        // A tier below the last one declares functions a later tier defines, and defines helpers
+        // only a later tier calls; neither is a defect of the tier.
+        .args(if RUNTIME_COMPLETE {
+            &[][..]
+        } else {
+            &[
+                "-Wl,--unresolved-symbols=ignore-all",
+                "-Wno-undefined-internal",
+                "-Wno-unused-function",
+            ][..]
+        })
         .arg("-I")
         .arg(runtime_dir())
         .args(&sources)
@@ -99,7 +113,13 @@ fn run_driver(driver: &str) -> Option<Output> {
         "{driver}: the driver and runtime did not build:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let output = Command::new(&executable).output().expect("run the driver");
+    Some(Command::new(&executable).output().expect("run the driver"))
+}
+
+/// Run `driver`; the process must exit 0 and its stdout must end in `OK`. Returns the output for a
+/// driver whose test checks more than that. `None` when the host cannot run drivers at all.
+fn run_driver(driver: &str) -> Option<Output> {
+    let output = build_and_run(driver)?;
     let stdout = &output.stdout;
     assert!(
         output.status.success() && stdout.ends_with(b"OK\n"),
@@ -109,6 +129,22 @@ fn run_driver(driver: &str) -> Option<Output> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(output)
+}
+
+/// Run `driver`, which must end the way the runtime ends a program it cannot continue
+/// (`kt_sys_fail`: status 134) with exactly `message` on stderr and nothing on stdout.
+fn run_driver_expecting_failure(driver: &str, message: &str) {
+    let Some(output) = build_and_run(driver) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.code() == Some(134) && stderr == message && output.stdout.is_empty(),
+        "{driver}: expected status 134 and stderr {message:?}, got {}\nstdout: {:?}\n\
+         stderr: {stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
@@ -129,6 +165,34 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
             .enumerate()
             .all(|(index, &byte)| byte == b'a' + (index % 26) as u8),
         "the payload arrives in order"
+    );
+}
+
+#[test]
+fn the_collector_frees_what_is_unreachable_and_reuses_it() {
+    run_driver("gc_collects_unreachable");
+}
+
+#[test]
+fn an_allocation_whose_size_would_wrap_runs_out_of_memory() {
+    run_driver_expecting_failure("gc_rejects_wrapping_size", "krusty: out of memory\n");
+}
+
+#[test]
+fn every_registered_global_root_is_kept_past_four_thousand() {
+    run_driver("gc_many_global_roots");
+}
+
+#[test]
+fn a_pointer_one_past_an_object_keeps_it_alive() {
+    run_driver("gc_end_pointer_keeps_object");
+}
+
+#[test]
+fn a_collection_started_during_a_collection_fails() {
+    run_driver_expecting_failure(
+        "gc_reentrant_collection_fails",
+        "krusty: a collection started during a collection\n",
     );
 }
 
