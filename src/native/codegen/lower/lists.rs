@@ -188,6 +188,17 @@ fn lazy_over_a_sequence(name: &str) -> bool {
     matches!(name, "iterator" | "withIndex")
 }
 
+/// The runtime entry point an implementor dispatch falls through to when the receiver is none of
+/// this file's classes — the three facts about it that travel together everywhere.
+struct RuntimeArm<'a> {
+    /// The runtime function's symbol.
+    symbol: &'static str,
+    /// What it takes, receiver first.
+    carried: &'a [Ty],
+    /// What it answers, which the call site then reconciles with its own expected type.
+    answer: Ty,
+}
+
 /// A member Kotlin declares over `Iterable` that the runtime answers by WALKING the receiver.
 ///
 /// Apart from [`interface_symbol`] only because a TEXT receiver must not reach these; see
@@ -599,12 +610,18 @@ impl BodyLowering<'_, '_, '_> {
             }
             operands.push((value, self.type_of(*argument)));
         }
-        let produced =
-            self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+        let produced = self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            ret,
+            None,
+            |body, _| {
                 // Unreachable: the arms above cover every class that can stand behind the type.
                 body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
                 Ok(Some(body.builder.ins().iconst(types::I64, 0)))
-            })?;
+            },
+        )?;
         Ok(produced)
     }
 
@@ -986,7 +1003,7 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
-    /// A ZERO-ARGUMENT collection member asked of a type this file implements ITSELF.
+    /// A collection member asked of a type this file implements ITSELF.
     ///
     /// The runtime answers such a member for the objects IT makes, and a class of this file's is
     /// not one of them — which is why the caller declines. But the file knows every class of its
@@ -994,10 +1011,11 @@ impl BodyLowering<'_, '_, '_> {
     /// receiver against each, dispatch on that implementor's own slot when it matches, and fall
     /// through to the runtime entry point otherwise.
     ///
-    /// Zero arguments on purpose. An argument would have to cross at the DECLARATION's carriers in
-    /// one arm and at the runtime entry point's in the other, and reconciling those is more than
-    /// the receiver test this is. `iterator`, `hasNext` and `next` take none, which is every member
-    /// in this group.
+    /// An ARGUMENT has to cross at the DECLARATION's carriers in one arm and at the runtime entry
+    /// point's in the other, which each arm reconciles for itself. A member Kotlin gives a SPECIAL
+    /// BRIDGE carries one more condition: the argument is tested against what the implementor
+    /// declares, and one that cannot be what it declares answers the member's own default instead
+    /// of reaching the override — see `intrinsics::special_bridge_default`.
     ///
     /// `None` when the member takes arguments, when the runtime has no entry point for it, or when
     /// any implementor does not supply it — a partial chain would fall through to the runtime for
@@ -1011,14 +1029,12 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
-        // wide type answers the member's default rather than reaching the override when the
-        // argument cannot be what the declaration accepts, and there is no bridge here to put in
-        // front of an implementor's arm. Every one of them takes an argument, so the nullary
-        // members are untouched.
-        if super::super::super::intrinsics::has_special_bridge(internal, name) {
-            return None;
-        }
+        // A member Kotlin gives a SPECIAL BRIDGE is still this dispatch's to make, with the bridge
+        // put in front of each implementor's arm: the call is reachable through a wider type than
+        // the override accepts, and Kotlin answers such a call with the member's own default
+        // rather than running it. Which default is the member's own question; see
+        // `intrinsics::special_bridge_default`.
+        let bridge = super::super::super::intrinsics::special_bridge_default(internal, name);
         let ty = self.type_of(receiver)?;
         // Which runtime entry point would have answered this. Three tables reach a member of a
         // runtime-known type: the ITERATION one, keyed on the role a receiver plays; the SCALAR
@@ -1027,8 +1043,25 @@ impl BodyLowering<'_, '_, '_> {
         let owner = internal.render();
         let (symbol, carried, answer) = super::super::super::intrinsics::iteration_role_of(ty)
             .and_then(|role| interface_symbol(role, name, args.len()))
+            // The WALK answers for the runtime's own objects here, as the last arm below the
+            // implementors — `contains` is the member this reaches that `interface_symbol` does
+            // not. Never over a list: a file that puts a class of its own behind a collection
+            // declines the list path outright, so there is nothing for the list gate to hold back.
+            .or_else(|| {
+                super::super::super::intrinsics::iteration_role_of(ty)
+                    .and_then(|role| walk_symbol(role, name, args.len(), ret, false))
+            })
             .or_else(|| super::super::super::intrinsics::scalar_member(&owner, name, params))
             .or_else(|| super::maps::runtime_symbol(&owner, name, args.len()))
+            // A LIST's own members — `remove`, `removeAt`, indexed access. The declaration's
+            // parameters are what tells `remove(element)` from the `removeAt` a JVM realization
+            // also spells `remove`, which is the same question `list_symbol` asks of the physical
+            // ones at an ordinary call site.
+            .or_else(|| {
+                is_list(ty)
+                    .then(|| list_symbol(name, args.len(), params))
+                    .flatten()
+            })
             // `Comparable.compareTo` is answered from the DESCRIPTOR rather than from a table
             // keyed on a shape, so it is named here rather than found: one member, one entry
             // point, both operands references and the answer an `Int`.
@@ -1042,12 +1075,35 @@ impl BodyLowering<'_, '_, '_> {
         if carried.len() != args.len() + 1 {
             return None;
         }
-        let declared = self.file.implementors_of(internal);
+        // By SHAPE where the receiver has one, because that is how the caller decided there was
+        // something of this file's behind it; see `FileLowering::implementors_of_shape`.
+        let declared = match super::super::super::intrinsics::collection_shape_of(ty) {
+            Some(shape) => self.file.implementors_of_shape(shape),
+            None => self.file.implementors_of(internal),
+        };
         let implementors: Vec<(ClassId, u32, Vec<Ty>, Ty)> = declared
             .iter()
             .filter_map(|&class| {
                 self.member_slot(class, name, args.len())
-                    .map(|(slot, params, supplied)| (class, slot, params, supplied))
+                    .map(|(slot, declares, supplied)| (class, slot, declares, supplied))
+            })
+            // The implementor's own parameters have to be REACHABLE from the ones the call states.
+            // `member_slot` matches on name and arity alone, and that is not enough: a JVM
+            // realization spells `removeAt` as `remove(int)`, which then matched a class's own
+            // `remove(String)` — a different member entirely, whose arm answered `null` for
+            // `list.removeAt(0)`.
+            //
+            // A bridge only ever WIDENS, so the direction is what decides. Where the call states a
+            // REFERENCE, any override is reachable: that is the erased position the bridge exists
+            // for, and an override taking a scalar — `containsValue(value: Int)` on a
+            // `Map<String, Int>` — is reached by testing the box and unboxing it, which is what
+            // the arm already does. Where the call states a scalar there is nothing to widen from,
+            // so only the same scalar can be meant.
+            .filter(|(_, _, declares, _)| {
+                declares.len() == params.len()
+                    && declares.iter().zip(params).all(|(declared, stated)| {
+                        carrier(*stated) == Carrier::Ref || carrier(*declared) == carrier(*stated)
+                    })
             })
             .collect();
         if implementors.is_empty() || implementors.len() != declared.len() {
@@ -1055,12 +1111,15 @@ impl BodyLowering<'_, '_, '_> {
         }
         Some(self.member_by_implementor(
             &implementors,
-            symbol,
-            &carried,
-            answer,
+            RuntimeArm {
+                symbol,
+                carried: &carried,
+                answer,
+            },
             receiver,
             args,
             ret,
+            bridge,
         ))
     }
 
@@ -1068,13 +1127,17 @@ impl BodyLowering<'_, '_, '_> {
     fn member_by_implementor(
         &mut self,
         implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
-        symbol: &'static str,
-        carried: &[Ty],
-        answer: Ty,
+        arm: RuntimeArm<'_>,
         receiver: u32,
         args: &[u32],
         ret: Ty,
+        bridge: Option<super::super::super::intrinsics::BridgeDefault>,
     ) -> Result<Option<Value>, Unsupported> {
+        let RuntimeArm {
+            symbol,
+            carried,
+            answer,
+        } = arm;
         let object = self.reference(receiver)?;
         if self.terminated {
             return Ok(None);
@@ -1098,6 +1161,7 @@ impl BodyLowering<'_, '_, '_> {
             object,
             &operands,
             answer,
+            bridge,
             move |body, object| {
                 let mut values = Vec::with_capacity(runtime_operands.len() + 1);
                 values.push(object);

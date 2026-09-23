@@ -527,6 +527,37 @@ impl<'a> FileLowering<'a> {
             .collect()
     }
 
+    /// Every class of this file an object of which could stand behind a collection of `shape`.
+    ///
+    /// Wider than [`Self::implementors_of`], and for the very reason the caller declined in the
+    /// first place: `implements_collection_of` asks by SHAPE, so a `List` of this file's is what
+    /// makes a receiver typed `Collection` unanswerable — `StrList : List<String?>` names `List`
+    /// and never `Collection`. A dispatch put in place of that decline has to find the same
+    /// classes the decline was about, not only the ones naming that exact type.
+    fn implementors_of_shape(
+        &self,
+        shape: super::super::intrinsics::CollectionShape,
+    ) -> Vec<ClassId> {
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface
+                    && std::iter::once(class.superclass)
+                        .chain(class.interfaces.iter())
+                        .chain(
+                            class
+                                .supertypes
+                                .iter()
+                                .copied()
+                                .filter_map(crate::types::Ty::obj_internal),
+                        )
+                        .any(|named| {
+                            super::super::intrinsics::collection_shape(named) == Some(shape)
+                        })
+            })
+            .collect()
+    }
+
     /// Whether a class of this file answers for the dependency type `internal`.
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
         self.implemented_dependencies

@@ -3509,6 +3509,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         object: Value,
         arguments: &[(Value, Option<Ty>)],
         answer: Ty,
+        bridge: Option<super::super::super::intrinsics::BridgeDefault>,
         runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
@@ -3533,6 +3534,36 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
             self.continue_in(mine);
             self.builder.seal_block(mine);
+            // A SPECIAL BRIDGE stands between the wide call and this override: the member is
+            // reachable with an argument the override does not accept, and Kotlin answers such a
+            // call without running it. So the operands are tested against the types this
+            // implementor declares BEFORE anything is converted to them — a conversion of a value
+            // that is not one of them is exactly what must not happen.
+            if let Some(bridge) = bridge {
+                let mut accepted = None;
+                for ((value, source), declared) in arguments.iter().zip(params.iter()) {
+                    let Some(admits) = self.admits_argument(*value, *source, *declared)? else {
+                        return Ok(None);
+                    };
+                    accepted = Some(match accepted {
+                        Some(previous) => self.builder.ins().band(previous, admits),
+                        None => admits,
+                    });
+                }
+                if let Some(accepted) = accepted {
+                    let mine_after = self.builder.create_block();
+                    let refused = self.builder.create_block();
+                    self.builder
+                        .ins()
+                        .brif(accepted, mine_after, &[], refused, &[]);
+                    self.continue_in(refused);
+                    self.builder.seal_block(refused);
+                    let default = self.bridge_default(bridge, arguments, answer)?;
+                    self.jump_to_merge(merge, carried, default);
+                    self.continue_in(mine_after);
+                    self.builder.seal_block(mine_after);
+                }
+            }
             // The carried list is the member's PARAMETERS, which `dispatch` prepends the receiver
             // to. Each operand crosses at the type this implementor declares for it.
             let mut operands = Vec::with_capacity(arguments.len());
@@ -3559,6 +3590,101 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
         Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// Whether `value` is something the declared parameter type ADMITS, as an `i8` boolean.
+    ///
+    /// The same question `x is T` asks, and settled the same way where the language settles it:
+    /// nothing is a `Nothing`, everything that is not null is an `Any`, and a nullable target
+    /// admits `null` besides. A scalar operand is asked through its box, exactly as an `is` check
+    /// asks one — the descriptor a box carries is what says a `5` is a `Number` and not a `Byte`.
+    fn admits_argument(
+        &mut self,
+        value: Value,
+        source: Option<Ty>,
+        declared: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let target = declared.non_null();
+        let nullable = declared.is_nullable();
+        let is_any = target
+            .obj_internal()
+            .is_some_and(super::super::super::intrinsics::is_any);
+        // A declared type that admits everything needs no test at all, and one that admits nothing
+        // needs no object: neither reads the value, and `Nothing?` reads only whether it is null.
+        let settled = match (target, is_any, nullable) {
+            (Ty::Nothing, _, false) => Some(false),
+            (_, true, true) => Some(true),
+            _ => None,
+        };
+        if let Some(constant) = settled {
+            return Ok(Some(
+                self.builder.ins().iconst(types::I8, i64::from(constant)),
+            ));
+        }
+        let Some(object) = self.convert(value, source, any())? else {
+            return Ok(None);
+        };
+        if target == Ty::Nothing {
+            // `Nothing?`: only `null` is one.
+            return Ok(Some(self.is_null(object)));
+        }
+        if is_any {
+            // `Any`, not nullable: everything but `null`.
+            let is_null = self.is_null(object);
+            let one = self.builder.ins().iconst(types::I8, 1);
+            return Ok(Some(self.builder.ins().bxor(is_null, one)));
+        }
+        let Some(descriptor) = self.file.type_descriptor(declared)? else {
+            return Err(format!(
+                "a special bridge testing against `{}`",
+                type_name_of(declared)
+            ));
+        };
+        let descriptor = self.data_address(descriptor);
+        let mut admits = self
+            .runtime_call(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[object, descriptor],
+            )?
+            .expect("`kt_is_instance` returns a Boolean");
+        if nullable {
+            let is_null = self.is_null(object);
+            admits = self.builder.ins().bor(admits, is_null);
+        }
+        Ok(Some(admits))
+    }
+
+    /// What the bridge hands back for an argument the override does not accept.
+    fn bridge_default(
+        &mut self,
+        bridge: super::super::super::intrinsics::BridgeDefault,
+        arguments: &[(Value, Option<Ty>)],
+        answer: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::BridgeDefault;
+        match bridge {
+            // "nothing of that kind is here", at the width the member answers: `false` for the
+            // questions, `-1` for the positions, `null` for the lookups. Read off the ANSWER so
+            // the constant and the merge block cannot disagree.
+            BridgeDefault::Absent => match answer.non_null() {
+                Ty::Boolean => Ok(Some(self.builder.ins().iconst(types::I8, 0))),
+                Ty::Int => Ok(Some(self.builder.ins().iconst(types::I32, -1))),
+                _ if carrier(answer) == Carrier::Ref => {
+                    Ok(Some(self.builder.ins().iconst(types::I64, 0)))
+                }
+                other => Err(format!("a special bridge answering `{other:?}`")),
+            },
+            // `getOrDefault(key, fallback)`: the caller's own second operand, at whatever type the
+            // site expects the answer to be.
+            BridgeDefault::SecondArgument => {
+                let Some((value, source)) = arguments.get(1).copied() else {
+                    return Err("a `getOrDefault` bridge with no fallback operand".to_string());
+                };
+                self.convert(value, source, answer)
+            }
+        }
     }
 
     /// Leave the current block for `merge`, carrying the arm's value where there is one.

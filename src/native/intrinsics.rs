@@ -130,14 +130,49 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
 /// these rather than calling an override Kotlin would have skipped. Every one of them takes an
 /// ARGUMENT, which is why the nullary members are unaffected.
 pub(super) fn has_special_bridge(owner: crate::types::TypeName, name: &str) -> bool {
+    special_bridge_default(owner, name).is_some()
+}
+
+/// What a SPECIAL BRIDGE answers when the argument cannot be what the override declares.
+///
+/// The bridge exists because these members are reachable through a WIDER type than the one the
+/// override accepts: `Collection<E>.contains(x as E)` erases to a call taking anything, and
+/// `EmptyMap.get(null)` reaches a `get(key: Any)`. Kotlin answers such a call without running the
+/// override at all, and each member has its own answer for "not one of mine" — which is the whole
+/// of what this names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BridgeDefault {
+    /// "there is no such thing here", spelled at whatever WIDTH the member answers: `false` for
+    /// the questions, `-1` for the positions, `null` for the lookups. Deriving it from the answer
+    /// rather than naming it per member is what keeps the two in step — `Map.remove` answers the
+    /// value it removed and `MutableCollection.remove` answers a boolean, and a default written
+    /// per name got that pair wrong in exactly the way the verifier catches.
+    Absent,
+    /// `Map.getOrDefault`: the caller's own fallback, whatever it is.
+    SecondArgument,
+}
+
+pub(super) fn special_bridge_default(
+    owner: crate::types::TypeName,
+    name: &str,
+) -> Option<BridgeDefault> {
     let over_a_map = is_map_type(owner) || is_map_entry_type(owner);
     let over_a_collection = is_list_type(owner)
         || is_set_type(owner)
         || matches!(iteration_role(owner), Some(IterationRole::Iterable));
     match name {
-        "get" | "remove" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
-        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
-        _ => false,
+        "getOrDefault" if over_a_map => Some(BridgeDefault::SecondArgument),
+        "get" | "remove" | "containsKey" | "containsValue" if over_a_map => {
+            Some(BridgeDefault::Absent)
+        }
+        // `remove` is a collection's too, answering whether anything went — and `removeAt`, which
+        // a JVM realization also spells `remove`, is not this: it takes an `Int`, which every call
+        // site already has statically, so its guard is the constant `true` and its arm is reached
+        // as before.
+        "contains" | "remove" | "indexOf" | "lastIndexOf" if over_a_collection => {
+            Some(BridgeDefault::Absent)
+        }
+        _ => None,
     }
 }
 

@@ -7378,6 +7378,34 @@ and behavior is checked by RUNNING the emitted program.
   Kotlin's documented one.
   Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
 
+- **A SPECIAL BRIDGE stands in front of a collection member a file implements itself.**
+  `Collection<E>.contains(x as E)` erases to a call taking anything and `EmptyMap.get(null)`
+  reaches a `get(key: Any)`; Kotlin answers such a call WITHOUT running the override, testing the
+  argument against what the override declares and handing back the member's own default when it is
+  not one. These members used to decline outright for a file with its own collection, because the
+  dispatch among that file's classes had no bridge to put in front of each arm.
+
+  The default is read off the member's ANSWER — `false` for the questions, `-1` for the positions,
+  `null` for the lookups — rather than named per member, because the two have to agree:
+  `Map.remove` answers the value it removed while `MutableCollection.remove` answers a boolean, and
+  a per-name table got exactly that pair wrong, emitting an `i8` into a merge block expecting a
+  pointer.
+
+  Which override a call can reach is decided by DIRECTION. Where the call states a reference — the
+  erased position the bridge exists for — any override is reachable, a scalar one
+  (`containsValue(value: Int)` on a `Map<String, Int>`) by testing the box's descriptor and
+  unboxing. Where the call states a scalar there is nothing to widen from, so only the same scalar
+  can be meant: without that, `removeAt` — which a JVM realization spells `remove(int)` — bound to
+  a class's own `remove(String)` and answered `null` for `list.removeAt(0)`.
+
+  The implementors are found by SHAPE, because that is how the caller decided there was something
+  of this file's behind the receiver: `StrList : List<String?>` names `List` and never
+  `Collection`, and a receiver typed `Collection` is what the decline was about.
+  Tests: `tests/native_special_bridge_e2e.rs`. krusty's JVM backend does not emit the bridge
+  METHODS, so the two cases that need one there take kotlinc as the oracle and require only the
+  native backend; that gap is unchanged by this and confirmed by stripping every `src/native/`
+  change from the tree.
+
 - **A map's three lookups disagree about a stored NULL, on purpose.** `getValue` is written in
   terms of "absent" and raises only then, so a key whose value is null answers that null.
   `getOrElse` and `getOrPut` are written in terms of "null" and run their lambda for a stored null

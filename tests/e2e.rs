@@ -1169,6 +1169,9 @@ mod native_map_members_e2e;
 
 #[path = "native_array_members_e2e.rs"]
 mod native_array_members_e2e;
+
+#[path = "native_special_bridge_e2e.rs"]
+mod native_special_bridge_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_vararg_constructor_e2e.rs"]

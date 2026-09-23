@@ -12,12 +12,15 @@
 //! one this file already assigned. A subclass needs no entry of its own either: `is` walks the
 //! super chain, and a subclass's vtable has already replaced the slot the dispatch reads.
 //!
-//! Zero arguments on purpose. An argument would have to cross at the DECLARATION's carriers in one
-//! arm and at the runtime entry point's in the other; `iterator`, `hasNext` and `next` take none.
+//! Zero arguments was where this started, because an argument has to cross at the DECLARATION's
+//! carriers in one arm and at the runtime entry point's in the other. Both are reconciled now, and
+//! a member Kotlin gives a SPECIAL BRIDGE carries one more condition besides: the argument is
+//! tested against what the implementor declares, and an argument that cannot be what it declares
+//! answers the member's own default rather than reaching the override.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// A program's own `Iterator`, reached through the type it implements.
 #[test]
@@ -112,19 +115,26 @@ fn a_member_with_arguments_dispatches_on_the_receiver_too() {
     expect_native_box(source, "ArgumentedImplementedMember", "OK");
 }
 
-/// A member Kotlin gives a SPECIAL BRIDGE declines, argument or no argument.
+/// A member Kotlin gives a SPECIAL BRIDGE is dispatched WITH the bridge in front of each arm.
 ///
 /// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
 /// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there — it
 /// answers the member's default, `null` for `get`, because the argument cannot be what the
-/// declaration accepts. The receiver dispatch has no bridge to put in front of an implementor's
-/// arm, so it declines rather than calling an override Kotlin would have skipped.
+/// declaration accepts.
 ///
-/// The two-sided conformance gate is what found this: dispatching these turned four corpus cases
-/// from declines into wrong answers, one of them a SIGILL.
+/// This used to DECLINE, and the reason it did is worth keeping: the receiver dispatch had no
+/// bridge to put in front of an implementor's arm, and dispatching without one turned four corpus
+/// cases from declines into wrong answers, one of them a SIGILL. The bridge is what was missing,
+/// not the dispatch. Each arm now tests the argument against what that implementor declares and
+/// hands back the member's own default when it is not one — so the override is skipped exactly
+/// where Kotlin skips it. See `tests/native_special_bridge_e2e.rs` for the rest of the group, and
+/// `docs/SPEC.md` for why the default is read off the member's answer rather than named per member.
+///
+/// The oracle here is kotlinc alone: krusty's JVM backend does not emit the bridge METHOD, so it
+/// cannot run this program yet.
 #[test]
-fn a_member_with_a_special_bridge_declines() {
-    expect_native_decline(
+fn a_member_with_a_special_bridge_is_bridged() {
+    expect_native_box(
         "object NotEmptyMap : MutableMap<Any, Any> {\n\
          \x20   override fun containsKey(key: Any): Boolean = true\n\
          \x20   override fun containsValue(value: Any): Boolean = true\n\
@@ -141,9 +151,11 @@ fn a_member_with_a_special_bridge_declines() {
          }\n\
          fun box(): String {\n\
          \x20   val n = NotEmptyMap as MutableMap<Any?, Any?>\n\
-         \x20   return if (n.get(null) == null) \"OK\" else \"fail\"\n\
+         \x20   if (n.get(null) != null) return \"fail the bridge ran the override\"\n\
+         \x20   if (n.get(\"\") == null) return \"fail the override did not run\"\n\
+         \x20   return \"OK\"\n\
          }\n",
         "SpecialBridgeMember",
-        "get",
+        "OK",
     );
 }
