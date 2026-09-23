@@ -133,9 +133,15 @@ pub(super) fn has_special_bridge(owner: crate::types::TypeName, name: &str) -> b
     let over_a_map = is_map_type(owner) || is_map_entry_type(owner);
     let over_a_collection = is_list_type(owner)
         || is_set_type(owner)
+        || matches!(
+            kotlin_owner(&owner.render()),
+            "kotlin/collections/Collection" | "kotlin/collections/MutableCollection"
+        )
         || matches!(iteration_role(owner), Some(IterationRole::Iterable));
     match name {
-        "get" | "remove" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
+        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
+        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
+        "remove" => over_a_map || over_a_collection,
         "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
         _ => false,
     }
@@ -276,19 +282,11 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
                 ConsoleOperand::Reference => Some(format!("kt_{name}_any")),
             }
         }
-        // The throws a program writes on purpose. Each is a `Nothing` or a check that diverges, so
-        // the caller's own bottom-value contract takes over from here; the runtime's part is the
-        // diagnosable exit this target gives a throw until it has exceptions.
-        //
-        // Only the forms that take no `lazyMessage` are named. That parameter is a LAMBDA of an
-        // `inline` declaration whose body is not here to splice, and Kotlin lets such a lambda
-        // return from the enclosing function — so invoking it as an ordinary function value would
-        // be a miscompile rather than a slower answer, and the form declines instead.
+        // `TODO()`, a throw a program writes on purpose: a `Nothing`, so the caller's own
+        // bottom-value contract takes over from here. `require`, `check` and `error` are
+        // [`precondition`]'s, which the caller asks first; they are not named twice.
         ("kotlin", "TODO", []) => Some("kt_not_implemented".to_string()),
         ("kotlin", "TODO", [_]) => Some("kt_not_implemented_reason".to_string()),
-        ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
-        ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
-        ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
         // `kotlin.math.abs`, one per width it is declared over. The operand crosses at its OWN
         // width and the answer comes back at it: `abs` of a `Long` is a `Long`, and computing it
         // at any other width would change what the minimum answers.
@@ -576,10 +574,8 @@ pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate>
 
 /// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
 ///
-/// Every enum constant answers `name` and `ordinal` from the storage its base contributes, and the
-/// accessor reaches a backend spelled as the provider named it — `getName` on `java/lang/Enum`,
-/// since the signatures come from a JVM jar. Normalizing that here keeps the one place that knows
-/// the spelling the same one that knows every other.
+/// Every enum constant answers `name` and `ordinal` from the storage its base contributes. The
+/// accessor arrives as the property's Kotlin name, so these are the only two spellings.
 pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
     if kotlin_owner(owner) != "kotlin/Enum" {
         return None;
@@ -620,9 +616,6 @@ pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
     }
 }
 
-/// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
-/// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
-/// which is what `4.toString()` means anyway.
 /// `a until b` — the half-open range builder, which the provider presents as an extension function
 /// of the ranges file facade rather than a member of the range it answers.
 ///
@@ -679,7 +672,7 @@ pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> boo
 pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
     matches!(
         kotlin_owner(owner),
-        "kotlin/PropertyReferenceDelegatesKt" | "kotlin/properties" | "kotlin"
+        "kotlin/PropertyReferenceDelegatesKt" | "kotlin"
     )
 }
 
@@ -764,7 +757,7 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
         // A SEQUENCE. Iterating one is the one member `Sequence` declares, and the wrapper the
         // runtime makes holds the source it walks — so the role is the same and the dispatch is
         // the descriptor's. Which OTHER members a sequence may be asked is narrower than an
-        // iterable's, and that is [`lists::is_sequence`]'s to enforce, not this table's.
+        // iterable's, and that is the sequence lowering's to enforce, not this table's.
         ("kotlin/sequences/Sequence", IterationRole::Iterable),
         ("kotlin/ranges/IntRange", IterationRole::Iterable),
         ("kotlin/ranges/LongRange", IterationRole::Iterable),
@@ -837,11 +830,10 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
     matches!(
         kotlin_owner(&internal.render()),
         "kotlin/collections/List"
-            | "kotlin/collections/Collection"
             // The MUTABLE ones read the same way: every question `List` answers, a `MutableList`
-            // answers identically, and the runtime gives both one entry point.
+            // answers identically, and the runtime gives both one entry point. `Collection` is not
+            // here: a `Set` is one, and the runtime's set is not laid out as its list.
             | "kotlin/collections/MutableList"
-            | "kotlin/collections/MutableCollection"
             | "kotlin/collections/ArrayList"
     )
 }
@@ -1507,26 +1499,49 @@ pub(super) fn array_member(
     })
 }
 
-/// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type).
+/// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
+/// operands are read at the operand type and the answer is that type.
 ///
-/// Kotlin declares one for every numeric pair, and the RESULT names the type they meet in:
-/// `Int.mod(Long)` answers a `Long`, so both operands are read at that width. The narrow integers
-/// answer at their own width and are computed at `Int`, which is exact — the answer's magnitude is
-/// below the divisor's, so nothing is lost on the way back down.
+/// Kotlin computes every pair at the WIDER of the two widths. When that is also the declared
+/// result — `Int.mod(Long)` answers a `Long`, `Float.mod(Double)` a `Double` — the pair is this
+/// table's. When the receiver is the wider one it is not: `Long.mod(Int)` is computed at `Long` and
+/// narrowed to the `Int` it declares, and `Double.mod(Float)` is computed at `Double`, so reading the
+/// receiver at the divisor's width would drop its high bits (`(1L shl 33).mod(3)` is 2, not 0).
+/// Those decline rather than answer wrongly. The narrow integers are computed at `Int`, which is
+/// exact: the answer's magnitude is below the divisor's, so nothing is lost on the way back down.
 ///
 /// Not [`scalar_member`]: that table hands its receiver over as a reference, and the receiver here
 /// is a number.
-pub(super) fn floor_mod(owner: &str, name: &str, params: &[Ty]) -> Option<(&'static str, Ty)> {
+pub(super) fn floor_mod(
+    owner: &str,
+    name: &str,
+    receiver: Ty,
+    params: &[Ty],
+) -> Option<(&'static str, Ty)> {
     if declaration_package(kotlin_owner(owner)) != "kotlin" || name != "mod" {
         return None;
     }
-    // A single numeric operand is the whole of the declaration set. `Char` is absent because
-    // Kotlin declares no `mod` for it, and a `Unit` or reference argument names something else.
-    match params {
-        [Ty::Byte | Ty::Short | Ty::Int] => Some(("kt_mod_int", Ty::Int)),
-        [Ty::Long] => Some(("kt_mod_long", Ty::Long)),
-        [Ty::Float] => Some(("kt_mod_float", Ty::Float)),
-        [Ty::Double] => Some(("kt_mod_double", Ty::Double)),
+    // Each numeric width, ranked; `Char` has no `mod` and a reference names something else.
+    let rank = |ty: Ty| match ty {
+        Ty::Byte | Ty::Short | Ty::Int => Some(0),
+        Ty::Long => Some(1),
+        Ty::Float => Some(2),
+        Ty::Double => Some(3),
+        _ => None,
+    };
+    let [divisor] = params else {
+        return None;
+    };
+    let (receiver_rank, divisor_rank) = (rank(receiver)?, rank(*divisor)?);
+    let integral = |rank: u8| rank < 2;
+    if integral(receiver_rank) != integral(divisor_rank) || receiver_rank > divisor_rank {
+        return None;
+    }
+    match *divisor {
+        Ty::Byte | Ty::Short | Ty::Int => Some(("kt_mod_int", Ty::Int)),
+        Ty::Long => Some(("kt_mod_long", Ty::Long)),
+        Ty::Float => Some(("kt_mod_float", Ty::Float)),
+        Ty::Double => Some(("kt_mod_double", Ty::Double)),
         _ => None,
     }
 }
@@ -1626,10 +1641,8 @@ pub(super) fn is_text_length(owner: crate::types::TypeName, name: &str) -> bool 
 ///
 /// The property is declared on `kotlin.Throwable` itself, so a subclass reading it — the program's
 /// own or one of the runtime's — arrives here under the root's owner. Both spellings are taken for
-/// the reason [`is_text_length`] gives: which one a provider uses is its business.
-///
-/// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
-/// answering `null` to a program that passed one, and that declines instead.
+/// the reason [`is_text_length`] gives: which one a provider uses is its business. `cause` is the
+/// other field [`throwable_field`] reads.
 pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
     throwable_field(owner, name) == Some("kt_throwable_message")
 }
@@ -1784,6 +1797,9 @@ pub(super) fn runtime_companion_member(
     }
 }
 
+/// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
+/// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
+/// which is what `4.toString()` means anyway.
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
@@ -1800,7 +1816,10 @@ pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&
             // arrives as a member of the facade with the builder as its receiver.
             ("appendLine", [_]) => return Some("kt_string_builder_append_line"),
             ("appendLine", []) => return Some("kt_string_builder_append_new_line"),
-            ("append", [_]) => return Some("kt_string_builder_append"),
+            // Every `append` the facade declares is `vararg`, so its one slot is an ARRAY of
+            // operands; the builder's own one-operand `append` is a member of the builder and is
+            // answered below. Binding the facade's to the one-operand function would render the
+            // array itself.
             _ => {}
         }
     }
@@ -1857,7 +1876,7 @@ mod tests {
         assert!(is_property_delegates_facade(
             "kotlin/PropertyReferenceDelegatesKt"
         ));
-        assert!(is_property_delegates_facade("kotlin/properties"));
+        assert!(!is_property_delegates_facade("kotlin/properties"));
         assert!(is_property_delegates_facade("kotlin"));
         // A different package, and a CLASS in the right one, are both still no.
         assert!(!is_property_delegates_facade("kotlin/collections"));
@@ -2033,5 +2052,81 @@ mod tests {
             runtime_function("kotlin/io/ConsoleKt", "readLine", &[]),
             None
         );
+    }
+
+    #[test]
+    fn a_mod_is_answered_only_where_its_operand_width_is_its_result() {
+        // Computed at the wider width, which is also the declared result.
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Int, &[Ty::Long]),
+            Some(("kt_mod_long", Ty::Long))
+        );
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Float, &[Ty::Double]),
+            Some(("kt_mod_double", Ty::Double))
+        );
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Byte, &[Ty::Byte]),
+            Some(("kt_mod_int", Ty::Int))
+        );
+        // Computed at the receiver's wider width and narrowed after: reading the receiver at the
+        // divisor's width would drop its high bits, so these decline.
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Long, &[Ty::Int]),
+            None
+        );
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Double, &[Ty::Float]),
+            None
+        );
+        // An integer and a floating-point operand meet in neither.
+        assert_eq!(
+            floor_mod("kotlin/NumbersKt", "mod", Ty::Int, &[Ty::Double]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_collection_is_not_read_as_a_list_and_keeps_its_special_bridges() {
+        let name = crate::types::type_name;
+        assert!(is_list_type(name("kotlin/collections/List")));
+        assert!(!is_list_type(name("kotlin/collections/Collection")));
+        assert!(!is_list_type(name("kotlin/collections/MutableCollection")));
+        assert!(has_special_bridge(
+            name("kotlin/collections/Collection"),
+            "contains"
+        ));
+        assert!(has_special_bridge(
+            name("kotlin/collections/MutableCollection"),
+            "remove"
+        ));
+        assert!(has_special_bridge(name("kotlin/collections/Map"), "remove"));
+        assert!(!has_special_bridge(
+            name("kotlin/collections/Collection"),
+            "get"
+        ));
+    }
+
+    #[test]
+    fn a_facade_append_is_vararg_and_only_the_builders_own_append_is_answered() {
+        assert_eq!(
+            runtime_member("kotlin/text/StringsKt", "append", &[Ty::array(Ty::String)]),
+            None
+        );
+        assert_eq!(
+            runtime_member("kotlin/text/StringBuilder", "append", &[Ty::String]),
+            Some("kt_string_builder_append")
+        );
+    }
+
+    #[test]
+    fn a_precondition_is_named_by_one_table_only() {
+        for name in ["require", "check"] {
+            assert_eq!(
+                runtime_function("kotlin/PreconditionsKt", name, &[Ty::Boolean]),
+                None
+            );
+            assert!(precondition("kotlin/PreconditionsKt", name, &[Ty::Boolean]).is_some());
+        }
     }
 }
