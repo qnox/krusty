@@ -18,6 +18,7 @@ use super::temporaries::Placement;
 use crate::jvm::inline::{BranchTarget, Insn};
 
 const GOTO: u8 = 0xa7;
+const GOTO_W: u8 = 0xc8;
 const NOP: u8 = 0x00;
 
 /// The tables the passes read, by original instruction index (length `insns + 1`).
@@ -35,9 +36,46 @@ fn goto_target(insn: &Insn) -> Option<usize> {
         Insn::Branch {
             op: GOTO,
             target: BranchTarget::Internal(to),
+        }
+        | Insn::BranchW {
+            op: GOTO_W,
+            target: BranchTarget::Internal(to),
         } => Some(*to),
         _ => None,
     }
+}
+
+/// Resolve a group through the `goto` chain that starts there. Results, including cycles, are
+/// cached for every visited group so a long chain is traversed once rather than once per branch.
+fn final_target(
+    start: usize,
+    leads_to: &BTreeMap<usize, usize>,
+    nodes: &[(Insn, Placement)],
+    resolved: &mut BTreeMap<usize, Option<usize>>,
+) -> Option<usize> {
+    let mut path = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut group = start;
+    let result = loop {
+        if let Some(result) = resolved.get(&group) {
+            break *result;
+        }
+        if !seen.insert(group) {
+            break None;
+        }
+        let Some(&goto) = leads_to.get(&group) else {
+            break Some(group);
+        };
+        path.push(group);
+        let Some(target) = goto_target(&nodes[goto].0) else {
+            break None;
+        };
+        group = target;
+    };
+    for group in path {
+        resolved.insert(group, result);
+    }
+    result
 }
 
 fn is_nop(insn: &Insn) -> bool {
@@ -86,20 +124,7 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
     }
     let mut changed = false;
     // Thread every jump through the `goto`s its target leads into.
-    let final_target = |start: usize| -> Option<usize> {
-        let mut seen = BTreeSet::new();
-        let mut goto = *leads_to.get(&start)?;
-        loop {
-            if !seen.insert(goto) {
-                return None;
-            }
-            let to = goto_target(&nodes[goto].0)?;
-            match leads_to.get(&to) {
-                Some(&next) => goto = next,
-                None => return Some(to),
-            }
-        }
-    };
+    let mut resolved = BTreeMap::new();
     let retargets: Vec<(usize, usize)> = nodes
         .iter()
         .enumerate()
@@ -112,7 +137,7 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
                 target: BranchTarget::Internal(to),
                 ..
             } => {
-                let last = final_target(*to)?;
+                let last = final_target(*to, &leads_to, nodes, &mut resolved)?;
                 (last != *to).then_some((at, last))
             }
             _ => None,
@@ -206,6 +231,13 @@ mod tests {
 
     fn branch(op: u8, to: usize) -> Insn {
         Insn::Branch {
+            op,
+            target: BranchTarget::Internal(to),
+        }
+    }
+
+    fn branch_w(op: u8, to: usize) -> Insn {
+        Insn::BranchW {
             op,
             target: BranchTarget::Internal(to),
         }
@@ -305,6 +337,26 @@ mod tests {
                 op(0x03),
                 op(0xac),
             ])
+        );
+    }
+
+    #[test]
+    fn a_wide_goto_to_the_next_instruction_is_removed() {
+        let insns = [branch_w(GOTO_W, 1), op(ARETURN)];
+        assert_eq!(run(&insns, &[], &[]), Some(vec![op(ARETURN)]));
+    }
+
+    #[test]
+    fn a_long_goto_chain_is_resolved_once_and_removed() {
+        let links = 4_096;
+        let end = links + 1;
+        let mut insns = vec![branch(0x99, 1)];
+        insns.extend((1..=links).map(|at| branch(GOTO, at + 1)));
+        insns.push(op(ARETURN));
+
+        assert_eq!(
+            run(&insns, &[], &[]),
+            Some(vec![branch(0x99, end), op(ARETURN)])
         );
     }
 }
