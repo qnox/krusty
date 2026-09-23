@@ -1982,11 +1982,17 @@ pub(crate) fn lower_value_classes(
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
         }
+        let own_value_class = c.is_value;
         for a in &mut c.ctor_args {
             // Drop the `<init>` null-check on a param that erased to a non-reference, OR whose value-class
             // underlying chain is null-capable (`ZN2(val z: ZN)` where `ZN(val z: Z1?)` → the value can be
-            // null, so kotlinc emits no check). Then erase the param type itself.
-            if !is_ref(&erase(&a.ty, &under)) || vc_underlying_nullable(&a.ty, &under) {
+            // null, so kotlinc emits no check). A value class's own private `<init>` is reached only
+            // from `box-impl` over an already-checked carrier and has none either. Then erase the param
+            // type itself.
+            if own_value_class
+                || !is_ref(&erase(&a.ty, &under))
+                || vc_underlying_nullable(&a.ty, &under)
+            {
                 a.check = None;
             }
             a.ty = erase(&a.ty, &under);

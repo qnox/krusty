@@ -2800,13 +2800,9 @@ fn attach_synth_debug_tables(
             _ => 1,
         }
     };
-    // A non-null reference param carries a `checkNotNullParameter` guard (`aload <slot>; ldc <name>;
-    // invokestatic`) before the body; kotlinc's LineNumberTable maps the decl line to the post-prologue
-    // offset. The guard's length is SLOT-dependent: `aload_0..3` is 1 byte but `aload <u1>` (slot ≥ 4)
-    // is 2, so a class with enough (or wide) ctor params pushes a non-null-ref param past slot 3 and its
-    // guard grows — the fixed-6 assumption was wrong there.
-    let is_nonnull_ref =
-        |name: &str, t: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, t) };
+    // A recorded `checkNotNullParameter` guard (`aload <slot>; ldc <name>; invokestatic`) precedes
+    // the body. The LineNumberTable starts after exactly those selected constructor-parameter
+    // guards; field types and field order are not an alternative source for that decision.
     // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
     let aload_len = |slot: u16| -> u16 {
         if slot <= 3 {
@@ -2839,19 +2835,19 @@ fn attach_synth_debug_tables(
         slot += 2;
     }
     let mut ctor_pc = 0u16;
+    if param_assertions {
+        let mut guard_slot = slot;
+        for argument in &c.ctor_args {
+            if let Some(name) = &argument.check {
+                let ldc = cw.string_ldc_len(name).unwrap_or(2);
+                ctor_pc += aload_len(guard_slot) + ldc + 3;
+            }
+            guard_slot += slot_size(argument.ty);
+        }
+    }
     // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
     for f in c.fields.iter().take(c.ctor_param_count as usize) {
         ctor_locals.push((f.name.clone(), desc(f.ty), slot));
-        // `-Xno-param-assertions` removed the guards, so the constructor body starts at pc 0. Counting
-        // them anyway put the `LineNumberTable` entry past the end of the emitted code, which the JVM
-        // rejects outright: `ClassFormatError: Invalid pc in LineNumberTable`.
-        if param_assertions && is_nonnull_ref(&f.name, f.ty) {
-            // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3).
-            // The ldc width is read off the REAL pool (2, or 3 for `ldc_w` past index 255) — the
-            // guard was already emitted, so the String constant exists.
-            let ldc = cw.string_ldc_len(&f.name).unwrap_or(2);
-            ctor_pc += aload_len(slot) + ldc + 3;
-        }
         slot += slot_size(f.ty);
     }
     let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
@@ -2896,6 +2892,11 @@ fn attach_synth_debug_tables(
         let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
         cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
     }
+    // Synthesized property setters use the declaration's recorded nullability policy. This is
+    // independent of the constructor's exact `IrCtorArg.check` facts above: a value class may omit
+    // its private-constructor guard while its public mutable-property setter still requires one.
+    let is_nonnull_ref =
+        |name: &str, ty: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, ty) };
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for (field_index, f) in c.fields.iter().enumerate() {
