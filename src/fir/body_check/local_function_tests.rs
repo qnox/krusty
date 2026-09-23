@@ -821,7 +821,7 @@ fn local_function_reference_uses_body_local_callable_identity() {
 
 #[test]
 fn local_extension_receiver_resolves_a_preceding_local_classifier_before_fir() {
-    let (body, _) = checked_function_body(
+    let (body, index) = checked_function_body(
         "fun box(): String {\n\
              class A\n\
              fun A.foo(): String = \"OK\"\n\
@@ -831,6 +831,24 @@ fn local_extension_receiver_resolves_a_preceding_local_classifier_before_fir() {
         "box",
     );
 
+    let FirExprKind::Block { statements, .. } =
+        &body.expr(root_expression(&body)).expect("root block").kind
+    else {
+        panic!("function body must be a FIR block")
+    };
+    let FirStatementKind::LocalDeclaration { declaration, .. } =
+        &body.statement(statements[0]).expect("local class").kind
+    else {
+        panic!("first statement must declare the local classifier")
+    };
+    let classifier = index
+        .classifier_identity(*declaration)
+        .expect("local classifier must have a stable resolved identity");
+    let FirStatementKind::LocalFunction { callable, .. } =
+        &body.statement(statements[1]).expect("local extension").kind
+    else {
+        panic!("second statement must declare the local extension")
+    };
     let reference = (0..body.expression_count())
         .find_map(|raw| {
             let expression = body.expr(FirExprId::from_raw(raw as u32))?;
@@ -838,20 +856,35 @@ fn local_extension_receiver_resolves_a_preceding_local_classifier_before_fir() {
                 .then_some(expression)
         })
         .expect("local extension reference must become checked FIR");
-    assert_eq!(reference.ty.get().fun_ret(), Some(Ty::String));
-    assert!(matches!(
-        reference.ty.get().non_null(),
-        Ty::Fun(signature)
-            if signature.params.len() == 1
-                && signature.params[0]
-                    .kotlin_class_internal()
-                    .is_some_and(|owner| owner.render().contains("$A"))
-    ));
+    let FirExprKind::LocalCallableReference {
+        target,
+        function_type,
+        reflective,
+        extension_receiver,
+        adaptation,
+    } = &reference.kind
+    else {
+        unreachable!("the search selected a local callable reference")
+    };
+    let classifier_ty = Ty::obj_name(classifier);
+    assert_eq!(target.body_depth, 0);
+    assert_eq!(target.callable, *callable);
+    assert_eq!(
+        function_type.get(),
+        Ty::fun(vec![classifier_ty], Ty::String)
+    );
+    assert!(*reflective);
+    assert!(extension_receiver.is_none());
+    assert!(adaptation.is_none());
+    assert_eq!(
+        reference.ty.get(),
+        Ty::obj_args("kotlin/reflect/KFunction1", &[classifier_ty, Ty::String])
+    );
 }
 
 #[test]
 fn generic_local_extension_signature_uses_the_preceding_local_classifier_scope() {
-    let (body, _) = checked_function_body(
+    let (body, index) = checked_function_body(
         "fun box(): String {\n\
              class A\n\
              fun <T> A.echo(value: T): T = value\n\
@@ -861,6 +894,19 @@ fn generic_local_extension_signature_uses_the_preceding_local_classifier_scope()
         "box",
     );
 
+    let FirExprKind::Block { statements, .. } =
+        &body.expr(root_expression(&body)).expect("root block").kind
+    else {
+        panic!("function body must be a FIR block")
+    };
+    let FirStatementKind::LocalDeclaration { declaration, .. } =
+        &body.statement(statements[0]).expect("local class").kind
+    else {
+        panic!("first statement must declare the local classifier")
+    };
+    let classifier = index
+        .classifier_identity(*declaration)
+        .expect("local classifier must have a stable resolved identity");
     let reference = (0..body.expression_count())
         .find_map(|raw| {
             let expression = body.expr(FirExprId::from_raw(raw as u32))?;
@@ -872,9 +918,7 @@ fn generic_local_extension_signature_uses_the_preceding_local_classifier_scope()
         reference.ty.get().non_null(),
         Ty::Fun(signature)
             if signature.params.len() == 2
-                && signature.params[0]
-                    .obj_internal()
-                    .is_some_and(|internal| internal.render().ends_with("$A"))
+                && signature.params[0] == Ty::obj_name(classifier)
                 && signature.params[1] == Ty::String
                 && signature.ret == Ty::String
     ));

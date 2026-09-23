@@ -97,6 +97,22 @@ fn builtins_decode_collection_hierarchy() {
     );
 }
 
+#[test]
+fn builtins_array_factory_retains_its_vararg_declaration() {
+    let jar = common::stdlib_jar();
+    let bytes = builtins_fragment(&jar, "kotlin/kotlin.kotlin_builtins");
+    let package = parse_builtins(&bytes).expect("valid kotlin builtins");
+    let array_of = package
+        .functions
+        .iter()
+        .find(|function| function.name == "arrayOf")
+        .expect("kotlin.arrayOf declaration");
+
+    assert_eq!(array_of.vararg, Some(0));
+    assert_eq!(array_of.params.len(), 1);
+    assert_eq!(array_of.params[0].render(), "kotlin/Array<out T>");
+}
+
 /// `String`'s members read straight from `kotlin/kotlin.kotlin_builtins` (no hardcoded member table):
 /// the `get(Int): Char` operator, `length: Int`, `plus(Any?): String`, `compareTo(String): Int`.
 #[test]
