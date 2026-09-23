@@ -32,20 +32,22 @@ use crate::store::{ArtifactStore, CachedModule, MissReason};
 
 /// The dependency identity a compiler environment can soundly publish.
 ///
-/// The model deliberately carries no method bodies, which is what makes avoidance possible — but
-/// two Kotlin constructs put body content into the ABI anyway:
+/// The reduced class-header model deliberately carries no method bodies, which is what makes
+/// avoidance possible — but a complete semantic ABI must also carry facts outside those headers:
 ///
 /// * **`inline` functions.** On this target an inline body is bytecode spliced into the CALL SITE
 ///   (`src/jvm/inline.rs`), so editing one changes what every dependent compiles to while changing
 ///   no signature.
 /// * **`contract { … }` blocks.** They live syntactically inside a body but drive callers'
 ///   smart-cast analysis (`src/contracts.rs`).
+/// * **Non-`SOURCE` annotations and module metadata.** Their payloads affect dependent frontend
+///   decisions even when a class/member descriptor is unchanged.
 ///
-/// A module containing either must not have its dependents keyed on the signature fingerprint: the
-/// fingerprint would not move, and the dependent would take a stale cache hit with wrong compiled
-/// behavior. [`Driver`] therefore publishes a whole-output digest for such modules, so any change
-/// to them invalidates their dependents. That is krusty's behavior today — no avoidance — but it is
-/// SOUND, and it is confined to the modules that actually need it.
+/// An environment that cannot prove every such observable is represented must not have dependents
+/// keyed on the reduced signature fingerprint: it would not move, and the dependent could take a
+/// stale cache hit with wrong compiled behavior. [`Driver`] therefore publishes a whole-output
+/// digest for an incomplete module, so any change invalidates dependents. That is conservative but
+/// sound; the concrete JVM adapter uses this path until its semantic ABI is complete.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublishedAbi {
     /// A semantic identity supplied by an environment that owns and proves its complete ABI model.

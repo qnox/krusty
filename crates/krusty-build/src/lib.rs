@@ -20,16 +20,15 @@
 //!   partially written entry must never read as a hit.
 //! * [`driver`] — plan, look up, compile, store, materialize. Sequential, because the compiler is
 //!   not `Send`.
+//! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
+//!   process per module.
 //!
-//! # What is NOT here YET
+//! # What is NOT here
 //!
-//! The build environment that runs the real `krusty` binary under the driver, which lands on top
-//! of this one.
-//!
-//! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling either. The providers are
+//! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling. The providers are
 //! ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change;
 //! this crate establishes the types they will populate. Parallelism needs a process pool with
-//! crash isolation and interleaved diagnostics, and a sequential driver is its oracle: the same
+//! crash isolation and interleaved diagnostics, and the sequential driver is its oracle: the same
 //! graph must produce the same artifacts either way.
 //!
 //! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
@@ -44,16 +43,20 @@
 
 pub mod abi;
 pub mod cache;
+pub mod compiler;
 pub mod digest;
 pub mod driver;
 pub mod graph;
 pub mod model;
 pub mod store;
 
-pub use abi::{AbiClass, AbiFingerprint, AbiMember, MemberKind};
+pub use abi::{
+    AbiAnnotation, AbiAnnotationValue, AbiClass, AbiConstant, AbiFingerprint, AbiMember, MemberKind,
+};
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
+pub use compiler::KrustyCli;
 pub use digest::{digest_bytes, Digest, Hasher};
-pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome};
+pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome, PublishedAbi};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
-pub use store::{ArtifactStore, CachedModule, MissReason};
+pub use store::{ArtifactStore, CachedModule, MissReason, StoreLookup};
