@@ -28,12 +28,16 @@
 //! * **Contracts.** A `contract { … }` block lives syntactically inside a body but drives callers'
 //!   smart-cast analysis (`src/contracts.rs`), so a "body-only" edit to a function with a contract
 //!   is not body-only.
+//! * **Declaration annotation payloads.** Non-`SOURCE` annotations can affect a dependent's
+//!   frontend decisions, but this reduced model does not yet retain all annotation arguments on
+//!   classes, members, parameters, and types.
 //! * **Separate public and friend hashes.** Friendship is exact path-set membership, so pruning
 //!   `internal` breaks friend modules while keeping it over-invalidates everyone else. Two hashes
 //!   per module, with each edge selecting one.
 //!
-//! Until those land, a fingerprint from this module is sound for avoidance only on code with no
-//! `inline` functions and no contracts. [`AbiClass::from_class_file`] cannot detect that for you.
+//! [`AbiClass::from_class_file`] cannot prove those omitted facts absent. A concrete compiler
+//! adapter must therefore treat this fingerprint as incomplete and key dependents on the full
+//! relevant output until a complete semantic ABI model exists.
 
 use crate::digest::{Digest, Hasher};
 
