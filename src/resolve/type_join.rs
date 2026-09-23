@@ -6,6 +6,11 @@ use crate::types::{Ty, TypeVariance};
 
 use super::semantic_common_supertype_inner;
 
+fn joined_star_projection(star_upper_bound: Ty, left: Ty, right: Ty) -> Option<Ty> {
+    (matches!(left, Ty::StarProjection(_)) || matches!(right, Ty::StarProjection(_)))
+        .then(|| Ty::star_projection(star_upper_bound))
+}
+
 /// Returns the flexible operand when the pair differs only by one top-level PLATFORM wrapper.
 ///
 /// This is intentionally exact. A nested PLATFORM occurrence belongs to the enclosing
@@ -35,6 +40,15 @@ pub(super) fn join_type_projection(
     // positions depend on.
     if let Some(platform) = exact_platform_flexible_pair(left, right) {
         return Some(platform);
+    }
+    // A STAR argument is the unknown one, and `C<*>` is the supertype of every `C<X>` — so a star
+    // joined with anything is that star, in any variance position. Destructuring it into
+    // `(out, <bound>)` and rejoining loses exactly that: the result comes back as `out Any?`, which
+    // says the argument is BOUNDED by `Any?` rather than unknown, and an invariant expectation
+    // written `C<*>` then rejects it. kotlinc reports `Resp<*>` where krusty reported
+    // `Resp<out Any!>` for the same two arms.
+    if let Some(star) = joined_star_projection(star_upper_bound, left, right) {
+        return Some(star);
     }
     let projection = |argument| match argument {
         Ty::InProjection(inner) => (true, false, *inner),
@@ -114,6 +128,32 @@ mod tests {
         assert_eq!(
             exact_platform_flexible_pair(Ty::nullable(plain), plain),
             None
+        );
+    }
+
+    #[test]
+    fn a_star_join_uses_the_declared_bound_in_both_orders() {
+        let declared_bound = Ty::obj("sample/Top");
+        let narrower_star = Ty::star_projection(Ty::obj("sample/Leaf"));
+        let other_star = Ty::star_projection(Ty::obj("sample/OtherLeaf"));
+        let ordinary = Ty::obj("sample/Value");
+        let expected = Some(Ty::star_projection(declared_bound));
+
+        assert_eq!(
+            joined_star_projection(declared_bound, narrower_star, ordinary),
+            expected
+        );
+        assert_eq!(
+            joined_star_projection(declared_bound, ordinary, narrower_star),
+            expected
+        );
+        assert_eq!(
+            joined_star_projection(declared_bound, narrower_star, other_star),
+            expected
+        );
+        assert_eq!(
+            joined_star_projection(declared_bound, other_star, narrower_star),
+            expected
         );
     }
 }
