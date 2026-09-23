@@ -10,7 +10,6 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
-mod builtin_member_realization;
 mod candidate_union;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
@@ -3327,7 +3326,7 @@ impl Classpath {
                             }
                         });
                     let physical_name = (physical_name != m.name).then_some(physical_name);
-                    let realization = builtin_member_realization::realization(
+                    let realization = crate::libraries::builtin_member_realization::realization(
                         crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                             owner: internal_id,
                             name: &m.name,
