@@ -22,7 +22,7 @@ use std::process::{Command, Output};
 /// leave the missing symbols unresolved (a driver that reaches one crashes, it does not pass). The
 /// tier that completes the runtime turns this on, and from then on a missing definition fails the
 /// link.
-const RUNTIME_COMPLETE: bool = false;
+const RUNTIME_COMPLETE: bool = true;
 
 fn runtime_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native/runtime")
@@ -84,6 +84,8 @@ fn run_driver(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
+            // The runtime's descriptor tables name their leading fields and leave the rest zero.
+            "-Wno-missing-field-initializers",
         ])
         .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
         .arg("-I")
@@ -130,4 +132,29 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
             .all(|(index, &byte)| byte == b'a' + (index % 26) as u8),
         "the payload arrives in order"
     );
+}
+
+#[test]
+fn unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns() {
+    run_driver("unsigned_unbox_null");
+}
+
+#[test]
+fn equal_callable_references_hash_on_the_wrapping_ring() {
+    run_driver("reference_hash_code");
+}
+
+#[test]
+fn string_literals_outnumbering_the_global_roots_stay_interned_and_alive() {
+    run_driver("string_literal_roots");
+}
+
+#[test]
+fn a_throwable_subclass_is_allocated_at_its_own_size() {
+    run_driver("throwable_subclass_size");
+}
+
+#[test]
+fn integer_arithmetic_and_exceptions_answer_as_kotlin_does() {
+    run_driver("arithmetic_and_exceptions");
 }
