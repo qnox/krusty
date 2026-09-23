@@ -259,7 +259,7 @@ fn parse_source_set_named(
             let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
             krusty::frontend::name_anonymous_classes(
                 &mut file,
-                &krusty::jvm::names::file_class_name(stem, None),
+                &krusty::frontend::file_facade_simple_name(stem),
             );
             file
         })

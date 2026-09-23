@@ -117,7 +117,7 @@ impl ReparseSource {
                 if let Some(stem) = self.file_stem.as_deref() {
                     name_anonymous_classes_with_counters(
                         &mut file,
-                        &crate::jvm::names::file_class_name(stem, None),
+                        &file_facade_simple_name(stem),
                         &mut anonymous_counters,
                     );
                 }
@@ -890,7 +890,7 @@ where
         file.is_common = source.is_common;
         if source.kind == SourceKind::Kotlin {
             if let Some(stem) = source.file_stem {
-                name_anonymous_classes(&mut file, &crate::jvm::names::file_class_name(stem, None));
+                name_anonymous_classes(&mut file, &file_facade_simple_name(stem));
             }
             header_validation::validate(&file, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
@@ -1479,6 +1479,25 @@ pub fn analyze_source_standalone(
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
     analyze_source(src, Box::new(EmptySymbolSource), diags)
+}
+
+/// The simple name of a source file's facade class: `foo.kt` → `FooKt`. Local classes are named
+/// under it, so the frontend fixes it before signature collection.
+pub fn file_facade_simple_name(file_stem: &str) -> String {
+    // A file-name character illegal in a JVM class name (`.`, `;`, `[`, `/`, `<`, `>`, `:`) becomes
+    // `_` — e.g. `foo.1.0.kt` → `Foo_1_0Kt` (a verbatim `.` would emit a `ClassFormatError`).
+    let sanitized: String = file_stem
+        .chars()
+        .map(|c| if ".;[]/<>:".contains(c) { '_' } else { c })
+        .collect();
+    let mut base = String::new();
+    let mut chars = sanitized.chars();
+    if let Some(c) = chars.next() {
+        base.extend(c.to_uppercase());
+    }
+    base.push_str(chars.as_str());
+    base.push_str("Kt");
+    base
 }
 
 /// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to the

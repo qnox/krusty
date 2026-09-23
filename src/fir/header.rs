@@ -3590,7 +3590,7 @@ pub fn stream_file_stub_inventory(
             if let Some(stem) = source.file_stem {
                 crate::frontend::name_anonymous_classes(
                     &mut file,
-                    &crate::jvm::names::file_class_name(stem, None),
+                    &crate::frontend::file_facade_simple_name(stem),
                 );
             }
         }

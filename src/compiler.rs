@@ -3256,7 +3256,9 @@ mod tests {
         assert!(outputs
             .iter()
             .any(|(path, _)| path == "AnonymousAccessorCaptureKt.class"));
-        assert!(outputs.iter().any(|(path, _)| path.contains("build$1")));
+        assert!(outputs
+            .iter()
+            .any(|(path, _)| path.contains("build$holder$1")));
     }
 
     #[test]

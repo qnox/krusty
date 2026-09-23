@@ -1129,10 +1129,11 @@ impl<'a> CommonIrBodySink<'a> {
                 .flags
                 .has(crate::fir::DeclarationFlags::SUSPEND)
             {
-                let ordinal = index.continuation_ordinal(declaration).ok_or(
-                    FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
-                )?;
-                self.ir.fn_continuation_ordinal.insert(function, ordinal);
+                // Only a suspend function with a body holds a continuation ordinal; one is
+                // required when its body is accepted.
+                if let Some(ordinal) = index.continuation_ordinal(declaration) {
+                    self.ir.fn_continuation_ordinal.insert(function, ordinal);
+                }
                 self.ir.suspend_funs.push(function);
             }
             if declaration_header
@@ -1364,6 +1365,15 @@ impl<'a> CommonIrBodySink<'a> {
             )
             .map_err(FirFileLoweringFailure::Body)?
         };
+        if declaration_header
+            .flags
+            .has(crate::fir::DeclarationFlags::SUSPEND)
+            && !self.ir.fn_continuation_ordinal.contains_key(&function)
+        {
+            return Err(FirFileLoweringFailure::MissingContinuationOrdinal(
+                declaration,
+            ));
+        }
         self.ir.functions[function as usize].body = Some(body);
 
         self.attach_callable_defaults(

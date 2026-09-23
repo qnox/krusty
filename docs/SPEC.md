@@ -3902,9 +3902,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
 - **Anonymous objects and suspend continuations are named by one walk that numbers every local
   node, as kotlinc's `InventNamesForLocalClasses` does.** A name is the chain of enclosing names
-  joined by `$`: the file facade (`file_class_name`, so `a.kt` gives `AKt`) or classifier, then each
-  function, property, local variable or local function the node sits in (`val o = object {}` in
-  `box` is `AKt$box$o$1`). A node without a name takes the next ordinal of its chain. Lambdas,
+  joined by `$`: the file facade (`file_facade_simple_name`, so `a.kt` gives `AKt`) or
+  classifier, then each function, property, local variable or local function the node sits in
+  (`val o = object {}` in `box` is `AKt$box$o$1`). A node without a name takes the next ordinal of its chain. Lambdas,
   function expressions and callable references take a position even when they compile to
   `invokedynamic` and write no class, so an object after one lambda in `box` is `AKt$box$2`.
   Ordinals are counted per upper-cased chain (`foo` overloads and `Foo` share one sequence) and run

@@ -49,19 +49,7 @@ pub(crate) fn function_interface_internal_name(arity: usize) -> String {
 
 /// The file-facade class internal name for a source file: `Foo.kt` → `FooKt` (package-qualified).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
-    // A file-name character illegal in a JVM class name (`.`, `;`, `[`, `/`, `<`, `>`, `:`) becomes
-    // `_` — e.g. `foo.1.0.kt` → `Foo_1_0Kt` (a verbatim `.` would emit a `ClassFormatError`).
-    let sanitized: String = file_stem
-        .chars()
-        .map(|c| if ".;[]/<>:".contains(c) { '_' } else { c })
-        .collect();
-    let mut base = String::new();
-    let mut chars = sanitized.chars();
-    if let Some(c) = chars.next() {
-        base.extend(c.to_uppercase());
-    }
-    base.push_str(chars.as_str());
-    base.push_str("Kt");
+    let base = crate::frontend::file_facade_simple_name(file_stem);
     match package {
         Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), base),
         _ => base,
