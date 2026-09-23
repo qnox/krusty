@@ -19,6 +19,14 @@ struct SelectedLocalClassifierCaptures {
     captures: Vec<SelectedLocalClassifierCapture>,
 }
 
+struct RequiredLocalClassifierCapture {
+    declaration: DeclId,
+    owner: TypeName,
+    field: usize,
+    capture: AnonymousObjectCapture,
+    lexical_binding: Option<u32>,
+}
+
 impl Checker<'_> {
     pub(super) fn extend_selected_local_dependency_captures(
         &self,
@@ -295,14 +303,12 @@ impl Checker<'_> {
                 captures
                     .into_iter()
                     .enumerate()
-                    .map(move |(field, selected)| {
-                        (
-                            declaration,
-                            owner,
-                            field,
-                            selected.capture,
-                            selected.lexical_binding,
-                        )
+                    .map(move |(field, selected)| RequiredLocalClassifierCapture {
+                        capture: selected.capture,
+                        declaration,
+                        owner,
+                        field,
+                        lexical_binding: selected.lexical_binding,
                     })
             })
             .collect::<Vec<_>>();
@@ -322,12 +328,19 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
         current_declaration: DeclId,
-        required: Vec<(DeclId, TypeName, usize, AnonymousObjectCapture, Option<u32>)>,
+        required: Vec<RequiredLocalClassifierCapture>,
         captures: &mut Vec<AnonymousObjectCapture>,
         capture_bindings: &mut Vec<Option<u32>>,
     ) {
         let receivers = self.implicit_receivers(scope);
-        for (declaration, owner, field, mut required, required_identity) in required {
+        for RequiredLocalClassifierCapture {
+            declaration,
+            owner,
+            field,
+            capture: mut required,
+            lexical_binding: required_identity,
+        } in required
+        {
             if declaration == current_declaration {
                 continue;
             }
@@ -398,7 +411,7 @@ impl Checker<'_> {
     fn local_classifier_captures_of(
         &self,
         owner: TypeName,
-    ) -> Option<Vec<(DeclId, TypeName, usize, AnonymousObjectCapture, Option<u32>)>> {
+    ) -> Option<Vec<RequiredLocalClassifierCapture>> {
         let declaration =
             self.discovered_local_class_captures
                 .keys()
@@ -420,7 +433,15 @@ impl Checker<'_> {
                 .cloned()
                 .zip(bindings.iter().copied())
                 .enumerate()
-                .map(|(field, (capture, binding))| (declaration, owner, field, capture, binding))
+                .map(
+                    |(field, (capture, lexical_binding))| RequiredLocalClassifierCapture {
+                        declaration,
+                        owner,
+                        field,
+                        capture,
+                        lexical_binding,
+                    },
+                )
                 .collect()
         })
     }
