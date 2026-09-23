@@ -4041,6 +4041,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
   `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
   `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
+- **A renamed-builtin bridge belongs to the first Kotlin CLASS that overrides the mapped member.**
+  kotlinc emits `size()` (for `Collection.size`), `intValue()` (for `Number.toInt`), `keySet()`,
+  `remove(int)` and the rest of the renamed family `public final` in the first Kotlin class of the
+  superclass chain whose declaration overrides the builtin — `kotlin.collections.AbstractCollection`
+  for every stdlib `AbstractList`/`AbstractSet` — and never again below it (measured: a subclass of
+  `AbstractList<T>` overriding `val size` publishes only an open `getSize()`). Redeclaring it in a
+  subclass overrides a final method, and the JVM rejects the class at load time with
+  `IncompatibleClassChangeError`. The frontend records, on each override edge, whether a Kotlin
+  superclass declaration among the implementation's other overridden members inherits the edge's
+  owner (`has_kotlin_superclass_override`); the JVM bridge pass skips a RENAMED bridge when that
+  fact is set. A Java superclass realizes the member under the JVM name itself, and a superclass
+  property that only shares the name does not override the builtin, so neither owns the bridge and
+  the implementation keeps emitting it. Ordinary erasure bridges are unaffected: kotlinc
+  regenerates those in every overriding class. The custom accessors of an overriding property are
+  also emitted without `final`, like the default accessors of a backing-field one. Tests:
+  `tests/renamed_builtin_bridge_owner_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type
