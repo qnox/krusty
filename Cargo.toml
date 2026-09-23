@@ -25,9 +25,10 @@ stacker = "0.1.24"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
-# Reading the prebuilt runtime's relocatable objects and writing the executable krusty links them
-# into. Only the linker uses it; the code generator brings its own dependency when it lands.
-object = "0.40.0"
+# Reading the relocatable ELF objects krusty's linker takes in (the prebuilt runtime's and the
+# program's). Only the ELF reader: the linker writes its executable by hand, and reads no other
+# object format, archive or compressed section. The code generator brings its own dependency.
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
 
 [features]
 # Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay
@@ -51,6 +52,10 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 # pprof's own backtrace backend, used directly so the harness can symbolize each sampled instruction
 # pointer once instead of once per stack (see `write_flamegraph`). Already in the tree via pprof.
 backtrace = "0.3"
+# The linker's unit tests build their input objects with `object`'s ELF writer, so each relocation
+# is exercised on every architecture without a C toolchain. Its extra dependencies are already in
+# the tree (via `zip`).
+object = { version = "0.40.0", default-features = false, features = ["write_core", "elf", "std"] }
 
 [lib]
 name = "krusty"
