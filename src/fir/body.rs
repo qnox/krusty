@@ -1293,6 +1293,7 @@ pub enum FirExprKind {
         plugin: &'static str,
         operation: &'static str,
         data: Box<[TypeName]>,
+        types: Box<[ResolvedTy]>,
         operands: Box<[FirPluginOperand]>,
     },
     Call(FirCall),
@@ -1578,8 +1579,14 @@ impl FirExprKind {
                     + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
             }
             FirExprKind::BackingFieldRead { .. } | FirExprKind::BackingFieldWrite { .. } => 0,
-            FirExprKind::PluginExpression { data, operands, .. } => {
+            FirExprKind::PluginExpression {
+                data,
+                types,
+                operands,
+                ..
+            } => {
                 data.len() * std::mem::size_of::<TypeName>()
+                    + types.len() * std::mem::size_of::<ResolvedTy>()
                     + operands.len() * std::mem::size_of::<FirPluginOperand>()
             }
             FirExprKind::FunctionInvokeReference {

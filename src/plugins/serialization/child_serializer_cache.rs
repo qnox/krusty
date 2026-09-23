@@ -263,6 +263,7 @@ pub(super) fn add_child_serializer_cache(
                     kind: "child-serializer-cache",
                     exprs: Vec::new(),
                     data: vec![serialized],
+                    types: Vec::new(),
                 });
                 ir.statics.push(crate::ir::IrStatic {
                     name: "$childSerializers".to_string(),

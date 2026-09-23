@@ -11,6 +11,7 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
@@ -603,14 +604,14 @@ fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
     }
 }
 
-/// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
-/// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
+/// Rewrite every frontend-planned `PluginPlaceholder { plugin: "serialization" }` into its concrete
+/// runtime call. For a reified `StringFormat` round-trip, core recorded the operands
 /// (`exprs = [receiver, serializer, value-or-string]`) and the resolved name ids (`data = [format
 /// internal, @Serializable class internal]`); the kotlinx member descriptors are owned here. Each
 /// placeholder's arena slot is overwritten in place (the index-based IR makes this a local edit):
 /// encode becomes the `encodeToString` call; decode becomes the `decodeFromString` call wrapped in a
 /// `checkcast` to the decoded class (the member returns erased `Object`).
-fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
+fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
     let markers: Vec<usize> = ir
         .exprs
         .iter()
@@ -625,7 +626,11 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         .collect();
     for mid in markers {
         let IrExpr::PluginPlaceholder {
-            kind, exprs, data, ..
+            kind,
+            exprs,
+            data,
+            types,
+            ..
         } = &ir.exprs[mid]
         else {
             continue;
@@ -633,6 +638,10 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         let kind = *kind;
         let exprs = exprs.clone();
         let data = data.clone();
+        let types = types.clone();
+        if descriptor_element::specialize(ir, ctx, mid, kind, &exprs, &types) {
+            continue;
+        }
         if kind == "serializer" {
             let [class_internal, selected_owner] = data.as_slice() else {
                 continue;
@@ -1500,6 +1509,10 @@ impl IrPlugin for SerializationPlugin {
         let serializer_type = type_name(KSERIALIZER_FQ);
         let serializable_annotation = type_name(SERIALIZABLE_FQ);
         for call in &ctx.calls {
+            if let Some(plan) = descriptor_element::plan(call) {
+                plans.push((call.expression, plan));
+                continue;
+            }
             // The public reified StringFormat helpers are splice-only declarations. Once ordinary
             // resolution has selected that exact extension and fixed `T`, retain a plugin-owned
             // checked operation instead of emitting a direct call to its throwing placeholder body.
@@ -1540,6 +1553,8 @@ impl IrPlugin for SerializationPlugin {
                     plugin: "serialization",
                     operation,
                     data,
+                    types: Vec::new(),
+                    implicit_receiver: false,
                     operands: vec![(receiver, receiver_ty), (*argument, call.params[0])],
                 })
             })();
@@ -1617,6 +1632,8 @@ impl IrPlugin for SerializationPlugin {
                     plugin: implementation.plugin,
                     operation: implementation.operation,
                     data: vec![classifier, call.owner],
+                    types: Vec::new(),
+                    implicit_receiver: false,
                     operands,
                 },
             ));
@@ -2210,7 +2227,7 @@ impl IrPlugin for SerializationPlugin {
         // Specialize the generic reified-serialization placeholders core emitted in user bodies
         // (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`) into the concrete `StringFormat`
         // member calls — the kotlinx descriptors live here, not in core lowering.
-        specialize_reified_placeholders(ir, ctx);
+        specialize_expression_placeholders(ir, ctx);
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
@@ -2478,6 +2495,7 @@ mod tests {
             calls: vec![crate::plugins::FrontendSelectedCall {
                 expression: crate::ast::ExprId(8),
                 explicit_receiver: None,
+                implicit_receiver: None,
                 owner: type_name("demo/Box$Companion"),
                 name: "serializer".to_owned(),
                 params: vec![serializer(inner)],
@@ -2501,6 +2519,69 @@ mod tests {
             [type_name("demo/Box"), type_name("demo/Box$Companion")]
         );
         assert_eq!(plans[0].1.operands, [(argument, serializer(inner))]);
+    }
+
+    #[test]
+    fn descriptor_element_plan_keeps_selected_receiver_defaults_and_element_type() {
+        let builder = Ty::obj(descriptor_element::CLASS_SERIAL_DESCRIPTOR_BUILDER_FQ);
+        let element = Ty::obj_args("demo/Box", &[Ty::String]);
+        let params = vec![
+            Ty::String,
+            Ty::obj_args("kotlin/collections/List", &[Ty::obj("kotlin/Annotation")]),
+            Ty::Boolean,
+        ];
+        let name = crate::ast::ExprId(3);
+        let optional = crate::ast::ExprId(4);
+        let call = crate::plugins::FrontendSelectedCall {
+            expression: crate::ast::ExprId(5),
+            explicit_receiver: None,
+            implicit_receiver: Some(builder),
+            owner: type_name(descriptor_element::SERIAL_DESCRIPTORS_FQ),
+            name: "element$default".to_owned(),
+            params: params.clone(),
+            ret: Ty::Unit,
+            generic_sig: Some(crate::libraries::GenericSig {
+                formals: vec!["T".to_owned()],
+                formal_bounds: vec![Vec::new()],
+                receiver: Some(builder),
+                params,
+                ret: Ty::Unit,
+                return_policy: crate::libraries::GenericReturnPolicy::Exact,
+            }),
+            inline: InlineKind::MustInline,
+            implementation: None,
+            type_arguments: vec![Some(element)],
+            argument_slots: vec![Some(name), None, Some(optional)],
+        };
+        let mut plans = Vec::new();
+        SerializationPlugin::default().plan_frontend_expressions(
+            &FrontendExpressionContext {
+                calls: vec![call.clone()],
+                classifier_annotations: std::collections::HashMap::new(),
+            },
+            &mut plans,
+        );
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0].1;
+        assert_eq!(plan.operation, "descriptorElementDefaultAnnotations");
+        assert_eq!(plan.types, [element]);
+        assert!(plan.implicit_receiver);
+        assert_eq!(plan.operands, [(name, Ty::String), (optional, Ty::Boolean)]);
+
+        let mut unrelated = call;
+        unrelated.owner = type_name("demo/SerialDescriptorsKt");
+        let mut plans = Vec::new();
+        SerializationPlugin::default().plan_frontend_expressions(
+            &FrontendExpressionContext {
+                calls: vec![unrelated],
+                classifier_annotations: std::collections::HashMap::new(),
+            },
+            &mut plans,
+        );
+        assert!(
+            plans.is_empty(),
+            "a same-named non-plugin call is not special"
+        );
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.
@@ -3171,6 +3252,7 @@ mod tests {
                 type_name("kotlinx/serialization/json/Json"),
                 type_name("demo/Foo"),
             ],
+            types: Vec::new(),
         });
         (ir, mid, [recv, ser, arg])
     }
@@ -3178,7 +3260,7 @@ mod tests {
     #[test]
     fn reified_encode_placeholder_specialized() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("encodeToString");
-        specialize_reified_placeholders(&mut ir, &PluginContext::default());
+        specialize_expression_placeholders(&mut ir, &PluginContext::default());
         match &ir.exprs[mid as usize] {
             IrExpr::Call {
                 callee:
@@ -3206,7 +3288,7 @@ mod tests {
     #[test]
     fn reified_decode_placeholder_specialized_with_checkcast() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("decodeFromString");
-        specialize_reified_placeholders(&mut ir, &PluginContext::default());
+        specialize_expression_placeholders(&mut ir, &PluginContext::default());
         // The slot becomes a checkcast to the decoded class wrapping the decode member call.
         let inner = match &ir.exprs[mid as usize] {
             IrExpr::TypeOp {
@@ -3246,11 +3328,12 @@ mod tests {
             kind: "serializer",
             exprs: Vec::new(),
             data: vec![classifier, type_name("demo/Row$Companion")],
+            types: Vec::new(),
         });
         let ctx = PluginContext::default()
             .with_external_serializers([(classifier, serializer)].into_iter().collect());
 
-        specialize_reified_placeholders(&mut ir, &ctx);
+        specialize_expression_placeholders(&mut ir, &ctx);
 
         match &ir.exprs[marker as usize] {
             IrExpr::Call {
@@ -3287,7 +3370,7 @@ mod tests {
             "a surviving PluginPlaceholder must be declined by jvm_can_emit"
         );
         // After specialization the file is emittable again.
-        specialize_reified_placeholders(&mut ir, &PluginContext::default());
+        specialize_expression_placeholders(&mut ir, &PluginContext::default());
         assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
     }
 }

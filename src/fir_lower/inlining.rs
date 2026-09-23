@@ -770,13 +770,13 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
+        IrExpr::PluginPlaceholder { types, .. } => specialize_tys(types, bindings),
         IrExpr::Lambda { sam: Some(sam), .. } => specialize_sam_target(sam, bindings),
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
         | IrExpr::SetValue { .. }
-        | IrExpr::PluginPlaceholder { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
