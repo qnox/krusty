@@ -5766,22 +5766,31 @@ fn emit_class(
         });
         let signature = property_jvm_signatures(&signature_formatter, &s.ty, None).field;
         cw.add_field_late_sig(acc, &s.name, &desc, signature.as_deref(), cv, ann);
-        // A `@JvmField` field carries the property's FIELD-targeted annotations (`JvmField` itself
-        // among them) as `RuntimeInvisibleAnnotations`, BEFORE the nullability entry — kotlinc's
-        // attribute order. The records live on the declaring COMPANION class.
-        if jvm_field {
-            if let Some(annotations) = c
-                .companion_class
-                .and_then(|companion| ir.class_id_by_name(companion))
-                .and_then(|companion| {
-                    ir.classes[companion as usize]
-                        .field_annotations
-                        .iter()
-                        .find(|annotations| annotations.field == s.name)
-                })
-            {
-                cw.set_last_late_field_annotations(&annotations.annotations);
-            }
+        // A field carries its FIELD-targeted annotations as `RuntimeInvisibleAnnotations`, BEFORE
+        // the nullability entry — kotlinc's attribute order.
+        //
+        // They come from wherever the field's DECLARATION lives: a hoisted companion property
+        // records them on the COMPANION, while a static this class owns outright — one a compiler
+        // plugin generated, say — records them on the class itself. The companion path keeps its
+        // `@JvmField` condition, which is what that annotation has always meant there: it is the
+        // reason the field is the property's whole JVM surface.
+        if let Some(annotations) = c
+            .companion_class
+            .and_then(|companion| ir.class_id_by_name(companion))
+            .filter(|_| jvm_field)
+            .and_then(|companion| {
+                ir.classes[companion as usize]
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == s.name)
+            })
+            .or_else(|| {
+                c.field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == s.name)
+            })
+        {
+            cw.set_last_late_field_annotations(&annotations.annotations);
         }
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`

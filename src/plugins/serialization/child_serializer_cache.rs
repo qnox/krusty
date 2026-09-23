@@ -390,6 +390,23 @@ pub(super) fn add_child_serializer_cache(
         ir.synthetic_methods.insert(acc);
         ir.serialization_cache_methods.insert(acc);
         ir.classes[class_id as usize].methods.push(acc);
+        // kotlinc marks the cache `@JvmField` even though it is PRIVATE: the annotation declares
+        // that the field IS the storage rather than a property behind accessors, and the plugin's
+        // own reads depend on that. It is written FIRST, ahead of the nullability entry.
+        ir.classes[class_id as usize]
+            .field_annotations
+            .push(crate::ir::FieldAnnotations {
+                field: "$childSerializers".to_string(),
+                annotations: crate::ir::DeclarationAnnotations::new(vec![
+                    crate::ir::RetainedAnnotation {
+                        retention: crate::types::AnnotationRetention::Binary,
+                        annotation: crate::ir::AppliedAnnotation {
+                            internal: type_name("kotlin/jvm/JvmField"),
+                            values: Vec::new(),
+                        },
+                    },
+                ]),
+            });
         Some(ChildSerializerCachePlan {
             static_index,
             accessor: acc,
@@ -512,7 +529,10 @@ impl ChildSerializersBody<'_> {
                     // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
                     e
                 } else {
-                    ir.add_expr(IrExpr::Const(IrConst::Null))
+                    super::element_serializer::unsupported_element_serializer(
+                        ir,
+                        serializer_field_types[i],
+                    )
                 }
             })
             .collect();

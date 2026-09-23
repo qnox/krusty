@@ -295,36 +295,8 @@ fn place_serializer_accessor(
     accessor
 }
 
-/// Emit a call to `class_fq.serializer(args)` routed through its `Companion` — `getstatic
-/// Foo.Companion; …args…; invokevirtual Foo$Companion.serializer(params)ret` — matching how kotlinc
-/// invokes the relocated accessor.
-fn companion_serializer_call(
-    ir: &mut IrFile,
-    class_fq: &str,
-    params: Vec<Ty>,
-    ret: Ty,
-    args: Vec<ExprId>,
-) -> ExprId {
-    let comp = companion_fq(class_fq);
-    let recv = ir.external_static_instance(class_fq, &comp, "Companion");
-    ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: type_name(&comp),
-            name: "serializer".to_string(),
-            descriptor: String::new(),
-            params: Some((params, ret)),
-            interface: false,
-        },
-        dispatch_receiver: Some(recv),
-        args,
-    })
-}
-
-/// Emit a call to `class_fq.serializer(args)`, routed through the `Companion` for a plain non-generic
-/// `@Serializable` data class (whose accessor was relocated there), or as a direct `invokestatic
-/// class_fq.serializer(…)` for an enum / sealed / custom-serializer / generic class (whose accessor
-/// stays static for now). The kind check is structural (order-independent, unlike probing
-/// `companion_class`, which is only set once the target's own declarations are generated).
+/// Emit a call to the exact generated `serializer` accessor, or retain a plugin placeholder until
+/// every declaration has been generated and the normal specialization pass can bind it.
 fn serializer_of(
     ir: &mut IrFile,
     class_fq: &str,
@@ -404,12 +376,16 @@ fn call_generated_serializer(
     classifier: crate::types::TypeName,
     accessor: GeneratedSerializerAccessor,
     args: Vec<ExprId>,
+    instantiated_signature: Option<(Vec<Ty>, Ty)>,
 ) -> ExprId {
     let GeneratedSerializerAccessor {
         receiver,
-        params,
-        ret,
+        params: declared_params,
+        ret: declared_ret,
     } = accessor;
+    // The declaration owns dispatch identity. A generic use owns its already-solved parameter and
+    // result types; substituting those is not another overload/owner selection.
+    let (params, ret) = instantiated_signature.unwrap_or((declared_params, declared_ret));
     match receiver {
         GeneratedSerializerReceiver::Static => ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFile {
@@ -462,9 +438,9 @@ fn call_generated_serializer(
     }
 }
 
-/// Emit the accessor the plugin actually generated. During declaration generation a referenced
-/// classifier may not have been visited yet, so retain the declaration-shape fallback for that
-/// ordering case; checked placeholders run after generation and use the exact accessor above.
+/// Emit the accessor the plugin actually generated. A referenced classifier that has not been
+/// visited yet remains a plugin operation until the post-generation specialization pass; guessing
+/// static-vs-companion shape from the declaration would create a second realization path.
 fn serializer_of_name(
     ir: &mut IrFile,
     classifier: crate::types::TypeName,
@@ -473,44 +449,19 @@ fn serializer_of_name(
     args: Vec<ExprId>,
 ) -> ExprId {
     if let Some(accessor) = generated_serializer_accessor(ir, classifier, args.len()) {
-        if accessor.params == params && accessor.ret == ret {
-            return call_generated_serializer(ir, classifier, accessor, args);
-        }
+        return call_generated_serializer(ir, classifier, accessor, args, Some((params, ret)));
     }
-    let companion = ir
-        .classes
-        .iter()
-        .find(|class| class.fq_name_id() == classifier)
-        .and_then(|class| class.companion_class);
-    let Some(companion) = companion else {
-        return ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
-                facade: classifier,
-                name: "serializer".to_string(),
-                params,
-                ret,
-                module_target: None,
-                module_default_call: false,
-            },
-            dispatch_receiver: None,
-            args,
-        });
-    };
-    let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
-        owner: classifier,
-        ty: companion,
-        field: "Companion".to_string(),
-    });
-    ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: companion,
-            name: "serializer".to_string(),
-            descriptor: String::new(),
-            params: Some((params, ret)),
-            interface: false,
-        },
-        dispatch_receiver: Some(receiver),
-        args,
+    // Operand types followed by the instantiated result. The post-generation pass uses these only
+    // to specialize the exact generated declaration it finds; owner/dispatch never comes from the
+    // shape recorded here.
+    let mut types = params;
+    types.push(ret);
+    ir.add_expr(IrExpr::PluginPlaceholder {
+        plugin: "serialization",
+        kind: "serializer",
+        exprs: args,
+        data: vec![classifier, classifier],
+        types,
     })
 }
 
@@ -650,7 +601,17 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             let realized = if let Some(accessor) =
                 generated_serializer_accessor(ir, class_internal, exprs.len())
             {
-                call_generated_serializer(ir, class_internal, accessor, exprs.clone())
+                let instantiated_signature = types
+                    .split_last()
+                    .filter(|(_, params)| params.len() == exprs.len())
+                    .map(|(&ret, params)| (params.to_vec(), ret));
+                call_generated_serializer(
+                    ir,
+                    class_internal,
+                    accessor,
+                    exprs.clone(),
+                    instantiated_signature,
+                )
             } else {
                 if ctx.external_serializer(class_internal).is_none() {
                     continue;
@@ -1371,19 +1332,7 @@ impl SerializationPlugin {
             .iter()
             .map(|&cid| {
                 let s = ir.classes[cid as usize].fq_name();
-                let companion_routed = {
-                    let c = &ir.classes[cid as usize];
-                    c.type_params.is_empty()
-                        && c.enum_entries.is_empty()
-                        && !c.is_sealed
-                        && !c.is_object
-                        && custom_serializer_of(ctx, ir, cid).is_none()
-                };
-                if companion_routed {
-                    companion_serializer_call(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
-                } else {
-                    serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
-                }
+                serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
             })
             .collect();
         let kclass_arr = ir.add_expr(IrExpr::Vararg {
@@ -1607,7 +1556,6 @@ impl IrPlugin for SerializationPlugin {
                     [Some(classifier)] => classifier.kotlin_class_internal(),
                     _ => None,
                 }
-                .or_else(return_classifier)
             };
             let Some(classifier) = classifier else {
                 continue;
@@ -2419,7 +2367,6 @@ impl IrPlugin for SerializationPlugin {
                             serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
                             fields: &fields,
-                            nested_serializers: &nested,
                             type_parameter_serializer_fields: &tp_field,
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
