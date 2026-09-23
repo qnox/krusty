@@ -444,6 +444,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_nullable_value_class_e2e;
 #[path = "data_class_param_check_e2e.rs"]
 mod data_class_param_check_e2e;
+#[path = "data_class_value_class_metadata_e2e.rs"]
+mod data_class_value_class_metadata_e2e;
 #[path = "data_copy_e2e.rs"]
 mod data_copy_e2e;
 #[path = "data_object_e2e.rs"]
