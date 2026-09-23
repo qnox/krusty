@@ -1,7 +1,7 @@
 //! Cross-module bytecode inliner (inliner #2): a *branchless* `inline fun` compiled by the real
 //! `kotlinc` into a separate library is **spliced** into the caller by krusty — no `invokestatic` to
 //! the library function survives, and the result is correct under the JVM verifier. Proves the
-//! `Emitter::try_inline_static` → `inline::splice_branchless` path end-to-end.
+//! emitter's unified bytecode-splice path end-to-end.
 
 use super::common;
 

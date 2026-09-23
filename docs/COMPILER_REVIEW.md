@@ -846,7 +846,7 @@ tokens or bridge-erasure checks. Focused verification:
 cargo fmt --check
 cargo check --profile gate
 ./run-tests.sh --test overloaded_inferred_return_e2e -- --nocapture
-./run-tests.sh --test inline_e2e -- --nocapture
+./run-tests.sh --test e2e inline_splice_e2e:: -- --nocapture
 ./run-tests.sh --test resolver_regression_e2e -- --nocapture
 ./run-tests.sh --test generic_fn_e2e -- --nocapture
 ```
@@ -970,7 +970,7 @@ facts across two independent side channels. Verification:
 cargo fmt --check
 cargo check --profile gate
 ./run-tests.sh --test feature_box_e2e -- --nocapture feature_snippets_run
-./run-tests.sh --test inline_e2e -- --nocapture
+./run-tests.sh --test e2e inline_splice_e2e:: -- --nocapture
 ./run-tests.sh --test classpath_receiver_lambda_e2e -- --nocapture
 ./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
 ```
@@ -1077,7 +1077,7 @@ Verification:
 cargo fmt --check
 cargo check --profile gate
 ./run-tests.sh --test lambda_e2e -- --nocapture
-./run-tests.sh --test inline_e2e -- --nocapture
+./run-tests.sh --test e2e inline_splice_e2e:: -- --nocapture
 ./run-tests.sh --test classpath_receiver_lambda_e2e -- --nocapture
 ./run-tests.sh --test feature_box_e2e -- --nocapture feature_snippets_run
 ./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
@@ -1099,7 +1099,7 @@ cargo check --profile gate
 ./run-tests.sh --test feature_box_e2e -- --nocapture lambda_shadowed_outer_var_does_not_allocate_ref_cell
 ./run-tests.sh --test feature_box_e2e -- --nocapture feature_snippets_run
 ./run-tests.sh --test lambda_e2e -- --nocapture
-./run-tests.sh --test inline_e2e -- --nocapture
+./run-tests.sh --test e2e inline_splice_e2e:: -- --nocapture
 ./run-tests.sh --test local_fun_ref_e2e -- --nocapture
 ./run-tests.sh --test name_based_destructuring_e2e -- --nocapture var_component_captured_and_mutated_in_lambda
 ```
@@ -1935,7 +1935,7 @@ cargo check --profile gate
 ./run-tests.sh --test metadata_return_types -- --nocapture
 ./run-tests.sh --test metadata_kept_params -- --nocapture
 ./run-tests.sh --test resolver_regression_e2e -- --nocapture lambda_return_overload_stays_separate_from_normal_inline_hofs
-./run-tests.sh --test inline_e2e -- --nocapture
+./run-tests.sh --test e2e inline_splice_e2e:: -- --nocapture
 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
 ```
 

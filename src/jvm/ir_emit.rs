@@ -13060,7 +13060,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &HashMap<String, String>,
+        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -14011,7 +14011,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
-        reified: &HashMap<String, String>,
+        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
     ) -> bool {
         let InlineStaticTarget {
             owner,

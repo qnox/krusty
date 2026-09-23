@@ -2,11 +2,13 @@
 //!
 //! Common IR retains checked Kotlin operations, substitutions, and exact semantic type-parameter
 //! identities. For a declaration, this module realizes those operations as kotlinc-compatible
-//! marker instructions before generic erasure. For a call site, it converts the checked semantic
-//! substitutions into the JVM classifier names consumed by the bytecode splicer.
+//! marker instructions before generic erasure. For a call site, it converts each checked semantic
+//! substitution into either the concrete JVM classifier or the host reified parameter consumed by
+//! the bytecode splicer.
 
 use std::collections::{HashMap, HashSet};
 
+use super::inline::ReifiedArgument;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
@@ -46,24 +48,40 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
     parameters.get(identity)
 }
 
-/// JVM class names for the checked reified substitutions attached to one call. Common IR retains
-/// semantic [`Ty`] values; the conversion to physical classifier names belongs here at the backend
-/// boundary. A `Unit` value uses its stored classifier form, just like every other value that a
-/// reified type-bearing instruction materializes.
-pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String, String> {
-    ir.reified_call_subst
-        .get(&expression)
-        .map(|substitutions| {
-            substitutions
-                .iter()
-                .filter_map(|(name, ty)| {
-                    let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
-                    let internal = super::jvm_class_map::to_jvm_internal(&internal);
-                    Some((name.clone(), internal.to_owned()))
-                })
-                .collect()
+/// The splice operands for the checked reified substitutions attached to one call. Common IR
+/// retains semantic [`Ty`] values; the conversion to physical classifier names belongs here at the
+/// backend boundary. A `Unit` value uses its stored classifier form, just like every other value
+/// that a reified type-bearing instruction materializes. A substitution that is itself a reified
+/// type parameter of a declaration in this file has no class yet: that declaration is a reified
+/// inline body, so the callee's marker is forwarded under the declaration's own parameter name.
+pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String, ReifiedArgument> {
+    let Some(substitutions) = ir.reified_call_subst.get(&expression) else {
+        return HashMap::new();
+    };
+    let forwarded = |ty: Ty| {
+        let Ty::TyParam(identity, _) = ty.non_null() else {
+            return None;
+        };
+        ir.signatures
+            .values()
+            .flat_map(|signature| &signature.type_params)
+            .find(|parameter| parameter.reified && parameter.semantic_name == identity)
+            .map(|parameter| ReifiedArgument::Forwarded {
+                name: parameter.name.clone(),
+                nullable: ty.is_nullable(),
+            })
+    };
+    substitutions
+        .iter()
+        .filter_map(|(name, ty)| {
+            let argument = forwarded(*ty).or_else(|| {
+                let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
+                let internal = super::jvm_class_map::to_jvm_internal(&internal);
+                Some(ReifiedArgument::Class(internal.to_owned()))
+            })?;
+            Some((name.clone(), argument))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn realize_expression_dag(
@@ -180,8 +198,50 @@ mod tests {
         assert_eq!(
             splice_type_map(&ir, expression),
             HashMap::from([
-                ("T".to_owned(), "kotlin/Unit".to_owned()),
-                ("R".to_owned(), "java/lang/String".to_owned()),
+                (
+                    "T".to_owned(),
+                    ReifiedArgument::Class("kotlin/Unit".to_owned())
+                ),
+                (
+                    "R".to_owned(),
+                    ReifiedArgument::Class("java/lang/String".to_owned())
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn splice_type_map_forwards_a_reified_parameter_of_the_host() {
+        let identity = "T@only";
+        let expression = 7;
+        let mut ir = IrFile::default();
+        ir.signatures.insert(0, reified_signature(identity));
+        let parameter = Ty::ty_param(identity, Ty::obj("kotlin/Any"));
+        ir.reified_call_subst.insert(
+            expression,
+            vec![
+                ("R".to_owned(), parameter),
+                ("S".to_owned(), Ty::nullable(parameter)),
+            ],
+        );
+
+        assert_eq!(
+            splice_type_map(&ir, expression),
+            HashMap::from([
+                (
+                    "R".to_owned(),
+                    ReifiedArgument::Forwarded {
+                        name: "T".to_owned(),
+                        nullable: false,
+                    },
+                ),
+                (
+                    "S".to_owned(),
+                    ReifiedArgument::Forwarded {
+                        name: "T".to_owned(),
+                        nullable: true,
+                    },
+                ),
             ])
         );
     }

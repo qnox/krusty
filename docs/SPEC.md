@@ -7955,6 +7955,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spurious `JvmMethodSignature` on plain inline facade records is gone (kotlinc emits none; suspend
   and type-parameter-mentioning signatures keep theirs).
 
+- **A forwarded reified argument keeps its marker.** When a reified inline body passes its OWN
+  reified parameter to another reified inline (`inline fun <reified T> List<Any?>.only() =
+  filterIsInstance<T>()`), kotlinc splices the callee and renames the callee's marker to the host
+  parameter: `reifiedOperationMarker(3, "T")` followed by the callee's erased `instanceof`. The
+  marker is spelled `T?` when the argument or the callee's own marker is nullable. krusty resolved
+  the forwarded `T` to its erased class while splicing, NOP'd the marker, and published `instanceof
+  java/lang/Object`, so every caller in another module received every element. The splice map is
+  now a `ReifiedArgument`: `Class` for a concrete argument (the marker is NOP'd and the type-bearing
+  op repointed, as before), or `Forwarded` for a substitution that is a reified type parameter of a
+  declaration in this file. For `Forwarded`, the marker triplet stays, its name `ldc` is repointed
+  after relocation (compact `ldc` when the host index fits), and the erased placeholder stays for
+  the host's own caller to reify. Test: `tests/reified_parameter_forwarding_e2e.rs`.
+
 - **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
   supertype declaration and the override the same physical shape — a trailing `Continuation`
   parameter and an `Object` return — so a type parameter appearing only in RETURN position erases

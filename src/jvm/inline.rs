@@ -18,8 +18,8 @@ mod continuation_flow;
 mod debug_lines;
 mod reified_operands;
 use continuation_flow::caller_continuation_reachable;
-pub use reified_operands::substitute_reified;
-use reified_operands::{reify_markers, set_reified_operand};
+pub(super) use reified_operands::ReifiedArgument;
+use reified_operands::{reify_markers, ReifiedRepoint};
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
@@ -465,19 +465,12 @@ fn local_load_store(base_op: u8, idx: u16) -> Insn {
     }
 }
 
-/// Add `base` to every local-variable index in the body (load/store in all forms, `iinc`, `ret`, and
-/// their `wide` variants), re-selecting the compact encoding. Relocating an inline body's locals into
-/// the caller's frame is a prerequisite for splicing — the body then occupies `base..base+max_locals`.
-pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
-    remap_locals(insns, |slot| slot + base)
-}
-
 /// Relocate every local-variable index in the body through `map`, re-selecting the compact encoding.
 ///
 /// A splice needs more than a shift when it substitutes a lambda body for a `FunctionN.invoke`: the
 /// parameter that held the lambda object no longer exists, and leaving its slot reserved pushes
 /// every later local one slot up. `map` therefore both rebases and closes those gaps.
-pub fn remap_locals(insns: &mut [Insn], map: impl Fn(u16) -> u16) -> Option<()> {
+fn remap_locals(insns: &mut [Insn], map: impl Fn(u16) -> u16) -> Option<()> {
     for insn in insns.iter_mut() {
         let Insn::Plain { op, operands } = insn else {
             continue;
@@ -612,9 +605,8 @@ pub fn stored_local(insn: &Insn) -> Option<u16> {
     }
 }
 
-/// Overwrite the 2-byte constant-pool operand of a pool-referencing instruction with `idx` (used to
-/// apply the reified repoints from [`substitute_reified`] after relocation).
-pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
+/// Overwrite the 2-byte constant-pool operand of a pool-referencing instruction with `idx`.
+fn set_pool_operand(insn: &mut Insn, idx: u16) {
     if let Insn::Plain { op, operands } = insn {
         if let Some((off, 2)) = pool_operand(*op) {
             let o = off - 1;
@@ -626,30 +618,11 @@ pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
     }
 }
 
-/// Redirect every `return`/`?return` in an inline body to the end of the inlined region instead of
-/// returning from the *caller*. A value-returning `?return` (`ireturn`/`areturn`/…) leaves its value
-/// on the stack — which becomes the call's result — and a plain `return` leaves nothing; replacing
-/// each with `goto end` preserves that stack effect while continuing into the caller's code. `end` is
-/// index `insns.len()` (one past the last instruction), a valid target the assembler lays out.
-pub fn redirect_returns(insns: &mut [Insn]) {
-    let end = insns.len();
-    for insn in insns.iter_mut() {
-        if let Insn::Plain { op, .. } = insn {
-            if matches!(*op, 0xac..=0xb1) {
-                *insn = Insn::Branch {
-                    op: 0xa7,
-                    target: BranchTarget::Internal(end),
-                };
-            }
-        }
-    }
-}
-
 /// Whether a method body is a **reified `inline`** function — its bytecode calls
 /// `Intrinsics.reifiedOperationMarker`, which the compiler must inline away (a direct call to such a
 /// method throws `UnsupportedOperationException` at runtime). This recognizes the must-inline case
 /// from the body alone, without parsing the `@Metadata` inline flag.
-pub fn is_reified_inline(body: &MethodCode) -> bool {
+fn is_reified_inline(body: &MethodCode) -> bool {
     let Some(insns) = disassemble(&body.code) else {
         return false;
     };
@@ -2058,14 +2031,14 @@ pub fn spliced_frame(
     })
 }
 
-pub fn splice_unified(
+pub(super) fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
     base: u16,
     lambdas: &[LambdaSplice],
     start_offset: usize,
     cw: &mut ClassWriter,
-    reified: &HashMap<String, String>,
+    reified: &HashMap<String, ReifiedArgument>,
 ) -> Option<BranchySplice> {
     // A `reifiedOperationMarker` body specializes its reified type parameter at the call site. Without
     // the call's reified type arguments (`reified` empty) it can't be specialized — the marker THROWS at
@@ -2095,10 +2068,10 @@ pub fn splice_unified(
     // NOP the reified markers now (before relocation) and remember which instructions to repoint; the
     // concrete `Class` pool ref is minted + applied AFTER relocation (so `relocate_insns` doesn't remap
     // it back to the erased placeholder).
-    let reified_targets: Vec<(usize, String)> = if reified.is_empty() {
+    let reified_targets: Vec<ReifiedRepoint> = if reified.is_empty() {
         Vec::new()
     } else {
-        reify_markers(&mut insns, &body.source_cp)?
+        reify_markers(&mut insns, &body.source_cp, reified)?
     };
     // `assert` is a codegen INTRINSIC, not a normal inline: kotlinc guards it on a synthetic per-class
     // `$assertionsDisabled` field (or elides it per `-Xassertions`/`ASSERTIONS_MODE`), and when disabled
@@ -2328,15 +2301,13 @@ pub fn splice_unified(
         }
     }
     relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
-    // Repoint each reified type-bearing op at its concrete type (post-relocation, so the fresh CLASS pool
-    // ref survives). An unmapped type-parameter name (`reified` lacks it) or a malformed type-bearing
-    // instruction skips the whole splice rather than emitting the erased placeholder.
-    for (j, name) in &reified_targets {
-        let concrete = reified.get(name)?;
-        let idx = cw.class_ref(concrete);
-        if !set_reified_operand(&mut insns[*j], idx) {
-            return None;
-        }
+    // Repoint each reified site (post-relocation, so the fresh pool ref survives). A malformed
+    // type-bearing instruction skips the whole splice rather than emitting the erased placeholder.
+    if !reified_targets
+        .iter()
+        .all(|repoint| repoint.apply(&mut insns, cw))
+    {
+        return None;
     }
     // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
@@ -2862,33 +2833,6 @@ pub fn splice_unified(
     })
 }
 
-pub fn splice(
-    body: &MethodCode,
-    descriptor: &str,
-    base: u16,
-    type_map: &HashMap<String, String>,
-    cw: &mut ClassWriter,
-) -> Option<Vec<Insn>> {
-    let mut insns = disassemble(&body.code)?;
-    // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
-    let patches = substitute_reified(&mut insns, &body.source_cp, cw, type_map);
-    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
-    for (j, idx) in patches {
-        set_pool_operand(&mut insns[j], idx);
-    }
-    shift_locals(&mut insns, base)?;
-    redirect_returns(&mut insns);
-    // Prologue: pop the arguments (top = last param) into their slots, declaration order reversed.
-    let params = param_store_ops(descriptor, base)?;
-    let mut out: Vec<Insn> = params
-        .iter()
-        .rev()
-        .map(|&(slot, op)| local_load_store(op, slot))
-        .collect();
-    out.extend(insns);
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3213,15 +3157,15 @@ mod tests {
     }
 
     #[test]
-    fn shift_locals_zero_is_identity_and_shift_works() {
+    fn local_remapping_preserves_zero_and_rebases_all_encodings() {
         // iload_1; istore_2; iinc 1, 1; return  (javac-style compact forms).
         let code = [0x1b, 0x3d, 0x84, 0x01, 0x01, 0xb1];
         let mut insns = disassemble(&code).unwrap();
-        shift_locals(&mut insns, 0).unwrap();
-        assert_eq!(assemble(&insns), code, "shift by 0 is identity");
+        remap_locals(&mut insns, |slot| slot).unwrap();
+        assert_eq!(assemble(&insns), code, "identity remapping is stable");
 
         let mut s = disassemble(&code).unwrap();
-        shift_locals(&mut s, 4).unwrap();
+        remap_locals(&mut s, |slot| slot + 4).unwrap();
         // iload_1 → iload 5 (0x15 5), istore_2 → istore 6 (0x36 6), iinc 1→5.
         assert_eq!(
             assemble(&s),
@@ -3230,7 +3174,7 @@ mod tests {
 
         // Shifting past 3 must promote _N forms to indexed (size grows; assemble relays out).
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
-        shift_locals(&mut t, 10).unwrap();
+        remap_locals(&mut t, |slot| slot + 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
     }
 
@@ -3322,16 +3266,16 @@ mod tests {
         assert_eq!(assemble(&insns), [0x1b, 0x1c, 0x60, 0x3e, 0xb1]);
     }
 
-    /// Without a removed slot the remap is exactly the old shift, so the generalization cannot have
-    /// changed what every other splice emits.
+    /// Without a removed slot the production remap is a flat rebase.
     #[test]
-    fn remapping_with_nothing_removed_is_the_flat_shift() {
+    fn remapping_with_nothing_removed_is_a_flat_rebase() {
         let code = [0x1b, 0x3d, 0x84, 0x01, 0x01, 0xb1];
-        let mut shifted = disassemble(&code).unwrap();
-        shift_locals(&mut shifted, 4).unwrap();
         let mut remapped = disassemble(&code).unwrap();
         remap_locals(&mut remapped, |slot| slot + 4).unwrap();
-        assert_eq!(assemble(&shifted), assemble(&remapped));
+        assert_eq!(
+            assemble(&remapped),
+            [0x15, 0x05, 0x36, 0x06, 0x84, 0x05, 0x01, 0xb1]
+        );
     }
 
     /// A bootstrap entry's dependency graph is every member the host would have to reference.
@@ -3492,105 +3436,6 @@ mod tests {
     }
 
     #[test]
-    fn splice_identity_function() {
-        // inline fun id(x: Int): Int = x  →  body: iload_0; ireturn
-        let body = MethodCode {
-            max_stack: 1,
-            max_locals: 1,
-            code: vec![0x1a, 0xac],
-            source_cp: vec![C::Other],
-            stackmap: None,
-            handlers: vec![],
-            locals: vec![],
-            lines: Vec::new(),
-            source_file: None,
-            defining_class: "T".into(),
-            dependency_source_map: None,
-            bootstrap_methods: Vec::new(),
-        };
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let tm = HashMap::new();
-        let insns = splice(&body, "(I)I", 1, &tm, &mut cw).expect("splice");
-        // Prologue stores the arg into slot 1 (istore_1), then the body loads it (iload 1) and the
-        // return became a goto to the end (value left on stack).
-        let bytes = assemble(&insns);
-        // istore_1(0x3c); iload 1 → iload_1(0x1b); goto end.
-        assert_eq!(bytes[0], 0x3c, "istore_1 binds the argument");
-        assert_eq!(bytes[1], 0x1b, "iload_1 reads it back");
-        assert_eq!(bytes[2], 0xa7, "return redirected to goto");
-    }
-
-    #[test]
-    fn substitute_reified_empty_array() {
-        // Source pool for an emptyArray-shaped body.
-        let src_cp = vec![
-            C::Other,
-            C::Utf8("kotlin/jvm/internal/Intrinsics".into()), // 1
-            C::Class(1),                                      // 2
-            C::Utf8("reifiedOperationMarker".into()),         // 3
-            C::Utf8("(ILjava/lang/String;)V".into()),         // 4
-            C::NameAndType(3, 4),                             // 5
-            C::Methodref(2, 5),                               // 6
-            C::Utf8("T?".into()),                             // 7
-            C::String(7),                                     // 8
-            C::Utf8("java/lang/Object".into()),               // 9
-            C::Class(9),                                      // 10
-        ];
-        // iconst_0(size); iconst_0(mode); ldc "T?"; invokestatic marker; anewarray Object; areturn
-        let mut insns = vec![
-            Insn::Plain {
-                op: 0x03,
-                operands: vec![],
-            },
-            Insn::Plain {
-                op: 0x03,
-                operands: vec![],
-            },
-            Insn::Plain {
-                op: 0x12,
-                operands: vec![8],
-            },
-            Insn::Plain {
-                op: 0xb8,
-                operands: vec![0, 6],
-            },
-            Insn::Plain {
-                op: 0xbd,
-                operands: vec![0, 10],
-            },
-            Insn::Plain {
-                op: 0xb0,
-                operands: vec![],
-            },
-        ];
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let mut tm = std::collections::HashMap::new();
-        tm.insert("T".to_string(), "java/lang/String".to_string());
-        let patches = substitute_reified(&mut insns, &src_cp, &mut cw, &tm);
-        assert_eq!(patches.len(), 1);
-        assert_eq!(patches[0].0, 4, "the anewarray is repointed");
-        // Marker call + its two arg pushes became nops; the size push (insn 0) is untouched.
-        assert!(matches!(insns[0], Insn::Plain { op: 0x03, .. }));
-        for k in 1..=3 {
-            assert!(
-                matches!(insns[k], Insn::Plain { op: 0x00, .. }),
-                "insn {k} nop"
-            );
-        }
-        set_pool_operand(&mut insns[4], patches[0].1);
-        if let Insn::Plain { op: 0xbd, operands } = &insns[4] {
-            assert_eq!(
-                (operands[0] as u16) << 8 | operands[1] as u16,
-                patches[0].1,
-                "anewarray now uses String"
-            );
-        } else {
-            panic!("expected anewarray");
-        }
-        assert_eq!(patches[0].1, cw.class_ref("java/lang/String"));
-    }
-
-    #[test]
     fn relocate_insns_through_pipeline() {
         let src_cp = vec![
             C::Other,
@@ -3609,28 +3454,6 @@ mod tests {
         let expected = cw.methodref("Foo", "bar", "()V");
         assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected);
         assert_eq!(out.len(), code.len());
-    }
-
-    #[test]
-    fn redirect_returns_jumps_to_end() {
-        // iload_0; ifeq +6 (→ second return); iconst_1; ireturn; iconst_0; ireturn
-        // Two value-returns; both become goto end, value left on stack.
-        let code = [0x1a, 0x99, 0x00, 0x06, 0x04, 0xac, 0x03, 0xac];
-        let mut insns = disassemble(&code).unwrap();
-        let n = insns.len();
-        redirect_returns(&mut insns);
-        // No return opcodes remain; both replaced by goto.
-        assert!(insns
-            .iter()
-            .all(|i| !matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))));
-        let gotos = insns
-            .iter()
-            .filter(|i| matches!(i, Insn::Branch { op: 0xa7, target: BranchTarget::Internal(target) } if *target == n))
-            .count();
-        assert_eq!(gotos, 2, "both returns became goto end");
-        // Reassembles to valid bytecode of the right shape (goto is 3 bytes vs ireturn's 1).
-        let out = assemble(&insns);
-        assert!(out.len() > code.len());
     }
 
     #[test]

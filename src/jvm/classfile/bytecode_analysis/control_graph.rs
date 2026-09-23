@@ -23,8 +23,8 @@ pub(crate) struct Handler {
 pub(crate) struct ControlGraph {
     normal: Vec<Vec<usize>>,
     exceptional: Vec<Vec<usize>>,
-    /// One past the last instruction — the virtual exit. A `goto` to it is how a spliced body's
-    /// redirected returns leave the region (see `inline::redirect_returns`), so it is a real target.
+    /// One past the last instruction — the virtual exit. A `goto` to it is how the unified inline
+    /// splicer routes non-trailing returns out of the relocated region, so it is a real target.
     exit: usize,
 }
 

@@ -796,8 +796,6 @@ mod infix_newline_operand_e2e;
 mod inheritance_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
 mod inline_deep_coverage_e2e;
-#[path = "inline_e2e.rs"]
-mod inline_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]
@@ -1315,6 +1313,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "reified_parameter_forwarding_e2e.rs"]
+mod reified_parameter_forwarding_e2e;
 #[path = "reified_splice_host_pool_wide_e2e.rs"]
 mod reified_splice_host_pool_wide_e2e;
 #[path = "relational_compare_to_seam_e2e.rs"]
