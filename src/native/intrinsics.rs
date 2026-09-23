@@ -117,6 +117,16 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class
+/// may extend.
+///
+/// It carries NO state — every member it declares is an abstract conversion — so a subclass of it
+/// is laid out exactly as a subclass of `kotlin.Any` is, and the descriptor exists already: boxed
+/// primitives point at it so that `is Number` has something to compare.
+pub(super) fn is_number_base(owner: crate::types::TypeName) -> bool {
+    kotlin_owner(&owner.render()) == "kotlin/Number"
+}
+
 /// Is this owner `kotlin.Boolean` itself, whatever the realization spells it?
 ///
 /// `Boolean::not` names the declaration `!b` names, and a realization of it goes out under
@@ -421,6 +431,153 @@ pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate>
     }
 }
 
+/// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
+///
+/// Every enum constant answers `name` and `ordinal` from the storage its base contributes. The
+/// accessor arrives as the property's Kotlin name, so these are the only two spellings.
+pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
+    if kotlin_owner(owner) != "kotlin/Enum" {
+        return None;
+    }
+    match accessor {
+        "name" => Some("name"),
+        "ordinal" => Some("ordinal"),
+        _ => None,
+    }
+}
+
+/// How a program iterates a receiver it could only type by an INTERFACE.
+///
+/// `Iterable` and `Iterator` both have a Kotlin spelling and a `java.util` one — the provider
+/// presents a Kotlin collection interface under whichever name the declaration it read carried —
+/// and normalizing that here is the point: a backend asks which of the two roles a type plays, not
+/// which library spelled it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IterationRole {
+    /// Something a `for` loop asks for an iterator.
+    Iterable,
+    /// The iterator itself.
+    Iterator,
+}
+
+/// Which role a type name plays, or `None` for anything that plays neither.
+///
+/// The concrete ranges are `Iterable` here as much as the interfaces are, because the runtime's own
+/// `kt_iterable_*` walk dispatches on the DESCRIPTOR and reaches a range as readily as a list. They
+/// are safe to name for the same reason the interfaces are: a file declaring a class that extends
+/// one of them overrides a dependency method and is declined whole. A member that must not be
+/// answered this way — one whose result depends on the receiver being a list — is read by
+/// `list_symbol` behind an `is_list` check, never through this.
+pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
+    // The table below is written in Kotlin names; a JVM jar's spelling is normalized to one first.
+    let internal = crate::types::type_name(kotlin_owner(&internal.render()));
+    [
+        ("kotlin/collections/Iterable", IterationRole::Iterable),
+        ("kotlin/collections/Collection", IterationRole::Iterable),
+        ("kotlin/collections/List", IterationRole::Iterable),
+        // The growable list. It is iterated exactly as a read-only list is: the runtime hands out
+        // the one list iterator, whose cursor is an index and whose bound is `kt_list_size`, which
+        // both shapes answer.
+        (
+            "kotlin/collections/MutableIterable",
+            IterationRole::Iterable,
+        ),
+        (
+            "kotlin/collections/MutableCollection",
+            IterationRole::Iterable,
+        ),
+        ("kotlin/collections/MutableList", IterationRole::Iterable),
+        ("kotlin/collections/ArrayList", IterationRole::Iterable),
+        (
+            "kotlin/collections/MutableIterator",
+            IterationRole::Iterator,
+        ),
+        // The SETS. A set is walked as the list of its elements, which is its insertion order —
+        // and a `Map` is walked as its ENTRIES, which is what Kotlin's `Map.iterator()` extension
+        // answers, so both reach the same descriptor dispatch a list does.
+        ("kotlin/collections/Set", IterationRole::Iterable),
+        ("kotlin/collections/MutableSet", IterationRole::Iterable),
+        ("kotlin/collections/HashSet", IterationRole::Iterable),
+        ("kotlin/collections/LinkedHashSet", IterationRole::Iterable),
+        ("kotlin/collections/Map", IterationRole::Iterable),
+        ("kotlin/collections/MutableMap", IterationRole::Iterable),
+        ("kotlin/collections/HashMap", IterationRole::Iterable),
+        ("kotlin/collections/LinkedHashMap", IterationRole::Iterable),
+        // A SEQUENCE. Iterating one is the one member `Sequence` declares, and the wrapper the
+        // runtime makes holds the source it walks — so the role is the same and the dispatch is
+        // the descriptor's. Which OTHER members a sequence may be asked is narrower than an
+        // iterable's, and that is the sequence lowering's to enforce, not this table's.
+        ("kotlin/sequences/Sequence", IterationRole::Iterable),
+        ("kotlin/ranges/IntRange", IterationRole::Iterable),
+        ("kotlin/ranges/LongRange", IterationRole::Iterable),
+        ("kotlin/ranges/CharRange", IterationRole::Iterable),
+        // A PROGRESSION is a walk with a step, and `10 downTo 1` is typed by one rather than by
+        // the range above it. The runtime needs nothing new for it: one struct serves a range and
+        // a progression — a plain range is the one whose step is 1 — and the object a `downTo`
+        // builds wears the very descriptor a range does, so every `kt_iterable_*` walk already
+        // reaches it. What was missing is only the STATIC name, which is what a call site has.
+        ("kotlin/ranges/IntProgression", IterationRole::Iterable),
+        ("kotlin/ranges/LongProgression", IterationRole::Iterable),
+        ("kotlin/ranges/CharProgression", IterationRole::Iterable),
+        // The unsigned pair the runtime owns, and their progressions. Kotlin declares exactly two
+        // unsigned ranges, since `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`.
+        ("kotlin/ranges/UIntRange", IterationRole::Iterable),
+        ("kotlin/ranges/ULongRange", IterationRole::Iterable),
+        ("kotlin/ranges/UIntProgression", IterationRole::Iterable),
+        ("kotlin/ranges/ULongProgression", IterationRole::Iterable),
+        ("kotlin/collections/Iterator", IterationRole::Iterator),
+        // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
+        // an interface, and naming them is safe for the reason the interfaces are: the only objects
+        // wearing one here are the runtime's own walks, and a file declaring its own subclass of
+        // one overrides a dependency method and is declined whole. `IntIterator`, `LongIterator`
+        // and `CharIterator` are deliberately ABSENT — a range's iterator wears those, and they are
+        // read by the narrow protocol before this is consulted at all.
+        ("kotlin/collections/ByteIterator", IterationRole::Iterator),
+        ("kotlin/collections/ShortIterator", IterationRole::Iterator),
+        (
+            "kotlin/collections/BooleanIterator",
+            IterationRole::Iterator,
+        ),
+        ("kotlin/collections/FloatIterator", IterationRole::Iterator),
+        ("kotlin/collections/DoubleIterator", IterationRole::Iterator),
+    ]
+    .into_iter()
+    .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
+}
+
+/// Whether a type name is a list the native runtime builds.
+pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/List"
+            // The MUTABLE ones read the same way: every question `List` answers, a `MutableList`
+            // answers identically, and the runtime gives both one entry point. `Collection` is not
+            // here: a `Set` is one, and the runtime's set is not laid out as its list.
+            | "kotlin/collections/MutableList"
+            | "kotlin/collections/ArrayList"
+    )
+}
+
+/// Whether a type name is the one an `is` answers with the runtime's LIST marker.
+///
+/// Narrower than [`is_list_type`] in BOTH directions, and for the same reason each way: the marker
+/// says only "this object is a `kotlin.collections.List`", so the name it answers for has to be one
+/// every object wearing it really is and one no object without it could be.
+///
+/// `Collection` is out because a SET is one and wears no marker, so `x is Collection<*>` would have
+/// said `false` of an object that is one. `MutableList` and `ArrayList` are out for the mirror
+/// reason: both kinds of list the runtime builds wear this marker, the immutable one included, so
+/// `listOf(1) is MutableList<*>` would have said `true` where Kotlin/Native says false. Those two
+/// keep declining, as they did before the marker existed — the runtime has nothing that tells one
+/// kind from the other in a check.
+///
+/// It is also the descriptor `List::class` names, which is why the spelling has to be exact: a
+/// class literal reads the descriptor's own Kotlin name, and `kt_type_list_interface` is named
+/// `kotlin.collections.List` and nothing else.
+pub(super) fn is_list_check_type(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/collections/List"
+}
+
 /// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
 ///
 /// An EXTENSION of the companion object, declared in `kotlin`, so the receiver is that object and
@@ -473,6 +630,135 @@ pub(super) fn float_to_bits(
 /// type too, and only the file knows whether it declares one.
 pub(super) fn is_comparable_compare_to(owner: &str, name: &str, params: &[Ty]) -> bool {
     kotlin_owner(owner) == "kotlin/Comparable" && name == "compareTo" && params.len() == 1
+}
+
+/// Whether a type name is `kotlin.Comparable` or the base whose comparison an enum inherits.
+///
+/// Both are what a DECLARED class naming one of them makes observable: an object of the program's
+/// standing behind a `Comparable` receiver, which the runtime's descriptor tables cannot order.
+pub(super) fn is_comparable_supertype(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/Comparable" | "kotlin/Enum"
+    )
+}
+
+/// Whether a type name is the SEQUENCE the native runtime makes.
+pub(super) fn is_sequence_type(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/sequences/Sequence"
+}
+
+/// Whether a type name is the MAP the native runtime builds.
+///
+/// `MutableMap`, `HashMap` and `LinkedHashMap` are one object there: the map that runtime builds is
+/// growable and insertion-ordered, which satisfies all three — the unordered spellings leave their
+/// order unspecified, and insertion order is one of the orders left unspecified.
+pub(super) fn is_map_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Map"
+            | "kotlin/collections/MutableMap"
+            | "kotlin/collections/HashMap"
+            | "kotlin/collections/LinkedHashMap"
+    )
+}
+
+/// Whether a type name is the SET the native runtime builds — the same four spellings, one level
+/// down.
+pub(super) fn is_set_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Set"
+            | "kotlin/collections/MutableSet"
+            | "kotlin/collections/HashSet"
+            | "kotlin/collections/LinkedHashSet"
+    )
+}
+
+/// Whether a type name is a map ENTRY, which `entries` hands out and a destructuring reads.
+pub(super) fn is_map_entry_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Map$Entry" | "kotlin/collections/MutableMap$MutableEntry"
+    )
+}
+
+/// One SHAPE of the runtime's collections.
+///
+/// A shape groups the types whose objects are interchangeable at a call site: a class standing
+/// behind one type of a shape could stand behind any other type of the same shape, and behind no
+/// type of another. `Set` shares the `Iterable` shape because a set implementor answers a
+/// `Collection` and an `Iterable` receiver too; `Map` has its own because Kotlin's map is no
+/// `Collection`, and `Sequence` has its own for the same reason.
+///
+/// This is what makes a file's declaration of its own collection a question about the RECEIVER
+/// rather than about the file: a file that declares a `Sequence` of its own endangers a receiver
+/// typed by a sequence and no list receiver anywhere.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CollectionShape {
+    /// Anything a `for` loop walks directly: a list, a set, a range, an array, text.
+    Iterable,
+    /// The iterator itself, which a walk asks `hasNext` and `next`.
+    Iterator,
+    /// A map, which is neither an `Iterable` nor an iterator.
+    Map,
+    /// ONE entry of a map, which `entries` hands out and a destructuring reads.
+    MapEntry,
+    /// A lazy sequence, which is no `Iterable` either.
+    Sequence,
+    /// TEXT — `String`, `CharSequence`, `StringBuilder`. A `for` loop walks it as the `Iterable`
+    /// shape is walked, but its OWN members are `length` and the indexed read rather than an
+    /// iterator, so a class of the program behind one is reached differently from one behind a
+    /// list. That is the whole reason it is a shape of its own.
+    Text,
+}
+
+/// The shape a type NAME belongs to. The narrow kinds are asked first: every one of them is an
+/// `Iterable` by [`iteration_role`], which walks a map as its entries and a sequence as its source,
+/// and that role is about walking rather than about which objects are interchangeable.
+pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<CollectionShape> {
+    if is_map_entry_type(internal) {
+        return Some(CollectionShape::MapEntry);
+    }
+    if is_map_type(internal) {
+        return Some(CollectionShape::Map);
+    }
+    if is_sequence_type(internal) {
+        return Some(CollectionShape::Sequence);
+    }
+    if is_list_type(internal) || is_set_type(internal) {
+        return Some(CollectionShape::Iterable);
+    }
+    // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it.
+    if matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
+    ) {
+        return Some(CollectionShape::Text);
+    }
+    match iteration_role(internal)? {
+        IterationRole::Iterable => Some(CollectionShape::Iterable),
+        IterationRole::Iterator => Some(CollectionShape::Iterator),
+    }
+}
+
+/// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it
+/// names no facade.
+///
+/// `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
+/// `box`, and it is right there — but there is no facade class on the native target at all: a
+/// top-level property is a global and a top-level function is a symbol, neither owned by anything.
+/// Kotlin/Native names that object `box$1`.
+///
+/// A facade is recognized by its `Kt` suffix, which is the same test [`declaration_package`] makes for
+/// the same reason. That spelling is a JVM provider detail, which is why the test lives here.
+pub(super) fn without_file_facade(qualified: &str) -> Option<String> {
+    let (package, tail) = match qualified.rfind('.') {
+        Some(at) => (&qualified[..=at], &qualified[at + 1..]),
+        None => ("", qualified),
+    };
+    let (facade, nested) = tail.split_once('$')?;
+    (facade.ends_with("Kt") && !nested.is_empty()).then(|| format!("{package}{nested}"))
 }
 
 /// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
@@ -704,6 +990,88 @@ pub(super) fn unsigned_owner(owner: crate::types::TypeName) -> Option<Ty> {
     Some(Ty::obj_name(owner).canonical_semantic()).filter(|ty| ty.is_unsigned())
 }
 
+/// A dependency type's KOTLIN name, whichever spelling a provider presented it under.
+///
+/// `java.lang.CharSequence` and `kotlin.CharSequence` are one type; which one a call carries is
+/// the provider's business, so anything keyed on the type has to ask for the Kotlin name first.
+pub(super) fn kotlin_name_of(owner: crate::types::TypeName) -> String {
+    kotlin_owner(&owner.render()).to_string()
+}
+
+/// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
+/// arity-less `kotlin.Function` they all extend).
+///
+/// The one dependency type whose member this target gives a FIXED slot: a function value's
+/// `invoke` sits right after `kotlin.Any`'s three, and the runtime names that number itself.
+pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
+    let rendered = kotlin_owner(&owner.render()).to_string();
+    let Some(suffix) = rendered.strip_prefix("kotlin/Function") else {
+        return false;
+    };
+    suffix.is_empty() || suffix.chars().all(|digit| digit.is_ascii_digit())
+}
+
+/// The runtime marker an `is` against a FUNCTION TYPE asks about, for a type that names one.
+///
+/// A function value is an object of a type of its own — one per lambda and per callable reference —
+/// so the type written at the site is never the object's. The markers stand in for it: each
+/// function value's descriptor names its arity's and the bare `kotlin.Function` beside it. A
+/// `suspend` function type spells the same names and is left to the paths that read it, which
+/// decline before reaching here.
+pub(super) fn function_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    const ARITIES: [&str; 23] = [
+        "kt_type_function0",
+        "kt_type_function1",
+        "kt_type_function2",
+        "kt_type_function3",
+        "kt_type_function4",
+        "kt_type_function5",
+        "kt_type_function6",
+        "kt_type_function7",
+        "kt_type_function8",
+        "kt_type_function9",
+        "kt_type_function10",
+        "kt_type_function11",
+        "kt_type_function12",
+        "kt_type_function13",
+        "kt_type_function14",
+        "kt_type_function15",
+        "kt_type_function16",
+        "kt_type_function17",
+        "kt_type_function18",
+        "kt_type_function19",
+        "kt_type_function20",
+        "kt_type_function21",
+        "kt_type_function22",
+    ];
+    let rendered = kotlin_owner(&owner.render()).to_string();
+    let suffix = rendered.strip_prefix("kotlin/Function")?;
+    if suffix.is_empty() {
+        return Some("kt_type_function");
+    }
+    ARITIES.get(suffix.parse::<usize>().ok()?).copied()
+}
+
+/// The runtime marker an `is` against one of Kotlin's REFLECTION types asks about.
+///
+/// A property reference is an object of a type of its own — the generator emits one per property —
+/// so the type written at the site is never the object's, exactly as for a function value. These
+/// markers are what the two have in common.
+pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    Some(match kotlin_owner(&owner.render()) {
+        "kotlin/reflect/KCallable" => "kt_type_kcallable",
+        "kotlin/reflect/KProperty" => "kt_type_kproperty",
+        "kotlin/reflect/KProperty0" => "kt_type_kproperty0",
+        "kotlin/reflect/KProperty1" => "kt_type_kproperty1",
+        "kotlin/reflect/KProperty2" => "kt_type_kproperty2",
+        "kotlin/reflect/KMutableProperty" => "kt_type_kmutable_property",
+        "kotlin/reflect/KMutableProperty0" => "kt_type_kmutable_property0",
+        "kotlin/reflect/KMutableProperty1" => "kt_type_kmutable_property1",
+        "kotlin/reflect/KMutableProperty2" => "kt_type_kmutable_property2",
+        _ => return None,
+    })
+}
+
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
 /// operands are read at the operand type and the answer is that type.
 ///
@@ -856,6 +1224,75 @@ pub(super) fn throwable_field(owner: crate::types::TypeName, name: &str) -> Opti
         "cause" => Some("kt_throwable_cause"),
         _ => None,
     }
+}
+
+/// The runtime function answering a `KClass` name accessor, or `None` for anything else.
+///
+/// Both spellings of each are taken for the reason `is_text_length` takes both: which one
+/// a provider presents a property's accessor under is the provider's business, not this table's.
+pub(super) fn class_name_accessor(
+    owner: crate::types::TypeName,
+    name: &str,
+) -> Option<&'static str> {
+    if !owner.matches("kotlin/reflect/KClass") {
+        return None;
+    }
+    match name {
+        "simpleName" => Some("kt_class_simple_name"),
+        "qualifiedName" => Some("kt_class_qualified_name"),
+        _ => None,
+    }
+}
+
+/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
+///
+/// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered
+/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
+/// would carry. A provider that materializes the receiver before the call reaches that table needs
+/// something to materialize, and for such an object the honest answer is the null reference —
+/// there is no object, and nothing dereferences it.
+pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&classifier.render()),
+        // The stdlib's standard delegates. `Delegates` declares no state and every member of it
+        // this runtime answers takes its arguments alone.
+        "kotlin/properties/Delegates"
+    )
+}
+
+/// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
+///
+/// Each is declared in no file krusty compiles and carries no state — every member of one is a
+/// constant the frontend folds — so what a program can observe about it is its IDENTITY. The
+/// runtime holds one static object per companion, with a descriptor of its own so that
+/// `Int.Companion === Long.Companion` is false.
+///
+/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
+/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
+pub(super) fn builtin_companion(classifier: crate::types::TypeName) -> Option<&'static str> {
+    let suffix = match kotlin_owner(&classifier.render()) {
+        "kotlin/Byte$Companion" => "byte",
+        "kotlin/Short$Companion" => "short",
+        "kotlin/Int$Companion" => "int",
+        "kotlin/Long$Companion" => "long",
+        "kotlin/Char$Companion" => "char",
+        "kotlin/Boolean$Companion" => "boolean",
+        "kotlin/Float$Companion" => "float",
+        "kotlin/Double$Companion" => "double",
+        "kotlin/String$Companion" => "string",
+        _ => return None,
+    };
+    Some(match suffix {
+        "byte" => "kt_byte_companion",
+        "short" => "kt_short_companion",
+        "int" => "kt_int_companion",
+        "long" => "kt_long_companion",
+        "char" => "kt_char_companion",
+        "boolean" => "kt_boolean_companion",
+        "float" => "kt_float_companion",
+        "double" => "kt_double_companion",
+        _ => "kt_string_companion",
+    })
 }
 
 /// A member of a COMPANION the runtime realizes, whose receiver carries nothing.

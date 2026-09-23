@@ -132,6 +132,49 @@ const CHURN: &str = "fun churn(rounds: Int): String {\n\
                      }\n";
 
 #[test]
+fn a_live_object_graph_survives_repeated_collection_intact() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A chain of 20,000 nodes, each holding a heap string, rooted only by its head — and churn
+    // between every batch, so the chain is traced many times while it is still being built. The
+    // walk afterwards checks every node: a missed reference field frees the tail, and a wrong
+    // offset reads a neighbour's bytes.
+    assert_eq!(
+        run(&format!(
+            "{CHURN}\
+             class Node(val value: Int, val label: String, val next: Node?)\n\
+             fun main() {{\n\
+             \x20   var head: Node? = null\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 20000) {{\n\
+             \x20       head = Node(i, \"node-$i\", head)\n\
+             \x20       if (i % 2000 == 0) churn(4000)\n\
+             \x20       i = i + 1\n\
+             \x20   }}\n\
+             \x20   churn(40000)\n\
+             \x20   var count = 0\n\
+             \x20   var sum = 0\n\
+             \x20   var labels = 0\n\
+             \x20   var n = head\n\
+             \x20   while (n != null) {{\n\
+             \x20       sum = sum + n.value\n\
+             \x20       if (n.label == \"node-${{n.value}}\") labels = labels + 1\n\
+             \x20       count = count + 1\n\
+             \x20       n = n.next\n\
+             \x20   }}\n\
+             \x20   println(count)\n\
+             \x20   println(sum)\n\
+             \x20   println(labels)\n\
+             }}\n"
+        )),
+        "20000\n199990000\n20000\n",
+        "every node, its integer and its string must come through every collection intact"
+    );
+}
+
+#[test]
 fn references_held_only_in_deep_frames_survive_collection() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

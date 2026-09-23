@@ -4405,6 +4405,13 @@ each one lowering more and declining less:
 - **Dependency calls** are realized through the provider's identity (`SymbolSource::external_callable`):
   the runtime answers a fixed table of stdlib members (`native/intrinsics.rs`), and any other
   dependency member declines.
+- **Classes and objects** (tier 2): class layout and vtables (`native/classes.rs`), constructors
+  primary and secondary, inheritance and `super`, interfaces with program-wide slots, abstract
+  members, data classes, `object` and companion singletons, enums, top-level properties with their
+  initialization order, `lateinit`, class literals, annotation instances, and classes extending a
+  runtime-owned `Throwable`. A singleton, an enum's constants and the top-level properties are
+  built lazily or before the entry, and each withdraws what it published when its initializer
+  throws.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

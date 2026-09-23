@@ -6231,6 +6231,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
   `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
   `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
+- **Native: a throwing initializer leaves nothing half-built.** An `object`'s instance is
+  published before its constructor runs (a constructor reaching back into its own object must find
+  it), and so are an enum's constants. When the constructor throws, the instance — or every
+  constant, and the enum's ready flag — is withdrawn and the exception carries on, so a later
+  access builds it again and throws again where Kotlin throws (the JVM answers that access with
+  `NoClassDefFoundError`; both are a throw). A top-level initializer that throws ends the program
+  before the entry's first statement, as the JVM's failed facade initializer does.
+  Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
+  `a_throwing_enum_constant_leaves_no_constants_behind`,
+  `a_throwing_top_level_initializer_stops_before_the_entry`).
 
 ## 8. Success criteria for the PoC
 

@@ -15,8 +15,12 @@ use std::rc::Rc;
 
 mod arithmetic;
 mod boxed;
+mod classes_literal;
+mod enums;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
+mod objects;
+mod statics;
 mod strings;
 mod type_checks;
 mod unsigned;
@@ -35,11 +39,13 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
-    Callee, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
+    Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp,
 };
 use crate::libraries::SemanticPlatform;
 use crate::types::Ty;
 
+use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
 use super::super::target::NativeTarget;
 use super::{Entry, PROGRAM_ENTRY};
@@ -169,15 +175,7 @@ pub fn lower_file(
         ir,
         runtime_symbols,
     } = input;
-    // A class of this file — its layout, its descriptor, its members — is not this generator's
-    // yet, and neither is a top-level property, whose storage and initialization order a class's
-    // would share.
-    if let Some(class) = ir.classes.first() {
-        return Err(format!("a class (`{}`)", class.fq_name()));
-    }
-    if !ir.statics.is_empty() {
-        return Err("a top-level property".to_string());
-    }
+    let class_model = model::build(ir)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(
@@ -193,13 +191,37 @@ pub fn lower_file(
         provider,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
+        model: class_model,
         functions: Vec::new(),
         imports: HashMap::new(),
         data_imports: HashMap::new(),
         strings: HashMap::new(),
         string_objects: HashMap::new(),
+        classes: Vec::new(),
+        accessors: HashMap::new(),
+        statics: Vec::new(),
+        enum_entries: HashMap::new(),
+        implemented_collections: implemented_collections(ir),
+        overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
+        // Filled once the class model can be consulted: which classes are walkable is which ones
+        // a thunk could be emitted for, and only the model knows that.
+        unwalkable_collections: std::collections::HashSet::new(),
+        walkable_classes: std::collections::HashMap::new(),
+        sequence_classes: std::collections::HashSet::new(),
+        declares_its_own_comparable: declares_its_own_comparable(ir),
+        implemented_dependencies: implemented_dependencies(ir),
     };
+    // Before anything reads a role: the walking members a class answers for decide both which
+    // receivers play an iteration role and which shapes still decline, and both are read while
+    // bodies are lowered.
+    lowering.resolve_walkable_classes();
     lowering.declare_functions()?;
+    lowering.declare_classes()?;
+    lowering.declare_statics()?;
+    lowering.declare_enum_entries()?;
+    lowering.define_classes()?;
+    lowering.define_enum_entries()?;
+    let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
@@ -212,7 +234,7 @@ pub fn lower_file(
                 Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
             };
         if is_entry {
-            lowering.define_program_entry(index)?;
+            lowering.define_program_entry(index, statics_init)?;
             defines_entry = true;
         }
     }
@@ -241,12 +263,142 @@ pub fn lower_file(
     })
 }
 
+/// The dependency types this file puts a class of its own behind, by Kotlin name.
+///
+/// Read from the OVERRIDE edges, which is where a class's answer for a dependency member is
+/// recorded whether or not its supertype list names the declaring type.
+fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
+    let mut owners = std::collections::HashSet::new();
+    for edge in ir.function_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) {
+            owners.insert(super::super::intrinsics::kotlin_name_of(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    for edge in ir.property_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) {
+            owners.insert(super::super::intrinsics::kotlin_name_of(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    owners
+}
+
+/// The collection SHAPES the file puts a class of its own behind.
+///
+/// Read from the OVERRIDE edges rather than from the supertype lists: what matters is that a
+/// member of this file answers for one of those types, which is exactly what an edge to a
+/// dependency declaration of it records — and it holds for a class reaching the type through
+/// another dependency type the supertype list does not name.
+///
+/// A SHAPE rather than a single flag, because the hazard is not the file's, it is the receiver's.
+/// An object of a class that answers for `Sequence` can stand behind a sequence and behind nothing
+/// else the runtime walks; a list receiver in the same file is as safe as it would be in a file
+/// that declared nothing. Each shape is recorded only from an edge that NAMES it, and no shape
+/// implies another: a class handing out an iterator of its own overrides `Iterator`'s members and
+/// is recorded there in its own right, and one returning a walk the runtime made is no hazard.
+/// Whether this file OVERRIDES `Throwable.message` or `Throwable.cause`.
+///
+/// Both are `open val`s of the runtime's own class, and this target reads them with a runtime
+/// function rather than through a slot — the class is the runtime's, and so is its layout. That is
+/// right for every throwable the runtime makes and wrong the moment a class of the program
+/// redeclares one: the read would answer the FIELD where Kotlin dispatches to the override. There
+/// is no slot to dispatch through, because the base declares none, so a file that overrides either
+/// declines the read rather than answering the wrong half of it.
+fn overrides_a_throwable_accessor(ir: &IrFile) -> bool {
+    ir.property_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) && super::super::intrinsics::throwable_field(edge.overridden_owner, &edge.name).is_some()
+    })
+}
+
+fn implemented_collections(
+    ir: &IrFile,
+) -> std::collections::HashSet<super::super::intrinsics::CollectionShape> {
+    let mut shapes = std::collections::HashSet::new();
+    for edge in ir.function_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) {
+            shapes.extend(super::super::intrinsics::collection_shape(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    for edge in ir.property_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) {
+            shapes.extend(super::super::intrinsics::collection_shape(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    shapes
+}
+
+/// Whether this file declares a class an object of which could stand behind a `Comparable<T>`.
+///
+/// `compareTo` asked of a receiver typed only by `Comparable` is answered by the DESCRIPTOR — a
+/// boxed primitive at its own width and with Kotlin's total order for the floating ones, a string
+/// by UTF-16 unit — and those tables answer only for the objects the RUNTIME makes. An object of
+/// the program's could stand behind that type too, and no static type tells the two apart, which is
+/// why the answer is the runtime's at all. So a file that declares one declines instead.
+///
+/// Three shapes count, and none of them is an override edge — which is why this is not
+/// [`implemented_dependencies`]. A class may NAME `Comparable` among its supertypes without
+/// overriding anything there: `interface A : Comparable<A>` is that, and its implementor overrides
+/// `A`'s spelling rather than `Comparable`'s. An ENUM is a `Comparable` with nothing written at
+/// all, `kotlin.Enum` supplying the comparison — whose ordinal is a field this generator lays out
+/// and the runtime cannot read. And a class may reach `Comparable` through a supertype declared
+/// somewhere else entirely, which no name in this file spells; overriding an external `compareTo`
+/// is the evidence of that one.
+///
+/// Naming `Comparable` anywhere in the file is enough, without walking the hierarchy: the class
+/// that names it is itself declared here, so a single pass over the declarations finds it.
+fn declares_its_own_comparable(ir: &IrFile) -> bool {
+    let named = |class: &crate::ir::IrClass| {
+        std::iter::once(class.superclass)
+            .chain(class.interfaces.iter())
+            .chain(
+                class
+                    .supertypes
+                    .iter()
+                    .copied()
+                    .filter_map(Ty::obj_internal),
+            )
+            .any(super::super::intrinsics::is_comparable_supertype)
+    };
+    ir.classes.iter().any(|class| {
+        !class.enum_entries.is_empty() || class.enum_entry_of.is_some() || named(class)
+    }) || ir.function_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) && edge.name == "compareTo"
+    })
+}
+
 struct FileLowering<'a> {
     ir: &'a IrFile,
     provider: &'a Rc<dyn SemanticPlatform>,
     module: &'a mut ObjectModule,
-    /// Symbols of this file's functions.
+    /// Symbols of this file's classes and functions.
     symbols: Symbols,
+    /// Layouts and vtables of this file's classes.
+    model: ClassModel,
     /// Declared Cranelift function per IR function index; `None` for an abstract method.
     functions: Vec<Option<FuncId>>,
     /// Runtime functions this file imports, by symbol.
@@ -259,9 +411,140 @@ struct FileLowering<'a> {
     /// first use. Kotlin promises equal literals are the same object, so the text's bytes being
     /// shared (above) is not enough: the string built from them has to be shared too.
     string_objects: HashMap<Vec<u8>, DataId>,
+    /// Per-class emitted items, parallel to `ir.classes`.
+    classes: Vec<objects::ClassItems>,
+    /// Synthesized field accessors the vtables reference, by slot.
+    accessors: HashMap<Slot, FuncId>,
+    /// The global slot of each top-level property, parallel to `ir.statics`.
+    statics: Vec<DataId>,
+    /// Per enum class, its constants' static slots and getters, in declaration order.
+    enum_entries: HashMap<ClassId, enums::EnumItems>,
+    /// The runtime-known types this file puts a class of its OWN behind, by their Kotlin name.
+    ///
+    /// A receiver typed by one of these may be an object of the program's rather than one the
+    /// runtime made, and the tables that answer a dependency member answer only for the runtime's.
+    implemented_dependencies: std::collections::HashSet<String>,
+    /// The collection SHAPES this file declares a class of its own behind.
+    ///
+    /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
+    /// collections this runtime MAKES — a range and a list. An object of the program's own behind
+    /// that type would have its vtable read for an entry it does not have, so a receiver of a
+    /// shape listed here declines by name instead of being answered wrongly. A receiver of any
+    /// OTHER shape is answered as usual; see [`implemented_collections`].
+    implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
+    /// [`overrides_a_throwable_accessor`].
+    overrides_a_throwable_accessor: bool,
+    /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
+    ///
+    /// A class implementing `kotlin.collections.Iterable` or `Iterator` records where its own
+    /// `iterator`/`hasNext`/`next` sit in its descriptor (`objects::WalkSlots`), which is what
+    /// lets the runtime's walking entry points reach an object it did not make. This says which
+    /// class that is, so a receiver typed by the class rather than by the interface plays the
+    /// role too — `xs.withIndex()` on a class of the program is the same walk as on a list.
+    walkable_classes:
+        std::collections::HashMap<crate::types::TypeName, super::super::intrinsics::IterationRole>,
+    /// Those among them that answer for `kotlin.sequences.Sequence`.
+    ///
+    /// They play the `Iterable` role — the walk is the same — and a receiver typed by one is
+    /// offered the same NARROW set of members a receiver typed `Sequence` is, for the same reason:
+    /// this runtime's walks are eager, and an eager `map` over a sequence is not Kotlin's.
+    sequence_classes: std::collections::HashSet<crate::types::TypeName>,
+    /// The shapes among those that the runtime cannot walk an object of this file's behind; see
+    /// [`unwalkable_collections`].
+    unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
+    /// see [`declares_its_own_comparable`].
+    declares_its_own_comparable: bool,
 }
 
 impl<'a> FileLowering<'a> {
+    /// Whether a class of this file answers for the dependency type `internal`.
+    fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
+        self.implemented_dependencies
+            .contains(&super::super::intrinsics::kotlin_name_of(internal))
+    }
+
+    /// Decide which classes of this file the runtime can WALK, and which collection shapes it
+    /// therefore still cannot.
+    ///
+    /// A class is walkable exactly when a thunk could be emitted for the members a walk goes
+    /// through: its own `iterator`, or its own `hasNext` AND `next`. That is one question, asked
+    /// here once, so that the role a receiver plays and the thunks an object carries can never
+    /// disagree — a class recorded as walkable whose descriptor holds no thunk would have its
+    /// objects read as something they are not.
+    ///
+    /// The shapes are the converse: a shape is UNWALKABLE where any class of this file behind it
+    /// is not walkable, because no static type tells one implementor from another within a shape.
+    /// `class Chars : CharSequence` is the case that makes it necessary — `CharSequence` shares
+    /// the iterable shape with a list, since text is walked by the same dispatch, but it declares
+    /// no `iterator`.
+    fn resolve_walkable_classes(&mut self) {
+        use super::super::intrinsics::IterationRole;
+        for id in 0..self.ir.classes.len() as ClassId {
+            let slots = self.walk_slots(id);
+            let role = if slots.iterator != 0 || slots.length != 0 {
+                // `Iterable` wins over `Iterator` for a class that answers for both. The two roles
+                // differ in which members a receiver is asked for, and a class handing out an
+                // iterator is asked for that one first. TEXT plays the same role: its own members
+                // are `length` and the indexed read, but a walk of it asks for an iterator and
+                // the runtime makes one over those two.
+                Some(IterationRole::Iterable)
+            } else if slots.has_next != 0 && slots.next != 0 {
+                Some(IterationRole::Iterator)
+            } else {
+                None
+            };
+            if let Some(role) = role {
+                let name = self.ir.classes[id as usize].fq_name;
+                self.walkable_classes.insert(name, role);
+                if slots.sequence {
+                    self.sequence_classes.insert(name);
+                }
+            }
+        }
+        let mut record = |owner: &crate::types::TypeName, overridden| {
+            if self.walkable_classes.contains_key(owner) {
+                return;
+            }
+            self.unwalkable_collections
+                .extend(super::super::intrinsics::collection_shape(overridden));
+        };
+        for (owner, edges) in &self.ir.function_overrides {
+            for edge in edges {
+                if matches!(
+                    edge.overridden,
+                    crate::fir::ResolvedFunctionOverrideTarget::External(_)
+                ) {
+                    record(owner, edge.overridden_owner);
+                }
+            }
+        }
+        for (owner, edges) in &self.ir.property_overrides {
+            for edge in edges {
+                if matches!(
+                    edge.overridden,
+                    crate::fir::ResolvedPropertyOverrideTarget::External(_)
+                ) {
+                    record(owner, edge.overridden_owner);
+                }
+            }
+        }
+    }
+
+    /// Whether this file declares a class of the given collection SHAPE.
+    ///
+    /// Asked by a type CHECK rather than by a call: a marker on the runtime's own types answers
+    /// `x is List<*>` for every list the runtime built, and says nothing about a list the program
+    /// declared. Where the file declares one, the check keeps declining rather than answering
+    /// `false` for an object that is one.
+    pub(super) fn implements_collection_shape(
+        &self,
+        shape: super::super::intrinsics::CollectionShape,
+    ) -> bool {
+        self.implemented_collections.contains(&shape)
+    }
+
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
@@ -276,10 +559,21 @@ impl<'a> FileLowering<'a> {
         Ok(signature)
     }
 
-    /// The signature of an IR function.
+    /// The signature of an IR function: a method takes its receiver first.
     fn function_signature(&self, id: crate::ir::FunId) -> Result<Signature, Unsupported> {
         let function = &self.ir.functions[id as usize];
-        self.signature_of(&function.params, function.ret)
+        let mut params = Vec::with_capacity(function.params.len() + 1);
+        if let Some(owner) = function.dispatch_receiver {
+            if self.ir.class_id_by_name(owner).is_none() {
+                return Err(format!(
+                    "a method of `{}`, which is not declared in this file",
+                    owner.render()
+                ));
+            }
+            params.push(any());
+        }
+        params.extend(super::super::captures::carried_parameters(self.ir, id));
+        self.signature_of(&params, function.ret)
     }
 
     /// Whether a function declares a REIFIED type parameter.
@@ -492,7 +786,15 @@ impl<'a> FileLowering<'a> {
             ));
         }
         let signature = self.function_signature(index as crate::ir::FunId)?;
-        let slots: Vec<Ty> = function.params.clone();
+        // `this`, when there is one, is value slot 0 and the parameters follow it.
+        let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
+        if let Some(owner) = function.dispatch_receiver {
+            slots.push(Ty::Obj(owner, &[]));
+        }
+        slots.extend(super::super::captures::carried_parameters(
+            self.ir,
+            index as crate::ir::FunId,
+        ));
         let name = function.name.clone();
         let ret = function.ret;
         let attempt = self.emit_function(
@@ -539,7 +841,11 @@ impl<'a> FileLowering<'a> {
     /// collector, runs the entry function — printing its result when it has one, which is how a
     /// `box()` case reports its verdict — and exits through the kernel; it never returns to
     /// `_start`.
-    fn define_program_entry(&mut self, main_index: usize) -> Result<(), Unsupported> {
+    fn define_program_entry(
+        &mut self,
+        main_index: usize,
+        statics_init: Option<FuncId>,
+    ) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let entry_id = self
             .module
@@ -575,12 +881,22 @@ impl<'a> FileLowering<'a> {
             let bottom = builder.ins().stack_addr(types::I64, slot, 0);
             let init_ref = self.module.declare_func_in_func(init, builder.func);
             builder.ins().call(init_ref, &[bottom]);
+            // Top-level properties are initialized before the entry function runs, which is when
+            // the JVM would have touched the facade and run its `<clinit>`.
+            let uncaught_ref = self.module.declare_func_in_func(uncaught, builder.func);
+            if let Some(statics_init) = statics_init {
+                let statics_ref = self.module.declare_func_in_func(statics_init, builder.func);
+                builder.ins().call(statics_ref, &[]);
+                // An initializer that threw has left its exception pending. Kotlin never reaches
+                // the entry then — the JVM fails the facade's `<clinit>` first — so the program
+                // ends here, reporting it, before the entry's first statement can run.
+                builder.ins().call(uncaught_ref, &[]);
+            }
             let main_ref = self.module.declare_func_in_func(main, builder.func);
             let call = builder.ins().call(main_ref, &[]);
             // A `throw` nothing caught has left the exception pending and returned a zero value
             // all the way to here. Kotlin ends the program reporting it, which is what this does —
             // and it must happen BEFORE the answer is printed, because that zero is not an answer.
-            let uncaught_ref = self.module.declare_func_in_func(uncaught, builder.func);
             builder.ins().call(uncaught_ref, &[]);
             if let Some(println) = println {
                 let result = builder.inst_results(call)[0];
@@ -958,6 +1274,42 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
             }
+            IrExpr::SetField {
+                receiver,
+                class,
+                index,
+                value,
+            } => self.field_write(receiver, class, index, value)?,
+            IrExpr::SetStatic { index, value } => self.static_write(index, value)?,
+            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                value,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    self.receiver_property(
+                        &target,
+                        dispatch_receiver,
+                        extension_receiver,
+                        &context_arguments,
+                        Some(value),
+                    )?;
+                    return Ok(());
+                }
+                match self.checked_property(&target) {
+                    Ok((class, index)) => {
+                        self.property_write(class, index, dispatch_receiver, value)?
+                    }
+                    Err(reason) if reason == objects::TOP_LEVEL => {
+                        let name = self.checked_property_name(&target)?;
+                        self.top_level_write(&name, value)?;
+                    }
+                    Err(reason) => return Err(reason),
+                }
+            }
             _ => {
                 self.expression(id)?;
             }
@@ -1308,16 +1660,80 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     _ => Ok(Some(checked)),
                 }
             }
-            // An object the RUNTIME constructs: a throwable it provides, or its `StringBuilder`.
-            // Every other construction names a class, and classes are not this generator's yet.
             IrExpr::New {
                 internal,
                 args,
                 ctor_params,
                 defaults,
+                default_prefix_count,
                 ..
-            } if defaults.is_empty() && type_checks::is_runtime_constructed(internal) => {
-                self.runtime_construction(internal, &args, ctor_params.as_deref())
+            } => {
+                // A construction's `defaults` name SOURCE-value ordinals, which begin after the
+                // compiler's leading operands; the generator works in the constructor's physical
+                // frame, so they are shifted once, here, rather than at each use.
+                let omitted: Vec<u32> = defaults
+                    .iter()
+                    .map(|ordinal| ordinal + default_prefix_count)
+                    .collect();
+                self.construction(
+                    internal,
+                    &args,
+                    ctor_params.as_deref(),
+                    (!omitted.is_empty()).then_some(omitted.as_slice()),
+                )
+            }
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => self.method_call(class, index, receiver, &args),
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => self.field_read(receiver, class, index),
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } => self.lateinit_initialized(receiver, class, index),
+            IrExpr::SingletonValue { classifier } => self.singleton(classifier),
+            IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
+            // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
+            // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
+            // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
+            // inline expansion to. This generator records none, so the lookup it emits is the same
+            // one either way; the distinction is read where it is meaningful, not repeated here.
+            IrExpr::EnumValueOf {
+                classifier,
+                arg,
+                declaration: _,
+            } => self.enum_value_of(classifier, arg),
+            IrExpr::EnclosingInstance {
+                receiver, inner, ..
+            } => self.enclosing_instance(receiver, inner),
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from the
+            // storage that base contributes.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.enum_member_name(target).is_some() => {
+                let member = self.enum_member_name(target).expect("checked by the guard");
+                self.enum_member(member, receiver)
+            }
+            // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.class_name_accessor(target).is_some() => {
+                let symbol = self
+                    .class_name_accessor(target)
+                    .expect("checked by the guard");
+                self.class_name(symbol, receiver)
             }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1326,6 +1742,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ..
             }) if self.throwable_field(target).is_some() => {
                 let symbol = self.throwable_field(target).expect("just matched");
+                if self.file.overrides_a_throwable_accessor {
+                    return Err(format!(
+                        "a read of `Throwable.{}` in a file that overrides one",
+                        if symbol == "kt_throwable_cause" {
+                            "cause"
+                        } else {
+                            "message"
+                        }
+                    ));
+                }
                 self.throwable_field_read(symbol, receiver)
             }
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
@@ -1334,6 +1760,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            IrExpr::Checked(IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    return self.receiver_property(
+                        &target,
+                        dispatch_receiver,
+                        extension_receiver,
+                        &context_arguments,
+                        None,
+                    );
+                }
+                match self.checked_property(&target) {
+                    Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
+                    Err(reason) if reason == objects::TOP_LEVEL => {
+                        let name = self.checked_property_name(&target)?;
+                        self.top_level_read(&name)
+                    }
+                    Err(reason) => Err(reason),
+                }
+            }
+            IrExpr::KClassLiteral { classifier, value } => self.class_literal(classifier, value),
+            IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {
                 body,
@@ -1346,7 +1799,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             | IrExpr::SetValue { .. }
             | IrExpr::While { .. }
             | IrExpr::Break { .. }
-            | IrExpr::Continue { .. } => {
+            | IrExpr::Continue { .. }
+            | IrExpr::SetField { .. }
+            | IrExpr::SetStatic { .. }
+            | IrExpr::Checked(IrCheckedOperation::PropertyWrite { .. }) => {
                 self.statement(id)?;
                 Ok(None)
             }
@@ -1672,17 +2128,79 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             },
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
-                Callee::External { ret, .. } | Callee::Intrinsic { ret, .. } => *ret,
+                Callee::External { ret, .. }
+                | Callee::Intrinsic { ret, .. }
+                | Callee::Super { ret, .. } => *ret,
+                Callee::Special { source, .. } => {
+                    let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
+                    self.file.ir.functions[*function as usize].ret
+                }
+                // A VIRTUAL call yields what the slot it dispatches through carries, which is the
+                // DECLARED return rather than the one this receiver's class narrows it to. For a
+                // generic member that is a type parameter, so the value is a reference — and
+                // saying so is what lets a site wanting a machine value unbox it. Leaving it
+                // undetermined is what made `class A(a: Tr<Int>) : Tr<Int> by a`'s `a.prop`
+                // reach an `Int` position as a reference with nothing to convert it by.
+                Callee::Virtual {
+                    params: Some((_, ret)),
+                    ..
+                } => *ret,
                 _ => return None,
             },
-            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
-            // `cs.length` is an `Int`: the language's own type, stated here because the checked
-            // property table has nothing to say about a dependency's property.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. })
-                if self.is_text_length(*target) =>
-            {
-                Ty::Int
+            IrExpr::New { internal, .. }
+            | IrExpr::SingletonValue {
+                classifier: internal,
             }
+            | IrExpr::EnumEntry {
+                classifier: internal,
+                ..
+            }
+            | IrExpr::EnumValueOf {
+                classifier: internal,
+                ..
+            } => Ty::Obj(*internal, &[]),
+            IrExpr::MethodCall { class, index, .. } => {
+                let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
+                self.file.ir.functions[fid as usize].ret
+            }
+            IrExpr::GetField { class, index, .. } => super::super::captures::physical_ty(
+                self.file.ir,
+                *class,
+                *index,
+                self.file.ir.classes[*class as usize].fields[*index as usize].ty,
+            ),
+            // The RAW field behind `::prop.isInitialized`, which carries what the field holds:
+            // the comparison against null is a node of its own around this one.
+            IrExpr::LateinitInitialized { class, index, .. } => {
+                super::super::captures::physical_ty(
+                    self.file.ir,
+                    *class,
+                    *index,
+                    self.file.ir.classes[*class as usize].fields[*index as usize].ty,
+                )
+            }
+            IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
+            // checked property table has nothing to say about them; their types are the language's
+            // and are stated where the read itself is recognized.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
+                // `cs.length` is an `Int`: the language's own type, stated here for the same
+                // reason `kotlin.Enum`'s two are.
+                if self.is_text_length(*target) {
+                    return Some(Ty::Int);
+                }
+                if self.class_name_accessor(*target).is_some() {
+                    return Some(Ty::nullable(Ty::String));
+                }
+                match self.enum_member_name(*target) {
+                    Some("name") => Ty::String,
+                    Some(_) => Ty::Int,
+                    None => return None,
+                }
+            }
+            // A class literal is an object of the reflection type Kotlin gives it, which is what
+            // makes an equality between two of them an equality between references.
+            IrExpr::KClassLiteral { .. } => classes_literal::kclass(),
             // `x!!` yields `x` or fails, so its type is the OPERAND's with the nullability taken
             // off — which is what the lowering already does, unboxing a nullable primitive there.
             // Saying so here is what lets a CONSUMER of `x!!` know what it is holding: without it
@@ -1831,7 +2349,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if dispatch_receiver.is_some() {
                     return Err("a static call with a receiver".to_string());
                 }
-                let params = self.file.ir.functions[*function as usize].params.clone();
+                let params = super::super::captures::carried_parameters(self.file.ir, *function);
                 let arguments = self.arguments(args, &params)?;
                 if self.terminated {
                     return Ok(None);
@@ -1845,6 +2363,57 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let func_ref = self.func_ref(id);
                 let call = self.emit_call(func_ref, &arguments)?;
                 Ok(self.builder.inst_results(call).first().copied())
+            }
+            Callee::Super {
+                owner,
+                name,
+                kind,
+                source,
+                params,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                let target = objects::SuperTarget {
+                    owner: *owner,
+                    name,
+                    kind: *kind,
+                    source: *source,
+                    params: Some(params),
+                };
+                self.direct_call(target, receiver, args)
+            }
+            Callee::Virtual {
+                owner,
+                name,
+                params,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a virtual call without a receiver (`{name}`)"));
+                };
+                self.virtual_call(*owner, name, params.as_ref(), receiver, args)
+            }
+            Callee::Special {
+                owner,
+                name,
+                source,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
+                // carries no accessor kind because it never names one.
+                let target = objects::SuperTarget {
+                    owner: *owner,
+                    name,
+                    kind: crate::ir::IrSuperCallKind::Function,
+                    source: *source,
+                    params: None,
+                };
+                self.direct_call(target, receiver, args)
             }
             Callee::Intrinsic { operation, ret } => {
                 self.intrinsic(*operation, *ret, dispatch_receiver, args)
@@ -1874,6 +2443,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        // A receiver typed by a RUNTIME-KNOWN type this file puts a class of its
+                        // own behind may be one of those objects, and every table below answers
+                        // only for the ones the runtime MAKES. No static type tells the two apart
+                        // — that is why those answers are the runtime's at all — so the member
+                        // declines by name, with the type it was asked of still in sight.
+                        if let Some(internal) = self
+                            .type_of(receiver)
+                            .map(Ty::non_null)
+                            .and_then(|ty| ty.obj_internal())
+                        {
+                            if self.file.implements_dependency(internal) {
+                                return Err(format!(
+                                    "the member `{}.{name}` of a type this file implements itself",
+                                    internal.render().replace('/', ".")
+                                ));
+                            }
+                        }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
                         // here rather than in the runtime keeps the operand unboxed — the member
                         // path below crosses everything as a reference, which for a `Double` would
@@ -2079,8 +2665,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // receiver's DESCRIPTOR says what to compare, exactly as `equals` and
                         // `toString` on such a receiver already read it — a boxed primitive at its
                         // own width, with Kotlin's TOTAL order for the floating ones, and a string
-                        // by UTF-16 unit.
+                        // by UTF-16 unit. A file that declares a `Comparable` of its own keeps
+                        // declining: an object of the program's could stand behind that type and
+                        // the runtime has no order for it.
                         if super::super::intrinsics::is_comparable_compare_to(&owner, &name, params)
+                            && !self.file.declares_its_own_comparable
                         {
                             let operands =
                                 vec![self.reference(receiver)?, self.reference(args[0])?];
@@ -2538,6 +3127,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.values_equal(left, right, ty).map(Some)
+    }
+
+    /// Whether two values already in hand are `equals`, by the same rules.
+    /// Two strings, concatenated.
+    pub(super) fn join(&mut self, left: Value, right: Value) -> Result<Value, Unsupported> {
+        Ok(self
+            .runtime_call("kt_string_plus", &[any(), any()], any(), &[left, right])?
+            .expect("`kt_string_plus` returns a string"))
     }
 
     pub(super) fn values_equal(

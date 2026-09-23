@@ -118,6 +118,26 @@ fn a_throw_two_calls_deep_is_caught_at_the_top() {
 }
 
 #[test]
+fn a_throw_from_a_constructor_is_caught() {
+    // A constructor is a generated function body like any other, and it propagates the same way.
+    expect_native_box(
+        "class Checked(val n: Int) {\n\
+         \x20   init { if (n < 0) throw IllegalArgumentException(\"negative\") }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       Checked(-1)\n\
+         \x20       \"fail: constructed\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message == \"negative\") \"OK\" else \"fail message\"\n\
+         \x20   }\n\
+         }\n",
+        "ThrowFromConstructor",
+        "OK",
+    );
+}
+
+#[test]
 fn a_stdlib_thrower_is_caught_like_a_written_throw() {
     // `error(m)` IS `throw IllegalStateException(m)` in Kotlin, so a `catch` must not be able to
     // tell them apart. One object through one path is what keeps that true.
@@ -195,6 +215,25 @@ fn an_uncaught_throw_past_a_try_still_ends_the_program() {
 }
 
 #[test]
+fn a_failed_cast_names_both_classes_the_way_kotlin_native_does() {
+    expect_native_box(
+        "class MyObject\n\
+         fun box(): String {\n\
+         \x20   try {\n\
+         \x20       MyObject() as String\n\
+         \x20   } catch (e: ClassCastException) {\n\
+         \x20       val said = e.message\n\
+         \x20       return if (said == \"class MyObject cannot be cast to class kotlin.String\") \"OK\"\n\
+         \x20              else \"fail: $said\"\n\
+         \x20   }\n\
+         \x20   return \"fail: no throw\"\n\
+         }\n",
+        "CastMessage",
+        "OK",
+    );
+}
+
+#[test]
 fn a_null_cast_is_a_null_pointer_exception_naming_the_target_type() {
     // `null as T` and `x!!` are both NullPointerException and differ in their MESSAGE: the cast
     // names the type it could not reach, and `!!` says nothing at all. kotlinc 2.4.10 confirms
@@ -215,11 +254,128 @@ fn a_null_cast_is_a_null_pointer_exception_naming_the_target_type() {
     );
 }
 
+#[test]
+fn reading_a_lateinit_property_before_it_is_set_throws() {
+    // The guard is at the READ, which is where kotlinc puts it: the field being null is the only
+    // evidence there is, and it is why `lateinit` is confined to types that have a null.
+    expect_native_box(
+        "class Holder {\n\
+         \x20   lateinit var text: String\n\
+         \x20   fun read(): String = text\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val holder = Holder()\n\
+         \x20   val said = try {\n\
+         \x20       holder.read()\n\
+         \x20       \"fail: read succeeded\"\n\
+         \x20   } catch (e: UninitializedPropertyAccessException) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (said != \"lateinit property text has not been initialized\") return \"fail: $said\"\n\
+         \x20   holder.text = \"set\"\n\
+         \x20   return if (holder.text == \"set\") \"OK\" else \"fail after set\"\n\
+         }\n",
+        "LateinitGuard",
+        "OK",
+    );
+}
+
+#[test]
+fn valueof_of_an_unknown_constant_throws() {
+    expect_native_box(
+        "enum class Color { RED, GREEN }\n\
+         fun box(): String {\n\
+         \x20   if (Color.valueOf(\"RED\") != Color.RED) return \"fail known\"\n\
+         \x20   return try {\n\
+         \x20       Color.valueOf(\"BLUE\")\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       \"OK\"\n\
+         \x20   }\n\
+         }\n",
+        "ValueOfUnknown",
+        "OK",
+    );
+}
+
+#[test]
+fn a_lateinit_property_that_overrides_one_is_guarded_too() {
+    // The read goes through a vtable slot because the property overrides an interface's, so it
+    // reaches the synthesized getter rather than the field directly. The guard has to be on what
+    // that getter reads, not on the shape of the read.
+    expect_native_box(
+        "interface Named { val label: String }\n\
+         class Tagged : Named {\n\
+         \x20   override lateinit var label: String\n\
+         \x20   fun read(): String = label\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val tagged = Tagged()\n\
+         \x20   val said = try { tagged.read(); \"fail: read succeeded\" }\n\
+         \x20              catch (e: UninitializedPropertyAccessException) { \"caught\" }\n\
+         \x20   if (said != \"caught\") return \"fail: $said\"\n\
+         \x20   tagged.label = \"set\"\n\
+         \x20   return if (tagged.read() == \"set\") \"OK\" else \"fail after set\"\n\
+         }\n",
+        "LateinitOverride",
+        "OK",
+    );
+}
+
 // ---- `finally` ---------------------------------------------------------------------------------
 //
 // `finally` runs on EVERY way out of a `try`: normal completion, each handler, an exception nobody
 // caught, and a `return`, `break` or `continue` written inside the body. Every expectation below
 // was taken from kotlinc 2.4.10 first — several are not what reading the construct suggests.
+
+#[test]
+fn a_finally_runs_after_the_body_completes() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String { try { log.append(\"t\"); return \"N\" } finally { log.append(\"f\") } }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"N\" && log.toString() == \"tf\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyNormal",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_runs_after_the_handler_that_caught() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   try { log.append(\"t\"); throw IllegalStateException(\"x\") }\n\
+         \x20   catch (e: IllegalStateException) { log.append(\"c\"); return \"C\" }\n\
+         \x20   finally { log.append(\"f\") }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"C\" && log.toString() == \"tcf\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyAfterCatch",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_runs_while_an_exception_is_travelling_and_then_it_carries_on() {
+    // The slot has to be CLEARED around the block: the finally's own calls each check it, so
+    // leaving it set would make the first of them turn straight round and the block would not run.
+    // kotlinc confirms a finally may call whatever it likes here.
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String { try { throw IllegalStateException(\"p\") } finally { log.append(\"f\") } }\n\
+         fun box(): String {\n\
+         \x20   val said = try { f() } catch (e: IllegalStateException) { e.message }\n\
+         \x20   return if (said == \"p\" && log.toString() == \"f\") \"OK\" else \"fail: $said/$log\"\n\
+         }\n",
+        "FinallyThenPropagate",
+        "OK",
+    );
+}
 
 #[test]
 fn a_finally_that_returns_takes_over_from_the_body() {
@@ -252,6 +408,76 @@ fn a_finally_that_throws_replaces_the_exception_in_flight() {
          \x20          catch (e: IllegalStateException) { \"fail: the first one survived\" }\n\
          }\n",
         "FinallyThrowWins",
+        "OK",
+    );
+}
+
+#[test]
+fn a_break_out_of_a_try_runs_its_finally() {
+    // The finally belongs to a `try` INSIDE the loop, so the breaking turn runs it like the
+    // others: kotlinc logs `0ff` for three turns where the second breaks.
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   for (i in 0..2) {\n\
+         \x20       try { if (i == 1) break; log.append(\"$i\") } finally { log.append(\"f\") }\n\
+         \x20   }\n\
+         \x20   return \"L\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"L\" && log.toString() == \"0ff\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyOnBreak",
+        "OK",
+    );
+}
+
+#[test]
+fn a_continue_out_of_a_try_runs_its_finally() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun box(): String {\n\
+         \x20   for (i in 0..2) {\n\
+         \x20       try { if (i == 1) continue; log.append(\"$i\") } finally { log.append(\"f\") }\n\
+         \x20   }\n\
+         \x20   // `0f` for the first turn, `f` alone for the one that continues, `2f` for the last.\n\
+         \x20   return if (log.toString() == \"0ff2f\") \"OK\" else \"fail: $log\"\n\
+         }\n",
+        "FinallyOnContinue",
+        "OK",
+    );
+}
+
+#[test]
+fn nested_finallys_run_innermost_first() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   try { try { return \"r\" } finally { log.append(\"inner\") } } finally { log.append(\"outer\") }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"r\" && log.toString() == \"innerouter\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "NestedFinallys",
+        "OK",
+    );
+}
+
+#[test]
+fn a_try_finally_with_no_catch_still_propagates() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): Int { try { return 1 } finally { log.append(\"a\") } }\n\
+         fun box(): String {\n\
+         \x20   val n = f()\n\
+         \x20   val caught = try {\n\
+         \x20       try { throw IllegalStateException(\"z\") } finally { log.append(\"b\") }\n\
+         \x20   } catch (e: IllegalStateException) { e.message }\n\
+         \x20   return if (n == 1 && caught == \"z\" && log.toString() == \"ab\") \"OK\" else \"fail: $n/$caught/$log\"\n\
+         }\n",
+        "TryFinallyNoCatch",
         "OK",
     );
 }
