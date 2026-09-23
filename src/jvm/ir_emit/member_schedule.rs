@@ -26,6 +26,7 @@ pub(super) fn source_ordered_members<'a>(
             .methods
             .iter()
             .copied()
+            .filter(|function| !ir.members_after_serialization_ctor.contains(function))
             .map(SourceOrderedMember::Function),
     );
     ordered.extend(

@@ -330,6 +330,7 @@ pub(super) fn add_child_serializer_cache(
             param_checks: Vec::new(),
         });
         ir.synthetic_methods.insert(acc);
+        ir.members_after_serialization_ctor.insert(acc);
         ir.classes[class_id as usize].methods.push(acc);
         Some(ChildSerializerCachePlan {
             static_index,
