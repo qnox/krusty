@@ -64,3 +64,22 @@ fun box(): String {\n\
         "subtype_receiver_binds_declared_formal",
     );
 }
+
+/// The same inference shape with repository-owned classifiers and a neutral callable name. This
+/// guards the generic receiver constraint independently of any stdlib `plus` realization.
+#[test]
+fn a_custom_subtype_receiver_binds_before_overload_selection() {
+    common::expect_box_same_as_kotlinc(
+        "open class Carrier<out T>\n\
+class Parcel<T> : Carrier<T>()\n\
+@JvmName(\"routeOne\") fun <T> Carrier<T>.route(value: T): String = \"one\"\n\
+@JvmName(\"routeMany\") fun <T> Carrier<T>.route(values: Iterable<T>): String = \"many\"\n\
+fun <E> forward(receiver: Parcel<E>, values: List<E>): String = receiver.route(values)\n\
+fun box(): String {\n\
+    if (forward(Parcel<Int>(), listOf(1, 2)) != \"many\") return \"collection\"\n\
+    if (Parcel<Int>().route(1) != \"one\") return \"element\"\n\
+    return \"OK\"\n\
+}\n",
+        "custom_subtype_receiver_binds_declared_formal",
+    );
+}
