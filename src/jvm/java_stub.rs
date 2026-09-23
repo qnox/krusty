@@ -122,6 +122,55 @@ struct Resolver<'a> {
     declaration_outers: &'a HashMap<&'a str, Option<&'a str>>,
 }
 
+/// Type variables in scope at one source position: the class's, then a member's own. Each level is
+/// a declaration's type-parameter list with its leftmost bounds, so a bound is read in the scope
+/// that declares it (a method `<T>` does not capture the `T` in a class parameter's bound).
+#[derive(Clone)]
+struct TypeVariables<'a> {
+    levels: Vec<&'a [(String, Option<SrcType>)]>,
+}
+
+impl<'a> TypeVariables<'a> {
+    fn of(declared: &'a [(String, Option<SrcType>)]) -> Self {
+        Self {
+            levels: vec![declared],
+        }
+    }
+
+    fn with<'b>(&self, declared: &'b [(String, Option<SrcType>)]) -> TypeVariables<'b>
+    where
+        'a: 'b,
+    {
+        let mut levels: Vec<&'b [(String, Option<SrcType>)]> = self.levels.clone();
+        levels.push(declared);
+        TypeVariables { levels }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.levels
+            .iter()
+            .any(|level| level.iter().any(|(declared, _)| declared == name))
+    }
+
+    /// The leftmost bound of the innermost type variable `name`, with the scope it is written in.
+    fn bound(&self, name: &str) -> Option<(Option<&'a SrcType>, Self)> {
+        let level = self
+            .levels
+            .iter()
+            .rposition(|level| level.iter().any(|(declared, _)| declared == name))?;
+        let bound = self.levels[level]
+            .iter()
+            .find(|(declared, _)| declared == name)
+            .and_then(|(_, bound)| bound.as_ref());
+        Some((
+            bound,
+            Self {
+                levels: self.levels[..=level].to_vec(),
+            },
+        ))
+    }
+}
+
 /// The declaration flags Java assigns after applying kind-specific implicit modifiers. This is the
 /// single semantic source for both the class header and the declaration's `InnerClasses` self entry.
 /// Those two classfile locations allow different flag subsets, but must never disagree about whether
@@ -193,13 +242,40 @@ impl Resolver<'_> {
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
-    /// Erased JVM descriptor of a source type. `None` if a reference type doesn't resolve.
-    fn desc(&self, t: &SrcType, tparams: &[&str]) -> Option<String> {
+    /// Erased JVM descriptor of a source type (JLS §4.6). `None` if a reference type doesn't
+    /// resolve.
+    fn desc(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<String> {
+        self.erased_desc(t, tparams, &mut Vec::new())
+    }
+
+    /// A type variable erases to the erasure of its leftmost bound, `Object` when it has none; a
+    /// bound that is itself a type variable is erased in turn (`<A, B extends A>` erases `B` to
+    /// `Object`). `erasing` holds the variables being expanded: javac rejects a cyclic bound.
+    fn erased_desc<'t>(
+        &self,
+        t: &'t SrcType,
+        tparams: &TypeVariables<'t>,
+        erasing: &mut Vec<&'t str>,
+    ) -> Option<String> {
         let mut s = "[".repeat(t.array as usize);
         if let Some(p) = primitive_desc(&t.name) {
             s.push_str(p);
-        } else if tparams.contains(&t.name.as_str()) {
-            s.push_str("Ljava/lang/Object;");
+        } else if let Some((bound, bound_scope)) = tparams.bound(&t.name) {
+            match bound {
+                None => s.push_str("Ljava/lang/Object;"),
+                Some(_) if erasing.contains(&t.name.as_str()) => {
+                    if !self.mode.is_lenient() {
+                        return None;
+                    }
+                    s.push_str("Ljava/lang/Object;");
+                }
+                Some(bound) => {
+                    erasing.push(&t.name);
+                    let erased = self.erased_desc(bound, &bound_scope, erasing);
+                    erasing.pop();
+                    s.push_str(&erased?);
+                }
+            }
         } else {
             match self.internal_of(&t.name) {
                 Some(i) => {
@@ -210,18 +286,33 @@ impl Resolver<'_> {
                 None if self.mode.is_lenient() => s.push_str("Ljava/lang/Object;"),
                 None => return None,
             }
-        }
-        for a in t.arguments() {
-            self.desc(a, tparams)?;
+            for a in t.arguments() {
+                self.resolves(a, tparams)?;
+            }
         }
         Some(s)
+    }
+
+    /// Whether every classifier a type argument names resolves. Erasure drops the arguments, but a
+    /// strict stub must still reject an unknown type rather than guess it.
+    fn resolves(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<()> {
+        if primitive_desc(&t.name).is_some() || tparams.contains(&t.name) {
+            return Some(());
+        }
+        if self.internal_of(&t.name).is_none() && !self.mode.is_lenient() {
+            return None;
+        }
+        for a in t.arguments() {
+            self.resolves(a, tparams)?;
+        }
+        Some(())
     }
 
     fn append_type_arguments(
         &self,
         output: &mut String,
         arguments: &[SrcType],
-        tparams: &[&str],
+        tparams: &TypeVariables<'_>,
     ) -> Option<()> {
         if arguments.is_empty() {
             return Some(());
@@ -235,13 +326,13 @@ impl Resolver<'_> {
     }
 
     /// JVM generic-`Signature` form of a source type (`LA<TE;>;`, `TE;`, `I`).
-    fn sig(&self, t: &SrcType, tparams: &[&str]) -> Option<String> {
+    fn sig(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<String> {
         let mut s = "[".repeat(t.array as usize);
         if let Some(p) = primitive_desc(&t.name) {
             s.push_str(p);
             return Some(s);
         }
-        if tparams.contains(&t.name.as_str()) {
+        if tparams.contains(&t.name) {
             s.push('T');
             s.push_str(&t.name);
             s.push(';');
@@ -295,7 +386,7 @@ impl Resolver<'_> {
     fn tparam_block(
         &self,
         tparams: &[(String, Option<SrcType>)],
-        scope: &[&str],
+        scope: &TypeVariables<'_>,
     ) -> Option<String> {
         if tparams.is_empty() {
             return Some(String::new());
@@ -313,7 +404,12 @@ impl Resolver<'_> {
         Some(s)
     }
 
-    fn build_class_sig(&self, d: &RawDecl, tp: &[&str], default_super: &str) -> Option<String> {
+    fn build_class_sig(
+        &self,
+        d: &RawDecl,
+        tp: &TypeVariables<'_>,
+        default_super: &str,
+    ) -> Option<String> {
         let mut sig = self.tparam_block(&d.tparams, tp)?;
         match &d.superclass {
             Some(t) => sig.push_str(&self.sig(t, tp)?),
@@ -330,7 +426,7 @@ impl Resolver<'_> {
     }
 
     fn emit(&self, d: &RawDecl) -> Option<Vec<u8>> {
-        let tp: Vec<&str> = d.tparams.iter().map(|(n, _)| n.as_str()).collect();
+        let tp = TypeVariables::of(&d.tparams);
         let is_enum = d.kind == DeclKind::Enum;
         let is_record = d.kind == DeclKind::Record;
         let super_internal = if is_enum {
@@ -391,7 +487,7 @@ impl Resolver<'_> {
                 || d.superclass
                     .iter()
                     .chain(d.interfaces.iter())
-                    .any(|t| t.has_type_arguments() || tp.contains(&t.name.as_str()));
+                    .any(|t| t.has_type_arguments() || tp.contains(&t.name));
             if generic {
                 let default_super = if is_record {
                     "java/lang/Record"
@@ -417,7 +513,7 @@ impl Resolver<'_> {
 
         for (name, ty, acc, constant) in &d.fields {
             let desc = self.desc(ty, &tp)?;
-            let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
+            let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
                 match self.sig(ty, &tp) {
                     Some(s) => Some(s),
                     None if self.mode.is_lenient() => None,
@@ -436,7 +532,7 @@ impl Resolver<'_> {
                     0
                 };
             let constant = (acc & (ACC_STATIC | ACC_FINAL) == (ACC_STATIC | ACC_FINAL))
-                .then(|| constant.as_ref())
+                .then_some(constant.as_ref())
                 .flatten()
                 .map(|constant| match constant {
                     JavaConstant::String(value) => {
@@ -449,7 +545,7 @@ impl Resolver<'_> {
         if is_record {
             for (name, ty) in &d.record_components {
                 let desc = self.desc(ty, &tp)?;
-                let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
+                let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
                     match self.sig(ty, &tp) {
                         Some(s) => Some(s),
                         None if self.mode.is_lenient() => None,
@@ -555,7 +651,7 @@ impl Resolver<'_> {
         Some(w.finish())
     }
 
-    fn build_member_sig(&self, m: &Member, scope: &[&str]) -> Option<String> {
+    fn build_member_sig(&self, m: &Member, scope: &TypeVariables<'_>) -> Option<String> {
         let mut s = self.tparam_block(&m.tparams, scope)?;
         s.push('(');
         for p in &m.params {
@@ -574,10 +670,9 @@ impl Resolver<'_> {
         w: &mut ClassWriter,
         d: &RawDecl,
         m: &Member,
-        class_tp: &[&str],
+        class_tp: &TypeVariables<'_>,
     ) -> Option<()> {
-        let mut scope = class_tp.to_vec();
-        scope.extend(m.tparams.iter().map(|(n, _)| n.as_str()));
+        let scope = class_tp.with(&m.tparams);
         let enum_constructor = d.kind == DeclKind::Enum && m.name == "<init>";
         let mut desc = if enum_constructor {
             "(Ljava/lang/String;I".to_string()
@@ -594,7 +689,7 @@ impl Resolver<'_> {
             || m.params
                 .iter()
                 .chain(m.ret.iter())
-                .any(|t| t.has_type_arguments() || scope.contains(&t.name.as_str()));
+                .any(|t| t.has_type_arguments() || scope.contains(&t.name));
         let sig = if generic {
             match self.build_member_sig(m, &scope) {
                 Some(s) => Some(s),
@@ -631,7 +726,7 @@ impl Resolver<'_> {
         Some(())
     }
 
-    fn erased_parameters(&self, params: &[SrcType], scope: &[&str]) -> Option<String> {
+    fn erased_parameters(&self, params: &[SrcType], scope: &TypeVariables<'_>) -> Option<String> {
         let mut descriptor = String::new();
         for parameter in params {
             descriptor.push_str(&self.desc(parameter, scope)?);
@@ -1433,5 +1528,81 @@ mod tests {
             .map(|reference| reference.path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(referenced, ["Actual"]);
+    }
+
+    /// JLS §4.6: a type variable erases to its leftmost bound, recursively, wherever it is declared.
+    /// Each expected descriptor is javac's for this source.
+    #[test]
+    fn type_variables_erase_to_their_leftmost_bound() {
+        let out = stubs(
+            "import java.util.List;\n\
+             public class Erasure<N extends Number, S extends N> {\n\
+                 public N number;\n\
+                 public S[] numbers;\n\
+                 public Erasure(N n) { number = n; }\n\
+                 public N get() { return number; }\n\
+                 public S narrow() { return null; }\n\
+                 public static <T extends Comparable<T>> T max(List<T> xs) { return null; }\n\
+                 public static <T extends Comparable<? super T>> T[] sorted(T[] xs) { return xs; }\n\
+                 public static <A, B extends A> B pick(A a, B b) { return b; }\n\
+                 public static <E extends CharSequence & Comparable<E>> E first(E e) { return e; }\n\
+                 public <N extends CharSequence> N shadow(N n) { return n; }\n\
+                 public <T> Erasure(T t, N n) { number = n; }\n\
+             }",
+            &[
+                "java/lang/Object",
+                "java/lang/Number",
+                "java/lang/Comparable",
+                "java/lang/CharSequence",
+                "java/util/List",
+            ],
+        )
+        .expect("stub");
+        let class = parse_class(&out[0].1).expect("parse stub");
+        let field = |name: &str| {
+            class
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.descriptor.as_str())
+        };
+        assert_eq!(field("number"), Some("Ljava/lang/Number;"));
+        assert_eq!(field("numbers"), Some("[Ljava/lang/Number;"));
+        let descriptors = |name: &str| {
+            class
+                .methods_named(name)
+                .into_iter()
+                .map(|method| method.descriptor.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            descriptors("<init>"),
+            [
+                "(Ljava/lang/Number;)V",
+                "(Ljava/lang/Object;Ljava/lang/Number;)V"
+            ]
+        );
+        assert_eq!(descriptors("get"), ["()Ljava/lang/Number;"]);
+        assert_eq!(descriptors("narrow"), ["()Ljava/lang/Number;"]);
+        assert_eq!(
+            descriptors("max"),
+            ["(Ljava/util/List;)Ljava/lang/Comparable;"]
+        );
+        assert_eq!(
+            descriptors("sorted"),
+            ["([Ljava/lang/Comparable;)[Ljava/lang/Comparable;"]
+        );
+        assert_eq!(
+            descriptors("pick"),
+            ["(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"]
+        );
+        assert_eq!(
+            descriptors("first"),
+            ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
+        );
+        assert_eq!(
+            descriptors("shadow"),
+            ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
+        );
     }
 }
