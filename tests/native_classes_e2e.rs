@@ -790,6 +790,39 @@ fn a_bridge_converts_its_arguments_as_well_as_its_answer() {
     );
 }
 
+#[test]
+fn an_abstract_member_carries_the_default_its_override_is_called_with() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin writes a default on the DECLARATION, and an interface member's declaration has no
+    // body. So `i.f()` has two halves that belong in different places: the argument is computed
+    // from the interface's own default, and which implementation then runs is decided by the
+    // receiver. Filling the argument must not settle the dispatch — the generator refused these
+    // outright rather than risk answering with the wrong implementation.
+    assert_eq!(
+        run("interface I {\n\
+             \x20   fun f(x: Int = 23): String\n\
+             }\n\
+             abstract class Base : I\n\
+             class C : Base(), I {\n\
+             \x20   override fun f(x: Int) = \"C:\" + x\n\
+             }\n\
+             class D : Base(), I {\n\
+             \x20   override fun f(x: Int) = \"D:\" + x\n\
+             }\n\
+             fun main() {\n\
+             \x20   val c: I = C()\n\
+             \x20   val d: I = D()\n\
+             \x20   println(c.f())\n\
+             \x20   println(d.f())\n\
+             \x20   println(c.f(42))\n\
+             }\n"),
+        "C:23\nD:23\nC:42\n"
+    );
+}
+
 /// A `value class` declines until the backend reads what the frontend checked about it.
 ///
 /// It is not a one-field class: Kotlin answers its `equals`, `hashCode` and `toString` by the

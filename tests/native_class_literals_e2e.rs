@@ -40,6 +40,24 @@ fn two_literals_of_one_type_are_equal_without_being_the_same_object() {
 }
 
 #[test]
+fn a_bound_literal_evaluates_its_receiver_exactly_once() {
+    // The receiver is an expression, not a type name: it runs, and a program can see it run.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var x = 42\n\
+         \x20   val first = (x++)::class\n\
+         \x20   if (first != Int::class) return \"fail class: $first\"\n\
+         \x20   if (x != 43) return \"fail effect: $x\"\n\
+         \x20   val second = { x *= 2; x }()::class\n\
+         \x20   if (second != Int::class) return \"fail boxed: $second\"\n\
+         \x20   return if (x == 86) \"OK\" else \"fail second effect: $x\"\n\
+         }\n",
+        "ClassLiteralReceiverEffect",
+        "OK",
+    );
+}
+
+#[test]
 fn a_literal_over_a_primitive_names_the_boxed_type() {
     // A scalar has no descriptor of its own, so the receiver is boxed and the box's descriptor is
     // the answer — which is `Int`, the same class the type literal names.

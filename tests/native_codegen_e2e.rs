@@ -979,6 +979,115 @@ fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
 }
 
 #[test]
+fn a_lambda_is_an_object_that_can_be_passed_called_and_returned() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A function value crosses a call boundary, is stored in a local, and is invoked through a
+    // parameter that knows only its arity — so every function value of an arity has to be callable
+    // one way, which is what the boxing convention at the thunk is for.
+    assert_eq!(
+        run("fun applyTo(f: (Int) -> Int, n: Int): Int = f(n)\n\
+             fun twice(f: (Int) -> Int, n: Int): Int = f(f(n))\n\
+             fun adder(by: Int): (Int) -> Int = { x -> x + by }\n\
+             fun main() {\n\
+             \x20   val inc = { x: Int -> x + 1 }\n\
+             \x20   println(applyTo(inc, 5))\n\
+             \x20   println(twice(inc, 5))\n\
+             \x20   println(applyTo(adder(10), 5))\n\
+             \x20   println(applyTo({ x -> x * x }, 7))\n\
+             \x20   val join = { a: String, b: String -> a + b }\n\
+             \x20   println(join(\"na\", \"me\"))\n\
+             \x20   val nothing = { }\n\
+             \x20   nothing()\n\
+             \x20   println(\"done\")\n\
+             }\n"),
+        "6\n7\n15\n49\nname\ndone\n"
+    );
+}
+
+#[test]
+fn a_lambda_captures_a_mutable_local_by_reference() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A captured `var` is one cell shared by the closure and the frame that made it, not a copy:
+    // writes on either side are visible to the other. A captured `val` is just its value.
+    assert_eq!(
+        run("fun run(f: () -> Unit) { f() }\n\
+             fun main() {\n\
+             \x20   var count = 0\n\
+             \x20   val label = \"n\"\n\
+             \x20   val bump = { count = count + 1 }\n\
+             \x20   run(bump)\n\
+             \x20   run(bump)\n\
+             \x20   println(count)\n\
+             \x20   count = 10\n\
+             \x20   run(bump)\n\
+             \x20   println(count)\n\
+             \x20   var text = \"\"\n\
+             \x20   val append = { s: String -> text = text + label + s }\n\
+             \x20   append(\"a\")\n\
+             \x20   append(\"b\")\n\
+             \x20   println(text)\n\
+             }\n"),
+        "2\n11\nnanb\n"
+    );
+}
+
+#[test]
+fn a_function_value_survives_collection_with_its_captures() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The closure holds the only reference to a heap string, and the loop allocates far past the
+    // collection threshold while calling it — so the capture has to be traced through the function
+    // object's own descriptor, at the offset the generator laid it out at.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val kept = \"kept-${1 + 1}\"\n\
+             \x20   val describe = { n: Int -> \"$kept:$n\" }\n\
+             \x20   var last = \"\"\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 100000) {\n\
+             \x20       last = describe(i)\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   println(last)\n\
+             \x20   println(describe(7))\n\
+             }\n"),
+        "kept-2:99999\nkept-2:7\n"
+    );
+}
+
+#[test]
+fn a_lambda_that_captures_nothing_is_one_object() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `{}` written once is one object however often it is evaluated — with nothing to capture
+    // there is nothing to allocate, so the instance is static storage and `===` sees it. A lambda
+    // that DOES capture is a fresh object each time, because each holds its own captured values.
+    // `hashCode` is not asserted here: `equals`/`hashCode` on a function value are declined for
+    // now, because a value of function type no longer says whether a lambda or a callable
+    // reference produced it, and the two want different answers.
+    assert_eq!(
+        run("fun generate(): () -> Unit = {}\n\
+             fun adder(by: Int): (Int) -> Int = { x -> x + by }\n\
+             fun main() {\n\
+             \x20   println(generate() === generate())\n\
+             \x20   println(adder(1) === adder(1))\n\
+             \x20   println(adder(1)(10))\n\
+             }\n"),
+        "true\nfalse\n11\n"
+    );
+}
+
+#[test]
 fn the_unit_value_is_the_runtimes_own() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -995,6 +1104,31 @@ fn the_unit_value_is_the_runtimes_own() {
              \x20   println(u == Unit)\n\
              }\n"),
         "kotlin.Unit\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn two_references_to_one_declaration_are_equal_through_two_variables() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin compares function values by the DECLARATION they name and the receiver they bind, so
+    // `::double == ::double` is true even though each is its own object. Nothing at the comparison
+    // can see that: both variables are spelled `(Int) -> Int`, which a lambda wears too. The
+    // OBJECT answers instead — a reference's table carries an `equals` keyed by the declaration,
+    // a lambda's carries `kotlin.Any`'s identity — and this used to be declined for want of that.
+    assert_eq!(
+        run("fun double(n: Int): Int = n * 2\n\
+             fun main() {\n\
+             \x20   val a: (Int) -> Int = ::double\n\
+             \x20   val b: (Int) -> Int = ::double\n\
+             \x20   val lambda: (Int) -> Int = { it * 2 }\n\
+             \x20   println(a == b)\n\
+             \x20   println(a == lambda)\n\
+             \x20   println(a.hashCode() == b.hashCode())\n\
+             }\n"),
+        "true\nfalse\ntrue\n"
     );
 }
 
@@ -1062,6 +1196,36 @@ fn the_stdlib_scope_functions_are_expanded_at_the_call_site() {
              \x20   println(calls)\n\
              }\n"),
         "4\n13\n9\n9\n103\n5\n"
+    );
+}
+
+#[test]
+fn a_scope_function_whose_block_is_a_function_value_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `apply { … }` written at the call site is spliced by the checked lowering and never reaches
+    // the generator. This is the other shape: the block arrives as a function-typed PARAMETER, so
+    // there is nothing to splice and the call has to be realized — invoke the block on the
+    // receiver, then yield what Kotlin's signature says. The counter pins the receiver being
+    // evaluated once.
+    assert_eq!(
+        run("class Box(var n: Int)\n\
+             var made = 0\n\
+             fun fresh(): Box { made = made + 1; return Box(2) }\n\
+             fun build(instructions: Box.() -> Unit): Box = fresh().apply(instructions)\n\
+             fun over(block: (Box) -> Unit): Box = fresh().also(block)\n\
+             fun read(block: (Box) -> Int): Int = fresh().let(block)\n\
+             fun on(block: Box.() -> Int): Int = fresh().run(block)\n\
+             fun main() {\n\
+             \x20   println(build { n = n + 5 }.n)\n\
+             \x20   println(over { it.n = it.n + 7 }.n)\n\
+             \x20   println(read { it.n + 30 })\n\
+             \x20   println(on { n + 40 })\n\
+             \x20   println(made)\n\
+             }\n"),
+        "7\n9\n32\n42\n4\n"
     );
 }
 
@@ -1255,6 +1419,68 @@ fn an_inherited_method_reaches_an_interfaces_number_through_a_bridge() {
 }
 
 #[test]
+fn a_lambda_becomes_the_fun_interface_it_is_converted_to() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A SAM conversion changes the TYPE a function value wears, and a type is a table here: the
+    // object holds its captures like any lambda, but a caller reaches it through the interface's
+    // own member number. What it inherits from the interface matters too — a default method, and a
+    // `kotlin.Any` member the interface overrides, both answer as an ordinary implementor's would.
+    assert_eq!(
+        run("fun interface Mapper {\n\
+             \x20   fun map(n: Int): Int\n\
+             \x20   fun twice(n: Int): Int = map(map(n))\n\
+             }\n\
+             fun interface Named { override fun toString(): String }\n\
+             var seen = 0\n\
+             fun interface Action { fun run() }\n\
+             fun apply(m: Mapper, n: Int) = m.map(n)\n\
+             fun render(value: Any) = value.toString()\n\
+             fun main() {\n\
+             \x20   println(apply({ it + 1 }, 20))\n\
+             \x20   val by = 5\n\
+             \x20   println(apply({ it + by }, 20))\n\
+             \x20   val doubler = Mapper { it * 2 }\n\
+             \x20   println(doubler.twice(3))\n\
+             \x20   println(render(Named { \"named\" }))\n\
+             \x20   val action = Action { seen = 7 }\n\
+             \x20   action.run()\n\
+             \x20   println(seen)\n\
+             }\n"),
+        "21\n25\n12\nnamed\n7\n"
+    );
+}
+
+#[test]
+fn converting_a_null_function_value_to_a_fun_interface_yields_null() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin converts a nullable function value to a `fun interface` by yielding null when it is
+    // null — not a wrapper around nothing, which would answer `!= null` and then call `invoke` on
+    // the null inside.
+    assert_eq!(
+        run("var ran = 0\n\
+             fun interface Runner { fun go() }\n\
+             fun isNull(r: Runner?): Boolean {\n\
+             \x20   if (r == null) return true\n\
+             \x20   r.go()\n\
+             \x20   return false\n\
+             }\n\
+             fun maybe(empty: Boolean): (() -> Unit)? = if (empty) null else {{ ran = ran + 1 }}\n\
+             fun main() {\n\
+             \x20   println(isNull(maybe(true)))\n\
+             \x20   println(isNull(maybe(false)))\n\
+             \x20   println(ran)\n\
+             }\n"),
+        "true\nfalse\n1\n"
+    );
+}
+
+#[test]
 fn an_inner_class_reaches_its_enclosing_instance() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -1290,6 +1516,44 @@ fn an_inner_class_reaches_its_enclosing_instance() {
              \x20   println(outer.Deep().Deeper().reach())\n\
              }\n"),
         "21\n40\ninner\n25\n25\n"
+    );
+}
+
+#[test]
+fn a_call_may_leave_arguments_out() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A default is written in the CALLEE's frame and may read an earlier parameter, so it cannot
+    // be evaluated at the call site. Each omission shape gets a wrapper that declares the callee's
+    // whole frame, fills the missing slots in declaration order, and calls through. A defaulted
+    // call on an open member still dispatches on its receiver: filling arguments does not decide
+    // which implementation runs.
+    assert_eq!(
+        run("fun greet(name: String, greeting: String = \"hi \"): String = greeting + name\n\
+             fun span(a: Int, b: Int = a + 1): Int = b - a\n\
+             fun three(a: Int, b: Int = 2, c: Int = 3): Int = a * 100 + b * 10 + c\n\
+             open class Base(val mark: String) {\n\
+             \x20   open fun tag(text: String, suffix: String = mark): String = text + suffix\n\
+             }\n\
+             class Loud(mark: String) : Base(mark) {\n\
+             \x20   override fun tag(text: String, suffix: String): String = text + suffix + \"!\"\n\
+             }\n\
+             data class Point(val x: Int, val y: Int)\n\
+             fun main() {\n\
+             \x20   println(greet(\"k\"))\n\
+             \x20   println(greet(\"k\", \"yo \"))\n\
+             \x20   println(span(10))\n\
+             \x20   println(three(1))\n\
+             \x20   println(three(1, c = 9))\n\
+             \x20   val base: Base = Base(\".\")\n\
+             \x20   println(base.tag(\"a\"))\n\
+             \x20   val loud: Base = Loud(\".\")\n\
+             \x20   println(loud.tag(\"a\"))\n\
+             \x20   println(Point(1, 2).copy(y = 9))\n\
+             }\n"),
+        "hi k\nyo k\n1\n123\n129\na.\na.!\nPoint(x=1, y=9)\n"
     );
 }
 
@@ -1416,6 +1680,35 @@ fn an_object_expression_implements_its_supertypes() {
              \x20   println(counter.next() + 40)\n\
              }\n"),
         "42\n42\n42\n42\n42\n"
+    );
+}
+
+#[test]
+fn a_local_class_shares_the_mutable_locals_it_captures() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `var a` that a local or anonymous class writes is ONE variable, not two: the class does not
+    // get a copy, it gets the cell the enclosing function moved the variable into. The checked
+    // lowering does the moving and marks which field carries the cell; `native::captures` is what
+    // says that field holds a reference, and without it the write lands in a copy and the enclosing
+    // function reads the value it started with.
+    assert_eq!(
+        run("fun box(): String {\n\
+             \x20   var counted = 1\n\
+             \x20   object { init { counted = 2 } }\n\
+             \x20   var named = \"a\"\n\
+             \x20   val setter = object { fun set() { named = \"b\" } }\n\
+             \x20   setter.set()\n\
+             \x20   var total = 0\n\
+             \x20   class Bump { fun go() { total += 5 } }\n\
+             \x20   Bump().go()\n\
+             \x20   Bump().go()\n\
+             \x20   return \"\" + counted + named + total\n\
+             }\n\
+             fun main() { println(box()) }\n"),
+        "2b10\n"
     );
 }
 
@@ -1616,6 +1909,41 @@ fn a_declaration_that_stores_a_default_stores_nothing() {
 }
 
 #[test]
+fn a_construction_may_leave_arguments_out() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A constructor's defaults are a function's problem with the object already in hand: a default
+    // may read an EARLIER parameter, so it has to be evaluated in the constructor's own frame. Each
+    // omission shape therefore gets a wrapper that declares that frame, fills the missing slots in
+    // declaration order and calls the constructor — the allocation stays at the call site, because
+    // allocating is not a default's to do. `class B : A()` reaches the same wrapper: a superclass
+    // delegation that leaves arguments out is the same call written without parentheses of its own.
+    assert_eq!(
+        run(
+            "open class Greeting(val name: String, val mark: String = \"!\", val full: String = name + mark)\n\
+             open class Base(val label: String = \"base\")\n\
+             class Derived : Base()\n\
+             var built = 0\n\
+             fun next(): String { built += 1; return built.toString() }\n\
+             class Counted(val tag: String = next())\n\
+             fun main() {\n\
+             \x20   val one = Greeting(\"k\")\n\
+             \x20   println(one.name + one.mark + one.full)\n\
+             \x20   val two = Greeting(\"k\", \"?\")\n\
+             \x20   println(two.full)\n\
+             \x20   println(Greeting(\"k\", \"?\", \"given\").full)\n\
+             \x20   println(Derived().label)\n\
+             \x20   println(object : Base() {}.label)\n\
+             \x20   println(Counted().tag + Counted().tag)\n\
+             }\n"
+        ),
+        "k!k!\nk?\ngiven\nbase\nbase\n12\n"
+    );
+}
+
+#[test]
 fn floating_point_values_render_as_kotlin_renders_them() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -1691,6 +2019,41 @@ fn what_kotlin_asks_of_a_value_directly() {
              \x20   println((0.0f / 0.0f).isNaN())\n\
              }\n"),
         "B\ntrue\ntrue\ntrue\ny\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n"
+    );
+}
+/// A callable reference is equal by WHAT IT REFERS TO, not by identity.
+///
+/// Kotlin's four rules in one program: two unbound references to the same declaration are equal
+/// though they are different objects; two bound ones with the same receiver are equal; two bound
+/// ones with different receivers are not; and a bound one never equals an unbound one. `hashCode`
+/// has to agree with each `equals` it is paired with.
+///
+/// The values cross as `Any` on purpose. That is how the corpus asks — `checkEqual(x: Any, y: Any)`
+/// — and it is the case the generator cannot see statically, so the answer has to come from the
+/// object's own table rather than from anything known at the call.
+#[test]
+fn a_callable_reference_is_equal_by_what_it_refers_to() {
+    common::expect_native_box(
+        "class Foo\n\
+         fun Foo.topLevelExtension(): Unit {}\n\
+         fun box(): String {\n\
+         \x20   val foo = Foo()\n\
+         \x20   val bar = Foo()\n\
+         \x20   val a: Any = Foo::topLevelExtension\n\
+         \x20   val b: Any = Foo::topLevelExtension\n\
+         \x20   if (a != b) return \"fail unbound\"\n\
+         \x20   if (a.hashCode() != b.hashCode()) return \"fail unbound hash\"\n\
+         \x20   val c: Any = foo::topLevelExtension\n\
+         \x20   val d: Any = foo::topLevelExtension\n\
+         \x20   if (c != d) return \"fail bound\"\n\
+         \x20   if (c.hashCode() != d.hashCode()) return \"fail bound hash\"\n\
+         \x20   val e: Any = bar::topLevelExtension\n\
+         \x20   if (c == e) return \"fail different receivers\"\n\
+         \x20   if (c == a) return \"fail bound vs unbound\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "RefEquality",
+        "OK",
     );
 }
 
@@ -2146,20 +2509,6 @@ fn a_collection_declines_by_the_declaration_it_names() {
          }\n",
         "CollectionDeclines",
         "listOf",
-    );
-}
-
-/// A function value declines by the node that makes it. A lambda is an object with a body of its
-/// own and a place in the function-type slot, and nothing here yet builds one.
-#[test]
-fn a_function_value_declines_by_the_node_that_makes_it() {
-    common::expect_native_decline(
-        "fun box(): String {\n\
-         \x20   val f = { \"OK\" }\n\
-         \x20   return \"OK\"\n\
-         }\n",
-        "FunctionValueDeclines",
-        "Lambda",
     );
 }
 

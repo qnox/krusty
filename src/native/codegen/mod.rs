@@ -80,11 +80,18 @@ impl Backend for CraneliftBackend {
 
     fn lower_ir_file(
         &self,
-        file: CheckedIrFile<'_>,
+        mut file: CheckedIrFile<'_>,
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
+        // Before the generator sees the file: a reflective dependency reference is a checked node
+        // the generator has no shape for, and this turns the realizable ones into the adapter form
+        // it already lowers. See `native::dependency_references`.
+        super::dependency_references::realize(&mut file.ir);
+        // The accessors a reference to a DEPENDENCY property is reached through, which the
+        // generator's own object is built from; see `native::dependency_references`.
+        let properties = super::dependency_references::realize_properties(&mut file.ir);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target.arch) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
@@ -105,6 +112,7 @@ impl Backend for CraneliftBackend {
             lower::FileInput {
                 ir: &file.ir,
                 runtime_symbols,
+                dependency_properties: &properties,
             },
             &self.provider,
             self.target,

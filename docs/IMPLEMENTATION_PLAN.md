@@ -4412,6 +4412,10 @@ each one lowering more and declining less:
   runtime-owned `Throwable`. A singleton, an enum's constants and the top-level properties are
   built lazily or before the entry, and each withdraws what it published when its initializer
   throws.
+- **Functions as values** (tier 3): lambdas and their captures (a captured `var` lives in a holder
+  object), function types with a fixed `invoke` slot, SAM conversions, callable references to
+  functions and properties including bound ones and dependency members, default arguments through
+  one wrapper per omission shape, local functions, and the stdlib scope functions.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

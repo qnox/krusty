@@ -16,10 +16,14 @@ use std::rc::Rc;
 mod arithmetic;
 mod boxed;
 mod classes_literal;
+mod defaults;
 mod enums;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
+mod functions;
 mod objects;
+mod references;
+mod scope;
 mod statics;
 mod strings;
 mod type_checks;
@@ -162,6 +166,10 @@ pub struct FileInput<'a> {
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
+    /// The accessors synthesized for each reference to a dependency property, by site; see
+    /// [`crate::native::dependency_references`].
+    pub dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
 }
 
 pub fn lower_file(
@@ -173,6 +181,7 @@ pub fn lower_file(
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
+        dependency_properties,
         runtime_symbols,
     } = input;
     let class_model = model::build(ir)?;
@@ -200,7 +209,15 @@ pub fn lower_file(
         classes: Vec::new(),
         accessors: HashMap::new(),
         statics: Vec::new(),
+        lambdas: HashMap::new(),
+        default_wrappers: HashMap::new(),
+        default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
+        reference_identities: HashMap::new(),
+        holders: HashMap::new(),
+        references: HashMap::new(),
+        dependency_properties,
+        dependency_property_skips: std::collections::HashMap::new(),
         implemented_collections: implemented_collections(ir),
         overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
@@ -218,8 +235,18 @@ pub fn lower_file(
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
+    lowering.declare_lambdas()?;
+    lowering.declare_default_wrappers()?;
+    lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
+    // Before any body is DEFINED, not after: a constructor is a body too, and a property
+    // reference written in a class's initializer (`class A { val r = C::z }`) is lowered while
+    // `define_classes` runs. Declaring these afterwards left exactly those sites unrealized.
+    lowering.declare_property_references()?;
+    lowering.declare_local_property_references()?;
     lowering.define_classes()?;
+    lowering.define_default_wrappers()?;
+    lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
@@ -417,8 +444,22 @@ struct FileLowering<'a> {
     accessors: HashMap<Slot, FuncId>,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
+    /// The emitted pieces of each lambda, by the expression that creates it.
+    lambdas: HashMap<u32, functions::LambdaItems>,
+    /// One wrapper per omission shape a call in this file uses.
+    default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The same, for a CONSTRUCTION that leaves arguments out.
+    default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
     enum_entries: HashMap<ClassId, enums::EnumItems>,
+    /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
+    holders: HashMap<String, DataId>,
+    /// The emitted pieces of each property reference, by the expression that creates it.
+    references: HashMap<u32, references::ReferenceSite>,
+    /// One marker per (referenced declaration, bound-ness) this file mentions — the identity two
+    /// callable references compare. Deduplicated here because two sites naming the same
+    /// declaration must reach the SAME marker; that is the whole point of it.
+    reference_identities: HashMap<String, DataId>,
     /// The runtime-known types this file puts a class of its OWN behind, by their Kotlin name.
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the
@@ -431,6 +472,14 @@ struct FileLowering<'a> {
     /// that type would have its vtable read for an entry it does not have, so a receiver of a
     /// shape listed here declines by name instead of being answered wrongly. A receiver of any
     /// OTHER shape is answered as usual; see [`implemented_collections`].
+    /// The accessors synthesized for each reference to a dependency property, by site; see
+    /// [`crate::native::dependency_references`].
+    dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Why a reference to a dependency property was left without an object, by site — filled by
+    /// the declare pass at the point it skips one, so the decline names the step that skipped it
+    /// rather than the condition it has in common with every other.
+    dependency_property_skips: std::collections::HashMap<u32, String>,
     implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
     /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
     /// [`overrides_a_throwable_accessor`].
@@ -1188,6 +1237,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => {
+                // A `var` a closure captures is replaced by a HOLDER: the slot holds the cell, not
+                // the value the source declared, and the declaration still says `Int` because that
+                // is what the programmer wrote. The initializer is what says which — and believing
+                // the declaration instead truncates a pointer into a 32-bit slot, which is a
+                // miscompile with no symptom at the point it happens.
+                let ty = match init.map(|init| self.file.ir.expr(init)) {
+                    Some(IrExpr::RefNew { .. }) => any(),
+                    _ => ty,
+                };
                 if carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
@@ -1700,6 +1758,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret),
+            IrExpr::RefNew { elem, init } => self.ref_new(elem, init),
+            IrExpr::RefGet { holder, elem } => self.ref_get(holder, elem),
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
@@ -1724,6 +1796,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self.enum_member_name(target).expect("checked by the guard");
                 self.enum_member(member, receiver)
             }
+            // `p.name`: a checked read of a dependency property whose receiver is a property
+            // reference, answered out of the reference's own table.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.reference_property(target, receiver).is_some() => self
+                .reference_property(target, receiver)
+                .expect("checked by the guard"),
             // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -1760,6 +1841,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            // `::foo.name` — `KCallable.name` of a reference written right here, which is the
+            // DECLARATION's own name and therefore known already.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.callable_reference_name(target, receiver).is_some() => {
+                let name = self
+                    .callable_reference_name(target, receiver)
+                    .expect("checked by the guard");
+                self.callable_name(receiver, &name)
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1785,6 +1878,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Err(reason) => Err(reason),
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
+                self.property_reference(id)
+            }
+            IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
             IrExpr::KClassLiteral { classifier, value } => self.class_literal(classifier, value),
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
@@ -2127,7 +2224,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ),
             },
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
+                Callee::Local(function)
+                | Callee::LocalWithDefaults { function, .. }
+                | Callee::ClassStaticWithDefaults { function, .. } => {
+                    self.file.ir.functions[*function as usize].ret
+                }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
@@ -2180,17 +2281,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::InvokeFunction { ret, .. } => *ret,
+            IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
+            // A function value and a captured-variable holder are both objects.
+            // A reference knows the function type it stands for, which is what makes an `equals`
+            // on it recognisable as one between function values.
+            IrExpr::CallableReference(reference) => reference.function_type,
+            IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
-                // `cs.length` is an `Int`: the language's own type, stated here for the same
-                // reason `kotlin.Enum`'s two are.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target, receiver, ..
+            }) => {
+                // `cs.length` is an `Int`, and `::foo.name` a `String`: both are the language's
+                // own types, stated here for the same reason `kotlin.Enum`'s two are.
                 if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
                 if self.class_name_accessor(*target).is_some() {
                     return Some(Ty::nullable(Ty::String));
+                }
+                if let Some(receiver) = receiver {
+                    if self.callable_reference_name(*target, *receiver).is_some() {
+                        return Some(Ty::String);
+                    }
                 }
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
@@ -2198,9 +2313,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => return None,
                 }
             }
+            // A property reference is an object of the reflection type the checker gave it. When
+            // the node carries none, the interface every one of them wears answers the two
+            // questions asked of this — that it is a reference, and that its members are the
+            // reference machinery's.
+            // A local delegated property's metadata wears the interface Kotlin gives it, which is
+            // what sends its `name` through the reference machinery.
+            IrExpr::LocalPropertyReference { .. } => Ty::obj("kotlin/reflect/KProperty"),
             // A class literal is an object of the reflection type Kotlin gives it, which is what
             // makes an equality between two of them an equality between references.
             IrExpr::KClassLiteral { .. } => classes_literal::kclass(),
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
+                .file
+                .ir
+                .logical_types
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| {
+                    Ty::obj(if *mutable {
+                        "kotlin/reflect/KMutableProperty"
+                    } else {
+                        "kotlin/reflect/KProperty"
+                    })
+                }),
             // `x!!` yields `x` or fails, so its type is the OPERAND's with the nullability taken
             // off — which is what the lowering already does, unboxing a nullable primitive there.
             // Saying so here is what lets a CONSUMER of `x!!` know what it is holding: without it
@@ -2341,6 +2476,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match callee {
+            // A call that leaves arguments out goes through the wrapper for its omission shape,
+            // which computes them in the callee's own frame — where a default that reads an
+            // earlier parameter can find it.
+            Callee::LocalWithDefaults { function, defaults } => {
+                self.defaulted_call(*function, defaults, dispatch_receiver, args)
+            }
+            Callee::ClassStaticWithDefaults {
+                function, defaults, ..
+            } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
@@ -2460,6 +2604,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 ));
                             }
                         }
+                        // `f.equals(…)` and `f.hashCode()` on a function value need no case of
+                        // their own. The receiver's static type does not say whether a lambda or a
+                        // reference produced it, and does not have to: the OBJECT's table does, at
+                        // run time, and the ordinary member dispatch below reaches it.
+                        // `x.apply(block)` where `block` is a function VALUE rather than a
+                        // lambda written here: nothing was spliced, so the call is realized as
+                        // what it means — invoke the block on the receiver.
+                        if let Some(realized) =
+                            self.scope_function(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
                         // here rather than in the runtime keeps the operand unboxed — the member
                         // path below crosses everything as a reference, which for a `Double` would
@@ -2491,6 +2647,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             receiver,
                             args,
                         ) {
+                            return realized;
+                        }
+                        // A property reference answers its own members through its own table.
+                        if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
+                            return realized;
+                        }
+                        // `val x by ::top`: the stdlib's delegate operators on a reference, which
+                        // are `get`/`set` under another name and reach the same table.
+                        if let Some(realized) =
+                            self.reference_delegate(&owner, &name, receiver, args, *ret)
+                        {
                             return realized;
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
@@ -2765,6 +2932,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             super::super::intrinsics::assertion_call(&owner, &name, params)
                         {
                             return self.assertion(symbol, compared, args);
+                        }
+                        // `assertFailsWith<T> { … }`. Not one of the comparisons above: it runs a
+                        // block and answers what that block threw, so it is the `try` machinery
+                        // rather than a runtime call.
+                        if super::super::intrinsics::is_assert_fails_with(&owner, &name, params) {
+                            return self.assert_fails_with(args, params, *ret);
+                        }
+                        // `run { … }` and `with(x) { … }`: the scope functions with no receiver to
+                        // arrive on, so they reach this path rather than the member one.
+                        if let Some(realized) =
+                            self.top_level_scope_function(&owner, &name, args, params, *ret)
+                        {
+                            return realized;
+                        }
+                        // `buildString { … }` / `buildList { … }`: a subject made here, the
+                        // block, then the subject. The same rearrangement the scope functions get.
+                        if let Some(builder) =
+                            super::super::intrinsics::builder_scope(&owner, &name, params)
+                        {
+                            return self.builder_scope_function(builder, args);
                         }
                         // `require`, `check`, `requireNotNull`, `checkNotNull`, `error`. Not a
                         // runtime call: the message block runs only when the check fails, so the

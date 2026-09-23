@@ -38,6 +38,20 @@ fn a_substituted_generic_bottom_value_runs_and_falls_through() {
 }
 
 #[test]
+fn a_substituted_generic_bottom_value_hands_on_the_value_it_made() {
+    // The same shape read as a value rather than discarded: what reaches the caller is the erased
+    // result the body actually returned, which is the only value there is to hand on.
+    expect_native_box(
+        "fun <K> materialize(): K = \"OK\" as K\n\
+         fun <T> myRun(action: () -> T): T = action()\n\
+         fun produce(): Any = myRun { materialize() } ?: \"fail\"\n\
+         fun box(): String = produce().toString()\n",
+        "SubstitutedBottomHandsOnValue",
+        "OK",
+    );
+}
+
+#[test]
 fn a_genuinely_divergent_call_ends_its_path() {
     // `stop` never returns, so the statement after it is unreachable and the join that follows has
     // only the other branch to merge. A backend that let the path continue would need a value of
