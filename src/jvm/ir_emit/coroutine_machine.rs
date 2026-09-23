@@ -108,8 +108,9 @@ pub(super) fn discover(
     cw: &crate::jvm::classfile::ClassWriter,
     expected: usize,
 ) -> Option<MachinePlan> {
+    use crate::jvm::classfile::bytecode_analysis::{ControlGraph, FrameTypes, Handler};
     use crate::jvm::classfile::CoroutineMarker;
-    use crate::jvm::suspend::cps::{ControlGraph, FrameTypes, Handler, LocalLiveness};
+    use crate::jvm::suspend::cps::LocalLiveness;
 
     let markers: Vec<(usize, u16)> = code
         .marker_positions()?
@@ -258,7 +259,7 @@ pub(super) fn discover(
             let held = state.local(slot);
             if matches!(
                 held,
-                crate::jvm::suspend::cps::VerificationType::Uninitialized(_)
+                crate::jvm::classfile::bytecode_analysis::VerificationType::Uninitialized(_)
             ) {
                 crate::trace_compiler!(
                     "suspend",
@@ -301,7 +302,7 @@ pub(super) fn discover(
 
 /// The slots some frame reachable from instruction `from` claims a type for.
 fn claimed_from(
-    graph: &crate::jvm::suspend::cps::ControlGraph,
+    graph: &crate::jvm::classfile::bytecode_analysis::ControlGraph,
     from: usize,
     frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
 ) -> Vec<u16> {

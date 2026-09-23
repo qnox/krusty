@@ -1,18 +1,15 @@
-//! Forward verification-type analysis over a decoded method body.
+//! Forward verification-type analysis over a decoded JVM method body.
 //!
-//! The coroutine transform spills a local into a continuation field and restores it where the body
-//! is re-entered, so it needs the local's TYPE at the suspension: it picks the field's descriptor
-//! and the cast that reads the value back. A `StackMapTable` frame states that only where the
-//! reference compiler wrote one, and for a local a loop rewrites across the suspension — an
-//! accumulator — the type at the suspension is the loop's merge, which no single frame in the body
-//! states.
+//! JVM transforms need the verifier's local and stack types at arbitrary instructions. A
+//! `StackMapTable` frame states them only where the compiler wrote one, and a value rewritten by a
+//! loop can have a merge type that no single recorded frame states.
 //!
 //! So this computes it the way the verifier does: seeded by the method's entry frame, every
 //! instruction's effect is applied forward, control-flow joins meet the way a verifier's do, and a
 //! recorded frame REPLACES the computed state at its position — the verifier checks the incoming
 //! state against the frame and continues from the frame, so the frame is what later code is held
 //! to. The result is the state the verifier will hold at every instruction, which is exactly the
-//! state a spill has to describe.
+//! state any target transform must preserve.
 
 use std::collections::HashMap;
 
@@ -54,7 +51,7 @@ impl PoolView for crate::jvm::classfile::ClassWriter {
 
 /// A verification type as the analysis tracks it. Distinct from [`VerifType`] in one respect: an
 /// object created by `new` and not yet constructed is `Uninitialized`, which a frame cannot name in
-/// this compiler's representation and a spill cannot carry.
+/// this compiler's representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum VerificationType {
     Top,
@@ -307,7 +304,7 @@ impl FrameTypes {
             let frame = FrameState::from_verif(locals, stack, pool);
             if recorded.insert(*index, frame).is_some() {
                 crate::trace_compiler!(
-                    "suspend",
+                    "bytecode",
                     "frame analysis: two frames recorded at {index}; they were not merged"
                 );
                 return None;
@@ -355,7 +352,7 @@ impl FrameTypes {
                 };
                 let Some(after) = step(insns, index, &state, pool) else {
                     crate::trace_compiler!(
-                        "suspend",
+                        "bytecode",
                         "frame analysis: cannot step {:?} at {index} from {state:?}",
                         insns[index]
                     );
@@ -364,7 +361,7 @@ impl FrameTypes {
                 for &to in graph.normal_successors(index) {
                     let Some(did) = propagate(&mut before, to, &after) else {
                         crate::trace_compiler!(
-                            "suspend",
+                            "bytecode",
                             "frame analysis: edge {index}->{to} does not meet: {after:?} into {:?} (insns {:?})",
                             before[to],
                             &insns[index.saturating_sub(4)..=index]
@@ -393,7 +390,7 @@ impl FrameTypes {
                 for &handler in graph.exceptional_successors(index) {
                     let Some(did) = propagate(&mut before, handler, &thrown) else {
                         crate::trace_compiler!(
-                            "suspend",
+                            "bytecode",
                             "frame analysis: handler edge {index}->{handler} does not meet: {thrown:?} into {:?}",
                             before[handler]
                         );
@@ -766,8 +763,8 @@ fn arithmetic_type(kind: u8) -> VerificationType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jvm::classfile::bytecode_analysis::Handler;
     use crate::jvm::inline::BranchTarget;
-    use crate::jvm::suspend::cps::Handler;
 
     /// A pool with named entries, enough for the instructions the tests use.
     #[derive(Default)]
