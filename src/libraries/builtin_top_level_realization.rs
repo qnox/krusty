@@ -82,11 +82,14 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
             let [elements] = facts.params else {
                 return None;
             };
+            let Some(Ty::OutProjection(element)) = elements.array_elem() else {
+                return None;
+            };
             facts.type_parameter_count == 1
                 && facts.vararg == Some(0)
                 && elements.is_reference_array()
                 && facts.ret.is_reference_array()
-                && facts.ret.array_elem() == elements.array_elem()
+                && facts.ret.array_elem() == Some(*element)
         }
         ArrayFactoryKind::ReferenceSize => {
             let [Ty::Int, initializer] = facts.params else {
@@ -482,5 +485,40 @@ mod tests {
         let mut non_operator = string_plus(&non_operator_params, Ty::String);
         non_operator.is_operator = false;
         assert_eq!(function_realization(non_operator), None);
+    }
+
+    #[test]
+    fn reference_array_factory_matches_the_metadata_vararg_projection() {
+        let type_parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let parameter = Ty::obj_args("kotlin/Array", &[Ty::out_projection(type_parameter)]);
+        let result = Ty::obj_args("kotlin/Array", &[type_parameter]);
+        let declaration = |params| BuiltinFunctionDeclaration {
+            package: type_name("kotlin"),
+            name: "arrayOf",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params,
+            ret: result,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: Some(0),
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        };
+
+        assert_eq!(
+            function_realization(declaration(std::slice::from_ref(&parameter))),
+            Some(CompilerIntrinsic::ArrayFactory(
+                ArrayFactoryKind::ReferenceVararg
+            ))
+        );
+
+        let invariant_parameter = Ty::obj_args("kotlin/Array", &[type_parameter]);
+        assert_eq!(
+            function_realization(declaration(std::slice::from_ref(&invariant_parameter))),
+            None,
+            "an ordinary same-named Array<T> parameter is not the builtin vararg declaration"
+        );
     }
 }
