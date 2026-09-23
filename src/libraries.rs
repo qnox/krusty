@@ -494,6 +494,45 @@ pub struct AliasExpansion {
     pub expansion_spelling: crate::spelling::Spelled,
 }
 
+/// How a provider realizes one already-selected dependency callable.
+///
+/// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
+/// back for it. Neither half names a target: [`LibraryCallable`] is the semantic declaration, and
+/// the kind says which shape the declaration takes — a top-level function, a member, or a property
+/// realized over storage rather than an accessor. A backend reads it; it does not reconstruct it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ExternalCallableKind {
+    TopLevel,
+    Extension,
+    Member,
+    Constructor,
+    /// A provider-normalized Kotlin property getter realized as a read of instance storage.
+    InstanceFieldRead,
+    /// A provider-normalized Kotlin property setter realized as a write of instance storage.
+    InstanceFieldWrite,
+    /// A selected dependency property whose realization is a static field read.
+    StaticFieldRead,
+    /// A selected dependency property whose realization is a static field write.
+    StaticFieldWrite,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternalCallableRealization {
+    pub callable: LibraryCallable,
+    pub kind: ExternalCallableKind,
+}
+
+/// A provider's realization of one normalized Kotlin property. FIR carries only its opaque
+/// identity; callers read the semantic name and the independently interned physical accessors here.
+#[derive(Clone, Debug)]
+pub struct ExternalPropertyRealization {
+    pub name: String,
+    pub getter: crate::fir::ExternalCallableId,
+    pub setter: Option<crate::fir::ExternalCallableId>,
+    /// The provider-normalized declaration is its value class's underlying storage property.
+    pub declares_value_class_storage: bool,
+}
+
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Confirm that every selected dependency was ingested completely before declaration lookup.
     fn validate_initialization(&self) -> Result<(), PlatformInitializationError> {
@@ -3126,6 +3165,19 @@ impl SemanticPlatform for EmptySymbolSource {
 
 #[cfg(test)]
 mod tests {
+
+    /// A source that publishes no dependency declarations has no identity to realize, so the
+    /// default answers nothing rather than a guess.
+    #[test]
+    fn a_source_without_dependencies_realizes_no_identity() {
+        let source: &dyn crate::symbol_source::SymbolSource = &super::EmptySymbolSource;
+        assert!(source
+            .external_callable(crate::fir::ExternalCallableId::from_raw(0))
+            .is_none());
+        assert!(source
+            .external_property(crate::fir::ExternalPropertyId::from_raw(0))
+            .is_none());
+    }
     use super::{
         map_call_args, AnnotationApplication, AnnotationParameterPolicy,
         AnnotationPositionalPolicy, CallSig, InlineKind, ParamList, TypeKind, Visibility,

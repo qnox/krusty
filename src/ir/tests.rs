@@ -524,3 +524,68 @@ fn generated_publication_rejects_parameter_name_arity_drift() {
         },
     );
 }
+
+/// A declaration's store of what fresh storage already holds is elided; the same store written as
+/// a later statement is not, and neither is a declaration's store of anything else.
+///
+/// The identity decides, not the shape: `var x = 0` followed by `init { x = 0 }` is two stores of
+/// the same field and value, and only the first is the declaration's.
+#[test]
+fn only_a_declarations_store_of_the_storage_default_is_elided() {
+    let mut ir = IrFile::default();
+    let receiver = ir.add_expr(IrExpr::GetValue(0));
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let store = |ir: &mut IrFile, value| {
+        ir.add_expr(IrExpr::SetField {
+            receiver,
+            class: 0,
+            index: 0,
+            value,
+        })
+    };
+    let declaration = store(&mut ir, zero);
+    let later = store(&mut ir, zero);
+    let declared_one = store(&mut ir, one);
+    ir.property_initializer_stores.insert(declaration);
+    ir.property_initializer_stores.insert(declared_one);
+
+    assert!(ir.is_elided_initializer_store(declaration));
+    assert!(!ir.is_elided_initializer_store(later));
+    assert!(!ir.is_elided_initializer_store(declared_one));
+}
+
+/// Fresh storage holds all-zero bits: `null`, `false`, and a zero of every width, signed or
+/// unsigned. A floating zero counts only with its sign bit clear, since `-0.0` is not those bits.
+#[test]
+fn the_storage_default_is_every_all_zero_constant() {
+    let mut ir = IrFile::default();
+    for constant in [
+        IrConst::Null,
+        IrConst::Boolean(false),
+        IrConst::Byte(0),
+        IrConst::Short(0),
+        IrConst::Int(0),
+        IrConst::Long(0),
+        IrConst::Char(0),
+        IrConst::UByte(0),
+        IrConst::UShort(0),
+        IrConst::UInt(0),
+        IrConst::ULong(0),
+        IrConst::Float(0.0),
+        IrConst::Double(0.0),
+    ] {
+        let expression = ir.add_expr(IrExpr::Const(constant.clone()));
+        assert!(ir.is_storage_default(expression), "{constant:?}");
+    }
+    for constant in [
+        IrConst::Boolean(true),
+        IrConst::Int(1),
+        IrConst::UInt(1),
+        IrConst::Float(-0.0),
+        IrConst::Double(-0.0),
+    ] {
+        let expression = ir.add_expr(IrExpr::Const(constant.clone()));
+        assert!(!ir.is_storage_default(expression), "{constant:?}");
+    }
+}

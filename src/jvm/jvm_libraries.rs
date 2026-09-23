@@ -5108,6 +5108,21 @@ impl JvmLibraries {
 }
 
 impl SymbolSource for JvmLibraries {
+    /// Both answered by the classpath, which is where this provider interned them.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.cp.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.cp.external_property(identity)
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         JvmLibraries::package_exists(self, parent, name)
     }
@@ -6766,6 +6781,49 @@ mod tests {
             .and_then(crate::symbol_resolver::Symbol::extension_call)
             .expect("UByte.downTo(UByte) must select from parsed stdlib metadata");
         assert_eq!(ubyte_down_to.ret, Ty::obj("kotlin/ranges/UIntProgression"));
+    }
+
+    /// A backend realizes a selected dependency through the PROVIDER, by the opaque identity the
+    /// provider assigned, and never by reaching into the classpath behind it. Each published
+    /// overload carries its identity, and asking the provider for it answers that very declaration.
+    #[test]
+    fn a_selected_dependency_is_realized_through_the_provider_by_its_identity() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/collections")),
+            "listOf",
+        );
+        let functions = match &symbols.callables {
+            crate::libraries::Callables::Functions(functions)
+            | crate::libraries::Callables::Both { functions, .. } => functions,
+            _ => panic!("kotlin.collections.listOf callable missing"),
+        };
+        assert!(!functions.overloads.is_empty());
+        let platform: &dyn SemanticPlatform = &libraries;
+        for function in &functions.overloads {
+            let identity = function
+                .callable
+                .external_identity
+                .expect("a published dependency function carries its provider identity");
+            let realization = platform
+                .external_callable(identity)
+                .expect("the provider realizes an identity it assigned");
+            assert_eq!(realization.callable.name, function.callable.name);
+            assert_eq!(realization.callable.owner, function.callable.owner);
+            assert_eq!(
+                realization.callable.physical_params,
+                function.callable.physical_params
+            );
+            assert_eq!(
+                realization.kind,
+                crate::libraries::ExternalCallableKind::TopLevel
+            );
+        }
     }
 
     #[test]
