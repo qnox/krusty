@@ -12,6 +12,7 @@ use crate::plugins::registry::NativePlugins;
 
 mod header_validation;
 mod inline_preparation;
+mod local_class_names;
 mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
@@ -116,7 +117,7 @@ impl ReparseSource {
                 if let Some(stem) = self.file_stem.as_deref() {
                     name_anonymous_classes_with_counters(
                         &mut file,
-                        &format!("{stem}Kt"),
+                        &crate::jvm::names::file_class_name(stem, None),
                         &mut anonymous_counters,
                     );
                 }
@@ -889,7 +890,7 @@ where
         file.is_common = source.is_common;
         if source.kind == SourceKind::Kotlin {
             if let Some(stem) = source.file_stem {
-                name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+                name_anonymous_classes(&mut file, &crate::jvm::names::file_class_name(stem, None));
             }
             header_validation::validate(&file, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
@@ -1480,29 +1481,17 @@ pub fn analyze_source_standalone(
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
-/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to
-/// kotlinc's enclosing-scoped spelling (`P2$Companion$build$1`): the innermost enclosing FUNCTION
-/// body (a member's or a top-level one) names the scope, with a per-scope 1-based ordinal in
-/// source order. Must run BEFORE checking — the checker records these internals in every type it
-/// hands the backend. A construction outside a function uses its innermost enclosing classifier, or
-/// the file facade at top level. No parse-time placeholder may survive as semantic identity: offsets
-/// repeat across files and would make unrelated anonymous classifiers overwrite one another.
+/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to the
+/// name kotlinc invents for them (`P2$Companion$build$1`), and record the ordinal each suspend
+/// function's continuation takes. Both come from one walk over the file ([`local_class_names`]),
+/// the one that numbers lambdas, callable references and delegated properties too, because
+/// kotlinc numbers them all in a single sequence per enclosing name. Must run BEFORE checking: the
+/// checker records these internals in every type it hands the backend. No parse-time placeholder
+/// may survive as semantic identity: offsets repeat across files and would make unrelated
+/// anonymous classifiers overwrite one another.
 pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
     let mut counters = std::collections::HashMap::new();
     name_anonymous_classes_with_counters(file, facade_simple, &mut counters);
-}
-
-/// The sequence a function's generated classes are numbered in: `<owner>$<function>`.
-///
-/// One site formats it. Both the anonymous-object naming below and the continuation reservations
-/// beside it must agree on the sequence, and they can only agree by construction.
-fn function_scope(owner: &str, function: &str) -> String {
-    format!("{owner}${function}")
-}
-
-/// A classifier's nesting chain as one scope segment (`Outer.Inner` is one owner, not two).
-fn classifier_scope_chain(name: &str) -> String {
-    name.replace('.', "$")
 }
 
 fn name_anonymous_classes_with_counters(
@@ -1511,100 +1500,12 @@ fn name_anonymous_classes_with_counters(
     counters: &mut std::collections::HashMap<String, u32>,
 ) {
     use crate::ast::{Decl, Expr};
-    let mut reserved = suspend_continuation_reservations(file, facade_simple);
-    let mut continuation_ordinals = std::collections::HashMap::new();
-    let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
-        .anonymous_object_classes
-        .iter()
-        .map(|(&construction, &decl)| (construction, decl))
-        .collect();
-    anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
-    for (construction, decl) in anons {
-        let span = file.expr_spans[construction.0 as usize];
-        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
-        for &candidate in &file.decls {
-            match file.decl(candidate) {
-                Decl::Fun(function) => {
-                    if function.span.lo <= span.lo && span.hi <= function.span.hi {
-                        let size = function.span.hi - function.span.lo;
-                        if best
-                            .as_ref()
-                            .is_none_or(|(smallest, _, _)| size < *smallest)
-                        {
-                            best = Some((
-                                size,
-                                function_scope(facade_simple, &function.name),
-                                crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
-                            ));
-                        }
-                    }
-                }
-                Decl::Class(class) => {
-                    if candidate == decl {
-                        continue;
-                    }
-                    let chain = classifier_scope_chain(&class.name);
-                    for (method_index, method) in class.methods.iter().enumerate() {
-                        if method.span.lo <= span.lo && span.hi <= method.span.hi {
-                            let size = method.span.hi - method.span.lo;
-                            if best
-                                .as_ref()
-                                .is_none_or(|(smallest, _, _)| size < *smallest)
-                            {
-                                best = Some((
-                                    size,
-                                    function_scope(&chain, &method.name),
-                                    crate::ast::AnonymousEnclosingFunction::Member {
-                                        class: candidate,
-                                        method: method_index as u32,
-                                    },
-                                ));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let (scope, enclosing) = match best {
-            Some((_, scope, enclosing)) => (scope, Some(enclosing)),
-            None => {
-                let classifier_scope = file
-                    .decls
-                    .iter()
-                    .filter_map(|&candidate| match file.decl(candidate) {
-                        Decl::Class(class)
-                            if candidate != decl
-                                && class.span.lo <= span.lo
-                                && span.hi <= class.span.hi =>
-                        {
-                            Some((
-                                class.span.hi - class.span.lo,
-                                classifier_scope_chain(&class.name),
-                            ))
-                        }
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    })
-                    .min_by_key(|(size, _)| *size)
-                    .map(|(_, scope)| scope)
-                    .unwrap_or_else(|| facade_simple.to_string());
-                (classifier_scope, None)
-            }
-        };
+    let invented = local_class_names::invent(file, facade_simple, counters);
+    for (construction, decl, fresh, enclosing) in invented.anonymous_objects {
         if let Some(enclosing) = enclosing {
             file.anonymous_object_enclosing_functions
                 .insert(decl, enclosing);
         }
-        take_continuation_reservations(
-            &mut reserved,
-            counters,
-            &mut continuation_ordinals,
-            &scope,
-            span.lo,
-        );
-        let ordinal = counters.entry(scope.clone()).or_insert(0);
-        *ordinal += 1;
-        let fresh = format!("{scope}${ordinal}");
         let Expr::Call { callee, .. } = file.expr(construction) else {
             continue;
         };
@@ -1657,99 +1558,8 @@ fn name_anonymous_classes_with_counters(
             *name = fresh;
         }
     }
-    // A suspend function declared after the last anonymous object of its scope still holds its
-    // ordinal: a later declaration unit carrying a same-named overload must not reuse it.
-    for (scope, held) in reserved {
-        let counter = counters.entry(scope).or_insert(0);
-        for (_, function) in held {
-            *counter += 1;
-            continuation_ordinals.insert(function, *counter);
-        }
-    }
     file.suspend_continuation_ordinals
-        .extend(continuation_ordinals);
-}
-
-/// Each scope's suspend functions, in declaration order, with the exact declaration that holds
-/// each reservation.
-///
-/// The reference compiler gives a suspend function's continuation class the next ordinal in its
-/// scope's `$N` sequence, ahead of every anonymous object the body declares. The reservation is
-/// made for the `suspend` modifier alone: a function that never reaches a suspension point emits
-/// no continuation class and still holds the ordinal.
-///
-/// The declaration travels with the offset so the ordinal this pass spends can be published as a
-/// fact about that declaration. Nothing downstream re-derives it.
-fn suspend_continuation_reservations(
-    file: &crate::ast::File,
-    facade_simple: &str,
-) -> std::collections::HashMap<String, Vec<(u32, crate::ast::AnonymousEnclosingFunction)>> {
-    use crate::ast::{AnonymousEnclosingFunction, Decl};
-    let mut reservations: std::collections::HashMap<
-        String,
-        Vec<(u32, AnonymousEnclosingFunction)>,
-    > = std::collections::HashMap::new();
-    for &candidate in &file.decls {
-        match file.decl(candidate) {
-            Decl::Fun(function) if function.is_suspend() => reservations
-                .entry(function_scope(facade_simple, &function.name))
-                .or_default()
-                .push((
-                    function.span.lo,
-                    AnonymousEnclosingFunction::TopLevel(candidate),
-                )),
-            Decl::Class(class) => {
-                let chain = classifier_scope_chain(&class.name);
-                for (index, method) in class.methods.iter().enumerate() {
-                    if !method.is_suspend() {
-                        continue;
-                    }
-                    reservations
-                        .entry(function_scope(&chain, &method.name))
-                        .or_default()
-                        .push((
-                            method.span.lo,
-                            AnonymousEnclosingFunction::Member {
-                                class: candidate,
-                                method: index as u32,
-                            },
-                        ));
-                }
-            }
-            Decl::Fun(_) | Decl::Property(_) => {}
-        }
-    }
-    for held in reservations.values_mut() {
-        held.sort_unstable_by_key(|(start, _)| *start);
-    }
-    reservations
-}
-
-/// Spend the ordinals held by the suspend functions of `scope` that open at or before `offset` —
-/// every one whose continuation the reference compiler names before an object declared there —
-/// recording which ordinal each one took.
-fn take_continuation_reservations(
-    reserved: &mut std::collections::HashMap<
-        String,
-        Vec<(u32, crate::ast::AnonymousEnclosingFunction)>,
-    >,
-    counters: &mut std::collections::HashMap<String, u32>,
-    ordinals: &mut std::collections::HashMap<crate::ast::AnonymousEnclosingFunction, u32>,
-    scope: &str,
-    offset: u32,
-) {
-    let Some(held) = reserved.get_mut(scope) else {
-        return;
-    };
-    let spent = held.partition_point(|(start, _)| *start <= offset);
-    if spent == 0 {
-        return;
-    }
-    let counter = counters.entry(scope.to_string()).or_insert(0);
-    for (_, function) in held.drain(..spent) {
-        *counter += 1;
-        ordinals.insert(function, *counter);
-    }
+        .extend(invented.continuations);
 }
 
 #[cfg(test)]

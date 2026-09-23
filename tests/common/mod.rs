@@ -257,7 +257,10 @@ fn parse_source_set_named(
             let features = krusty::features::LangFeatures::from_source(source);
             let tokens = krusty::lexer::lex(source, diags);
             let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
-            krusty::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            krusty::frontend::name_anonymous_classes(
+                &mut file,
+                &krusty::jvm::names::file_class_name(stem, None),
+            );
             file
         })
         .collect::<Vec<_>>();

@@ -3588,7 +3588,10 @@ pub fn stream_file_stub_inventory(
         }
         if source.kind == SourceKind::Kotlin {
             if let Some(stem) = source.file_stem {
-                crate::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+                crate::frontend::name_anonymous_classes(
+                    &mut file,
+                    &crate::jvm::names::file_class_name(stem, None),
+                );
             }
         }
         let (source_id, stubs) = builder

@@ -1533,7 +1533,7 @@ fn reparsed_anonymous_object_retains_its_own_property_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let internal = crate::types::type_name("AnonymousPropertyKt$box$1");
+    let internal = crate::types::type_name("AnonymousPropertyKt$box$value$1");
     let legacy = analysis
         .symbols
         .class_by_type_name(internal)
@@ -1607,7 +1607,7 @@ fn non_local_property_signature_publishes_demanded_anonymous_member_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let anonymous = crate::types::type_name("A$1");
+    let anonymous = crate::types::type_name("A$x$1");
     let provider = crate::fir::StreamedModuleSymbols::for_file(index, 0);
     let classifier = provider
         .classifier(anonymous)
