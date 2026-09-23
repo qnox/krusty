@@ -4197,16 +4197,6 @@ impl Classpath {
         found
     }
 
-    /// Exact JVM value-class declaration facts for one dependency classifier. This is a physical
-    /// realization query: overload selection and Kotlin type inference have already completed.
-    pub(super) fn value_class_declaration(
-        &self,
-        internal: TypeName,
-    ) -> Option<super::value_class_declarations::ValueClassDeclaration> {
-        let class = self.find_name(internal)?;
-        super::value_class_declarations::from_class_info(&class)
-    }
-
     /// JVM storage for an already-resolved Kotlin singleton classifier. FIR/common IR carry only
     /// the singleton declaration; classfile layout decides how this backend materializes its value.
     pub(crate) fn singleton_storage(&self, classifier: TypeName) -> Option<(TypeName, String)> {
