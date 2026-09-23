@@ -14,7 +14,8 @@
 use super::{
     class_ty,
     element_serializer::{
-        element_serializer_plan, emit_cached_element_serializer, ElementSerializerPlan,
+        child_cache_element_plan, emit_cached_element_serializer, ElementSerializerPlan,
+        UnderivableChildCacheElement,
     },
     field_serializer_of, kserializer_of, property_is_contextual, type_name, Callee, ClassId,
     ExprId, InlineKind, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
@@ -204,12 +205,6 @@ pub(super) fn add_child_serializer_cache(
     // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
     // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is a `Lazy` over its own
     // factory, else null.
-    let enum_internals: std::collections::HashSet<TypeName> = ir
-        .classes
-        .iter()
-        .filter(|c| !c.enum_entries.is_empty())
-        .map(crate::ir::IrClass::fq_name_id)
-        .collect();
     // Which properties need a cached serializer, decided ONCE, before anything is built.
     //
     // A property needs one when its serializer must be ALLOCATED rather than read as a singleton —
@@ -221,26 +216,46 @@ pub(super) fn add_child_serializer_cache(
     // now REFUSES the file rather than quietly dropping the cache. The classification has to be
     // right, not merely recoverable — and computing it up front is also what lets the build loop
     // below take `ir` mutably.
-    let cached_plans: Vec<Option<ElementSerializerPlan>> = foo_fields
-        .iter()
-        .map(|(name, ty)| {
-            if property_is_contextual(ctx, ir, class_id, name)
-                || field_serializer_of(ctx, ir, class_id, name).is_some()
-            {
-                return None;
-            }
-            let plan = element_serializer_plan(ir, ctx, ty)?;
-            match &plan {
-                ElementSerializerPlan::Collection { .. } => Some(plan),
-                ElementSerializerPlan::Generated { classifier, .. }
-                    if enum_internals.contains(classifier) =>
+    let cached_plans: Result<Vec<Option<ElementSerializerPlan>>, UnderivableChildCacheElement> =
+        foo_fields
+            .iter()
+            .map(|(name, ty)| {
+                if property_is_contextual(ctx, ir, class_id, name)
+                    || field_serializer_of(ctx, ir, class_id, name).is_some()
                 {
-                    Some(plan)
+                    return Ok(None);
                 }
-                _ => None,
-            }
-        })
-        .collect();
+                child_cache_element_plan(ir, ctx, ty)
+            })
+            .collect();
+
+    let cached_plans = match cached_plans {
+        Ok(plans) => plans,
+        Err(UnderivableChildCacheElement) => {
+            let unsupported = ir.add_expr(IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                kind: "child-serializer-cache",
+                exprs: Vec::new(),
+                data: vec![serialized],
+                types: Vec::new(),
+            });
+            ir.statics.push(crate::ir::IrStatic {
+                name: "$childSerializers".to_string(),
+                ty: lazy_cache_ty(),
+                init: unsupported,
+                is_var: false,
+                is_const: false,
+                owner: Some(serialized),
+                visibility: crate::types::Visibility::Private,
+                setter_jvm_name: None,
+                erased_declared_ty: None,
+                custom_accessor: true,
+                line: 0,
+                source_order: u32::MAX,
+            });
+            return None;
+        }
+    };
 
     if cached_plans.iter().all(Option::is_none) {
         return None;

@@ -33,6 +33,37 @@ pub(super) enum ElementSerializerPlan {
     Builtin(TypeName),
 }
 
+/// The type requires a child-cache slot, but no complete serializer plan can be selected for it.
+/// Keeping this distinct from `Ok(None)` prevents an invalid cached element from being silently
+/// reclassified as an uncached one.
+pub(super) struct UnderivableChildCacheElement;
+
+/// Select the one serializer plan a child-cache slot will emit.
+///
+/// `Ok(None)` means the type does not use the cache. `Err` means it does require a cache (a
+/// collection or same-file enum), but its complete serializer is underivable. The cache builder
+/// publishes that invalid state as an unsupported residual rather than trying an uncached path.
+pub(super) fn child_cache_element_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
+    let Some(classifier) = ty.kotlin_class_internal() else {
+        return Ok(None);
+    };
+    let cacheable = collection_serializer_builder(classifier).is_some()
+        || ir
+            .classes
+            .iter()
+            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty());
+    if !cacheable {
+        return Ok(None);
+    }
+    element_serializer_plan(ir, ctx, ty)
+        .map(Some)
+        .ok_or(UnderivableChildCacheElement)
+}
+
 #[derive(Clone, Copy)]
 struct BuiltinSerializer {
     classifier: TypeName,
