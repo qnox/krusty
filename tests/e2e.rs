@@ -1661,6 +1661,8 @@ mod unsigned_array_e2e;
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]
 mod unsigned_companion_constant_ty_e2e;
+#[path = "unsigned_default_store_e2e.rs"]
+mod unsigned_default_store_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]
