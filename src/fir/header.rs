@@ -316,18 +316,38 @@ fn local_executable_owner(
         return Some(owner);
     }
 
-    match file
-        .anonymous_object_enclosing_functions
-        .get(&declaration)?
-    {
+    enclosing_function_identity(
+        file,
+        source,
+        ids,
+        classifier_ids,
+        *file
+            .anonymous_object_enclosing_functions
+            .get(&declaration)?,
+    )
+}
+
+/// The stable identity of a source function the parser recorded as an exact lexical enclosure.
+///
+/// The only way from [`crate::ast::AnonymousEnclosingFunction`] to a declaration id: it interns the
+/// same anchor `function_stub` does, so both sides name one declaration. Every consumer of that
+/// edge goes through here rather than matching on the variants again.
+pub(super) fn enclosing_function_identity(
+    file: &File,
+    source: SourceFileId,
+    ids: &mut DeclarationIds,
+    classifier_ids: &std::collections::HashMap<DeclId, DeclarationId>,
+    enclosing: crate::ast::AnonymousEnclosingFunction,
+) -> Option<DeclarationId> {
+    match enclosing {
         crate::ast::AnonymousEnclosingFunction::TopLevel(function) => {
-            let Decl::Fun(function_decl) = file.decl(*function) else {
+            let Decl::Fun(function_decl) = file.decl(function) else {
                 return None;
             };
             let sibling = u32::try_from(
                 file.decls
                     .iter()
-                    .position(|candidate| candidate == function)?,
+                    .position(|candidate| *candidate == function)?,
             )
             .ok()?;
             Some(ids.intern(DeclarationAnchor {
@@ -340,19 +360,19 @@ fn local_executable_owner(
         }
         crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
             let owner = classifier_ids
-                .get(class)
+                .get(&class)
                 .copied()
-                .or_else(|| classifier_identity(file, source, ids, *class))?;
-            let Decl::Class(class_decl) = file.decl(*class) else {
+                .or_else(|| classifier_identity(file, source, ids, class))?;
+            let Decl::Class(class_decl) = file.decl(class) else {
                 return None;
             };
-            let function = class_decl.methods.get(*method as usize)?;
+            let function = class_decl.methods.get(method as usize)?;
             Some(ids.intern(DeclarationAnchor {
                 source,
                 range: function.span,
                 owner: Some(owner),
                 kind: DeclarationKind::Function,
-                sibling: *method,
+                sibling: method,
             }))
         }
     }
@@ -546,6 +566,11 @@ pub struct HeaderDeclaration {
     /// Declaration annotations as compact classifier-reference types. Resolution consumes this
     /// temporary range during Pass 1 and publishes stable classifier identities.
     pub annotations: HeaderTypeRange,
+    /// Class-literal arguments written on those annotations, keyed by annotation ordinal — the
+    /// declaration-level twin of [`HeaderParameter::annotation_class_literals`]. A class-level
+    /// `@Serializable(with = X::class)` is a semantic fact another file of the same module must be
+    /// able to read, and it cannot be recovered once the source AST is released.
+    pub annotation_class_literals: HeaderParameterAnnotationClassLiteralRange,
     pub kind: HeaderDeclarationKind,
 }
 
@@ -564,6 +589,7 @@ pub struct HeaderSyntaxArena {
     path_segments: Vec<LookupNameId>,
     parameters: Vec<HeaderParameter>,
     parameter_annotation_class_literals: Vec<HeaderParameterAnnotationClassLiteral>,
+    declaration_annotation_class_literals: Vec<HeaderParameterAnnotationClassLiteral>,
     type_parameters: Vec<HeaderTypeParameter>,
     bounds: Vec<HeaderTypeBound>,
     interface_delegations: Vec<HeaderInterfaceDelegation>,
@@ -599,6 +625,14 @@ impl HeaderSyntaxArena {
         values: impl IntoIterator<Item = HeaderParameterAnnotationClassLiteral>,
     ) -> HeaderParameterAnnotationClassLiteralRange {
         let (start, len) = Self::range(&mut self.parameter_annotation_class_literals, values);
+        HeaderParameterAnnotationClassLiteralRange { start, len }
+    }
+
+    fn add_declaration_annotation_class_literal_range(
+        &mut self,
+        values: impl IntoIterator<Item = HeaderParameterAnnotationClassLiteral>,
+    ) -> HeaderParameterAnnotationClassLiteralRange {
+        let (start, len) = Self::range(&mut self.declaration_annotation_class_literals, values);
         HeaderParameterAnnotationClassLiteralRange { start, len }
     }
 
@@ -1044,6 +1078,14 @@ impl HeaderSyntaxArena {
         &self.parameter_annotation_class_literals[start..start + range.len as usize]
     }
 
+    pub fn declaration_annotation_class_literals(
+        &self,
+        range: HeaderParameterAnnotationClassLiteralRange,
+    ) -> &[HeaderParameterAnnotationClassLiteral] {
+        let start = range.start as usize;
+        &self.declaration_annotation_class_literals[start..start + range.len as usize]
+    }
+
     /// Mutable view of one declaration's packed parameters. Multiplatform actualization uses this
     /// to publish an expect parameter's default-presence fact on the callable that survives as the
     /// actual declaration. The expression remains expect-owned only while Pass-1 syntax is live;
@@ -1095,7 +1137,8 @@ impl HeaderSyntaxArena {
             + self.type_operands.len() * std::mem::size_of::<HeaderTypeId>()
             + self.path_segments.len() * std::mem::size_of::<LookupNameId>()
             + self.parameters.len() * std::mem::size_of::<HeaderParameter>()
-            + self.parameter_annotation_class_literals.len()
+            + (self.parameter_annotation_class_literals.len()
+                + self.declaration_annotation_class_literals.len())
                 * std::mem::size_of::<HeaderParameterAnnotationClassLiteral>()
             + self.type_parameters.len() * std::mem::size_of::<HeaderTypeParameter>()
             + self.bounds.len() * std::mem::size_of::<HeaderTypeBound>()
@@ -1111,6 +1154,10 @@ struct ExtractedFileStubs {
     /// The `expect` keyword each header declaration of this file was introduced by, recorded while
     /// the parser unit is live because nothing afterwards can answer it.
     expect_keywords: Vec<(DeclarationId, TextRange)>,
+    /// The generated-class position each `suspend` function's continuation holds, bound to that
+    /// function's stable identity. The parser pass that numbers the sequence is the only one that
+    /// can say which positions are free; this carries its answer past the AST.
+    continuation_ordinals: Vec<(DeclarationId, u32)>,
 }
 
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
@@ -1977,6 +2024,46 @@ fn extract_file_stub_inventory(
             break;
         }
     }
+    // The reservation the anonymous-object naming pass made for each suspend function, bound to the
+    // identity its own stub already interned. Look the anchor up, never intern one: a second anchor
+    // for a declaration that has one is a second identity for it.
+    let position = |wanted: DeclId| file.decls.iter().position(|decl| *decl == wanted);
+    let mut continuation_ordinals = file
+        .suspend_continuation_ordinals
+        .iter()
+        .filter_map(|(&function, &ordinal)| {
+            let declaration = match function {
+                crate::ast::AnonymousEnclosingFunction::TopLevel(declaration) => {
+                    let Decl::Fun(function) = file.decl(declaration) else {
+                        return None;
+                    };
+                    ids.get(DeclarationAnchor {
+                        source,
+                        range: function.span,
+                        owner: None,
+                        kind: DeclarationKind::Function,
+                        sibling: u32::try_from(position(declaration)?).ok()?,
+                    })?
+                }
+                crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
+                    let owner = source_declarations[position(class)?]?;
+                    let Decl::Class(class) = file.decl(class) else {
+                        return None;
+                    };
+                    ids.get(DeclarationAnchor {
+                        source,
+                        range: class.methods.get(method as usize)?.span,
+                        owner: Some(owner),
+                        kind: DeclarationKind::Function,
+                        sibling: method,
+                    })?
+                }
+            };
+            Some((declaration, ordinal))
+        })
+        .collect::<Vec<_>>();
+    // A map iterates in no order; the stubs this travels beside are a sequence.
+    continuation_ordinals.sort_unstable();
     ExtractedFileStubs {
         stubs,
         source_declarations: source_declarations
@@ -1986,6 +2073,7 @@ fn extract_file_stub_inventory(
             })
             .collect(),
         expect_keywords,
+        continuation_ordinals,
     }
 }
 
@@ -2075,13 +2163,17 @@ pub fn extract_file_header_syntax(
         })
     }
 
-    fn parameters(
+    /// The class literals written as the FIRST argument of each annotation in `annotation_args`, as
+    /// dotted source paths keyed by annotation ordinal.
+    ///
+    /// `@Serializable(with = pkg.Type::class)` is a semantic fact a later pass must be able to read, and
+    /// the annotation's argument expressions do not survive the source AST. Declaration and value-
+    /// parameter annotations are extracted by this one function so the two cannot disagree about which
+    /// written shapes count.
+    fn annotation_class_literals(
         file: &File,
-        headers: &mut HeaderSyntaxArena,
-        names: &mut LookupNames,
-        values: &[Param],
-        type_annotations: &std::collections::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
-    ) -> HeaderParameterRange {
+        annotation_args: &[Vec<crate::ast::ExprId>],
+    ) -> Vec<(u32, String)> {
         fn qualifier_segments(
             file: &File,
             expression: crate::ast::ExprId,
@@ -2103,6 +2195,40 @@ pub fn extract_file_header_syntax(
             }
         }
 
+        let mut literals = Vec::new();
+        for (annotation_ordinal, arguments) in annotation_args.iter().enumerate() {
+            let Some(&argument) = arguments.first() else {
+                continue;
+            };
+            let Expr::CallableRef {
+                receiver: Some(receiver),
+                name,
+            } = file.expr(argument)
+            else {
+                continue;
+            };
+            if name != "class" {
+                continue;
+            }
+            let mut segments = Vec::new();
+            if !qualifier_segments(file, *receiver, &mut segments) || segments.is_empty() {
+                continue;
+            }
+            literals.push((
+                u32::try_from(annotation_ordinal).expect("too many annotations on one declaration"),
+                segments.join("."),
+            ));
+        }
+        literals
+    }
+
+    fn parameters(
+        file: &File,
+        headers: &mut HeaderSyntaxArena,
+        names: &mut LookupNames,
+        values: &[Param],
+        type_annotations: &std::collections::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
+    ) -> HeaderParameterRange {
         let mut packed = Vec::with_capacity(values.len());
         for parameter in values {
             let annotations = annotation_types(headers, names, &parameter.annotations);
@@ -2114,34 +2240,17 @@ pub fn extract_file_header_syntax(
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
             );
-            let mut annotation_class_literals = Vec::new();
-            for (annotation_ordinal, arguments) in parameter.annotation_args.iter().enumerate() {
-                let Some(&argument) = arguments.first() else {
-                    continue;
-                };
-                let Expr::CallableRef {
-                    receiver: Some(receiver),
-                    name,
-                } = file.expr(argument)
-                else {
-                    continue;
-                };
-                if name != "class" {
-                    continue;
-                }
-                let mut segments = Vec::new();
-                if !qualifier_segments(file, *receiver, &mut segments) || segments.is_empty() {
-                    continue;
-                }
-                let classifier = headers.add_path(&segments.join("."), names);
-                annotation_class_literals.push(HeaderParameterAnnotationClassLiteral {
-                    annotation_ordinal: u32::try_from(annotation_ordinal)
-                        .expect("too many parameter annotations"),
-                    classifier,
-                });
-            }
+            let literals = annotation_class_literals(file, &parameter.annotation_args)
+                .into_iter()
+                .map(
+                    |(annotation_ordinal, path)| HeaderParameterAnnotationClassLiteral {
+                        annotation_ordinal,
+                        classifier: headers.add_path(&path, names),
+                    },
+                )
+                .collect::<Vec<_>>();
             let annotation_class_literals =
-                headers.add_parameter_annotation_class_literal_range(annotation_class_literals);
+                headers.add_parameter_annotation_class_literal_range(literals);
             packed.push(HeaderParameter {
                 name: names.intern(&parameter.name),
                 ty: headers.add_type(&parameter.ty, names),
@@ -2301,6 +2410,7 @@ pub fn extract_file_header_syntax(
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             annotations,
+            annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::Callable {
                 receiver,
                 parameters,
@@ -2367,6 +2477,7 @@ pub fn extract_file_header_syntax(
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             annotations,
+            annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::Property {
                 receiver,
                 context_parameters,
@@ -2409,6 +2520,7 @@ pub fn extract_file_header_syntax(
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             annotations: HeaderTypeRange::default(),
+            annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::TypeAlias {
                 type_parameters,
                 target,
@@ -2475,6 +2587,19 @@ pub fn extract_file_header_syntax(
         let primary_parameters =
             primary_parameters(headers, names, &class.props, &file.type_annotations);
         let annotations = annotation_types(headers, names, &class.annotations);
+        // A class-level `@Serializable(with = X::class)` is read by ANOTHER file of this module,
+        // which never sees this AST. Capture it here, where the written argument still exists.
+        let annotation_class_literals = annotation_class_literals(file, &class.annotation_args)
+            .into_iter()
+            .map(
+                |(annotation_ordinal, path)| HeaderParameterAnnotationClassLiteral {
+                    annotation_ordinal,
+                    classifier: headers.add_path(&path, names),
+                },
+            )
+            .collect::<Vec<_>>();
+        let annotation_class_literals =
+            headers.add_declaration_annotation_class_literal_range(annotation_class_literals);
         let delegations = headers.add_interface_delegation_range(
             class.interface_delegations.iter().filter_map(|delegation| {
                 let supertype = delegation.supertype?;
@@ -2497,6 +2622,7 @@ pub fn extract_file_header_syntax(
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             annotations,
+            annotation_class_literals,
             kind: HeaderDeclarationKind::Classifier {
                 type_parameters: declared_type_parameters,
                 lexical_type_parameter_captures,
@@ -2529,6 +2655,7 @@ pub fn extract_file_header_syntax(
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor,
                 annotations,
+                annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {
                     context_parameters,
                     parameters: primary_parameters,
@@ -2567,6 +2694,7 @@ pub fn extract_file_header_syntax(
             headers.insert_declaration(HeaderDeclaration {
                 declaration: property_id,
                 annotations,
+                annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Property {
                     receiver: None,
                     context_parameters: HeaderParameterRange::default(),
@@ -2599,6 +2727,7 @@ pub fn extract_file_header_syntax(
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor_id,
                 annotations,
+                annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {
                     context_parameters,
                     parameters,
@@ -2765,6 +2894,10 @@ pub struct StreamedHeaderModule {
     /// declaration — a search with no answer for a synthesized declaration and a wrong one whenever
     /// two headers share a line. One entry per `expect` declaration.
     pub expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
+    /// The generated-class position each `suspend` function's continuation holds in its scope's
+    /// sequence, 1-based in declaration order. Only the parser pass that numbers that sequence can
+    /// answer it, so it is carried rather than recomputed. A backend builds the spelling.
+    pub continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3470,6 +3603,7 @@ pub struct HeaderInventoryBuilder {
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
     expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
+    continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
     source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
@@ -3538,6 +3672,8 @@ impl HeaderInventoryBuilder {
         order_file_stubs(&mut stubs, &self.declarations);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.expect_keywords.extend(extracted.expect_keywords);
+        self.continuation_ordinals
+            .extend(extracted.continuation_ordinals);
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3652,6 +3788,7 @@ impl HeaderInventoryBuilder {
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
             expect_keywords: self.expect_keywords,
+            continuation_ordinals: self.continuation_ordinals,
             inventory: self.inventory,
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
