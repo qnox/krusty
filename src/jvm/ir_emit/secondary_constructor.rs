@@ -124,26 +124,37 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
-            let (target_class, mut target_jvm_tys, default_masks): (String, Vec<Ty>, &[i32]) =
-                match &sc.delegate {
-                    CtorDelegateTarget::This {
-                        target_params,
-                        default_masks,
-                        ..
-                    } => (fq_name.to_string(), jvm_tys(target_params), default_masks),
-                    CtorDelegateTarget::Super {
-                        owner,
-                        target_params,
-                        default_masks,
-                    } => {
-                        let owner =
-                            crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
-                        (owner, jvm_tys(target_params), default_masks)
-                    }
-                    CtorDelegateTarget::ImplicitEnumBase => {
-                        ("java/lang/Enum".to_string(), Vec::new(), &[])
-                    }
-                };
+            let (target_class, mut target_jvm_tys, target_is_primary, default_masks): (
+                String,
+                Vec<Ty>,
+                bool,
+                &[i32],
+            ) = match &sc.delegate {
+                CtorDelegateTarget::This {
+                    target_params,
+                    to_primary,
+                    default_masks,
+                    ..
+                } => (
+                    fq_name.to_string(),
+                    jvm_tys(target_params),
+                    *to_primary,
+                    default_masks,
+                ),
+                CtorDelegateTarget::Super {
+                    owner,
+                    target_params,
+                    to_primary,
+                    default_masks,
+                } => {
+                    let owner =
+                        crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
+                    (owner, jvm_tys(target_params), *to_primary, default_masks)
+                }
+                CtorDelegateTarget::ImplicitEnumBase => {
+                    ("java/lang/Enum".to_string(), Vec::new(), true, &[])
+                }
+            };
             let delegates_to_this = matches!(sc.delegate, CtorDelegateTarget::This { .. });
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
@@ -231,18 +242,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
-            // A cross-class delegation target (`super(…)` to a base) whose primary ctor takes a value-class
-            // param has a PRIVATE primary — reach it through the `(…args, DefaultConstructorMarker)`
-            // accessor. A same-class `this(…)` to the own private primary stays direct (accessible).
-            let target_sealed = target_class != fq_name
+            // A delegation target whose primary ctor takes a value-class param has a PRIVATE primary —
+            // reach it through the `(…args, DefaultConstructorMarker)` accessor, from a subclass's
+            // `super(…)` and from the class's own `this(…)` alike.
+            let targets_hidden_primary =
+                target_is_primary && e.ir.has_value_param_ctor(&target_class);
+            let target_sealed = target_is_primary
+                && target_class != fq_name
                 && e.ir
                     .classes
                     .iter()
                     .any(|o| o.fq_name_matches(&target_class) && o.is_sealed);
-            if emitted_default_masks.is_empty()
-                && ((target_class != fq_name && e.ir.has_value_param_ctor(&target_class))
-                    || target_sealed)
-            {
+            if emitted_default_masks.is_empty() && (targets_hidden_primary || target_sealed) {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
@@ -492,6 +503,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &sc_source_tys,
                 &sc.defaults,
                 Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
+                sc.vc_params,
                 sc.annotations.deprecated(),
                 stub_access,
                 cw,
@@ -499,7 +511,19 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             );
         }
         if c.is_sealed || sc.vc_params {
-            super::constructor_defaults::emit_ctor_marker_accessor(fq_name, &sc_param_tys, cw);
+            let parameter_identities =
+                crate::jvm::method_parameters::secondary_constructor_identities(
+                    c,
+                    sc,
+                    self.owner_prefix,
+                    &sc_param_tys,
+                );
+            super::constructor_defaults::emit_ctor_marker_accessor(
+                fq_name,
+                &sc_param_tys,
+                &parameter_identities,
+                cw,
+            );
         }
     }
 }

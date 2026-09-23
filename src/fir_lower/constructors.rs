@@ -339,6 +339,7 @@ pub(super) fn finalize_constructors(
             class.super_arg_prelude = delegate_prelude;
             class.super_args = arguments;
             class.super_ctor_params = parameters;
+            class.super_ctor_is_primary = target_primary;
             if let Some(external_target) = external_target {
                 ir.external_super_constructors
                     .insert(class.fq_name, external_target);
@@ -360,6 +361,7 @@ pub(super) fn finalize_constructors(
                 crate::ir::CtorDelegateTarget::Super {
                     owner,
                     target_params: parameters,
+                    to_primary: target_primary,
                     default_masks: Vec::new(),
                 }
             };

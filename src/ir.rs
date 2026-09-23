@@ -1641,6 +1641,9 @@ pub struct IrClass {
     /// Checker-selected semantic parameter types parallel to `super_args`. A backend couples these to
     /// its physical superclass-constructor ABI without resolving the constructor again.
     pub super_ctor_params: Vec<Ty>,
+    /// Whether the checker-selected superclass constructor is the primary declaration. Backends
+    /// consume this identity fact instead of comparing erased descriptors with the primary shape.
+    pub super_ctor_is_primary: bool,
     /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
     /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
@@ -1885,6 +1888,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
+            super_ctor_is_primary: true,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -1995,6 +1999,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
+            super_ctor_is_primary: true,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -2092,6 +2097,8 @@ pub enum CtorDelegateTarget {
     Super {
         owner: TypeName,
         target_params: Vec<Ty>,
+        /// Exact selected declaration kind retained from checked constructor resolution.
+        to_primary: bool,
         default_masks: Vec<i32>,
     },
     /// An enum secondary constructor with no written `this(…)` delegation. Kotlin implicitly

@@ -5623,6 +5623,7 @@ fn build_continuation_class(
         super_arg_prelude: Vec::new(),
         super_args: vec![super_arg],
         super_ctor_params: vec![Ty::Int],
+        super_ctor_is_primary: true,
         enum_entries: vec![],
         enum_entry_of: None,
         prop_ref: None,
