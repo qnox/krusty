@@ -66,6 +66,7 @@ mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
 mod plugin_expression_annotations;
+mod plugin_expression_planning;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod receiver_flow;
@@ -78,13 +79,15 @@ mod scope;
 mod signature_collection;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
-pub(crate) use signature_collection::collect_signatures_with_cp_headers_and_local_contexts;
 use signature_collection::{
     base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
     resolve_source_alias_expansion, spelling_scope, supertype_components, supertype_graph,
 };
 pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
+pub(crate) use signature_collection::{
+    collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
+};
 mod singleton_receivers;
 mod source_constructors;
 mod stable_path;
@@ -3920,6 +3923,8 @@ pub struct SymbolTable {
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
+    /// The native compiler plugins this compilation runs (none unless the driver selects them).
+    native_plugins: crate::plugins::registry::NativePlugins,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -3987,11 +3992,16 @@ pub struct SymbolTable {
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: Box<dyn SemanticPlatform>,
+    native_plugins: crate::plugins::registry::NativePlugins,
 }
 
 impl PassTwoSymbols {
     pub(crate) fn semantic_platform(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 }
 
@@ -4000,6 +4010,7 @@ impl SymbolTable {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: self.libraries,
+            native_plugins: self.native_plugins,
         }
     }
 }
@@ -4038,6 +4049,7 @@ impl Default for SymbolTable {
             toplevel_jvm_names: HashMap::new(),
             enums: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
+            native_plugins: Default::default(),
             ext_funs: HashMap::new(),
             source_ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
@@ -37666,6 +37678,7 @@ fn make_checker<'a>(
 
 trait CheckerSymbolEnvironment {
     fn libraries(&self) -> &dyn SemanticPlatform;
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins;
     fn compilation_id(&self) -> u64;
     fn pass_one_symbols(&self) -> Option<&SymbolTable>;
     fn pass_one_symbols_mut(&mut self) -> Option<&mut SymbolTable>;
@@ -37674,6 +37687,10 @@ trait CheckerSymbolEnvironment {
 impl CheckerSymbolEnvironment for SymbolTable {
     fn libraries(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 
     fn compilation_id(&self) -> u64 {
@@ -37692,6 +37709,10 @@ impl CheckerSymbolEnvironment for SymbolTable {
 impl CheckerSymbolEnvironment for PassTwoSymbols {
     fn libraries(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 
     fn compilation_id(&self) -> u64 {
@@ -40055,103 +40076,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         context_args,
     };
     if !capture_discovery {
-        let calls = info
-            .resolved_calls
-            .iter()
-            .filter_map(|(&expression, call)| {
-                let (owner, name, params, ret, generic_sig, inline, implementation) = match call {
-                    ResolvedCall::TopLevel(target) => (
-                        target.callable.owner,
-                        target.callable.name.clone(),
-                        target.callable.params.clone(),
-                        target.callable.ret,
-                        target.callable.generic_sig.as_deref().cloned(),
-                        target.callable.inline,
-                        target.callable.plugin_expression,
-                    ),
-                    ResolvedCall::Member(target) => (
-                        target
-                            .member
-                            .owner
-                            .or_else(|| target.receiver.kotlin_class_internal())?,
-                        target.member.name.clone(),
-                        target.member.params.clone(),
-                        target.ret,
-                        target.member.generic_sig.clone(),
-                        target.member.inline,
-                        target.member.plugin_expression,
-                    ),
-                    ResolvedCall::Extension(target) => (
-                        target.callable.owner,
-                        target.callable.name.clone(),
-                        target.params.clone(),
-                        target.callable.ret,
-                        target.callable.generic_sig.as_deref().cloned(),
-                        target.callable.inline,
-                        target.callable.plugin_expression,
-                    ),
-                    ResolvedCall::Companion(target) => (
-                        target.owner?,
-                        target.name.clone(),
-                        target.params.clone(),
-                        target.ret,
-                        target.generic_sig.clone(),
-                        target.inline,
-                        target.plugin_expression,
-                    ),
-                    _ => return None,
-                };
-                let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
-                    .map(|receiver| (receiver, info.ty(receiver)));
-                let implicit_receiver = info
-                    .implicit_receiver_selections
-                    .get(&expression)
-                    .map(|selected| selected.ty);
-                Some(crate::plugins::FrontendSelectedCall {
-                    expression,
-                    explicit_receiver,
-                    implicit_receiver,
-                    owner,
-                    name,
-                    params,
-                    ret,
-                    generic_sig,
-                    inline,
-                    implementation,
-                    type_arguments: info
-                        .resolved_call_type_args
-                        .get(&expression)
-                        .cloned()
-                        .unwrap_or_default(),
-                    argument_slots: info
-                        .resolved_call_arg_slots
-                        .get(&expression)
-                        .cloned()
-                        .unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let classifier_annotations =
-            plugin_expression_annotations::classifier_annotations_for_calls(
-                plugin_expression_annotations::ClassifierAnnotationInputs {
-                    resolved_index,
-                    pass_one_symbols: syms.pass_one_symbols(),
-                    libraries: syms.libraries(),
-                },
-                &calls,
-            );
-        let context = crate::plugins::FrontendExpressionContext {
-            calls,
-            classifier_annotations,
-        };
-        for (expression, plan) in
-            crate::plugins::enabled_plugins("main").plan_frontend_expressions(&context)
-        {
-            let previous = info
-                .expr_lowers
-                .insert(expression, ExprLowering::PluginExpression(Box::new(plan)));
-            debug_assert!(previous.is_none(), "plugin expression plan collision");
-        }
+        plugin_expression_planning::plan_plugin_expressions(
+            file,
+            &mut info,
+            syms.native_plugins(),
+            plugin_expression_annotations::ClassifierAnnotationInputs {
+                resolved_index,
+                pass_one_symbols: syms.pass_one_symbols(),
+                libraries: syms.libraries(),
+            },
+        );
     }
     info
 }

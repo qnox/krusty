@@ -165,13 +165,25 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
+    let plugins = opts.resolve_plugins(&effective_classpath);
+    for note in &plugins.notes {
+        eprintln!("info: {note}");
+    }
+    if !plugins.errors.is_empty() {
+        return Err(plugins
+            .errors
+            .iter()
+            .map(|error| format!("error: {error}\n"))
+            .collect());
+    }
     let cp = std::rc::Rc::new(Classpath::new_with_friend_paths(
         effective_classpath,
         opts.friend_paths.clone(),
     ));
     // Construction is fallible: a corrupt selected dependency remains a terminal frontend
     // diagnostic and never becomes a queryable provider with an empty symbol index.
-    let platform = JvmLibraries::new(cp.clone());
+    let platform = krusty::frontend::PlatformProvider::from(JvmLibraries::new(cp.clone()))
+        .with_native_plugins(plugins.native);
     let source_inputs = opts
         .sources
         .iter()

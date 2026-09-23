@@ -6203,6 +6203,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/ext_receiver_tparam_binding_e2e.rs`
   (`a_subtype_receiver_over_a_caller_type_variable_binds_the_declared_receiver_formal`,
   cross-checked against the reference compiler).
+- **A compiler plugin runs only when the command line requests it, and one krusty cannot run fails
+  the compile.** kotlinc loads the jars of `-Xplugin=<jar>,<jar>` (repeatable, split on `,` only:
+  `-Xplugin=a.jar:b.jar` names one missing jar) and configures them with
+  `-P plugin:<id>:<key>=<value>`; 2.4 also takes the experimental `-Xcompiler-plugin=<jars>[=<k>=<v>,…]`
+  and refuses a command line that mixes the two syntaxes. Without the serialization plugin it
+  synthesizes nothing for a `@Serializable` class — no `$serializer`, no `Companion.serializer()`,
+  no intrinsic `serializer<T>()` — so krusty's serialization pass, which used to run on every
+  compilation, now runs only when requested. The CLI dropped every plugin switch with "ignoring
+  unsupported option", so all-open's source was rejected, a no-arg class compiled without its no-arg
+  constructor (`NoSuchMethodException` at run time) and a `@Composable` signature went
+  untransformed. The switches are now resolved against the extension registry, which identifies a
+  jar as kotlinc's `ServiceLoader` does — by the registrar class its
+  `META-INF/services/…CompilerPluginRegistrar` (or legacy `…ComponentRegistrar`) file declares, never
+  by its file name. A jar declaring the serialization registrar prints an `info:` line and runs
+  krusty's native pass; a jar declaring any registrar no registered extension answers to is an
+  `error:` naming it and the compile exits 1, and so is an entry krusty cannot read (kotlinc fails on
+  it too). A readable jar declaring no registrar holds no plugin, and kotlinc 2.4.20 compiles as
+  without it (exit 0), so krusty does too. A `-P` id no registered extension answers to is an error
+  as well — stricter than kotlinc, which ignores options for a plugin it did not load, and kept from
+  the registry's contract because such an option says the build meant to run a plugin krusty cannot,
+  and krusty never drops a plugin request it cannot resolve. A KSP request is an error too,
+  because the command line starts no codegen host. A missing jar and a malformed
+  `-P` are kotlinc's own errors, in its words. The selection travels with the analysis
+  (`PlatformProvider::with_native_plugins`) into signature collection, body checking and the backend,
+  so the three phases cannot disagree. The language server and the in-process test helpers select
+  every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
+  `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
+  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the all-open,
+  no-arg and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
+  unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
+  missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
+  `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
+  `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
 
 ## 8. Success criteria for the PoC
 

@@ -256,6 +256,7 @@ pub fn emit_analyzed<B: Backend>(
                     &backend_module_facts,
                     symbols.semantic_platform(),
                 ),
+                native_plugins: symbols.native_plugins(),
                 module_name,
                 stems,
             },
