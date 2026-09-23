@@ -85,6 +85,31 @@ fn may_supply_inherited_implementation(
         || !owner_already_has_obligation(source, implementation_owner, obligation_owner)
 }
 
+/// For each overridden declaration of ONE implementation, the other overridden declarations that
+/// belong to a superclass (not an interface) which inherits the first one's owner. Such a
+/// superclass member itself overrides that declaration, so the declaration reaches the
+/// implementation through the superclass chain rather than first at the implementation.
+fn superclass_overrides<Target: Copy>(
+    source: &dyn SymbolSource,
+    overridden: impl Iterator<Item = (Target, crate::types::TypeName, bool)>,
+) -> Vec<Box<[Target]>> {
+    let overridden = overridden.collect::<Vec<_>>();
+    overridden
+        .iter()
+        .map(|&(_, owner, _)| {
+            overridden
+                .iter()
+                .filter(|&&(_, superclass, superclass_is_interface)| {
+                    !superclass_is_interface
+                        && superclass != owner
+                        && owner_already_has_obligation(source, superclass, owner)
+                })
+                .map(|&(target, _, _)| target)
+                .collect()
+        })
+        .collect()
+}
+
 fn target(
     index: &ResolvedModuleIndex,
     property: &PropertyInfo,
@@ -359,6 +384,7 @@ fn publish_inherited_interface_function_plans(
                         "inherited implementation result",
                     ),
                     suspend: implementation.flags.suspend,
+                    superclass_overrides: Box::default(),
                     depth: supertype.depth,
                 });
             }
@@ -466,6 +492,7 @@ fn publish_inherited_interface_property_plans(
                     ),
                     overridden_mutable: applied.setter.is_some(),
                     implementation_mutable: implementation.setter.is_some(),
+                    superclass_overrides: Box::default(),
                     depth: supertype.depth,
                 });
             }
@@ -486,6 +513,7 @@ fn append_property_override_edges(
     seen: &mut HashSet<ResolvedPropertyOverrideTarget>,
     overrides: &mut Vec<ResolvedPropertyOverride>,
 ) {
+    let first = overrides.len();
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
             .classifier(supertype.classifier)
@@ -531,9 +559,24 @@ fn append_property_override_edges(
                 implementation_type,
                 overridden_mutable: applied.setter.is_some(),
                 implementation_mutable,
+                superclass_overrides: Box::default(),
                 depth: supertype.depth,
             });
         }
+    }
+    let edges = &mut overrides[first..];
+    let covering = superclass_overrides(
+        source,
+        edges.iter().map(|edge| {
+            (
+                edge.overridden,
+                edge.overridden_owner,
+                edge.overridden_is_interface,
+            )
+        }),
+    );
+    for (edge, covering) in edges.iter_mut().zip(covering) {
+        edge.superclass_overrides = covering;
     }
 }
 
@@ -602,6 +645,7 @@ fn append_function_override_edges(
     seen: &mut HashSet<ResolvedFunctionOverrideTarget>,
     overrides: &mut Vec<ResolvedFunctionOverride>,
 ) {
+    let first = overrides.len();
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
             .classifier(supertype.classifier)
@@ -690,9 +734,24 @@ fn append_function_override_edges(
                     "overriding function result",
                 ),
                 suspend,
+                superclass_overrides: Box::default(),
                 depth: supertype.depth,
             });
         }
+    }
+    let edges = &mut overrides[first..];
+    let covering = superclass_overrides(
+        source,
+        edges.iter().map(|edge| {
+            (
+                edge.overridden,
+                edge.overridden_owner,
+                edge.overridden_is_interface,
+            )
+        }),
+    );
+    for (edge, covering) in edges.iter_mut().zip(covering) {
+        edge.superclass_overrides = covering;
     }
 }
 

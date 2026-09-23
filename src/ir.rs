@@ -3090,6 +3090,7 @@ pub struct IrPropertyOverride {
     pub implementation_type: Ty,
     pub overridden_mutable: bool,
     pub implementation_mutable: bool,
+    pub superclass_overrides: Vec<crate::fir::ResolvedPropertyOverrideTarget>,
     pub depth: u32,
 }
 
@@ -3113,6 +3114,7 @@ pub struct IrFunctionOverride {
     pub implementation_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub implementation_result: Ty,
     pub suspend: bool,
+    pub superclass_overrides: Vec<crate::fir::ResolvedFunctionOverrideTarget>,
     pub depth: u32,
 }
 

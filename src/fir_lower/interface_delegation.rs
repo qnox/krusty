@@ -309,6 +309,9 @@ fn materialize_delegation(
                             .to_vec(),
                         implementation_result: member.call.result.get(),
                         suspend: member.call.suspend,
+                        // A delegation forwarder implements an interface obligation no superclass
+                        // declaration of this class overrides.
+                        superclass_overrides: Vec::new(),
                         depth: 0,
                     });
                 if member.call.suspend {

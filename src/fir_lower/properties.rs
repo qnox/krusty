@@ -985,6 +985,13 @@ fn materialize_member_property(
     if property.visibility.is_private() {
         ir.private_methods.extend(getter.iter().copied());
     }
+    // An open or overriding property's custom accessors stay overridable, exactly as the default
+    // accessors of a backing-field property do through `IrProperty::is_open`: kotlinc emits the
+    // getter of `override val size: Int get() = 2` without `final` even in a final class.
+    if property.flags.has(DeclarationFlags::OPEN) {
+        ir.open_methods
+            .extend(getter.iter().chain(setter.iter()).copied());
+    }
     if let Some(setter) = setter.filter(|_| {
         property.visibility.is_private() || setter_is_private(index, property.declaration)
     }) {

@@ -55,6 +55,29 @@ fn external_method_name(
     )
 }
 
+/// Whether a Kotlin superclass declaration that itself overrides the bridged member already owns
+/// the renamed-builtin bridge (`size()` for `Collection.size`, `intValue()` for `Number.toInt`).
+///
+/// kotlinc emits such a bridge `final` in the first Kotlin class that overrides the mapped member
+/// (`kotlin.collections.AbstractCollection.size()`), so every subclass inherits it and must not
+/// redeclare it: a second copy overrides a final method (`IncompatibleClassChangeError`). A Java
+/// superclass realizes the member under the JVM name itself and owns no such bridge, so it never
+/// counts. Each covering declaration is its external identity, or `None` for a declaration of the
+/// module being compiled (always Kotlin).
+fn superclass_owns_renamed_bridge(
+    classpath: &crate::jvm::classpath::Classpath,
+    covering: impl IntoIterator<Item = Option<crate::fir::ExternalCallableId>>,
+) -> bool {
+    covering.into_iter().any(|external| {
+        external.is_none_or(|target| {
+            classpath
+                .external_callable(target)
+                .and_then(|realization| classpath.find_name(realization.callable.owner))
+                .is_some_and(|class| class.meta.class_kind.is_some())
+        })
+    })
+}
+
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
 /// override) needs an `ACC_BRIDGE` method carrying the SUPERCLASS's descriptor that delegates to the
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
@@ -157,6 +180,21 @@ fn superclass_method_bridges(
                 }
             }
         };
+        if bridge_name != edge.name
+            && superclass_owns_renamed_bridge(
+                classpath,
+                edge.superclass_overrides
+                    .iter()
+                    .map(|covering| match covering {
+                        crate::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+                        crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                            Some(*target)
+                        }
+                    }),
+            )
+        {
+            continue;
+        }
         crate::trace_compiler!(
             "bridges",
             "stable override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={} target={} declared={base_params:?}->{base_ret:?} concrete={own_params:?}->{own_ret:?}",
@@ -269,8 +307,33 @@ fn property_bridges(ir: &mut IrFile, cid: usize, classpath: &crate::jvm::classpa
                 external_method_name(classpath, target, &source_getter)
             }
         };
+        crate::trace_compiler!(
+            "bridges",
+            "stable property override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={bridge_getter} target={target_getter} covering={:?}",
+            edge.implementation,
+            edge.implementation_owner,
+            edge.overridden,
+            edge.overridden_owner,
+            edge.name,
+            edge.superclass_overrides,
+        );
         if type_descriptor(edge.declared_type) == type_descriptor(edge.implementation_type)
             && bridge_getter == target_getter
+        {
+            continue;
+        }
+        if bridge_getter != source_getter
+            && superclass_owns_renamed_bridge(
+                classpath,
+                edge.superclass_overrides
+                    .iter()
+                    .map(|covering| match covering {
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(_) => None,
+                        crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
+                            Some(*target)
+                        }
+                    }),
+            )
         {
             continue;
         }
