@@ -174,3 +174,83 @@ fn a_chain_across_lines_types_its_shared_null_path() {
         "safe-call chain across lines",
     );
 }
+
+const ELVIS_OVER_CHAINS: &str = "class Link(val name: String?, val next: Link?) {\n\
+    \x20   fun markerScore(): Int = 1\n\
+    }\n\
+    fun nameOr(link: Link?): String = link?.name ?: \"x\"\n\
+    fun nextNameOr(link: Link?): String = link?.next?.name ?: \"x\"\n\
+    fun thirdNameOr(link: Link?): String = link?.next?.next?.name ?: \"x\"\n\
+    fun nextScoreOr(link: Link?): Int = link?.next?.markerScore() ?: 0\n\
+    fun valueOr(s: String?): String = s ?: \"d\"\n\
+    fun printNextName(link: Link?) {\n\
+    \x20   println(link?.next?.name ?: \"x\")\n\
+    }\n\
+    fun discardNextName(link: Link?) {\n\
+    \x20   link?.next?.name ?: \"x\"\n\
+    }\n";
+
+#[test]
+fn an_elvis_over_a_safe_call_chain_joins_its_null_path_like_kotlincs() {
+    // Every guard of the chain, and the elvis's own check of the chain's value, jump to the elvis's
+    // right side; kotlinc's last pass turns the final `ifnull N; goto E; N:` into `ifnonnull E`.
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ElvisChain",
+        ELVIS_OVER_CHAINS,
+        "ElvisChainKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    for member in [
+        "java.lang.String nameOr(Link)",
+        "java.lang.String nextNameOr(Link)",
+        "java.lang.String thirdNameOr(Link)",
+        "int nextScoreOr(Link)",
+        "java.lang.String valueOr(java.lang.String)",
+        "void printNextName(Link)",
+        "void discardNextName(Link)",
+    ] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+        let frames = stack_map(&built.reference, member)
+            .unwrap_or_else(|| panic!("{member} has no StackMapTable"));
+        assert!(!frames.is_empty(), "{member} has no StackMapTable");
+        assert_eq!(
+            stack_map(&built.krusty, member),
+            Some(frames),
+            "{member} frames"
+        );
+    }
+}
+
+#[test]
+fn an_elvis_over_a_safe_call_chain_still_runs() {
+    common::expect_box_ok_with_stdlib(
+        &format!(
+            "{ELVIS_OVER_CHAINS}\
+             fun box(): String {{\n\
+             \x20   val chain = Link(\"a\", Link(null, Link(\"c\", null)))\n\
+             \x20   if (nameOr(null) != \"x\" || nameOr(chain) != \"a\") return \"one\"\n\
+             \x20   if (nextNameOr(chain) != \"x\" || nextNameOr(Link(null, null)) != \"x\") return \"two\"\n\
+             \x20   if (thirdNameOr(chain) != \"c\" || thirdNameOr(null) != \"x\") return \"three\"\n\
+             \x20   if (nextScoreOr(chain) != 1 || nextScoreOr(Link(null, null)) != 0) return \"score\"\n\
+             \x20   if (valueOr(null) != \"d\" || valueOr(\"v\") != \"v\") return \"plain\"\n\
+             \x20   printNextName(chain)\n\
+             \x20   printNextName(null)\n\
+             \x20   discardNextName(chain)\n\
+             \x20   discardNextName(null)\n\
+             \x20   return \"OK\"\n\
+             }}\n"
+        ),
+        "elvis over a safe-call chain",
+    );
+}

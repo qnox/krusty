@@ -1045,6 +1045,16 @@ impl BodyLowering<'_> {
                     let result = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(condition), rhs), (None, lhs)],
                     });
+                    // An elvis over a safe call is one more guard of that call's chain: its left
+                    // value's null check joins the chain's, and every `null` reaches the right side.
+                    let over_safe_call = matches!(
+                        self.ir.expr(lhs_value),
+                        IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
+                    );
+                    if over_safe_call {
+                        self.ir.null_guards.insert(result);
+                        self.ir.elvis_safe_call_guards.insert(result);
+                    }
                     self.ir.add_expr(IrExpr::Block {
                         stmts: vec![variable],
                         value: Some(result),
@@ -1737,7 +1747,7 @@ impl BodyLowering<'_> {
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
-        self.ir.safe_call_guards.insert(guarded);
+        self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),

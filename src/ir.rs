@@ -2420,11 +2420,16 @@ pub struct IrFile {
     /// Source binding reads and the checked binding's reassignment contract. The expression key is
     /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
     pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,
-    /// The null guard of every lowered safe call (`a?.f()`), keyed by its `When`: the first branch
-    /// tests the receiver temporary against `null` and yields the null result, the `else` is the
-    /// selector. Recorded where the safe call is lowered, so a backend lays the guard out as its
-    /// platform compiler does without recognizing the shape again.
-    pub safe_call_guards: std::collections::HashSet<ExprId>,
+    /// The null guard of every lowered safe call (`a?.f()`), and of an elvis over one
+    /// (`a?.f() ?: b`), keyed by its `When`: the first branch tests the temporary against `null` and
+    /// yields the null result (the elvis's right side), the `else` is the selector (the elvis's
+    /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
+    /// compiler does without recognizing the shape again.
+    pub null_guards: std::collections::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
+    /// need this provenance when statement emission differs from a safe call's literal-null arm;
+    /// it must not recover that distinction from the lowered branch shape.
+    pub elvis_safe_call_guards: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
