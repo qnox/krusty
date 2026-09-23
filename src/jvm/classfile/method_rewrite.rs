@@ -18,6 +18,8 @@
 //! into a recorded frame agrees with that frame; otherwise the method is written exactly as
 //! emitted.
 
+use std::collections::BTreeSet;
+
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::redundant_gotos;
 use super::temporaries::{self, Body};
@@ -465,6 +467,13 @@ impl ClassWriter {
             }
             *slot = next;
         }
+        let debug_after_insert: BTreeSet<usize> = rewrite
+            .stack_at_target
+            .iter()
+            .filter_map(|(target, _)| {
+                (new_index[*target] != late_index[*target]).then_some(*target)
+            })
+            .collect();
         let is_late_label = |label: u32| rewrite.late_labels.contains(&label);
         let retarget = |to: usize| new_index[to];
         let retarget_branch = |placement: temporaries::Placement, to: usize| match placement {
@@ -525,6 +534,19 @@ impl ClassWriter {
             new_offsets[new_index[k.min(n)]]
         };
         let map16 = |pc: u16| map(usize::from(pc)) as u16;
+        // A debug boundary and the implicit return at an `ifnull` fold's target describe the
+        // original instruction/range boundary after its labels. They therefore belong after the
+        // `pop` inserted in front of that original instruction. Other `Before(k)` insertions (the
+        // `dup` beside a branch) do not move a table boundary at `k`.
+        let map_after_inserted = |pc: usize| -> usize {
+            let k = offsets.partition_point(|&at| at < pc).min(n);
+            if debug_after_insert.contains(&k) {
+                new_offsets[late_index[k]]
+            } else {
+                map(pc)
+            }
+        };
+        let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
@@ -644,15 +666,16 @@ impl ClassWriter {
         let lnt: Vec<(u16, u16)> = method
             .lnt
             .iter()
-            .map(|&(pc, line)| (map16(pc), line))
+            .map(|&(pc, line)| (map_after_inserted16(pc), line))
             .collect();
         let lvt: Vec<LvtEntry> = method
             .lvt
             .iter()
             .map(|&(name, desc, slot, old_start, old_len)| {
-                let start = old_start.map(map16);
+                let start = old_start.map(map_after_inserted16);
                 let len = old_len.map(|old_len| {
-                    let end = map(old_start.map_or(0, usize::from) + usize::from(old_len));
+                    let end =
+                        map_after_inserted(old_start.map_or(0, usize::from) + usize::from(old_len));
                     (end - start.map_or(0, usize::from)) as u16
                 });
                 (name, desc, slot, start, len)
@@ -770,7 +793,7 @@ impl ClassWriter {
             exceptions,
             lnt,
             lvt,
-            implicit_void_return_pc: method.implicit_void_return_pc.map(map16),
+            implicit_void_return_pc: method.implicit_void_return_pc.map(map_after_inserted16),
             frames,
         })
     }

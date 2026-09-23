@@ -27,7 +27,42 @@ const SOURCE: &str = "class Link(val name: String?, val next: Link?) {\n\
     }\n\
     fun growIt(link: Link?) {\n\
     \x20   link?.grow()\n\
+    }\n\
+    class Token {\n\
+    \x20   fun stamp(): String = \"seen\"\n\
+    }\n\
+    fun boundary(token: Token?): String {\n\
+    \x20   val scoped = token\n\
+    \x20   scoped?.stamp()\n\
+    \x20   return \"OK\"\n\
     }\n";
+
+/// One method's complete offset-bearing rows from a debug table, in emitted order.
+fn method_debug_table(text: &str, marker: &str, table: &str) -> Vec<String> {
+    let mut lines = text.lines().map(str::trim);
+    lines
+        .by_ref()
+        .find(|line| line.ends_with(';') && line.contains(marker))
+        .unwrap_or_else(|| panic!("{marker} not found"));
+    let mut method = lines.take_while(|line| {
+        !(line.ends_with(';')
+            && line.contains('(')
+            && !line.starts_with("descriptor:")
+            && !line.contains("//"))
+    });
+    method
+        .by_ref()
+        .find(|line| line.starts_with(table))
+        .unwrap_or_else(|| panic!("{marker} has no {table}"));
+    method
+        .skip_while(|line| line.starts_with("Start "))
+        .take_while(|line| {
+            line.starts_with("line ")
+                || line.starts_with(|character: char| character.is_ascii_digit())
+        })
+        .map(str::to_string)
+        .collect()
+}
 
 #[test]
 fn safe_calls_are_laid_out_like_kotlincs() {
@@ -50,6 +85,7 @@ fn safe_calls_are_laid_out_like_kotlincs() {
         "void touchIt(Link)",
         "void measureIt(java.lang.String)",
         "void growIt(Link)",
+        "java.lang.String boundary(Token)",
     ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
@@ -65,6 +101,17 @@ fn safe_calls_are_laid_out_like_kotlincs() {
             stack_map(&built.krusty, member),
             Some(frames),
             "{member} frames"
+        );
+    }
+
+    let member = "java.lang.String boundary(Token)";
+    for table in ["LineNumberTable", "LocalVariableTable"] {
+        let reference = method_debug_table(&built.reference, member, table);
+        assert!(!reference.is_empty(), "{member} has an empty {table}");
+        assert_eq!(
+            method_debug_table(&built.krusty, member, table),
+            reference,
+            "{member} {table}"
         );
     }
 }
@@ -87,6 +134,7 @@ fn safe_calls_laid_out_like_kotlincs_still_run() {
              \x20   measureIt(\"m\")\n\
              \x20   growIt(null)\n\
              \x20   growIt(chain)\n\
+             \x20   if (boundary(null) != \"OK\" || boundary(Token()) != \"OK\") return \"boundary\"\n\
              \x20   return \"OK\"\n\
              }}\n"
         ),

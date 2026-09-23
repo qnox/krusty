@@ -107,11 +107,19 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
             let late =
                 matches!(nodes[at].1, Placement::Original(index) if (tables.late_branch)(index));
             if let Some(target) = goto_target(insn) {
-                next_goto = Some(at);
-                if run.contains(&target) && !late {
-                    redundant.push(at);
-                } else {
+                if late {
+                    // This target label stands after an instruction inserted at the same original
+                    // bytecode position. Neither this `goto` nor a jump reaching it may be folded
+                    // through that instruction.
                     run.clear();
+                    next_goto = None;
+                } else {
+                    next_goto = Some(at);
+                    if run.contains(&target) {
+                        redundant.push(at);
+                    } else {
+                        run.clear();
+                    }
                 }
             } else if !is_nop(insn) {
                 run.clear();
@@ -252,7 +260,12 @@ mod tests {
         }
     }
 
-    fn run(insns: &[Insn], lines: &[usize], bounds: &[usize]) -> Option<Vec<Insn>> {
+    fn run_with_late(
+        insns: &[Insn],
+        lines: &[usize],
+        bounds: &[usize],
+        late_branches: &[usize],
+    ) -> Option<Vec<Insn>> {
         let mut nodes: Vec<(Insn, Placement)> = insns
             .iter()
             .enumerate()
@@ -270,9 +283,13 @@ mod tests {
             lines: &line,
             variable_bounds: &bound,
             protected_starts: &[],
-            late_branch: &|_| false,
+            late_branch: &|index| late_branches.contains(&index),
         };
         remove(&mut nodes, &tables).then(|| nodes.into_iter().map(|(insn, _)| insn).collect())
+    }
+
+    fn run(insns: &[Insn], lines: &[usize], bounds: &[usize]) -> Option<Vec<Insn>> {
+        run_with_late(insns, lines, bounds, &[])
     }
 
     const IFNONNULL: u8 = 0xc7;
@@ -348,6 +365,21 @@ mod tests {
                 op(0xac),
             ])
         );
+    }
+
+    #[test]
+    fn a_jump_is_not_threaded_through_a_goto_to_a_late_label() {
+        // The target of instruction 2 stands after an instruction inserted at group 4. Retargeting
+        // instruction 0 through it would instead land before that inserted instruction.
+        let insns = [
+            branch(0x99, 2),
+            op(0x04),
+            branch(GOTO, 4),
+            op(0x05),
+            op(ARETURN),
+        ];
+
+        assert_eq!(run_with_late(&insns, &[], &[], &[2]), None);
     }
 
     #[test]
