@@ -11,7 +11,7 @@
 //! to. The result is the state the verifier will hold at every instruction, which is exactly the
 //! state any target transform must preserve.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::ControlGraph;
 use crate::jvm::classfile::VerifType;
@@ -411,22 +411,53 @@ impl FrameTypes {
         self.before.get(index)?.as_ref()
     }
 
+    /// The reference widenings this body's edges into its recorded frames make: `(arriving,
+    /// expected)` for each reference arriving where a frame names a different reference. The body
+    /// as emitted is what the JVM verifies, so each of these is an assignment it accepts; a
+    /// rewrite of the body may make the same ones again (see [`Self::frames_hold`]).
+    pub(crate) fn reference_widenings(
+        &self,
+        insns: &[Insn],
+        graph: &ControlGraph,
+        frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
+        pool: &dyn PoolView,
+    ) -> Option<HashSet<(String, String)>> {
+        let mut widenings = HashSet::new();
+        let mut note = |value: &VerificationType, to: &VerificationType| {
+            if let (VerificationType::Reference(value), VerificationType::Reference(to)) =
+                (value, to)
+            {
+                if value != to {
+                    widenings.insert((value.clone(), to.clone()));
+                }
+            }
+        };
+        self.edges_into_frames(insns, graph, frames, pool, &mut |after, frame| {
+            for (to, value) in frame.stack.iter().zip(&after.stack) {
+                note(value, to);
+            }
+            for (slot, to) in frame.locals.iter().enumerate() {
+                note(after.locals.get(slot).unwrap_or(&VerificationType::Top), to);
+            }
+            true
+        })
+        .then_some(widenings)
+    }
+
     /// Whether every normal edge into a recorded frame arrives with a state that frame accepts:
     /// the same stack height, and each value the frame names typed compatibly. [`Self::analyze`]
     /// takes a recorded frame as given; a rewrite that moved values onto and off the stack uses
     /// this to prove the frames it edited still describe the code. The class hierarchy is not
-    /// modelled, so differing non-null reference names are declined rather than guessed assignable.
+    /// modelled: a reference is accepted where the frame names the same reference, `Object`, or a
+    /// reference it is `known` to widen to (the widenings the body as emitted already made).
     pub(crate) fn frames_hold(
         &self,
         insns: &[Insn],
         graph: &ControlGraph,
         frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
         pool: &dyn PoolView,
+        known: &HashSet<(String, String)>,
     ) -> bool {
-        let recorded: HashMap<usize, FrameState> = frames
-            .iter()
-            .map(|(index, locals, stack)| (*index, FrameState::from_verif(locals, stack, pool)))
-            .collect();
         let assignable = |value: &VerificationType, to: &VerificationType| {
             use VerificationType::*;
             match (value, to) {
@@ -434,10 +465,39 @@ impl FrameTypes {
                 (Null, Reference(_)) => true,
                 // Every reference is an `Object`; that needs no class hierarchy.
                 (Reference(_), Reference(expected)) if expected == "java/lang/Object" => true,
-                (Reference(value), Reference(expected)) => value == expected,
+                (Reference(value), Reference(expected)) => {
+                    value == expected || known.contains(&(value.clone(), expected.clone()))
+                }
                 (value, to) => value == to,
             }
         };
+        self.edges_into_frames(insns, graph, frames, pool, &mut |after, frame| {
+            frame.stack.len() == after.stack.len()
+                && frame
+                    .stack
+                    .iter()
+                    .zip(&after.stack)
+                    .all(|(to, value)| assignable(value, to))
+                && frame.locals.iter().enumerate().all(|(slot, to)| {
+                    assignable(after.locals.get(slot).unwrap_or(&VerificationType::Top), to)
+                })
+        })
+    }
+
+    /// Visit every normal edge into a recorded frame with the state arriving on it and the frame;
+    /// `false` as soon as an instruction cannot be stepped or `visit` refuses an edge.
+    fn edges_into_frames(
+        &self,
+        insns: &[Insn],
+        graph: &ControlGraph,
+        frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
+        pool: &dyn PoolView,
+        visit: &mut dyn FnMut(&FrameState, &FrameState) -> bool,
+    ) -> bool {
+        let recorded: HashMap<usize, FrameState> = frames
+            .iter()
+            .map(|(index, locals, stack)| (*index, FrameState::from_verif(locals, stack, pool)))
+            .collect();
         for index in 0..insns.len() {
             let Some(state) = self.before(index) else {
                 continue;
@@ -449,16 +509,7 @@ impl FrameTypes {
                 let Some(frame) = recorded.get(&to) else {
                     continue;
                 };
-                let holds = frame.stack.len() == after.stack.len()
-                    && frame
-                        .stack
-                        .iter()
-                        .zip(&after.stack)
-                        .all(|(to, value)| assignable(value, to))
-                    && frame.locals.iter().enumerate().all(|(slot, to)| {
-                        assignable(after.locals.get(slot).unwrap_or(&VerificationType::Top), to)
-                    });
-                if !holds {
+                if !visit(&after, frame) {
                     crate::trace_compiler!(
                         "bytecode",
                         "frame at {to} does not hold for the edge from {index}: {after:?} into {frame:?}"
@@ -1264,5 +1315,34 @@ mod tests {
             types.before(5).expect("reachable").local(1),
             &reference("java/lang/String")
         );
+    }
+
+    /// A frame recorded with a wider reference than the value arriving at it (`Iterable` where a
+    /// `List` arrives) holds only when the body as emitted already made that widening.
+    #[test]
+    fn a_frame_holds_a_widening_the_emitted_body_already_made() {
+        let pool = FakePool::default();
+        // 0 aload_0; 1 astore_1; 2 goto 3; 3 return — frame at 3 types slot 1 as `Iterable`.
+        let insns = [plain(0x2a), plain(0x4c), branch(0xa7, 3), plain(0xb1)];
+        let graph = ControlGraph::build(&insns, &[]).expect("graph");
+        let entry = [object("java/util/List")];
+        let frames = [(
+            3,
+            vec![object("java/util/List"), object("java/lang/Iterable")],
+            Vec::new(),
+        )];
+        let types = analyze(&insns, &entry, &frames, &pool);
+        let widenings = types
+            .reference_widenings(&insns, &graph, &frames, &pool)
+            .expect("steps");
+        assert_eq!(
+            widenings,
+            HashSet::from([(
+                "java/util/List".to_string(),
+                "java/lang/Iterable".to_string()
+            )])
+        );
+        assert!(!types.frames_hold(&insns, &graph, &frames, &pool, &HashSet::new()));
+        assert!(types.frames_hold(&insns, &graph, &frames, &pool, &widenings));
     }
 }
