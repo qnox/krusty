@@ -75,6 +75,9 @@ pub(crate) struct Body<'a> {
     /// `true` for each `checkcast` kotlinc's redundant-cast pass removes. That pass runs before this
     /// one, so selected instructions are gone before any rule here looks.
     pub redundant_casts: &'a [bool],
+    /// `true` for each instruction removed with a redundant null check and its feed. This pass also
+    /// runs before temporary elimination.
+    pub redundant_null_checks: &'a [bool],
     /// The label each branch jumps to, by original index, where the builder recorded one. Several
     /// labels can stand at one index; kotlinc's rules tell them apart.
     pub branch_labels: &'a [Option<u32>],
@@ -826,15 +829,17 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             .collect(),
     };
     let mut eliminated = Vec::new();
-    let casts_removed = body.redundant_casts.contains(&true);
+    let earlier_removed =
+        body.redundant_casts.contains(&true) || body.redundant_null_checks.contains(&true);
     working.nodes.retain(|(_, placement)| {
         !matches!(placement, Placement::Original(index)
-            if body.redundant_casts.get(*index).copied().unwrap_or(false))
+            if body.redundant_casts.get(*index).copied().unwrap_or(false)
+                || body.redundant_null_checks.get(*index).copied().unwrap_or(false))
     });
-    let earlier_pass_only = {
+    let earlier_passes_only = {
         let nodes = working.nodes.clone();
         move || {
-            casts_removed.then(|| Rewrite {
+            earlier_removed.then(|| Rewrite {
                 nodes,
                 eliminated: Vec::new(),
                 stack_at_target: Vec::new(),
@@ -899,13 +904,13 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
     let mut removed = trivially_removed;
     let Some(folded) = fold_null_checks(&mut working, &mut stack_at_target, &mut late_labels)
     else {
-        return earlier_pass_only();
+        return earlier_passes_only();
     };
     removed.extend(folded);
     let Some(temporaries) = temporaries(body, &removed) else {
-        return earlier_pass_only();
+        return earlier_passes_only();
     };
-    let mut changed = casts_removed || removed_nop || !removed.is_empty();
+    let mut changed = earlier_removed || removed_nop || !removed.is_empty();
     for (store, loads) in temporaries {
         let Some(store_at) = working.position(store) else {
             continue;
@@ -1056,6 +1061,7 @@ mod tests {
             marks: &mark,
             named,
             redundant_casts: &redundant_casts,
+            redundant_null_checks: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| field == 1,
@@ -1099,9 +1105,10 @@ mod tests {
         rewrite_with(insns, arrivals, marks, &[], &[])
     }
 
-    fn rewrite_after_casts(
+    fn rewrite_after_earlier_passes(
         insns: &[Insn],
         casts: &[usize],
+        null_checks: &[usize],
         arrivals: &[usize],
         marks: &[usize],
         handlers: &[Handler],
@@ -1118,6 +1125,10 @@ mod tests {
         for &index in casts {
             redundant_casts[index] = true;
         }
+        let mut redundant_null_checks = vec![false; insns.len()];
+        for &index in null_checks {
+            redundant_null_checks[index] = true;
+        }
         let branch_labels = vec![None; insns.len()];
         let labels_at = vec![Vec::new(); insns.len() + 1];
         let body = Body {
@@ -1127,6 +1138,7 @@ mod tests {
             marks: &mark,
             named: &[],
             redundant_casts: &redundant_casts,
+            redundant_null_checks: &redundant_null_checks,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|_| false,
@@ -1154,7 +1166,7 @@ mod tests {
             op(0xb1),
         ];
         assert_eq!(
-            rewrite_after_casts(&insns, &[1], &[6], &[], &[]),
+            rewrite_after_earlier_passes(&insns, &[1], &[], &[6], &[], &[]),
             Some(vec![
                 op(0x01),
                 op(POP),
@@ -1179,7 +1191,8 @@ mod tests {
             branch(GOTO, 8),
             op(0xb1),
         ];
-        let rewritten = rewrite_after_casts(&insns, &[3], arrivals, marks, &[]).expect("cast");
+        let rewritten =
+            rewrite_after_earlier_passes(&insns, &[3], &[], arrivals, marks, &[]).expect("cast");
         assert_eq!(
             rewritten,
             vec![
@@ -1216,8 +1229,39 @@ mod tests {
             handler: 4,
         };
         assert_eq!(
-            rewrite_after_casts(&insns, &[1], &[1, 4], &[], &[handler]),
+            rewrite_after_earlier_passes(&insns, &[1], &[], &[1, 4], &[], &[handler]),
             Some(vec![op(0x01), op(NOP), op(POP), op(0xb1)])
+        );
+    }
+
+    #[test]
+    fn a_removed_null_check_keeps_its_debug_boundary_for_the_next_pass() {
+        let call = with(0xb6, &[0, 3]);
+        let check = with(INVOKESTATIC, &[0, 9]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            op(DUP),
+            check,
+            branch(IFNULL, 9),
+            op(ALOAD_1),
+            call.clone(),
+            branch(GOTO, 9),
+            op(0xb1),
+        ];
+        assert_eq!(
+            rewrite_after_earlier_passes(&insns, &[], &[3, 4], &[9], &[3], &[]),
+            Some(vec![
+                op(ALOAD_0),
+                op(ASTORE_1),
+                op(ALOAD_1),
+                branch(IFNULL, 9),
+                op(ALOAD_1),
+                call,
+                branch(GOTO, 9),
+                op(0xb1),
+            ])
         );
     }
 
@@ -1658,6 +1702,7 @@ mod tests {
             marks: &marks,
             named: &[],
             redundant_casts: &redundant_casts,
+            redundant_null_checks: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|_| false,

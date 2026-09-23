@@ -1186,6 +1186,8 @@ mod one_armed_when_fallthrough_e2e;
 mod redundant_checkcast_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "redundant_null_check_e2e.rs"]
+mod redundant_null_check_e2e;
 #[path = "spliced_expression_null_check_e2e.rs"]
 mod spliced_expression_null_check_e2e;
 #[path = "temporary_elimination_e2e.rs"]
