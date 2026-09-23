@@ -136,6 +136,8 @@ mod build840_mm1_safe_call_lambda_ext_e2e;
 mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
+#[path = "builtin_member_realization_e2e.rs"]
+mod builtin_member_realization_e2e;
 #[path = "bytecode_parity_e2e.rs"]
 mod bytecode_parity_e2e;
 #[path = "call_targs_property_inference_e2e.rs"]
