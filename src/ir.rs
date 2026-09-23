@@ -2763,12 +2763,11 @@ pub struct IrFile {
     /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
-    /// Call `ExprId` → reified-type substitution for a `<reified T>` CLASSPATH inline extension whose
-    /// compiled body the backend must splice: `[(type-parameter name, concrete JVM internal name)]`
-    /// (`[("T", "lib/Prov")]`). The bytecode splicer feeds this to `substitute_reified` so a
-    /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type — the
-    /// classpath analogue of the IR inliner's `reified_subst` (which only has same-file bodies). The
-    /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
+    /// Call `ExprId` → checked reified-type substitutions for a classpath inline declaration whose
+    /// compiled body a target may splice. The values stay backend-agnostic [`Ty`]s here. At the JVM
+    /// boundary, a concrete value becomes a class-pool operand while a reified parameter of the host
+    /// declaration keeps the callee's `reifiedOperationMarker` for the host's caller to specialize.
+    /// This is the classpath analogue of the IR inliner's same-file `reified_subst`.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
     /// Exact methods the serialization child cache generated: its factories and accessor.
     ///
