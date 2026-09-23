@@ -236,3 +236,22 @@ class K { suspend fun g() { take(object {}) } }
         "{ordinals:?}"
     );
 }
+
+#[test]
+fn file_facade_names_follow_kotlinc_package_part_rules() {
+    // The class files kotlinc 2.4.10 writes for these file names.
+    for (stem, facade) in [
+        ("box", "BoxKt"),
+        ("1", "_1Kt"),
+        (
+            "32defaultParametersInSuspend",
+            "_32defaultParametersInSuspendKt",
+        ),
+        ("a-b", "A_bKt"),
+        ("x.y", "X_yKt"),
+        ("q$r", "Q_rKt"),
+        ("_u", "_uKt"),
+    ] {
+        assert_eq!(file_facade_simple_name(stem), facade, "{stem}");
+    }
+}

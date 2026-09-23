@@ -1484,18 +1484,32 @@ pub fn analyze_source_standalone(
 /// The simple name of a source file's facade class: `foo.kt` → `FooKt`. Local classes are named
 /// under it, so the frontend fixes it before signature collection.
 pub fn file_facade_simple_name(file_stem: &str) -> String {
-    // A file-name character illegal in a JVM class name (`.`, `;`, `[`, `/`, `<`, `>`, `:`) becomes
-    // `_` — e.g. `foo.1.0.kt` → `Foo_1_0Kt` (a verbatim `.` would emit a `ClassFormatError`).
+    // kotlinc's `PackagePartClassUtils`: every character that is not a letter or digit becomes `_`
+    // (`foo.1.0.kt` → `Foo_1_0Kt`, `a-b.kt` → `A_bKt`), and a name that cannot start a Java
+    // identifier is prefixed with `_` rather than capitalized (`1.kt` → `_1Kt`).
     let sanitized: String = file_stem
         .chars()
-        .map(|c| if ".;[]/<>:".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_alphabetic() || c.is_numeric() {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let mut base = String::new();
     let mut chars = sanitized.chars();
-    if let Some(c) = chars.next() {
-        base.extend(c.to_uppercase());
+    match chars.next() {
+        Some(c) if c.is_numeric() => {
+            base.push('_');
+            base.push_str(&sanitized);
+        }
+        Some(c) => {
+            base.extend(c.to_uppercase());
+            base.push_str(chars.as_str());
+        }
+        None => {}
     }
-    base.push_str(chars.as_str());
     base.push_str("Kt");
     base
 }

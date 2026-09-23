@@ -3902,8 +3902,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
 - **Anonymous objects and suspend continuations are named by one walk that numbers every local
   node, as kotlinc's `InventNamesForLocalClasses` does.** A name is the chain of enclosing names
-  joined by `$`: the file facade (`file_facade_simple_name`, so `a.kt` gives `AKt`) or
-  classifier, then each function, property, local variable or local function the node sits in
+  joined by `$`: the file facade (`file_facade_simple_name`, kotlinc's `PackagePartClassUtils`
+  rule: `a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`) or classifier, then each function, property, local variable or local function the node sits in
   (`val o = object {}` in `box` is `AKt$box$o$1`). A node without a name takes the next ordinal of its chain. Lambdas,
   function expressions and callable references take a position even when they compile to
   `invokedynamic` and write no class, so an object after one lambda in `box` is `AKt$box$2`.
@@ -3926,8 +3926,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that chain. Lambda and reference classes are still named downstream (plan item 1, later slices).
   Tests: `frontend::tests::anonymous_objects_share_the_sequence_lambdas_references_and_delegates_number`,
   `…::anonymous_objects_in_classifiers_follow_kotlinc_member_chains`,
-  `…::anonymous_objects_in_local_scopes_follow_kotlinc_chains`, and
-  `…::suspend_continuations_hold_their_place_in_the_shared_sequence`. Their expected names are the
+  `…::anonymous_objects_in_local_scopes_follow_kotlinc_chains`,
+  `…::suspend_continuations_hold_their_place_in_the_shared_sequence`, and
+  `…::file_facade_names_follow_kotlinc_package_part_rules`. Their expected names are the
   class files kotlinc 2.4.10 writes for the same sources.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
