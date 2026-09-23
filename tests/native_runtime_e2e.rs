@@ -84,6 +84,9 @@ fn run_driver(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
+            // The runtime's descriptor tables name their leading fields and leave the rest zero, as
+            // C initializers are meant to; every other extra warning stays an error.
+            "-Wno-missing-field-initializers",
         ])
         .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
         .arg("-I")
