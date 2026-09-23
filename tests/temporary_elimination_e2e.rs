@@ -82,7 +82,14 @@ fn stack_map(disassembly: &str, marker: &str) -> Option<Vec<String>> {
     lines
         .by_ref()
         .find(|line| line.ends_with(';') && line.contains(marker))?;
-    let mut method = lines.take_while(|line| !(line.ends_with(';') && line.contains('(')));
+    // The next member's declaration ends this method's listing; a `descriptor:` line or a
+    // commented constant (`// Method …:()Ljava/lang/String;`) has the same shape but belongs to it.
+    let mut method = lines.take_while(|line| {
+        !(line.ends_with(';')
+            && line.contains('(')
+            && !line.starts_with("descriptor:")
+            && !line.contains("//"))
+    });
     method
         .by_ref()
         .find(|line| line.starts_with("StackMapTable"))?;
