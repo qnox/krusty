@@ -180,6 +180,12 @@ impl ChildSerializerCachePlan {
 /// becomes characters is the classfile writer.
 pub(super) type PendingChildSerializerCache = (ClassId, TypeName, Vec<(String, Ty)>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CachedSerializerKind {
+    Collection,
+    Enum,
+}
+
 /// The `$childSerializers` cache for one `@Serializable` class, built once every OTHER class's
 /// `$serializer` exists.
 ///
@@ -199,7 +205,8 @@ pub(super) fn add_child_serializer_cache(
     // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
     // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
     // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
-    // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
+    // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is a `Lazy` over its own
+    // factory, else null.
     let enum_internals: std::collections::HashSet<TypeName> = ir
         .classes
         .iter()
@@ -217,22 +224,26 @@ pub(super) fn add_child_serializer_cache(
     // now REFUSES the file rather than quietly dropping the cache. The classification has to be
     // right, not merely recoverable — and computing it up front is also what lets the build loop
     // below take `ir` mutably.
-    let cached: Vec<bool> = foo_fields
+    let cached_kinds: Vec<Option<CachedSerializerKind>> = foo_fields
         .iter()
         .map(|(name, ty)| {
             if super::property_is_contextual(ctx, ir, class_id, name)
                 || field_serializer_of(ctx, ir, class_id, name).is_some()
             {
-                return false;
+                return None;
             }
-            ty.kotlin_class_internal().is_some_and(|classifier| {
-                collection_serializer_builder(classifier).is_some()
-                    || enum_internals.contains(&classifier)
-            })
+            let classifier = ty.kotlin_class_internal()?;
+            if collection_serializer_builder(classifier).is_some() {
+                Some(CachedSerializerKind::Collection)
+            } else if enum_internals.contains(&classifier) {
+                Some(CachedSerializerKind::Enum)
+            } else {
+                None
+            }
         })
         .collect();
 
-    if !cached.iter().any(|slot| *slot) {
+    if cached_kinds.iter().all(Option::is_none) {
         return None;
     }
     {
@@ -245,10 +256,10 @@ pub(super) fn add_child_serializer_cache(
         let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
         let mut factories = 0usize;
         for (index, (_, ty)) in foo_fields.iter().enumerate() {
-            if !cached[index] {
+            let Some(kind) = cached_kinds[index] else {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
-            }
+            };
             let Some(es) = super::element_serializer_expr(ir, ctx, ty) else {
                 // A property classified as NEEDING a cached serializer whose serializer cannot be
                 // built is an invalid intermediate state, not a shape to recover from. Dropping
@@ -295,6 +306,37 @@ pub(super) fn add_child_serializer_cache(
                 n => format!("_childSerializers$_anonymous_${}", n - 1),
             };
             factories += 1;
+            // kotlinc narrows every constructor operand AND the constructed serializer to
+            // `KSerializer` before returning, though both already conform. The casts are three
+            // bytes each and they move the `areturn` the factory's line entry hangs on.
+            let kserializer = class_ty(super::KSERIALIZER_FQ);
+            if kind == CachedSerializerKind::Collection {
+                let IrExpr::New { args, .. } = ir.exprs[es as usize].clone() else {
+                    unreachable!("a cached collection serializer plan lowers to a construction")
+                };
+                let narrowed = args
+                    .iter()
+                    .map(|&argument| {
+                        ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: argument,
+                            type_operand: kserializer,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if let IrExpr::New { args, .. } = &mut ir.exprs[es as usize] {
+                    *args = narrowed;
+                } else {
+                    unreachable!(
+                        "the collection construction remains stable while its operands narrow"
+                    )
+                }
+            }
+            let es = ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: es,
+                type_operand: kserializer,
+            });
             let returned = ir.add_expr(IrExpr::Return(Some(es)));
             let factory_body = ir.add_expr(IrExpr::Block {
                 stmts: vec![returned],
@@ -386,7 +428,7 @@ pub(super) fn add_child_serializer_cache(
         Some(ChildSerializerCachePlan {
             static_index,
             accessor: acc,
-            cached,
+            cached: cached_kinds.iter().map(Option::is_some).collect(),
         })
     }
 }
