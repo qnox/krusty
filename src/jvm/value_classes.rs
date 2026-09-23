@@ -413,6 +413,10 @@ pub(crate) fn lower_value_classes(
             let u = u.canonical_semantic();
             let ir_under = u.scalar_value_repr().unwrap_or(u);
             under.insert(fq, ir_under);
+            // Publish it for the queries that run after this pass (`is_value_class_name`,
+            // `value_class_underlying_name`): a value class this file does not declare is otherwise
+            // invisible to them, and emission treats a sibling file's value class as a plain class.
+            ir.insert_external_value_class_name(fq, ir_under);
         }
     }
     // Native unsigned classes share ordinary primitive carriers in expressions, but cross boxed
@@ -433,8 +437,8 @@ pub(crate) fn lower_value_classes(
         return true;
     }
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
-    // resolved value classes belong to this source module. `IrFile::is_value_class_name` already
-    // recognizes same-file and external/module declarations, so copying `under` into a second public
+    // resolved value classes belong to this source module. `IrFile::is_value_class_name` recognizes
+    // same-file declarations and the external/module ones published above, so copying `under` into a second public
     // name table would create two semantic authorities that can drift. The metadata writer combines
     // that existing lookup with this origin subset when deciding whether a downstream reader can see
     // the value-class record.
