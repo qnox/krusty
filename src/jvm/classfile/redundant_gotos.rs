@@ -29,6 +29,10 @@ pub(crate) struct Tables<'a> {
     pub variable_bounds: &'a [bool],
     /// Where each protected range begins.
     pub protected_starts: &'a [usize],
+    /// Whether the branch at an original index jumps to a label standing after an instruction the
+    /// null-check rules inserted at its target: that instruction is between them, so such a `goto`
+    /// is not redundant and such a jump is not threaded.
+    pub late_branch: &'a dyn Fn(usize) -> bool,
 }
 
 fn goto_target(insn: &Insn) -> Option<usize> {
@@ -100,9 +104,11 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
     for group in (0..groups).rev() {
         for &at in members[group].iter().rev() {
             let insn = &nodes[at].0;
+            let late =
+                matches!(nodes[at].1, Placement::Original(index) if (tables.late_branch)(index));
             if let Some(target) = goto_target(insn) {
                 next_goto = Some(at);
-                if run.contains(&target) {
+                if run.contains(&target) && !late {
                     redundant.push(at);
                 } else {
                     run.clear();
@@ -128,6 +134,9 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
     let retargets: Vec<(usize, usize)> = nodes
         .iter()
         .enumerate()
+        .filter(|(_, (_, placement))| {
+            !matches!(placement, Placement::Original(index) if (tables.late_branch)(*index))
+        })
         .filter_map(|(at, (insn, _))| match insn {
             Insn::Branch {
                 target: BranchTarget::Internal(to),
@@ -261,6 +270,7 @@ mod tests {
             lines: &line,
             variable_bounds: &bound,
             protected_starts: &[],
+            late_branch: &|_| false,
         };
         remove(&mut nodes, &tables).then(|| nodes.into_iter().map(|(insn, _)| insn).collect())
     }

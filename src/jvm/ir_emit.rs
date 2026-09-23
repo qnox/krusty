@@ -12865,6 +12865,12 @@ struct Emitter<'a> {
     /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
     /// unassigned on any incoming edge means `top` at the merge.
     label_unassigned_values: HashMap<Label, HashSet<u32>>,
+    /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
+    /// this guard is the chain's outermost one, which binds it and yields the null result.
+    safe_call_null_exits: HashMap<u32, (Label, bool)>,
+    /// A chain's receiver temporaries declared after its first guard already jumped to the shared
+    /// null exit, by that exit: none of them is assigned on every path into it.
+    safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
@@ -12979,6 +12985,8 @@ impl<'a> Emitter<'a> {
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
+            safe_call_null_exits: HashMap::new(),
+            safe_call_exit_temporaries: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             continuation_slot: None,
@@ -14236,6 +14244,7 @@ impl<'a> Emitter<'a> {
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
+                self.link_safe_call_chain(e, code);
                 // Scope block-locals: restore the slot *map* after the block (keeping next_slot
                 // monotonic) so a local declared here doesn't leak into a later merge-point frame
                 // (its slot must read as `Top` once out of scope — else a sibling branch that never
@@ -14547,6 +14556,35 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
+        // A safe call whose value is unused discards inside its guard, as kotlinc writes it: the
+        // selector runs as a statement and the null path leaves nothing to pop. Its block runs as a
+        // statement block, which discards the guard below.
+        if let IrExpr::Block {
+            value: Some(value), ..
+        } = node
+        {
+            let shared = matches!(self.safe_call_null_exits.get(value), Some((_, false)));
+            if self.ir.safe_call_guards.contains(value) && !shared {
+                self.emit(e, code);
+                return;
+            }
+        }
+        if let IrExpr::When { branches } = node {
+            if let [(Some(guard), null_result), (None, selector)] = branches.as_slice() {
+                let shared = matches!(self.safe_call_null_exits.get(&e), Some((_, false)));
+                if self.ir.safe_call_guards.contains(&e) && !shared {
+                    let end = code.new_label();
+                    let entry_height = code.stack_height().max(0) as u16;
+                    self.emit_safe_call_guard(
+                        e,
+                        (*guard, *null_result, *selector),
+                        when::Emission::new(true, Ty::Unit, &[], entry_height, end, None),
+                        code,
+                    );
+                    return;
+                }
+            }
+        }
         if let IrExpr::BottomValue {
             producer,
             completion,
@@ -17116,6 +17154,7 @@ impl<'a> Emitter<'a> {
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
             IrExpr::Block { stmts, value } => {
+                self.link_safe_call_chain(e, code);
                 let enclosing_statement_line = self.statement_line;
                 let saved = self.slots.clone();
                 self.block_depth += 1;
@@ -19235,6 +19274,17 @@ impl<'a> Emitter<'a> {
         } else {
             self.verif_stack(result_ty)
         };
+        if self.ir.safe_call_guards.contains(&expression) {
+            if let [(Some(guard), null_result), (None, selector)] = branches {
+                self.emit_safe_call_guard(
+                    expression,
+                    (*guard, *null_result, *selector),
+                    when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end, None),
+                    code,
+                );
+                return;
+            }
+        }
         // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
         // of comparisons. Everything above (the result type, the statement/value decision, the entry
         // height) applies unchanged; only the dispatch differs.
@@ -19388,6 +19438,72 @@ impl<'a> Emitter<'a> {
             self.frame(end, result_stack, code);
         }
         self.bind(end, code);
+    }
+
+    /// A safe call whose receiver is itself a safe call yielding `null` — `a?.b?.c` — has one null
+    /// exit, as kotlinc's safe-call chain folding gives it: the inner guard jumps straight to the
+    /// outer guard's null path, which the outer guard binds. `block` is a safe call's block; this
+    /// links its guard with the guard initializing its receiver temporary.
+    fn link_safe_call_chain(&mut self, block: u32, code: &mut CodeBuilder) {
+        let guard_of = |emitter: &Self, block: u32| match emitter.ir.expr(block) {
+            IrExpr::Block {
+                stmts,
+                value: Some(value),
+            } if emitter.ir.safe_call_guards.contains(value) => Some((stmts.clone(), *value)),
+            _ => None,
+        };
+        let Some((stmts, outer)) = guard_of(self, block) else {
+            return;
+        };
+        let [variable] = stmts.as_slice() else {
+            return;
+        };
+        let IrExpr::Variable {
+            index: temporary,
+            init: Some(init),
+            ..
+        } = *self.ir.expr(*variable)
+        else {
+            return;
+        };
+        let Some((_, inner)) = guard_of(self, init) else {
+            return;
+        };
+        // Both guards must take the guard layout, or the shared exit would never be bound.
+        let guard_shaped = |emitter: &Self, guard: u32| match emitter.ir.expr(guard) {
+            IrExpr::When { branches } => {
+                matches!(branches.as_slice(), [(Some(_), _), (None, _)]).then(|| branches.clone())
+            }
+            _ => None,
+        };
+        if guard_shaped(self, outer).is_none() {
+            return;
+        }
+        let Some(branches) = guard_shaped(self, inner) else {
+            return;
+        };
+        let [(Some(_), null_result), (None, selector)] = branches.as_slice() else {
+            return;
+        };
+        if !matches!(self.ir.expr(*null_result), IrExpr::Const(IrConst::Null))
+            || self.diverges(*selector)
+        {
+            return;
+        }
+        let label = match self.safe_call_null_exits.get(&outer) {
+            Some(&(label, _)) => label,
+            None => {
+                let label = code.new_label();
+                self.safe_call_null_exits.insert(outer, (label, true));
+                label
+            }
+        };
+        self.safe_call_null_exits.insert(inner, (label, false));
+        // This block's temporary is stored after the inner guard's jump.
+        self.safe_call_exit_temporaries
+            .entry(label)
+            .or_default()
+            .push(temporary);
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control

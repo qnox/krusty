@@ -2420,6 +2420,11 @@ pub struct IrFile {
     /// Source binding reads and the checked binding's reassignment contract. The expression key is
     /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
     pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,
+    /// The null guard of every lowered safe call (`a?.f()`), keyed by its `When`: the first branch
+    /// tests the receiver temporary against `null` and yields the null result, the `else` is the
+    /// selector. Recorded where the safe call is lowered, so a backend lays the guard out as its
+    /// platform compiler does without recognizing the shape again.
+    pub safe_call_guards: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.

@@ -346,12 +346,42 @@ impl ClassWriter {
             variable_bounds[end] = true;
             named.push((start, end, slot));
         }
+        // Which label each branch jumps to, and the labels bound at each index in the order they
+        // stand: kotlinc's rules see labels, and several can share one offset.
+        let mut branch_labels: Vec<Option<u32>> = vec![None; n];
+        for &(operand, label) in &source.builder.fixups {
+            if label.builder != source.builder.id {
+                continue;
+            }
+            if let Some(at) = operand.checked_sub(1).and_then(index_of) {
+                branch_labels[at] = Some(label.index);
+            }
+        }
+        let mut labels_at: Vec<Vec<u32>> = vec![Vec::new(); n + 1];
+        {
+            let mut bound: Vec<(u32, usize, u32)> = Vec::new();
+            for (label, &pc) in source.builder.labels.iter().enumerate() {
+                let label = label as u32;
+                if pc == usize::MAX || source.builder.is_dead_bound(label) {
+                    continue;
+                }
+                if let Some(at) = index_of(pc) {
+                    bound.push((source.builder.bind_sequence(label as usize), at, label));
+                }
+            }
+            bound.sort_unstable();
+            for (_, at, label) in bound {
+                labels_at[at].push(label);
+            }
+        }
         let body = Body {
             insns: &insns,
             handlers: &handlers,
             arrivals: &arrivals,
             marks: &marks,
             named: &named,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
             one_word_static: &|field| {
                 self.fieldref_descriptor_at(field)
                     .is_some_and(|descriptor| !matches!(descriptor, "J" | "D"))
@@ -391,14 +421,23 @@ impl ClassWriter {
                 .collect(),
             eliminated: Vec::new(),
             stack_at_target: Vec::new(),
+            late_labels: std::collections::BTreeSet::new(),
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
+        let rewrite_late = rewrite.late_labels.clone();
         let gotos_changed = redundant_gotos::remove(
             &mut rewrite.nodes,
             &redundant_gotos::Tables {
                 lines: &lines,
                 variable_bounds: &variable_bounds,
                 protected_starts: &protected_starts,
+                late_branch: &|index| {
+                    branch_labels
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|label| rewrite_late.contains(&label))
+                },
             },
         );
         if !folded_any && !gotos_changed {
@@ -414,24 +453,49 @@ impl ClassWriter {
             }
             *slot = next;
         }
+        // A late label stands after the instructions a rule inserted in front of its index's group.
+        let mut late_index = vec![rewrite.nodes.len(); n + 1];
+        let mut next = 0;
+        for (k, slot) in late_index.iter_mut().enumerate().take(n) {
+            while next < rewrite.nodes.len()
+                && (rewrite.nodes[next].1.group() < k
+                    || rewrite.nodes[next].1 == temporaries::Placement::Before(k))
+            {
+                next += 1;
+            }
+            *slot = next;
+        }
+        let is_late_label = |label: u32| rewrite.late_labels.contains(&label);
         let retarget = |to: usize| new_index[to];
+        let retarget_branch = |placement: temporaries::Placement, to: usize| match placement {
+            temporaries::Placement::Original(index)
+                if branch_labels
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(is_late_label) =>
+            {
+                late_index[to]
+            }
+            _ => new_index[to],
+        };
         let new_insns: Vec<Insn> = rewrite
             .nodes
             .iter()
-            .map(|(insn, _)| match insn {
+            .map(|(insn, placement)| match insn {
                 Insn::Branch {
                     op,
                     target: BranchTarget::Internal(to),
                 } => Insn::Branch {
                     op: *op,
-                    target: BranchTarget::Internal(retarget(*to)),
+                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
                 },
                 Insn::BranchW {
                     op,
                     target: BranchTarget::Internal(to),
                 } => Insn::BranchW {
                     op: *op,
-                    target: BranchTarget::Internal(retarget(*to)),
+                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
                 },
                 Insn::TableSwitch {
                     default,
@@ -523,7 +587,7 @@ impl ClassWriter {
                 continue;
             };
             for (n, (at, value)) in pushed.iter().enumerate() {
-                if *at == pc {
+                if *at == pc && !is_late_label(*label) {
                     stack.push(value.clone());
                     received[n] = true;
                 }
@@ -551,10 +615,16 @@ impl ClassWriter {
         frames.bytes = assemble(&new_insns);
         frames.fixups.clear();
         frames.switch_fixups.clear();
-        for label in &mut frames.labels {
-            if *label != usize::MAX {
-                *label = map(*label);
+        for (label, pc) in frames.labels.iter_mut().enumerate() {
+            if *pc == usize::MAX {
+                continue;
             }
+            *pc = if is_late_label(label as u32) {
+                let k = offsets.partition_point(|&at| at < *pc).min(n);
+                new_offsets[late_index[k]]
+            } else {
+                map(*pc)
+            };
         }
         // A removed reload can leave its jump target and the join after it at one offset, each with
         // its own frame: the target's carries the checked value's type, the join's whatever every

@@ -1737,6 +1737,7 @@ impl BodyLowering<'_> {
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
+        self.ir.safe_call_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
