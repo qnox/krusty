@@ -1,7 +1,7 @@
 //! The architecture and operating system a native build targets.
 //!
-//! This exists because cross-compilation is a requirement, not a feature: `docs/BUILD_AND_NATIVE_PLAN.md`
-//! takes Go's property — every target buildable from any host, with no per-target toolchain — as
+//! This exists because cross-compilation is a requirement, not a feature: krusty takes Go's
+//! property — every target buildable from any host, with no per-target toolchain — as
 //! non-negotiable. Making the target an explicit value rather than "whatever this machine is" is
 //! what keeps the host from leaking into the build by default.
 

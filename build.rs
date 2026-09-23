@@ -23,14 +23,24 @@ use std::process::Command;
 /// RISC-V's clang does not take `-mcmodel=small` (its equivalent is the default `medlow`), and
 /// `-mno-relax` keeps linker-relaxation relocations out of its objects: krusty's own linker applies
 /// relocations and relaxes nothing.
-const TARGETS: &[(&str, &str, &[&str])] = &[
+///
+/// The number after the triple is the target's ELF `e_machine`: every object is checked against it,
+/// because a `KRUSTY_RUNTIME_CC` wrapper that adds its own `--target` would otherwise file one
+/// architecture's code under another's name without a single failed step.
+const TARGETS: &[(&str, &str, u16, &[&str])] = &[
     (
         "X86_64",
         "x86_64-unknown-linux-gnu",
+        62,
         &["-mcmodel=small", "-fcf-protection=none"],
     ),
-    ("Aarch64", "aarch64-unknown-linux-gnu", &["-mcmodel=small"]),
-    ("Riscv64", "riscv64-unknown-linux-gnu", &["-mno-relax"]),
+    (
+        "Aarch64",
+        "aarch64-unknown-linux-gnu",
+        183,
+        &["-mcmodel=small"],
+    ),
+    ("Riscv64", "riscv64-unknown-linux-gnu", 243, &["-mno-relax"]),
 ];
 
 /// Flags every target compiles with. The objects are embedded in krusty and linked into a user's
@@ -77,7 +87,7 @@ fn main() {
 
     let mut built_any = false;
     let mut compiler_missing = false;
-    for (arch, triple, extra) in TARGETS {
+    for (arch, triple, machine, extra) in TARGETS {
         let target_dir = out_dir.join("runtime").join(arch);
         std::fs::create_dir_all(&target_dir).expect("create runtime output directory");
         let mut objects = Vec::new();
@@ -95,7 +105,17 @@ fn main() {
                 .arg(runtime_dir.join(source))
                 .status();
             match status {
-                Ok(status) if status.success() => objects.push(object),
+                Ok(status) if status.success() => {
+                    if let Err(problem) = check_object(&object, *machine) {
+                        println!(
+                            "cargo:warning=native runtime: `{compiler}` built {source} for {triple} as {problem}; \
+                             the {arch} target will be unavailable"
+                        );
+                        ok = false;
+                        break;
+                    }
+                    objects.push(object)
+                }
                 Ok(status) => {
                     println!(
                         "cargo:warning=native runtime: `{compiler}` failed for {triple} on {source} ({status}); \
@@ -138,6 +158,10 @@ fn main() {
         "/// Whether any target's runtime was prebuilt (a C compiler was available when krusty was built).\n\
          pub const AVAILABLE: bool = {built_any};\n"
     ));
+    generated.push_str(&format!(
+        "/// The runtime sources every target's objects were compiled from, in the table's order.\n\
+         pub const SOURCES: &[&str] = &{SOURCES:?};\n"
+    ));
     std::fs::write(out_dir.join("prebuilt_runtime.rs"), generated)
         .expect("write prebuilt_runtime.rs");
     // With no compiler found, installing one is what should bring the runtime back, and that is a
@@ -146,4 +170,28 @@ fn main() {
     if compiler_missing {
         println!("cargo:rerun-if-env-changed=PATH");
     }
+}
+
+/// The ELF identity of a freshly compiled object: a 64-bit little-endian relocatable for `machine`.
+/// `Err` names what it is instead.
+fn check_object(object: &Path, machine: u16) -> Result<(), String> {
+    let bytes = std::fs::read(object).map_err(|error| format!("an unreadable file ({error})"))?;
+    if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" {
+        return Err("something that is not ELF".to_string());
+    }
+    if bytes[4] != 2 || bytes[5] != 1 {
+        return Err(format!(
+            "ELF class {} / data encoding {}, not 64-bit little-endian",
+            bytes[4], bytes[5]
+        ));
+    }
+    let kind = u16::from_le_bytes([bytes[16], bytes[17]]);
+    if kind != 1 {
+        return Err(format!("ELF type {kind}, not a relocatable object"));
+    }
+    let found = u16::from_le_bytes([bytes[18], bytes[19]]);
+    if found != machine {
+        return Err(format!("code for ELF machine {found}, not {machine}"));
+    }
+    Ok(())
 }

@@ -1,8 +1,7 @@
 //! Native backend — Kotlin to a self-contained executable, with no JVM in the result and no other
 //! compiler in the loop.
 //!
-//! `docs/BUILD_AND_NATIVE_PLAN.md` records the decisions this module implements, in order: krusty
-//! owns its runtime; krusty owns its code generator, so it emits no C; Cranelift owns instruction
+//! The decisions this module implements, in order: krusty owns its runtime; krusty owns its code generator, so it emits no C; Cranelift owns instruction
 //! selection and register allocation and nothing else; and the final link is krusty's, because
 //! zero-toolchain cross-compilation needs it to be. The pipeline is therefore:
 //!
