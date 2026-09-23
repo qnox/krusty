@@ -241,11 +241,8 @@ impl ProductionSignatureSemantics<'_> {
             // readable upper bound, exactly as the body checker reads the same classifier.
             let declaration = self
                 .with_resolver(scope, |resolver| resolver.classifier(internal))
-                .ok();
-            let type_param_variances = declaration
-                .as_ref()
-                .map(|classifier| classifier.type_param_variances.clone())
-                .unwrap_or_default();
+                .ok()?;
+            let type_param_variances = &declaration.type_param_variances;
             if let Some(argument) =
                 reference
                     .targs
@@ -293,7 +290,7 @@ impl ProductionSignatureSemantics<'_> {
                 );
                 return Some(Ty::Error);
             }
-            let fallback_star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+            let default_star_bound = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
             let classifier = self.table.class_by_type_name(internal);
             let captured_count = classifier.map_or(0, |classifier| {
                 classifier.captured_type_parameters.type_params.len()
@@ -313,32 +310,27 @@ impl ProductionSignatureSemantics<'_> {
                     Some(super::super::projected_typeref_argument(
                         argument,
                         resolved,
-                        fallback_star_bound,
+                        default_star_bound,
                     ))
                 });
             }
-            let bindings = declaration.as_ref().map_or_else(
-                crate::symbol_resolver::GSigBinds::new,
-                |declaration| {
-                    super::super::projected_classifier_argument_bindings(
-                        declaration.type_params(),
-                        &parsed,
-                    )
-                },
+            let bindings = super::super::projected_classifier_argument_bindings(
+                declaration.type_params(),
+                &parsed,
             );
             for (index, (syntax, resolved)) in reference.targs.iter().zip(parsed).enumerate() {
                 arguments.push(match resolved {
                     Some(resolved) => resolved,
                     None => {
                         let upper_bound = declaration
-                            .as_ref()
-                            .and_then(|declaration| declaration.type_param_bounds().get(index))
+                            .type_param_bounds()
+                            .get(index)
                             .and_then(|bounds| bounds.first())
                             .copied()
                             .map(|bound| {
                                 crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
                             })
-                            .unwrap_or(fallback_star_bound);
+                            .unwrap_or(default_star_bound);
                         super::super::projected_typeref_argument(syntax, Ty::Error, upper_bound)
                     }
                 });
@@ -378,7 +370,7 @@ impl ProductionSignatureSemantics<'_> {
                                             .type_param_bounds
                                             .get(ordinal)
                                             .copied()
-                                            .unwrap_or(fallback_star_bound),
+                                            .unwrap_or(default_star_bound),
                                     )
                                 })
                         }),
