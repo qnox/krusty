@@ -19,6 +19,7 @@
 //! emitted.
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
+use super::redundant_gotos;
 use super::temporaries::{self, Body};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
@@ -318,9 +319,13 @@ impl ClassWriter {
             arrivals[handler.handler] = true;
         }
         let mut marks = vec![false; n + 1];
+        let mut lines = vec![false; n + 1];
         for &(pc, _) in &method.lnt {
-            marks[index_of(usize::from(pc))?] = true;
+            let at = index_of(usize::from(pc))?;
+            marks[at] = true;
+            lines[at] = true;
         }
+        let mut variable_bounds = vec![false; n + 1];
         // A local-variable entry without a start covers the whole method; one without a length
         // runs to the end.
         let range = |start: Option<u16>, len: Option<u16>| {
@@ -337,6 +342,8 @@ impl ClassWriter {
             let (start, end) = (index_of(start)?, index_of(end)?);
             marks[start] = true;
             marks[end] = true;
+            variable_bounds[start] = true;
+            variable_bounds[end] = true;
             named.push((start, end, slot));
         }
         let body = Body {
@@ -360,7 +367,43 @@ impl ClassWriter {
                     })
             },
         };
-        let rewrite = temporaries::eliminate(&body)?;
+        if insns.iter().any(|insn| {
+            matches!(
+                insn,
+                Insn::Branch {
+                    target: BranchTarget::External(_),
+                    ..
+                } | Insn::BranchW {
+                    target: BranchTarget::External(_),
+                    ..
+                }
+            )
+        }) {
+            return None;
+        }
+        let folded = temporaries::eliminate(&body);
+        let folded_any = folded.is_some();
+        let mut rewrite = folded.unwrap_or_else(|| temporaries::Rewrite {
+            nodes: insns
+                .iter()
+                .enumerate()
+                .map(|(index, insn)| (insn.clone(), temporaries::Placement::Original(index)))
+                .collect(),
+            eliminated: Vec::new(),
+            stack_at_target: Vec::new(),
+        });
+        let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
+        let gotos_changed = redundant_gotos::remove(
+            &mut rewrite.nodes,
+            &redundant_gotos::Tables {
+                lines: &lines,
+                variable_bounds: &variable_bounds,
+                protected_starts: &protected_starts,
+            },
+        );
+        if !folded_any && !gotos_changed {
+            return None;
+        }
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
         // later one — where a label that stood at `k` lands.
         let mut new_index = vec![rewrite.nodes.len(); n + 1];
@@ -563,6 +606,55 @@ impl ClassWriter {
             })
             .collect::<Option<_>>()?;
         let new_graph = ControlGraph::build(&new_insns, &new_handlers)?;
+        // kotlinc's writer puts a frame only where a jump, a switch or a handler arrives. A label a
+        // rewrite left reached only by falling through (its `goto` removed, its jumps threaded on)
+        // loses its frame; one left in dead code keeps it, since the verifier still checks it.
+        let mut targeted = vec![false; new_insns.len() + 1];
+        for insn in &new_insns {
+            match insn {
+                Insn::Branch {
+                    target: BranchTarget::Internal(to),
+                    ..
+                }
+                | Insn::BranchW {
+                    target: BranchTarget::Internal(to),
+                    ..
+                } => targeted[*to] = true,
+                Insn::TableSwitch {
+                    default, targets, ..
+                } => {
+                    for &to in std::iter::once(default).chain(targets) {
+                        targeted[to] = true;
+                    }
+                }
+                Insn::LookupSwitch { default, pairs } => {
+                    for &to in std::iter::once(default).chain(pairs.iter().map(|(_, to)| to)) {
+                        targeted[to] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for handler in &new_handlers {
+            targeted[handler.handler] = true;
+        }
+        let ends_flow = |insn: &Insn| match insn {
+            Insn::Branch { op, .. } | Insn::BranchW { op, .. } => matches!(*op, 0xa7 | 0xc8),
+            Insn::Plain { op, .. } => matches!(*op, 0xac..=0xb1 | 0xbf),
+            Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => true,
+        };
+        let labels = frames.labels.clone();
+        frames.frames.retain(|(label, _, _)| {
+            let Some(&pc) = labels.get(*label as usize) else {
+                return true;
+            };
+            match new_offsets.binary_search(&pc) {
+                Ok(at) if at < new_insns.len() => {
+                    targeted[at] || (at > 0 && ends_flow(&new_insns[at - 1]))
+                }
+                _ => true,
+            }
+        });
         let merged = self
             .merged_frames(&frames)
             .into_iter()

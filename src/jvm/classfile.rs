@@ -13,6 +13,7 @@ mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
+mod redundant_gotos;
 mod temporaries;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
