@@ -2004,6 +2004,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (a bridge method's debug tables, constant-pool order) predate it. Test:
   `tests/star_projection_wildcard_e2e.rs` (a Java fixture with a wildcard result and parameter,
   declared, stubbed, and passed, run on the JVM).
+- **A star projection's readable bound is its parameter's declared bound, wherever the classifier
+  comes from.** `Discounted<*>` over `class Discounted<P : Product>` is `Discounted<out Product>`
+  in a declaration header and in a body alike. Compact Pass-1 signature resolution read the bound
+  only from classes of the module being compiled, so for a CLASSPATH classifier a header spelled it
+  `Discounted<out Any?>` while the body checker, reading the classifier through the provider,
+  spelled it `Discounted<out Product>`. The two spellings of one written type then disagreed: a
+  smart cast of `this` to `Discounted<*>` no longer matched a `Discounted<*>` parameter, so the call
+  lost its `checkcast` (`VerifyError`), and a local override taking `Discounted<*>` no longer
+  matched the interface member it overrides, so it got no bridge (`AbstractMethodError`). Header
+  star bounds now come from the provider-normalized classifier (module or classpath), exactly as
+  the body checker reads them. Tests: `tests/classpath_star_projection_bound_e2e.rs`, against both
+  a krusty-built and a kotlinc-built dependency.
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
