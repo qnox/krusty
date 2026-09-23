@@ -15655,26 +15655,9 @@ impl<'a> Emitter<'a> {
                         // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
                         // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
                         // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
-                        // A SECONDARY ctor with value-class params has the same private+marker ABI —
-                        // the checker-selected `ctor_params` identify it by erased shape.
-                        let vc_secondary = ctor_params.as_ref().is_some_and(|ps| {
-                            let want = jvm_tys(ps);
-                            self.ir
-                                .class_id_by_name(*internal)
-                                .map(|cid| &self.ir.classes[cid as usize])
-                                .is_some_and(|target| {
-                                    target.secondary_ctors.iter().any(|sc| {
-                                        sc.vc_params
-                                            && jvm_tys(&sc.prefix_params)
-                                                .into_iter()
-                                                .chain(jvm_tys(&sc.params))
-                                                .eq(want.iter().copied())
-                                    })
-                                })
-                        });
                         let use_accessor = self.owner != owner
                             && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
-                                || vc_secondary);
+                                || self.ir.has_value_class_parameter_construction(e));
                         let base_parameter_count = field_tys.len();
                         let source_parameter_count = base_parameter_count
                             .checked_sub(*default_prefix_count as usize)
@@ -20309,7 +20292,7 @@ fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
     args.iter().map(|a| jvm_declared_ty(&a.ty)).collect()
 }
 
-fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
+pub(super) fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
     if c.ctor_args.is_empty() {
         field_jvm_tys(&c.fields[..c.ctor_param_count as usize])
     } else {
