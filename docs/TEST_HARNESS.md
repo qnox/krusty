@@ -85,7 +85,11 @@ compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
 corpus, then everything else), then runs twenty-two balanced whole-module shards of the internally
 parallel e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS`
-overrides the shard count.
+overrides the shard count. The native codegen/box lane compiles, links and runs every case the native
+backend accepts, so it is partitioned too: `KRUSTY_NATIVE_CONFORMANCE_SHARDS` (default 4) fresh
+processes, logged as `native-box-shard-1-of-4` and so on, each under the conformance deadline, and
+excluded from the "everything else" pass. `scripts/native-conformance-run.sh` runs the same partition
+for the `just` recipes and CI.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -208,6 +212,8 @@ Optional profiling knobs:
   each full-suite e2e shard.
 - `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
   run.
+- `KRUSTY_NATIVE_CONFORMANCE_SHARDS=<count>` overrides the four partitions of the native codegen/box
+  lane.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
