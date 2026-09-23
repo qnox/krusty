@@ -146,40 +146,44 @@ fn both_split(
     )
 }
 
-/// Assert that krusty's report is the reference compiler's, EXCEPT for the entries named in
-/// `unimplemented` — diagnostics krusty does not implement at all, which have nothing to do with
-/// this check and which the fixture cannot avoid provoking.
-///
-/// Each excused entry is a COMPLETE ledger line, `file:line:column: message`, matched by equality
-/// and removed once. A prefix would excuse whatever else the reference compiler happened to say
-/// at the same coordinate, and a `contains`/`any` pair would excuse an entry that had moved to a
-/// different declaration. The list is asserted from both sides: every entry must appear in the
-/// reference report exactly as many times as it is named, so it cannot outlive the gap it names,
-/// and what is left after removing them must be krusty's complete ledger. A fixture that can
-/// avoid the diagnostic does so instead of listing it.
-fn assert_identical_except(source: &str, stem: &str, unimplemented: &[&str]) {
+/// Assert that krusty's report is the reference compiler's except for an exact, version-recorded
+/// list of diagnostics krusty does not implement. The implemented ledger must remain an ordered
+/// subsequence, and both the number and complete text of the gaps are pinned.
+fn assert_identical_except(source: &str, stem: &str, unimplemented_count: usize) {
     let (reference, krusty) = both(source, stem);
     assert!(
         !reference.is_empty(),
         "the fixture must make the reference compiler report something"
     );
-    let mut expected: Vec<String> = reference.iter().map(ToString::to_string).collect();
-    for excused in unimplemented {
-        let at = expected
-            .iter()
-            .position(|entry| entry.starts_with(excused))
-            .unwrap_or_else(|| {
-                panic!(
-                    "the reference compiler no longer reports `{excused}`, so it must stop being \
-                     excused; it reported {expected:#?}"
-                )
-            });
-        expected.remove(at);
+    let expected = reference
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let actual = krusty.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let mut actual_at = 0;
+    let mut unimplemented = Vec::new();
+    for entry in &expected {
+        if actual.get(actual_at) == Some(entry) {
+            actual_at += 1;
+        } else {
+            unimplemented.push(entry.clone());
+        }
     }
     assert_eq!(
-        krusty.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        expected,
-        "krusty's complete ledger must be the reference compiler's, minus the named gaps"
+        actual_at,
+        actual.len(),
+        "krusty's ledger is not a subsequence"
+    );
+    assert_eq!(unimplemented.len(), unimplemented_count, "unexpected gaps");
+    let recorded = common::recorded_named("unimplemented", || unimplemented.clone());
+    assert_eq!(
+        unimplemented, recorded,
+        "the exact excused diagnostics changed"
+    );
+    assert_eq!(
+        actual.len() + unimplemented.len(),
+        expected.len(),
+        "krusty's complete ledger plus the named gaps must be the reference compiler's"
     );
 }
 
@@ -347,15 +351,9 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
          actual typealias GenericAlias<T> = Parcel<T>\n\
          actual typealias FunAlias = (Int) -> String\n",
         "Aliases",
-        // A function type IS a classifier with declaration-site variance (`Function1<in P1,
-        // out R>`), so no function-type alias can avoid these two, and the shape is worth
-        // keeping. Both are diagnostics krusty does not implement at all, and each is named by
-        // its complete ledger line so neither can quietly stand in for something else.
-        // Each is named by its position and the start of its sentence, which no release rewords.
-        &[
-            "Aliases.kt:7:1: aliased class cannot have type parameters with declaration-site variance.",
-            "Aliases.kt:7:1: type arguments on the right-hand side of ",
-        ],
+        // A function type is a classifier with declaration-site variance, so no function-type
+        // alias can avoid these two diagnostics. Their complete versioned lines are recorded.
+        2,
     );
 }
 

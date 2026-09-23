@@ -101,7 +101,22 @@ pub fn set_target(version: KotlinVersion) -> Result<(), String> {
 
 /// The reference version this process reproduces.
 pub fn target() -> KotlinVersion {
-    *TARGET.get_or_init(|| target_from(std::env::var("KRUSTY_LANGUAGE_VERSION").ok()))
+    *TARGET.get_or_init(|| configured_target().unwrap_or_else(|error| panic!("{error}")))
+}
+
+/// Validate the environment-selected reference version without fixing the process-wide target.
+/// Drivers use this to turn a bad build configuration into an ordinary compilation error; library
+/// callers that read [`target`] directly still fail loudly instead of silently compiling as a
+/// different Kotlin release.
+pub fn configured_target() -> Result<KotlinVersion, String> {
+    match std::env::var("KRUSTY_LANGUAGE_VERSION") {
+        Ok(value) => target_from(Some(value)),
+        Err(std::env::VarError::NotPresent) => target_from(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(
+            "invalid Kotlin reference version in KRUSTY_LANGUAGE_VERSION: value is not valid UTF-8"
+                .to_string(),
+        ),
+    }
 }
 
 /// Whether the reference version is `version` or newer.
@@ -109,10 +124,26 @@ pub fn at_least(version: KotlinVersion) -> bool {
     target() >= version
 }
 
-fn target_from(env: Option<String>) -> KotlinVersion {
-    env.as_deref()
-        .and_then(KotlinVersion::parse)
-        .unwrap_or_else(KotlinVersion::newest)
+fn target_from(env: Option<String>) -> Result<KotlinVersion, String> {
+    let Some(value) = env else {
+        return Ok(KotlinVersion::newest());
+    };
+    let version = KotlinVersion::parse(&value).ok_or_else(|| {
+        format!("invalid Kotlin reference version {value:?}; expected major.minor.patch")
+    })?;
+    let supported = KotlinVersion::supported();
+    if supported.contains(&version) {
+        Ok(version)
+    } else {
+        let listed = supported
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        Err(format!(
+            "unsupported Kotlin reference version {version}; supported: {}",
+            listed.join(", ")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -149,8 +180,12 @@ mod tests {
 
     #[test]
     fn the_environment_selects_the_target_and_defaults_to_the_newest() {
-        assert_eq!(target_from(Some("2.4.10".into())), KotlinVersion::V2_4_10);
-        assert_eq!(target_from(None), KotlinVersion::newest());
-        assert_eq!(target_from(Some(String::new())), KotlinVersion::newest());
+        assert_eq!(
+            target_from(Some("2.4.10".into())),
+            Ok(KotlinVersion::V2_4_10)
+        );
+        assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
+        assert!(target_from(Some(String::new())).is_err());
+        assert!(target_from(Some("2.4.99".into())).is_err());
     }
 }

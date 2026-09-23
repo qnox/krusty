@@ -330,18 +330,16 @@ fn java_only_members_are_not_in_the_kotlin_scope() {
     }
 }
 
-/// krusty's only diagnostic for `source` is kotlinc's diagnostic naming `member`, recorded per
-/// Kotlin version. kotlinc may add follow-on errors inside the lambda, which are not pinned.
+/// krusty's complete ordered diagnostic ledger for `source` is kotlinc's, recorded per version.
 fn assert_member_unresolved_as_kotlinc(member: &str, source: &str) {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let expected = common::recorded_named(member, || {
-        common::reference_error_messages("Main", source)
-            .into_iter()
-            .filter(|message| message.contains(&format!("'{member}'")))
-            .collect()
-    });
-    assert_eq!(expected.len(), 1, "kotlinc on {source}: {expected:?}");
+    let expected =
+        common::recorded_named(member, || common::reference_error_messages("Main", source));
+    assert!(
+        !expected.is_empty(),
+        "kotlinc must reject {source}: {expected:?}"
+    );
     let diagnostics =
         common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
     assert_eq!(diagnostics, expected, "{source}");

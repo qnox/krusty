@@ -329,22 +329,9 @@ fn a_body_less_expect_is_untouched() {
     // costs an ordinary header nothing, and the report it does get is unaffected.
     let expected = common::recorded(|| kotlinc_ledger(&sources));
     assert_eq!(expected.len(), 3, "kotlinc's whole ledger: {expected:?}");
-    // One measured difference: the reference compiler reports every unactualized CLASSIFIER before
-    // any callable, each group in source order, so `Holder` comes first there although it is
-    // written last. krusty's diagnostic sink normalises the whole compilation to source order,
-    // which is a property of the sink and not of this check — a grouping every diagnostic krusty
-    // writes would have to give up.
-    let line_of = |entry: &String| {
-        entry
-            .split(':')
-            .nth(1)
-            .and_then(|line| line.parse::<u32>().ok())
-    };
-    let mut in_source_order = expected.clone();
-    in_source_order.sort_by_key(line_of);
     assert_eq!(
         ledger(&report, &sources),
-        in_source_order,
-        "krusty's whole ledger: the same three entries, in the sink's source order:\n{report}"
+        expected,
+        "krusty's complete ordered ledger must match kotlinc:\n{report}"
     );
 }

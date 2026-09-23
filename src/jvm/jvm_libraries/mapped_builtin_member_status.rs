@@ -13,11 +13,17 @@ use crate::types::{type_name, TypeName};
 
 const VISIBLE_METHODS_2_4: &str =
     include_str!("mapped_builtin_member_status/visible_methods_2_4.tsv");
+const DEPRECATED_HIDDEN_METHODS_2_4: &str =
+    include_str!("mapped_builtin_member_status/deprecated_hidden_methods_2_4.tsv");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MappedBuiltinMemberStatus {
     Visible,
     Hidden,
+    /// The declaration is deliberately absent from source lookup, but its presence changes the
+    /// unresolved-reference diagnostic. This is declaration-provider metadata, not a resolver
+    /// inference from a Kotlin classifier or member spelling.
+    DeprecatedHidden,
 }
 
 impl MappedBuiltinMemberStatus {
@@ -27,51 +33,51 @@ impl MappedBuiltinMemberStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct VisibleMethod {
+struct PolicyMethod {
     kotlin_face: TypeName,
     jvm_owner: TypeName,
     physical_name: &'static str,
     descriptor: &'static str,
 }
 
-fn visible_methods() -> &'static [VisibleMethod] {
-    static METHODS: std::sync::OnceLock<Box<[VisibleMethod]>> = std::sync::OnceLock::new();
-    METHODS.get_or_init(|| {
-        VISIBLE_METHODS_2_4
-            .lines()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    return None;
-                }
-                let mut fields = line.split('\t');
-                let (
-                    Some(kotlin_face),
-                    Some(jvm_owner),
-                    Some(physical_name),
-                    Some(descriptor),
-                    None,
-                ) = (
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                )
-                else {
-                    panic!("invalid mapped-builtin member policy row {}", index + 1);
-                };
-                Some(VisibleMethod {
-                    kotlin_face: type_name(kotlin_face),
-                    jvm_owner: type_name(jvm_owner),
-                    physical_name,
-                    descriptor,
-                })
+fn visible_methods() -> &'static [PolicyMethod] {
+    static METHODS: std::sync::OnceLock<Box<[PolicyMethod]>> = std::sync::OnceLock::new();
+    METHODS.get_or_init(|| parse_methods(VISIBLE_METHODS_2_4))
+}
+
+fn deprecated_hidden_methods() -> &'static [PolicyMethod] {
+    static METHODS: std::sync::OnceLock<Box<[PolicyMethod]>> = std::sync::OnceLock::new();
+    METHODS.get_or_init(|| parse_methods(DEPRECATED_HIDDEN_METHODS_2_4))
+}
+
+fn parse_methods(input: &'static str) -> Box<[PolicyMethod]> {
+    input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let mut fields = line.split('\t');
+            let (Some(kotlin_face), Some(jvm_owner), Some(physical_name), Some(descriptor), None) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            ) else {
+                panic!("invalid mapped-builtin member policy row {}", index + 1);
+            };
+            Some(PolicyMethod {
+                kotlin_face: type_name(kotlin_face),
+                jvm_owner: type_name(jvm_owner),
+                physical_name,
+                descriptor,
             })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
 }
 
 /// Classify a classfile member for one mapped Kotlin declaration.
@@ -88,13 +94,16 @@ pub(super) fn mapped_builtin_member_status(
         .physical_name
         .as_deref()
         .unwrap_or(member.name.as_str());
-    if visible_methods().iter().any(|visible| {
-        visible.kotlin_face == kotlin_face
-            && visible.jvm_owner == jvm_owner
-            && visible.physical_name == physical_name
-            && visible.descriptor == member.descriptor
-    }) {
+    let matches = |entry: &PolicyMethod| {
+        entry.kotlin_face == kotlin_face
+            && entry.jvm_owner == jvm_owner
+            && entry.physical_name == physical_name
+            && entry.descriptor == member.descriptor
+    };
+    if visible_methods().iter().any(matches) {
         MappedBuiltinMemberStatus::Visible
+    } else if deprecated_hidden_methods().iter().any(matches) {
+        MappedBuiltinMemberStatus::DeprecatedHidden
     } else {
         MappedBuiltinMemberStatus::Hidden
     }
@@ -102,7 +111,10 @@ pub(super) fn mapped_builtin_member_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{mapped_builtin_member_status, visible_methods, MappedBuiltinMemberStatus};
+    use super::{
+        deprecated_hidden_methods, mapped_builtin_member_status, visible_methods,
+        MappedBuiltinMemberStatus,
+    };
     use crate::libraries::LibraryMember;
     use crate::types::{type_name, Ty};
 
@@ -237,6 +249,44 @@ mod tests {
                 &alias,
             ),
             MappedBuiltinMemberStatus::Visible
+        );
+    }
+
+    #[test]
+    fn hidden_deprecation_is_an_exact_provider_fact() {
+        let keys = deprecated_hidden_methods()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(deprecated_hidden_methods().len(), 2);
+        assert_eq!(keys.len(), deprecated_hidden_methods().len());
+
+        assert_eq!(
+            status(
+                "kotlin/collections/List",
+                "java/util/List",
+                "getFirst",
+                "()Ljava/lang/Object;",
+            ),
+            MappedBuiltinMemberStatus::DeprecatedHidden
+        );
+        assert_eq!(
+            status(
+                "kotlin/collections/MutableList",
+                "java/util/List",
+                "getFirst",
+                "()Ljava/lang/Object;",
+            ),
+            MappedBuiltinMemberStatus::Hidden
+        );
+        assert_eq!(
+            status(
+                "kotlin/collections/List",
+                "java/util/List",
+                "getFirst",
+                "(I)Ljava/lang/Object;",
+            ),
+            MappedBuiltinMemberStatus::Hidden
         );
     }
 }

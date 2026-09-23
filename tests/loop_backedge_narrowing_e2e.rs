@@ -41,11 +41,12 @@ fn rejects_naming_the_declared_receiver(src: &str, context: &str) {
         1,
         "{context}: kotlinc must reject once: {expected:?}"
     );
-    assert_eq!(diagnostics.len(), 1, "{context}: {diagnostics:?}");
-    let reference = expected[0].trim_end_matches('.');
-    assert!(
-        diagnostics[0].starts_with(reference),
-        "{context}: {diagnostics:?} against kotlinc's {expected:?}"
+    let krusty_expected =
+        krusty::diagnostic_wording::unresolved_reference_on("length", Some("Any"));
+    assert_eq!(
+        diagnostics,
+        [krusty_expected],
+        "{context}: exact krusty diagnostic"
     );
 }
 

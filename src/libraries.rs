@@ -2641,6 +2641,10 @@ pub struct LibraryType {
     /// static Java field). This is a semantic name-hiding fact; no storage shape crosses the provider
     /// boundary.
     pub hidden_member_properties: HashSet<String>,
+    /// Source callable names for declarations excluded by `@Deprecated(level = HIDDEN)` (or an
+    /// equivalent declaration-provider policy). They never enter overload selection, but their
+    /// presence remains a semantic rejection fact used by version-specific diagnostics.
+    pub hidden_deprecated_callables: HashSet<String>,
     /// Exact source-level callable/property declarations keyed by source name. Providers populate this
     /// once with the classifier signature; core applies receiver type arguments and walks inheritance.
     pub declared_callables: HashMap<String, Callables>,
@@ -2808,6 +2812,7 @@ impl LibraryType {
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
@@ -3302,6 +3307,7 @@ mod tests {
             supertype_templates: Vec::new(),
             constructors: vec![],
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: std::collections::HashMap::new(),
             declared_callable_order: Vec::new(),
             members: vec![],

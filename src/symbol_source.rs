@@ -397,6 +397,7 @@ mod tests {
                     supertype_templates: vec![Ty::obj(&self.owner)],
                     constructors: vec![],
                     hidden_member_properties: Default::default(),
+                    hidden_deprecated_callables: Default::default(),
                     declared_callables,
                     declared_callable_order: Vec::new(),
                     members: vec![],

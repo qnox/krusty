@@ -61,6 +61,20 @@ fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
         .collect()
 }
 
+fn assert_recorded_reference_ledger(output: &str) {
+    let observed = reference_errors(output)
+        .into_iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}:{}: {}",
+                diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = common::recorded(|| observed.clone());
+    assert_eq!(observed, expected, "kotlinc's complete ordered ledger");
+}
+
 /// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
 /// cannot turn either failure into a passing skip.
 fn run(src: &str, stem: &str) -> String {
@@ -1190,14 +1204,10 @@ fun <U : Marker> outer(): Duo<U, U?> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("RepeatedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
-    assert!(
-        diagnostics.contains("cannot infer type for type parameter 'T'")
-            || diagnostics.contains("type mismatch"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
     );
 }
 
@@ -1212,14 +1222,10 @@ fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("MixedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
-    assert!(
-        diagnostics.contains("cannot infer type for type parameter 'T'")
-            || diagnostics.contains("type mismatch"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
     );
 }
 
@@ -1233,10 +1239,7 @@ fun <T : Marker> outer(): List<T?> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("NullableNestedContext", source);
     assert_ne!(code, 0, "kotlinc accepted the invalid fixture");
-    assert!(
-        diagnostics.contains("only safe (?.) or non-null asserted (!!.) calls are allowed"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
-    );
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'."]
@@ -1966,10 +1969,13 @@ class MutBox<T>(var v: T) {
             message: "null cannot be a value of a non-null type 'String'.".to_string(),
         }]
     );
-    // krusty still rejects the call, but as an unresolved `getOrDefault` rather than kotlinc's
-    // null-argument mismatch; only the rejection is pinned until that diagnostic is fixed.
-    let diagnostics = common::front_end_diagnostics_with_stdlib(source);
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        [krusty::diagnostic_wording::unresolved_reference_on(
+            "getOrDefault",
+            Some("MutBox<String>")
+        )]
+    );
 }
 
 #[test]

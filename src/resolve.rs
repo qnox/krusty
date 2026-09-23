@@ -72,6 +72,7 @@ mod plugin_expression_planning;
 mod postponed_applicability;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
+mod qualifiers;
 mod receiver_flow;
 mod resolved_type_occurrences;
 mod safe_call_flow;
@@ -139,6 +140,7 @@ pub(crate) use member_extension_selection::{
 };
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
+use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 use stable_path::StablePathRead;
 use streaming_signature_bridge::*;
@@ -424,53 +426,6 @@ fn order_primary_class_bounds(
     }
 }
 
-/// The committed meaning of a dotted expression's prefix.
-///
-/// Kotlin resolves the root at scope-tower priority before looking at later segments. A value root
-/// therefore stays a value even if its next member is absent; resolution never backtracks to a
-/// same-named package or classifier. Package/classifier prefixes advance left-to-right through the
-/// federated [`SymbolSource`]. The terminal name is deliberately resolved by the owning syntax
-/// (read, call, constructor, reference), after this qualifier walk finishes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResolvedQualifier {
-    Value,
-    Package(TypeName),
-    Classifier(TypeName),
-}
-
-impl ResolvedQualifier {
-    fn classifier(self) -> Option<TypeName> {
-        match self {
-            ResolvedQualifier::Classifier(internal) => Some(internal),
-            ResolvedQualifier::Value | ResolvedQualifier::Package(_) => None,
-        }
-    }
-}
-
-/// Why a qualifier walk could not commit its next segment. This is data, not an eagerly emitted
-/// diagnostic: several expression forms probe whether a receiver is a qualifier before handling it
-/// as a value. The path that finally owns the expression reports the stored segment with kotlinc's
-/// ordinary unresolved/ambiguity wording.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum QualifierError {
-    NotANameChain {
-        expression: ExprId,
-    },
-    UnresolvedSegment {
-        expression: Option<ExprId>,
-        name: String,
-    },
-    AmbiguousRoot {
-        expression: Option<ExprId>,
-        name: String,
-    },
-}
-
-enum QualifierInput<'a> {
-    Expression(ExprId),
-    Root(&'a str),
-}
-
 struct BootstrapSymbolSource<'a> {
     declarations: &'a std::collections::HashSet<TypeName>,
     aliases: &'a std::collections::HashSet<TypeName>,
@@ -531,167 +486,17 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
     }
 }
 
-fn classifier_identity<S: SymbolSource + ?Sized>(
-    source: &S,
-    namespace: crate::symbol_source::SymbolNamespace,
-    name: &str,
-) -> Option<TypeName> {
-    source.symbols(namespace, name).classifier_name
-}
-
-fn walk_qualifier<S: SymbolSource + ?Sized>(
-    source: &S,
-    mut prefix: ResolvedQualifier,
-    segments: &[(Option<ExprId>, String)],
-) -> Result<ResolvedQualifier, QualifierError> {
-    for (segment_expression, segment) in segments {
-        prefix = match prefix {
-            ResolvedQualifier::Value => return Ok(ResolvedQualifier::Value),
-            ResolvedQualifier::Package(package) => {
-                if let Some(classifier) = classifier_identity(
-                    source,
-                    crate::symbol_source::SymbolNamespace::Package(package),
-                    segment,
-                ) {
-                    ResolvedQualifier::Classifier(classifier)
-                } else {
-                    if source.package_exists(package, segment) {
-                        ResolvedQualifier::Package(crate::types::type_name_child(package, segment))
-                    } else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: *segment_expression,
-                            name: segment.clone(),
-                        });
-                    }
-                }
-            }
-            ResolvedQualifier::Classifier(owner) => {
-                let Some(classifier) = classifier_identity(
-                    source,
-                    crate::symbol_source::SymbolNamespace::Classifier(owner),
-                    segment,
-                ) else {
-                    return Err(QualifierError::UnresolvedSegment {
-                        expression: *segment_expression,
-                        name: segment.clone(),
-                    });
-                };
-                ResolvedQualifier::Classifier(classifier)
-            }
-        };
-    }
-    Ok(prefix)
-}
-
-/// Resolve the namespace facets of one dotted spelling after VALUE-root selection has declined it.
-/// A scoped/default-import classifier and a root package may legally have the same first segment
-/// (`java.lang.Package` and source package `Package`). The classifier rung wins when its COMPLETE
-/// path resolves; a missing nested edge does not erase the independent package facet.
-fn walk_qualifier_namespace_facets<S: SymbolSource + ?Sized>(
-    source: &S,
-    classifier_root: Option<TypeName>,
-    root_expression: Option<ExprId>,
-    root_name: &str,
-    segments: &[(Option<ExprId>, String)],
-) -> Result<ResolvedQualifier, QualifierError> {
-    let classifier_result = classifier_root.map(|classifier| {
-        walk_qualifier(source, ResolvedQualifier::Classifier(classifier), segments)
-    });
-    if let Some(Ok(resolved)) = classifier_result.as_ref() {
-        return Ok(*resolved);
-    }
-
-    let package_result = if source.package_exists(TypeName::ROOT, root_name) {
-        let package = crate::types::type_name_child(TypeName::ROOT, root_name);
-        match walk_qualifier(source, ResolvedQualifier::Package(package), segments) {
-            Ok(resolved) => return Ok(resolved),
-            Err(error) => Some(Err(error)),
-        }
-    } else {
-        None
-    };
-
-    classifier_result.or(package_result).unwrap_or_else(|| {
-        Err(QualifierError::UnresolvedSegment {
-            expression: root_expression,
-            name: root_name.to_string(),
-        })
-    })
-}
-
-/// Walk an absolute import/package spelling once, from its first segment to its last. This is the
-/// only conversion from source import text to a classifier identity; it never flattens the spelling
-/// and retries alternative `$` placements.
-fn qualifier_path<S: SymbolSource + ?Sized>(
-    path: &str,
-    source: &S,
-    scoped_root: Option<TypeName>,
-) -> Result<ResolvedQualifier, QualifierError> {
-    let segments = path
-        .split(['.', '/'])
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| (None, segment.to_string()))
-        .collect::<Vec<_>>();
-    let Some((root_expression, root_name)) = segments.first() else {
-        return Err(QualifierError::UnresolvedSegment {
-            expression: None,
-            name: String::new(),
-        });
-    };
-    let prefix = if let Some(classifier) = scoped_root {
-        ResolvedQualifier::Classifier(classifier)
-    } else if let Some(classifier) = classifier_identity(
-        source,
-        crate::symbol_source::SymbolNamespace::Package(TypeName::ROOT),
-        root_name,
-    ) {
-        ResolvedQualifier::Classifier(classifier)
-    } else if source.package_exists(TypeName::ROOT, root_name) {
-        ResolvedQualifier::Package(crate::types::type_name_child(TypeName::ROOT, root_name))
-    } else {
-        return Err(QualifierError::UnresolvedSegment {
-            expression: *root_expression,
-            name: root_name.clone(),
-        });
-    };
-    walk_qualifier(source, prefix, &segments[1..])
-}
-
-fn classifier_path<S: SymbolSource + ?Sized>(
-    path: &str,
-    source: &S,
-    scoped_root: Option<TypeName>,
-) -> Result<TypeName, QualifierError> {
-    match qualifier_path(path, source, scoped_root)? {
-        ResolvedQualifier::Classifier(internal) => Ok(internal),
-        ResolvedQualifier::Package(_) | ResolvedQualifier::Value => {
-            Err(QualifierError::UnresolvedSegment {
-                expression: None,
-                name: path
-                    .rsplit(['.', '/'])
-                    .find(|segment| !segment.is_empty())
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-        }
-    }
-}
-
 /// `UNRESOLVED_REFERENCE` for a member looked up on an explicit receiver. Which receivers kotlinc
 /// names (from 2.4.20, see [`crate::diagnostic_wording::unresolved_reference_on`]) was measured
 /// against the reference compiler: a smart cast names the narrowed type, a safe call the non-null
 /// one, a platform type its Kotlin spelling, the `null` literal `Nothing?`; a receiver typed by a
 /// type parameter (nullable or not) is not named at all, and neither is one that failed to resolve.
-pub(crate) fn unresolved_member_message(name: &str, receiver: Ty) -> String {
-    // JDK 21's `List.getFirst()`/`getLast()` stay in the mapped scope as HIDDEN-deprecated
-    // candidates (`JvmBuiltInsSignatures.DEPRECATED_LIST_METHODS`), and kotlinc reports a hidden
-    // candidate as a bare unresolved name, with no receiver.
-    let hidden_list_member = matches!(name, "getFirst" | "getLast")
-        && matches!(
-            receiver.non_null().kotlin_class_internal(),
-            Some(owner) if owner == "kotlin/collections/List" || owner == "kotlin/collections/MutableList"
-        );
-    if hidden_list_member {
+pub(crate) fn unresolved_member_message(
+    name: &str,
+    receiver: Ty,
+    hidden_deprecated: bool,
+) -> String {
+    if hidden_deprecated {
         return crate::diagnostic_wording::unresolved_reference_on(name, None);
     }
     let rendered = match receiver {
@@ -15557,7 +15362,12 @@ impl<'a> Checker<'a> {
         if qualifier {
             crate::diagnostic_wording::unresolved_reference_on(name, None)
         } else {
-            unresolved_member_message(name, rt)
+            unresolved_member_message(
+                name,
+                rt,
+                self.resolver()
+                    .receiver_has_hidden_deprecated_member(rt, name),
+            )
         }
     }
 
@@ -26590,7 +26400,15 @@ impl<'a> Checker<'a> {
                     ),
                     Ok(None) => match rt {
                         Ty::Error => {}
-                        Ty::Obj(..) => self.diags.error(span, unresolved_member_message(&name, rt)),
+                        Ty::Obj(..) => {
+                            let hidden_deprecated = self
+                                .resolver()
+                                .receiver_has_hidden_deprecated_member(rt, &name);
+                            self.diags.error(
+                                span,
+                                unresolved_member_message(&name, rt, hidden_deprecated),
+                            )
+                        }
                         _ => self.diags.error(
                             span,
                             format!("cannot assign to a member of '{}'", rt.source_name()),
@@ -27579,6 +27397,53 @@ mod tests {
     }
 
     #[test]
+    fn a_later_classifier_miss_does_not_reinterpret_its_root_as_a_package() {
+        struct CollidingRoot;
+
+        impl SymbolSource for CollidingRoot {
+            fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+                parent == TypeName::ROOT && name == "Clash"
+            }
+
+            fn symbols(
+                &self,
+                namespace: crate::symbol_source::SymbolNamespace,
+                name: &str,
+            ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+                let package = crate::types::type_name("Clash");
+                if namespace == crate::symbol_source::SymbolNamespace::Package(package)
+                    && name == "Tail"
+                {
+                    return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                        classifier_name: Some(crate::types::type_name("Clash/Tail")),
+                        classifier: Some(std::sync::Arc::new(
+                            crate::libraries::LibraryType::declaration_header(),
+                        )),
+                        ..Default::default()
+                    });
+                }
+                std::rc::Rc::new(crate::libraries::ResolvedSymbols::default())
+            }
+        }
+
+        let result = walk_qualifier_namespace_facets(
+            &CollidingRoot,
+            Some(crate::types::type_name("scope/Clash")),
+            None,
+            "Clash",
+            &[(None, "Tail".to_string())],
+        );
+
+        assert_eq!(
+            result,
+            Err(QualifierError::UnresolvedSegment {
+                expression: None,
+                name: "Tail".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn local_class_nested_typealias_is_collected_under_its_hoisted_source_owner() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
@@ -28223,6 +28088,7 @@ val result = object { fun value(): String = captured }
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
             hidden_member_properties: Default::default(),
+            hidden_deprecated_callables: Default::default(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
@@ -28567,12 +28433,12 @@ fun rejected(owner: Owner) { owner.hidden() }
              fun read(box: Box): String = box.component2()",
         );
 
-        // The wording (with or without the receiver clause) is checked against kotlinc per version
-        // in `tests/`; here only that `component2` is unresolved and nothing else is reported.
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(
-            errors[0].starts_with("unresolved reference 'component2'"),
-            "{errors:?}"
+        assert_eq!(
+            errors,
+            [crate::diagnostic_wording::unresolved_reference_on(
+                "component2",
+                Some("Box")
+            )]
         );
     }
 
@@ -31138,6 +31004,7 @@ fun box(): String {
                     supertype_templates,
                     constructors: vec![],
                     hidden_member_properties: Default::default(),
+                    hidden_deprecated_callables: Default::default(),
                     declared_callables,
                     declared_callable_order: (internal == foo)
                         .then(|| vec!["prop".to_string()])
@@ -31291,6 +31158,7 @@ fun box(): String {
                     supertype_templates: Vec::new(),
                     constructors: vec![],
                     hidden_member_properties: Default::default(),
+                    hidden_deprecated_callables: Default::default(),
                     declared_callables,
                     declared_callable_order: names.iter().map(|name| (*name).to_string()).collect(),
                     members: vec![],
@@ -35839,9 +35707,13 @@ fun use() {
             "fun f(s: String): String = s.substring(\"x\")",
             "argument type mismatch: actual type is 'String', but 'Int' was expected.",
         );
-        err_contains(
-            "fun f(a: Int): Int = a.substring(1)",
-            "unresolved reference 'substring'",
+        let (errors, _) = check("fun f(a: Int): Int = a.substring(1)");
+        assert_eq!(
+            errors,
+            [crate::diagnostic_wording::unresolved_reference_on(
+                "substring",
+                Some("Int")
+            )]
         );
     }
 
@@ -36055,9 +35927,13 @@ fun use() {
 
     #[test]
     fn reference_type_errors() {
-        err_contains(
-            "class Point(val x: Int)\nfun f(p: Point): Int = p.z",
-            "unresolved reference 'z'",
+        let (errors, _) = check("class Point(val x: Int)\nfun f(p: Point): Int = p.z");
+        assert_eq!(
+            errors,
+            [crate::diagnostic_wording::unresolved_reference_on(
+                "z",
+                Some("Point")
+            )]
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",

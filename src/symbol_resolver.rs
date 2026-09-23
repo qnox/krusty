@@ -43,9 +43,10 @@ use hierarchy_projection::{
 };
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
-    declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
-    lexical_enclosing_classifier_names, members_in_hierarchy, override_input_shapes_match,
-    specialize_member_function, InheritedNestedClassifier, OverrideInputShape,
+    declared_member_callables, has_hidden_deprecated_member, imported_object_member_symbols,
+    inherited_nested_classifier_name, lexical_enclosing_classifier_names, members_in_hierarchy,
+    override_input_shapes_match, specialize_member_function, InheritedNestedClassifier,
+    OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
@@ -2192,6 +2193,13 @@ impl<'a> SymbolResolver<'a> {
         self.fn_scope
             .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
             .unwrap_or_default()
+    }
+
+    /// A declaration-provider rejection fact for `receiver.name`. Hidden-deprecated declarations
+    /// never become candidates; this is consulted only after ordinary selection has failed so the
+    /// diagnostic can reproduce the selected Kotlin reference version.
+    pub(crate) fn receiver_has_hidden_deprecated_member(&self, receiver: Ty, name: &str) -> bool {
+        has_hidden_deprecated_member(&self.src, member_scope_receiver(receiver), name)
     }
 
     /// Collect the declarations denoted by `receiver.name` exactly once. Member declarations and
@@ -7541,6 +7549,7 @@ mod tests {
             supertype_templates: Vec::new(),
             constructors,
             hidden_member_properties: Default::default(),
+            hidden_deprecated_callables: Default::default(),
             declared_callables: std::collections::HashMap::new(),
             declared_callable_order: Vec::new(),
             members: vec![],

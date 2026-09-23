@@ -280,9 +280,8 @@ fun box(): String {{\n\
 /// The formal's declared BOUND still constrains a receiver that is the only evidence for it: a
 /// receiver outside the bound is rejected rather than widening the formal to admit it.
 ///
-/// Both compilers reject at the same position. kotlinc reports the one candidate as inapplicable
-/// because of a receiver type mismatch, while krusty still calls the reference unresolved; only the
-/// position is pinned until krusty's diagnostic is fixed.
+/// Both compilers reject at the same position; their complete diagnostics are pinned independently
+/// while krusty still calls the reference unresolved.
 #[test]
 fn a_receiver_outside_the_formals_bound_is_still_rejected() {
     let main = format!(
@@ -295,13 +294,30 @@ fun probe() {{\n\
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
     assert_eq!((result.krusty_code, result.reference_code), (1, 1));
     assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
-    let position = |stderr: &str| {
-        common::compiler_errors(stderr)
-            .into_iter()
-            .map(|error| (error.file, error.line, error.column))
-            .collect::<Vec<_>>()
-    };
-    let expected = [("Main.kt".to_string(), 23, 11)];
-    assert_eq!(position(&result.reference_stderr), expected, "kotlinc");
-    assert_eq!(position(&result.krusty_stderr), expected, "krusty");
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 23,
+            column: 11,
+            message: krusty::diagnostic_wording::unresolved_reference_on("piped", Some("Cfg")),
+        }]
+    );
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_eq!(reference.len(), 1, "{}", result.reference_stderr);
+    assert_eq!(
+        (
+            reference[0].file.as_str(),
+            reference[0].line,
+            reference[0].column
+        ),
+        ("Main.kt", 23, 11)
+    );
+    assert_eq!(
+        vec![reference[0].message.clone()],
+        common::recorded_named(
+            "a_receiver_outside_the_formals_bound_is_still_rejected",
+            || { vec![reference[0].message.clone()] }
+        )
+    );
 }

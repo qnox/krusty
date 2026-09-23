@@ -235,6 +235,7 @@ pub fn krusty_error_ledger(sources: &[(&str, &str)]) -> Vec<String> {
     let output = Command::new(common::krusty_binary())
         .arg("-d")
         .arg(work.join("krusty-out"))
+        .arg("-no-reflect")
         .args(&source_paths)
         .output()
         .expect("run krusty diagnostic fixture");

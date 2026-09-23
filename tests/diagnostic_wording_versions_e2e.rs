@@ -82,3 +82,50 @@ fn implemented_expect() {
         ),
     );
 }
+
+#[test]
+fn the_cli_version_flag_overrides_the_environment_before_compilation() {
+    let work = common::scratch_dir().expect("scratch dir");
+    let source = work.join("Flag.kt");
+    std::fs::write(&source, "fun f(x: String): Int = x.missing\n").expect("write source");
+    let output = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-Xkotlin-reference-version=2.4.10",
+            "-no-stdlib",
+            "-no-reflect",
+            "-no-jdk",
+            "-d",
+        ])
+        .arg(work.join("out"))
+        .arg(&source)
+        .env("KRUSTY_LANGUAGE_VERSION", "2.4.20")
+        .output()
+        .expect("run krusty");
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        common::ledger(&stderr),
+        ["Flag.kt:1:27: unresolved reference 'missing'."]
+    );
+}
+
+#[test]
+fn an_invalid_environment_version_is_a_clean_configuration_error() {
+    let work = common::scratch_dir().expect("scratch dir");
+    let source = work.join("Valid.kt");
+    std::fs::write(&source, "fun value(): Int = 1\n").expect("write source");
+    let output = std::process::Command::new(common::krusty_binary())
+        .args(["-no-stdlib", "-no-reflect", "-no-jdk", "-d"])
+        .arg(work.join("out"))
+        .arg(&source)
+        .env("KRUSTY_LANGUAGE_VERSION", "not-a-version")
+        .output()
+        .expect("run krusty");
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "krusty: invalid Kotlin reference version \"not-a-version\"; expected major.minor.patch\n"
+    );
+}

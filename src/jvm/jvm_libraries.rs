@@ -14,7 +14,7 @@ use generic_signatures::{
     suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
-use mapped_builtin_member_status::mapped_builtin_member_status;
+use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -2611,6 +2611,18 @@ impl JvmLibraries {
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
+            let hidden_deprecated_callables = if kotlin_scope_is_authoritative {
+                members
+                    .iter()
+                    .filter(|member| {
+                        mapped_builtin_member_status(internal_name, ci.this_class, member)
+                            == MappedBuiltinMemberStatus::DeprecatedHidden
+                    })
+                    .map(|member| member.name.clone())
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
             if kotlin_scope_is_authoritative {
                 // Retain only physical members admitted to this mapped Kotlin declaration by the
                 // provider-owned, versioned JVM-builtins policy.
@@ -2704,6 +2716,7 @@ impl JvmLibraries {
                 supertype_templates,
                 constructors,
                 hidden_member_properties,
+                hidden_deprecated_callables,
                 declared_callables: std::collections::HashMap::new(),
                 declared_callable_order: Vec::new(),
                 members,
@@ -3363,6 +3376,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         supertype_templates: Vec::new(),
         constructors: Vec::new(),
         hidden_member_properties: Default::default(),
+        hidden_deprecated_callables: Default::default(),
         declared_callables: std::collections::HashMap::new(),
         declared_callable_order: Vec::new(),
         members,
@@ -3434,6 +3448,7 @@ fn builtin_library_type(
         supertype_templates: generic.supertype_templates,
         constructors,
         hidden_member_properties: Default::default(),
+        hidden_deprecated_callables: Default::default(),
         declared_callables: std::collections::HashMap::new(),
         declared_callable_order: Vec::new(),
         members,

@@ -45,6 +45,7 @@ mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
 mod member_schedule;
+mod metadata_policy;
 mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
@@ -73,6 +74,11 @@ use inline_call::{
 };
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
+};
+pub use metadata_policy::KotlinMetadata;
+use metadata_policy::{
+    annotation_impl_carries_nullability, is_continuation_class, is_coroutine_state_machine,
+    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
@@ -354,48 +360,6 @@ pub(super) struct EmitEnv<'a> {
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
-}
-
-/// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
-/// encoded protobuf, one byte per `char`) / `d2` (string table) arrays. Attached to the facade class so
-/// another Kotlin/krusty compilation can resolve its top-level declarations — in particular reading the
-/// `IS_SUSPEND` flag + logical signature of a `suspend fun`.
-#[derive(Clone)]
-pub struct KotlinMetadata {
-    pub k: i32,
-    pub mv: Vec<i32>,
-    pub xi: i32,
-    pub d1: Vec<String>,
-    pub d2: Vec<String>,
-}
-
-fn is_continuation_class(class: &crate::ir::IrClass) -> bool {
-    class.superclass_matches("kotlin/coroutines/jvm/internal/ContinuationImpl")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
-}
-
-/// `ProtoBuf.Visibility` numbers kotlinc writes for a synthetic class (see [`synthetic_class_xi`]).
-const SYNTHETIC_PROTECTED: i32 = 2;
-const SYNTHETIC_PUBLIC: i32 = 3;
-const SYNTHETIC_LOCAL: i32 = 5;
-
-/// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
-/// visibility into bits 8–10 (`METADATA_SYNTHETIC_CLASS_VISIBILITY_BIT_FIRST..LAST`): a lambda or
-/// suspend lambda is `local`, a named suspend function's package-private continuation normalizes to
-/// `protected`, and a `$DefaultImpls` holder is `public`. Earlier releases wrote the IR flags alone.
-fn synthetic_class_xi(visibility: i32) -> i32 {
-    const JVM_IR_AND_STABLE_ABI: i32 = 48;
-    if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
-        JVM_IR_AND_STABLE_ABI | (visibility << 8)
-    } else {
-        JVM_IR_AND_STABLE_ABI
-    }
-}
-
-fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
-    is_continuation_class(class)
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
 }
 
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
@@ -8543,12 +8507,6 @@ fn emit_annotation_equals(
             &[Some("Lorg/jetbrains/annotations/Nullable;")],
         );
     }
-}
-
-/// Whether an annotation implementation class stamps `@NotNull`/`@Nullable` on its constructor,
-/// `equals` and `toString`. Kotlin 2.4.20 stopped; earlier releases did.
-fn annotation_impl_carries_nullability() -> bool {
-    !crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
 /// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a

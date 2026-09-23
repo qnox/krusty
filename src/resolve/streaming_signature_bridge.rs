@@ -639,17 +639,25 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        let non_null_member = matches!(receiver, Ty::Nullable(_))
-            && self
-                .with_resolver(scope, |resolver| {
-                    resolver.resolve_symbol(
-                        crate::symbol_resolver::SymRecv::Value(receiver.non_null()),
-                        spelling,
-                        &[],
-                        &[],
-                    )
-                })
-                .is_ok();
+        let non_null_member = if matches!(receiver, Ty::Nullable(_)) {
+            match self.with_resolver(scope, |resolver| {
+                Some(
+                    resolver
+                        .resolve_symbol(
+                            crate::symbol_resolver::SymRecv::Value(receiver.non_null()),
+                            spelling,
+                            &[],
+                            &[],
+                        )
+                        .is_some(),
+                )
+            }) {
+                Ok(exists) => exists,
+                Err(diagnostic) => return diagnostic,
+            }
+        } else {
+            false
+        };
         let location = match self.headers.signature_origins.get(origin) {
             Some(crate::fir::Origin::Source { file, span }) => Some((file, span)),
             _ => None,
@@ -665,7 +673,7 @@ impl ProductionSignatureSemantics<'_> {
                     receiver.source_name()
                 ),
             ),
-            _ => self.record_unresolved_member(scope.owner, origin, receiver, spelling),
+            _ => self.record_unresolved_member(scope, origin, receiver, spelling),
         }
     }
 
@@ -673,15 +681,21 @@ impl ProductionSignatureSemantics<'_> {
     /// words it so both passes report one diagnostic.
     fn record_unresolved_member(
         &self,
-        declaration: crate::fir::DeclarationId,
+        scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
         receiver: Ty,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
+        let hidden_deprecated = match self.with_resolver(scope, |resolver| {
+            Some(resolver.receiver_has_hidden_deprecated_member(receiver, spelling))
+        }) {
+            Ok(hidden) => hidden,
+            Err(diagnostic) => return diagnostic,
+        };
         self.record_source_diagnostic(
-            declaration,
+            scope.owner,
             origin,
-            crate::resolve::unresolved_member_message(spelling, receiver),
+            crate::resolve::unresolved_member_message(spelling, receiver, hidden_deprecated),
         )
     }
 
@@ -1045,18 +1059,19 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        let candidates = self
-            .with_resolver(scope, |resolver| {
-                Some(
-                    resolver
-                        .receiver_callables(receiver, spelling)
-                        .functions()
-                        .to_vec(),
-                )
-            })
-            .unwrap_or_default();
+        let candidates = match self.with_resolver(scope, |resolver| {
+            Some(
+                resolver
+                    .receiver_callables(receiver, spelling)
+                    .functions()
+                    .to_vec(),
+            )
+        }) {
+            Ok(candidates) => candidates,
+            Err(diagnostic) => return diagnostic,
+        };
         if candidates.is_empty() {
-            self.record_unresolved_member(scope.owner, origin, receiver, spelling)
+            self.record_unresolved_member(scope, origin, receiver, spelling)
         } else {
             self.record_inapplicable_member_call(scope.owner, origin, spelling, &candidates)
         }

@@ -234,13 +234,6 @@ impl DiagSink {
         self.diags.extend(tail);
     }
 
-    /// Restore deterministic source order after diagnostics from multiple semantic phases have
-    /// been merged. The stable sort preserves production order for diagnostics at the same range.
-    pub(crate) fn sort_source_order(&mut self) {
-        self.diags
-            .sort_by_key(|diagnostic| (diagnostic.file, diagnostic.span.lo, diagnostic.span.hi));
-    }
-
     pub fn has_errors(&self) -> bool {
         self.diags.iter().any(|d| d.severity == Severity::Error)
     }

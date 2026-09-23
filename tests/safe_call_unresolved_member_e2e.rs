@@ -22,17 +22,10 @@ fn assert_unresolved(src: &str, name: &str) {
     let d = diags(src);
     let expected = common::recorded(|| common::reference_error_messages("Main", src));
     assert!(
-        expected
-            .iter()
-            .any(|message| message.contains(&format!("'{name}'"))),
-        "kotlinc must report `{name}` unresolved: {expected:?}"
+        !expected.is_empty(),
+        "kotlinc must reject `{name}` in {src:?}"
     );
-    for message in &expected {
-        assert!(
-            d.contains(message),
-            "expected `{message}` for {src:?}, got {d:?}"
-        );
-    }
+    assert_eq!(d, expected, "complete ordered diagnostics for {src:?}");
 }
 
 fn assert_accepted(src: &str) {
@@ -43,30 +36,24 @@ fn assert_accepted(src: &str) {
     );
 }
 
-fn assert_argument_mismatch(src: &str) {
-    let d = diags(src);
-    assert!(
-        d.iter()
-            .any(|message| message.contains("argument type mismatch")),
-        "expected an argument mismatch for {src:?}, got {d:?}"
-    );
+fn assert_argument_mismatch(label: &str, src: &str) {
+    assert_rejected_as_kotlinc(label, src);
 }
 
-fn assert_inapplicable(src: &str) {
-    let d = diags(src);
+fn assert_inapplicable(label: &str, src: &str) {
+    assert_rejected_as_kotlinc(label, src);
+}
+
+fn assert_rejected_as_kotlinc(label: &str, src: &str) {
+    let expected = common::recorded_named(label, || common::reference_error_messages("Main", src));
     assert!(
-        d.iter().any(|message| {
-            message.contains("argument type mismatch")
-                || message.starts_with("none of the following candidates is applicable:")
-                || message.starts_with("too many arguments for")
-                || message.starts_with("function '")
-        }),
-        "expected an inapplicable-call diagnostic for {src:?}, got {d:?}"
+        !expected.is_empty(),
+        "kotlinc must reject the inapplicable call in {src:?}"
     );
-    assert!(
-        d.iter()
-            .all(|message| !message.contains("unresolved reference")),
-        "an existing member must not be called unresolved: {d:?}"
+    assert_eq!(
+        diags(src),
+        expected,
+        "complete ordered diagnostics for {src:?}"
     );
 }
 
@@ -149,12 +136,15 @@ fn unselectable_but_existing_members_are_not_called_unresolved() {
     assert_accepted("fun f(x: UInt?): UInt? = x?.plus(1u)\n");
     assert_accepted("fun f(g: ((Int) -> Int)?): Int? = g?.invoke(1)\n");
     // Existing-but-inapplicable members get overload diagnostics, never "unresolved reference".
-    assert_argument_mismatch("fun f(s: String?): Any? = s?.let(1)\n");
-    assert_inapplicable("fun f(s: String?): Any? = s?.substring(9, 9, 9)\n");
+    assert_argument_mismatch("let-argument", "fun f(s: String?): Any? = s?.let(1)\n");
+    assert_inapplicable(
+        "substring-arity",
+        "fun f(s: String?): Any? = s?.substring(9, 9, 9)\n",
+    );
     // `Int.toString(radix)` is a real stdlib extension and is therefore applicable.
     assert_accepted("fun f(i: Int?): Any? = i?.toString(1)\n");
-    assert_inapplicable("fun f(i: Int?): Any? = i?.hashCode(1)\n");
-    assert_inapplicable("fun f(i: Int?): Any? = i?.equals()\n");
+    assert_inapplicable("hash-code-arity", "fun f(i: Int?): Any? = i?.hashCode(1)\n");
+    assert_inapplicable("equals-arity", "fun f(i: Int?): Any? = i?.equals()\n");
 }
 
 /// The classpath-less `String` table stands in for stdlib EXTENSIONS (`kotlin.String` has no
@@ -174,21 +164,18 @@ fn user_string_extension_outranks_the_classpath_less_table() {
     );
 }
 
-/// The no-classpath fallback's NAME still exists when this particular invocation cannot select one
-/// of its recorded shapes. Existence and applicability are separate questions: this compiler may
-/// lack the overload diagnostic, but it must not claim that `substring` itself is unresolved.
+/// The classpath-less builtin declaration is still an ordinary candidate: an invalid call must
+/// publish the same complete applicability diagnostic as the metadata-backed declaration, not be
+/// accepted or mislabeled as an unresolved name.
 #[test]
 fn classpath_less_string_overload_mismatch_is_not_called_unresolved() {
-    let diagnostics = common::front_end_diagnostics(
-        "fun f(s: String?): Any? = s?.substring(9, 9, 9)\n",
-        &[],
-        None,
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .all(|message| !message.contains("unresolved reference 'substring'.")),
-        "an existing fallback name must not be reported unresolved: {diagnostics:?}"
+    const SOURCE: &str = "fun f(s: String?): Any? = s?.substring(9, 9, 9)\n";
+    let expected = common::recorded(|| common::reference_error_messages("Main", SOURCE));
+    assert!(!expected.is_empty(), "kotlinc must reject the invalid call");
+    assert_eq!(
+        common::front_end_diagnostics(SOURCE, &[], None),
+        expected,
+        "the classpath-less declaration must preserve exact applicability diagnostics"
     );
 }
 

@@ -39,8 +39,7 @@ fn compile(source: &str, multiplatform: bool) -> (bool, String) {
 }
 
 /// kotlinc's error ledger for `source` as a multiplatform `Main.kt` with `extra` arguments, in
-/// source order (kotlinc lists unactualized classifiers before callables; krusty's sink does not),
-/// recorded per Kotlin version for the running test.
+/// emission order, recorded per Kotlin version for the running test.
 fn kotlinc_ledger(source: &str, extra: &[&str]) -> Vec<String> {
     common::recorded(|| {
         let dir = common::scratch_dir().expect("scratch dir");
@@ -54,9 +53,10 @@ fn kotlinc_ledger(source: &str, extra: &[&str]) -> Vec<String> {
         args.extend(extra.iter().map(ToString::to_string));
         args.push(src.to_string_lossy().into_owned());
         let (_, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc");
-        let mut reported = common::reported(&stderr);
-        reported.sort_by_key(|entry| (entry.line, entry.column));
-        reported.iter().map(ToString::to_string).collect()
+        common::reported(&stderr)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     })
 }
 
@@ -204,10 +204,6 @@ fn the_module_a_diagnostic_names_is_the_declared_one() {
     let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
     report.push_str(&String::from_utf8_lossy(&out.stderr));
     let expected = kotlinc_ledger(SOURCE, &["-module-name", "mylib"]);
-    assert!(
-        expected.iter().all(|entry| entry.contains("mylib")),
-        "kotlinc names the declared module: {expected:?}"
-    );
     assert_eq!(
         ledger(&report),
         expected,

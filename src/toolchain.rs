@@ -189,7 +189,9 @@ pub fn dist_jar(name: &str) -> Option<PathBuf> {
 }
 
 /// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g. `1.9.24-release-822`
-/// → `1.9.24`) or a located versioned stdlib jar, defaulting to a known-good version.
+/// → `1.9.24`) or a located versioned stdlib jar, defaulting to the process-wide reference
+/// target. Dependency provisioning must not silently switch to the newest release when the caller
+/// explicitly selected an older supported compiler contract.
 pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {
         if let Ok(s) = std::fs::read_to_string(lib.parent().unwrap().join("build.txt")) {
@@ -207,7 +209,7 @@ pub fn kotlin_version() -> String {
                 .and_then(|s| s.strip_suffix(".jar"))
                 .map(String::from)
         })
-        .unwrap_or_else(|| crate::kotlin_version::KotlinVersion::newest().to_string())
+        .unwrap_or_else(reference_version)
 }
 
 /// The provisioned Kotlin codegen/box corpus root. `KRUSTY_KOTLIN_BOX_DIR` overrides the

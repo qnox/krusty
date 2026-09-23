@@ -245,6 +245,35 @@ pub(crate) fn declared_member_callables(
     declared_callables(source, &classifier, receiver, name)
 }
 
+/// Whether the applied receiver hierarchy declares `name` only as a hidden-deprecated callable.
+/// Providers retain this rejection fact beside the classifier while excluding the declaration from
+/// ordinary candidate collection. Resolution therefore never infers it from a classifier/member
+/// spelling and never makes it applicable.
+pub(crate) fn has_hidden_deprecated_member(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    name: &str,
+) -> bool {
+    let mut queue = std::collections::VecDeque::from([receiver.non_null()]);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = queue.pop_front() {
+        let Some(internal) = current.kotlin_class_internal() else {
+            continue;
+        };
+        if !seen.insert(internal) {
+            continue;
+        }
+        let Some(classifier) = source.classifier(internal) else {
+            continue;
+        };
+        if classifier.hidden_deprecated_callables.contains(name) {
+            return true;
+        }
+        queue.extend(direct_supertypes_from_classifier(&classifier, current));
+    }
+    false
+}
+
 pub(crate) fn members_in_hierarchy(
     source: &dyn SymbolSource,
     receiver: Ty,
