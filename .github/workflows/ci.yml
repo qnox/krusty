@@ -60,6 +60,32 @@ jobs:
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 600
         run: just ci
 
+  # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
+  # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.
+  klib-semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: zulu
+          java-version: '25'
+      - name: cache Kotlin toolchains and focused-test prerequisites
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/cache/kotlin-native
+            target/cache/kotlinc
+            target/cache/box-corpus
+          key: klib-semantics-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+      - name: decode the Kotlin/Native stdlib through common metadata
+        run: just klib-semantics
+
   build-conformance-bin:
     runs-on: ubuntu-latest
     steps:
@@ -200,7 +226,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, conformance, versions, build-release]
+    needs: [ci, klib-semantics, conformance, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     concurrency:

@@ -4,8 +4,9 @@
 //! Only annotation classifiers whose metadata carries `IS_EXPECT_CLASS` are imported here; platform
 //! declarations in the same archive never enter the JVM symbol source.
 //!
-//! The container itself is read through [`crate::klib::KlibArchive`], which is target-independent:
-//! this is the JVM backend's *use* of a klib, not its own klib reader.
+//! The authoritative metadata model and decoder are target-independent. This module is the JVM
+//! backend's *use* of that model and consumes it directly; no JVM builtins adapter participates in
+//! the KLIB provider path.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
     CallSig, ClassifierInheritance, LibraryMember, LibraryType, ParamList, TypeKind,
 };
+use crate::metadata::{decode, semantic};
 use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
 
 #[derive(Debug)]
@@ -22,12 +24,12 @@ pub(super) enum CommonExpectationError {
     Container(KlibError),
     InvalidModuleHeader {
         path: PathBuf,
-        source: super::metadata::klib_validation::PackageFragmentDecodeError,
+        source: decode::PackageFragmentDecodeError,
     },
     InvalidFragment {
         archive: PathBuf,
         entry: String,
-        source: super::metadata::klib_validation::PackageFragmentDecodeError,
+        source: decode::PackageFragmentDecodeError,
     },
     PackageInventoryMismatch {
         path: PathBuf,
@@ -128,10 +130,11 @@ impl CommonExpectationIndex {
         let archive = KlibArchive::open(path)?;
         archive.manifest()?;
         let module_header = archive.module_header()?;
-        let module_header = super::metadata::klib_validation::parse_module_header(&module_header)
-            .map_err(|source| CommonExpectationError::InvalidModuleHeader {
-            path: path.join("default/linkdata/module"),
-            source,
+        let module_header = decode::parse_module_header(&module_header).map_err(|source| {
+            CommonExpectationError::InvalidModuleHeader {
+                path: path.join("default/linkdata/module"),
+                source,
+            }
         })?;
         let fragments = archive.package_fragments();
         let fragment_packages = fragments
@@ -152,12 +155,13 @@ impl CommonExpectationIndex {
         let mut classifiers = HashMap::new();
         for fragment in fragments {
             let bytes = archive.read(&fragment.entry)?;
-            let package = super::metadata::klib_validation::parse_package_fragment_checked(&bytes)
-                .map_err(|source| CommonExpectationError::InvalidFragment {
+            let package = semantic::parse_package_fragment_checked(&bytes).map_err(|source| {
+                CommonExpectationError::InvalidFragment {
                     archive: path.to_path_buf(),
                     entry: fragment.entry,
                     source,
-                })?;
+                }
+            })?;
             for (internal, declaration) in package.classes {
                 if declaration.kind != TypeKind::Annotation || !declaration.is_expect {
                     continue;
@@ -172,8 +176,8 @@ impl CommonExpectationIndex {
     }
 }
 
-fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
-    let bounds = super::classpath::builtin_bounds(&declaration.type_params, &HashMap::new());
+fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
+    let bounds = semantic::semantic_bounds(&declaration.type_params, &HashMap::new());
     let type_parameters = TypeParameters::new(
         declaration
             .type_params
@@ -187,7 +191,7 @@ fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
                 parameter
                     .bounds
                     .iter()
-                    .map(|bound| super::classpath::builtin_ty(bound, &bounds))
+                    .map(|bound| semantic::semantic_ty(bound, &bounds))
                     .collect()
             })
             .collect(),
@@ -200,7 +204,7 @@ fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
     let supertype_templates = declaration
         .supertype_tys
         .iter()
-        .map(|supertype| super::classpath::builtin_ty(supertype, &bounds))
+        .map(|supertype| semantic::semantic_ty(supertype, &bounds))
         .collect::<Vec<_>>();
     let supertypes = declaration
         .supertypes
@@ -214,7 +218,7 @@ fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
         let params = constructor
             .params
             .iter()
-            .map(|parameter| super::classpath::builtin_ty(parameter, &bounds))
+            .map(|parameter| semantic::semantic_ty(parameter, &bounds))
             .collect::<Vec<_>>();
         let mut member = LibraryMember::new(
             "<init>".to_string(),
@@ -487,10 +491,9 @@ mod tests {
                 0x0a, 0x03, 0x0a, 0x01, b'C', 0x12, 0x06, 0x0a, 0x04, 0x10, 0x00, 0x18, 0x00, 0x22,
                 0x06, 0x18, 0x00, tag, 0x02, 0x10, 0x80,
             ];
-            let error =
-                super::super::metadata::klib_validation::parse_package_fragment_checked(&fragment)
-                    .err()
-                    .expect("truncated nested declaration must fail the whole fragment");
+            let error = crate::metadata::semantic::parse_package_fragment_checked(&fragment)
+                .err()
+                .expect("truncated nested declaration must fail the whole fragment");
             assert_eq!(error.offset, 21);
             assert_eq!(error.detail, format!("truncated {declaration} declaration"));
         }

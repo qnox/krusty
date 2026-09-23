@@ -11,6 +11,8 @@
 #   just test       full test suite (optionally `just test -- <args>`)
 #   just test-all   suite against every supported Kotlin version, in parallel
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
+#   just kotlin-native download+unpack the matching Kotlin/Native distribution; prints root path
+#   just klib-semantics exercise the common KLIB metadata decoder against that distribution
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
 #   just conformance       print box-suite conformance "<pct> <passed> <scanned>"
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
@@ -227,6 +229,47 @@ kotlinc VERSION=`just max-version`:
     rm -rf "$tmp"
     chmod +x "$bin"
     echo "$bin"
+
+# Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
+# The extracted root is versioned and cached beside the JVM compiler distribution.
+kotlin-native VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="{{VERSION}}"
+    case "$(uname -s)-$(uname -m)" in
+      Linux-x86_64) host=linux-x86_64 ;;
+      Linux-aarch64|Linux-arm64) host=linux-aarch64 ;;
+      Darwin-x86_64) host=macos-x86_64 ;;
+      Darwin-arm64|Darwin-aarch64) host=macos-aarch64 ;;
+      *) echo "unsupported Kotlin/Native host: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+    esac
+    name="kotlin-native-prebuilt-${host}-${ver}"
+    parent="$PWD/target/cache/kotlin-native/$ver"
+    root="$parent/$name"
+    if [ -d "$root/klib/common/stdlib" ]; then echo "$root"; exit 0; fi
+    url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/${name}.tar.gz"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    echo "downloading kotlin-native ${ver} for ${host}…" >&2
+    curl -fsSL "$url" -o "$tmp/kotlin-native.tar.gz"
+    tar -xzf "$tmp/kotlin-native.tar.gz" -C "$tmp"
+    [ -d "$tmp/$name/klib/common/stdlib" ] || {
+      echo "downloaded Kotlin/Native archive has no common stdlib KLIB" >&2
+      exit 1
+    }
+    mkdir -p "$parent"
+    mv "$tmp/$name" "$root"
+    echo "$root"
+
+# This lane is deliberately required: the integration test may be optional in an ordinary local
+# run, but this recipe provisions the distribution and turns absence or an undecodable fragment
+# into a failure.
+klib-semantics VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(just kotlin-native "{{VERSION}}")"
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
+      ./run-tests.sh --test e2e klib_semantic_e2e -- --nocapture
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
