@@ -4,7 +4,9 @@
 //! the FIR sink. It never reads source syntax or performs member lookup.
 
 use crate::fir::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex};
-use crate::ir::{ClassId, ExprId, FnParamInfo, IrBinOp, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{
+    ClassId, ExprId, FnParamInfo, IrBinOp, IrDataClassMemberRole, IrExpr, IrFile, IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
@@ -140,6 +142,12 @@ fn synthesize_components_and_copy(
                 return Err(FirFileLoweringFailure::MissingCallable(declaration));
             }
         };
+        let owner = ir.classes[class as usize].fq_name_id();
+        ir.record_data_class_member(
+            owner,
+            IrDataClassMemberRole::Component(ordinal as u32),
+            function,
+        );
         let this = ir.add_expr(IrExpr::GetValue(0));
         let value = ir.add_expr(IrExpr::GetField {
             receiver: this,
@@ -159,6 +167,8 @@ fn synthesize_components_and_copy(
             return Err(FirFileLoweringFailure::MissingCallable(declaration));
         }
     };
+    let owner = ir.classes[class as usize].fq_name_id();
+    ir.record_data_class_member(owner, IrDataClassMemberRole::Copy, copy);
     let capture_count = ir.classes[class as usize].constructor_prefix_count;
     let mut args = Vec::with_capacity(capture_count as usize + fields.len());
     for field in 0..capture_count {
@@ -239,6 +249,8 @@ fn synthesize_to_string(
         None if has_method(ir, class, "toString", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
+    let owner = ir.classes[class as usize].fq_name_id();
+    ir.record_data_class_member(owner, IrDataClassMemberRole::ToString, function);
     // The rendered internal name spells the package separator and the nesting separator
     // differently, so the simple name is read through the identity tree rather than by splitting
     // the rendering. The JVM pool seeding builds the twin recipe from the same operation.
@@ -320,6 +332,8 @@ fn synthesize_hash_code(
         None if has_method(ir, class, "hashCode", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
+    let owner = ir.classes[class as usize].fq_name_id();
+    ir.record_data_class_member(owner, IrDataClassMemberRole::HashCode, function);
     let hashes = fields
         .iter()
         .map(|field| field_hash(class, field, ir))
@@ -441,6 +455,8 @@ fn synthesize_equals(
         None if has_method(ir, class, "equals", 1) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
+    let owner = ir.classes[class as usize].fq_name_id();
+    ir.record_data_class_member(owner, IrDataClassMemberRole::Equals, function);
     let classifier = ir.classes[class as usize].fq_name_id();
     let mut statements = Vec::new();
 

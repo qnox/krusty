@@ -52,3 +52,29 @@ pub(super) fn source_ordered_members<'a>(
     });
     ordered
 }
+
+/// Split the schedule around the primary `<init>`. kotlinc emits a value class's declared members
+/// and its `Any` overrides (`toString-impl` … `equals`) first, then the private primary `<init>`,
+/// then the generated representation members in a fixed order: `constructor-impl`, `box-impl`,
+/// `unbox-impl`, `equals-impl0`. Every other class emits `<init>` first.
+pub(super) fn split_around_primary_constructor<'a>(
+    ir: &IrFile,
+    class: &IrClass,
+    ordered: Vec<SourceOrderedMember<'a>>,
+) -> (Vec<SourceOrderedMember<'a>>, Vec<SourceOrderedMember<'a>>) {
+    if !class.is_value || !class.has_primary_ctor {
+        return (Vec::new(), ordered);
+    }
+    let representation_rank = |member: &SourceOrderedMember<'_>| match member {
+        SourceOrderedMember::Function(function) => ir
+            .jvm_value_class_representation_order
+            .get(function)
+            .copied(),
+        _ => None,
+    };
+    let (mut after, before): (Vec<_>, Vec<_>) = ordered
+        .into_iter()
+        .partition(|member| representation_rank(member).is_some());
+    after.sort_by_key(|member| representation_rank(member));
+    (before, after)
+}
