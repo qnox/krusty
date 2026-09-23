@@ -85,8 +85,21 @@ fn build_and_run(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
+            // The runtime's descriptor tables name their leading fields and leave the rest zero, as
+            // C initializers are meant to; every other extra warning stays an error.
+            "-Wno-missing-field-initializers",
         ])
-        .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
+        // A tier below the last one declares functions a later tier defines, and defines helpers
+        // only a later tier calls; neither is a defect of the tier.
+        .args(if RUNTIME_COMPLETE {
+            &[][..]
+        } else {
+            &[
+                "-Wl,--unresolved-symbols=ignore-all",
+                "-Wno-undefined-internal",
+                "-Wno-unused-function",
+            ][..]
+        })
         .arg("-I")
         .arg(runtime_dir())
         .args(&sources)
