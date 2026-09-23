@@ -240,6 +240,19 @@ fn materialize_delegation(
                     member.call.result.get(),
                     result,
                 );
+                let parameter_identities = member
+                    .overridden
+                    .parameter_identities
+                    .iter()
+                    .map(super::resolved_parameter_identity)
+                    .collect::<Vec<_>>();
+                if parameter_identities.len() != params.len() {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                }
+                ir.fn_params.insert(
+                    function,
+                    crate::ir::FnParamInfo::identities(parameter_identities),
+                );
                 if !member.type_parameters.is_empty() {
                     ir.signatures.insert(
                         function,
@@ -324,11 +337,17 @@ fn materialize_delegation(
                 let context_params = property
                     .context_parameters
                     .iter()
-                    .map(|parameter| (parameter.name.to_string(), parameter.ty.get()))
+                    .map(|parameter| {
+                        (
+                            parameter.name.to_string(),
+                            parameter.kind,
+                            parameter.ty.get(),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let context_types = context_params
                     .iter()
-                    .map(|(_, parameter)| *parameter)
+                    .map(|(_, _, parameter)| *parameter)
                     .collect::<Vec<_>>();
                 let delegate = delegate_field_read(ir, class, field);
                 let getter_call = delegated_call(ir, &property.getter, delegate)?;

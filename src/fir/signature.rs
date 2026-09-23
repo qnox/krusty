@@ -1687,8 +1687,10 @@ pub struct ResolvedDeclarationHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedClassifierContextParameter {
-    /// `None` is the legacy unnamed `context(Type)` receiver form.
+    /// Present only for a named context value. Anonymous parameters and legacy receivers remain
+    /// distinct through `kind`; an absent name is never used to infer which syntax was written.
     pub name: Option<Box<str>>,
+    pub kind: crate::ast::ContextParameterKind,
     pub ty: ResolvedTy,
 }
 
@@ -1841,6 +1843,7 @@ pub struct ResolvedDelegatedProperty {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedContextParameter {
     pub name: Box<str>,
+    pub kind: crate::ast::ContextParameterKind,
     pub ty: ResolvedTy,
 }
 
@@ -2801,7 +2804,9 @@ impl ResolvedModuleIndex {
         superclass: Option<Ty>,
         interfaces: impl IntoIterator<Item = Ty>,
         interface_delegations: impl IntoIterator<Item = ResolvedInterfaceDelegation>,
-        context_parameters: impl IntoIterator<Item = (Option<Box<str>>, Ty)>,
+        context_parameters: impl IntoIterator<
+            Item = (Option<Box<str>>, crate::ast::ContextParameterKind, Ty),
+        >,
         sealed_subclasses: impl IntoIterator<Item = TypeName>,
     ) -> Result<(), UnpublishableType> {
         let superclass = superclass.map(ResolvedTy::new).transpose()?;
@@ -2816,9 +2821,10 @@ impl ResolvedModuleIndex {
             .into_boxed_slice();
         let context_parameters = context_parameters
             .into_iter()
-            .map(|(name, ty)| {
+            .map(|(name, kind, ty)| {
                 Ok(ResolvedClassifierContextParameter {
                     name,
+                    kind,
                     ty: ResolvedTy::new(ty)?,
                 })
             })

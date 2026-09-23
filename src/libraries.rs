@@ -2416,6 +2416,9 @@ pub struct PropertyInfo {
     /// The setter's own visibility. Accessors can differ, so property visibility cannot stand in for
     /// this fact.
     pub setter_visibility: Visibility,
+    /// Source identity of an explicitly declared setter value parameter. `None` means the setter is
+    /// implicit and its target backend must project the language-defined generated role.
+    pub setter_parameter_name: Option<String>,
     /// `const val` — a compile-time constant whose value use sites inline.
     pub is_const: bool,
     /// Kotlin's compiler-known integer-coercion marker on this constant declaration. Providers
@@ -3049,6 +3052,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             getter,
             setter: None,
             setter_visibility: Visibility::Private,
+            setter_parameter_name: None,
             is_const: false,
             implicit_integer_coercion: false,
             compile_time_constant: None,

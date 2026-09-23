@@ -10,6 +10,7 @@ use super::{ExprId, FunId, IrFile};
 pub enum IrParameterRole {
     Value,
     ContextValue,
+    AnonymousContextParameter { ordinal: u32 },
     ContextReceiver { ordinal: u32 },
     ExtensionReceiver,
     CapturedValue { ordinal: u32 },
@@ -75,6 +76,14 @@ impl IrParameterIdentity {
         Self {
             source_name: None,
             role: IrParameterRole::ContextReceiver { ordinal },
+            provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn anonymous_context_parameter(ordinal: u32) -> Self {
+        Self {
+            source_name: None,
+            role: IrParameterRole::AnonymousContextParameter { ordinal },
             provenance: IrParameterProvenance::SourceDeclared,
         }
     }
@@ -282,7 +291,7 @@ mod tests {
 
     #[test]
     fn parameter_roles_carry_source_identity_without_target_spelling() {
-        let identities = vec![
+        let identities = [
             IrParameterIdentity::captured_value(Some("ledger".to_string()), 0),
             IrParameterIdentity::captured_value(None, 1),
             IrParameterIdentity::captured_receiver(0),
@@ -311,7 +320,7 @@ mod tests {
         assert_eq!(
             identities
                 .iter()
-                .map(|identity| identity.role.clone())
+                .map(|identity| identity.role)
                 .collect::<Vec<_>>(),
             [
                 IrParameterRole::CapturedValue { ordinal: 0 },

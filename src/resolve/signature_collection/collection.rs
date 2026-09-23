@@ -1536,6 +1536,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     setter_name: header
                                         .is_mutable_property
                                         .then(|| property_setter_name(&header.name)),
+                                    setter_parameter_name: None,
                                     setter_visibility: header
                                         .is_mutable_property
                                         .then_some(header.visibility),
@@ -2407,6 +2408,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             setter_name: property_header
                                 .mutable
                                 .then(|| property_setter_name(&property_header.name)),
+                            setter_parameter_name: property_header.setter_parameter_name.clone(),
                             setter_visibility: property_header
                                 .mutable
                                 .then_some(property_header.setter_visibility),
@@ -4232,6 +4234,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             package: source_packages[i].replace('.', "/"),
                             visibility: property_visibility,
                             setter_visibility: property_header.setter_visibility,
+                            setter_parameter_name: property_header.setter_parameter_name.clone(),
                             read_stability: if property_header.mutable
                                 || has_custom_getter
                                 || is_delegated

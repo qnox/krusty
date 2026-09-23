@@ -43,6 +43,7 @@ pub(super) fn attach_declared_function_debug(
         );
     }
     let descriptor = method_descriptor(&param_tys, jvm_declared_ty(&function.ret));
+    let assertion_names = crate::jvm::parameter_names::function_assertions(ir, fid, &param_tys);
     let mut locals = Vec::new();
     let mut slot = 0u16;
     if !function.is_static {
@@ -50,17 +51,25 @@ pub(super) fn attach_declared_function_debug(
         slot = 1;
     }
     let mut body_pc = 0u16;
+    let source_name = ir
+        .fn_source_names
+        .get(&fid)
+        .map(String::as_str)
+        .unwrap_or(&function.name);
     for (index, ty) in param_tys.iter().enumerate() {
         let identity = parameter_identities
             .and_then(|identities| identities.get(index))
             .expect("a debug-published parameter needs its canonical source identity");
-        let name = crate::jvm::parameter_names::local_variable(identity, &function.name);
+        let name = crate::jvm::parameter_names::local_variable(identity, source_name);
         if function
             .param_checks
             .get(index)
             .is_some_and(Option::is_some)
         {
-            let guarded = crate::jvm::parameter_names::assertion(identity)
+            let guarded = assertion_names
+                .as_ref()
+                .and_then(|names| names.get(index))
+                .and_then(Clone::clone)
                 .expect("a checked parameter carries an assertion identity");
             body_pc += aload_len(slot) + cw.string_ldc_len(&guarded).unwrap_or(2) + 3;
         }

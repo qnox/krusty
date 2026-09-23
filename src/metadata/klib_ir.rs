@@ -626,7 +626,7 @@ fn decode_inline_body(
     }
 }
 
-fn statement_expression<'a>(statement: &'a [u8]) -> Result<Option<&'a [u8]>, KlibIrDecodeError> {
+fn statement_expression(statement: &[u8]) -> Result<Option<&[u8]>, KlibIrDecodeError> {
     let fields = message(statement, "bodies.knb", 0)?;
     Ok(unique_bytes(&fields, 3, "statement expression", "bodies.knb")?.map(|field| field.value))
 }
@@ -661,10 +661,7 @@ fn expression_operation<'a>(
     Ok(operation)
 }
 
-fn returned_value<'a>(
-    statement: &'a [u8],
-    declaration: u64,
-) -> Result<Option<&'a [u8]>, KlibIrDecodeError> {
+fn returned_value(statement: &[u8], declaration: u64) -> Result<Option<&[u8]>, KlibIrDecodeError> {
     let Some(expression) = statement_expression(statement)? else {
         return Ok(None);
     };
@@ -1444,10 +1441,10 @@ mod tests {
             "Owner".to_string(),
             "compute".to_string(),
         ];
-        let signatures = vec![public_signature(0, &[1, 2], 41)];
+        let signatures = [public_signature(0, &[1, 2], 41)];
         let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let literal = varint_field(6, 7);
-        let bodies = vec![bytes_field(5, &literal)];
+        let bodies = [bytes_field(5, &literal)];
         let bodies = bodies.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let file = IrFile {
             strings: &strings,
@@ -1481,7 +1478,7 @@ mod tests {
         ];
         let signature = public_signature(0, &[1, 2], 41);
         let signatures = [signature.as_slice()];
-        let bodies = vec![bytes_field(5, &varint_field(6, 7))];
+        let bodies = [bytes_field(5, &varint_field(6, 7))];
         let bodies = bodies.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let file = IrFile {
             strings: &strings,
@@ -1561,7 +1558,7 @@ mod tests {
             "Callback".to_string(),
             "execute".to_string(),
         ];
-        let signatures = vec![
+        let signatures = [
             public_signature(0, &[1, 2], 41),
             public_signature(0, &[3, 4], 17),
         ];
@@ -1570,7 +1567,7 @@ mod tests {
         let callee = 1 << 8;
         let receiver = 31;
         let lambda = 47;
-        let bodies = vec![block_body(&[returned_statement(
+        let bodies = [block_body(&[returned_statement(
             declaration,
             &call_expression(callee, &[lambda, receiver]),
         )])];
@@ -1615,7 +1612,7 @@ mod tests {
             "Callback".to_string(),
             "execute".to_string(),
         ];
-        let signature_bytes = vec![
+        let signature_bytes = [
             public_signature(0, &[1, 2], 41),
             public_signature(0, &[3, 4], 17),
             public_signature(0, &[1, 2], 42),
@@ -1627,7 +1624,7 @@ mod tests {
             .collect::<Vec<_>>();
         let first_parameter = 31;
         let second_parameter = 47;
-        let bodies = vec![
+        let bodies = [
             block_body(&[returned_statement(
                 0,
                 &call_expression(1 << 8, &[first_parameter]),
@@ -1705,7 +1702,7 @@ mod tests {
             .map(Vec::as_slice)
             .collect::<Vec<_>>();
         let parameter = 31;
-        let bodies = vec![block_body(&[returned_statement(
+        let bodies = [block_body(&[returned_statement(
             0,
             &call_expression(1 << 8, &[parameter]),
         )])];
@@ -1736,7 +1733,7 @@ mod tests {
         let signature = public_signature(0, &[1, 2], 41);
         let signatures = [signature.as_slice()];
         let parameter = 31;
-        let bodies = vec![block_body(&[returned_statement(
+        let bodies = [block_body(&[returned_statement(
             0,
             &call_expression(7 << 8, &[parameter]),
         )])];
@@ -1791,7 +1788,7 @@ mod tests {
     #[test]
     fn absent_signature_index_is_an_error_not_a_spelling_fallback() {
         let strings = vec!["fixture".to_string()];
-        let bodies = vec![bytes_field(5, &varint_field(6, 1))];
+        let bodies = [bytes_field(5, &varint_field(6, 1))];
         let bodies = bodies.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let file = IrFile {
             strings: &strings,

@@ -176,6 +176,7 @@ fn class_initialization_parameters<'a>(
                 name: parameter.name.as_str(),
                 ty,
                 span: parameter.span,
+                context_kind: crate::ast::ContextParameterKind::None,
             })
         })
         .collect()
@@ -642,6 +643,7 @@ fn check_and_dispatch_property_body(
             name: parameter.name.as_str(),
             ty,
             span: parameter.ty.span,
+            context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
     // A member property initializer or delegate expression runs inside the constructor, where the primary-constructor
@@ -668,6 +670,7 @@ fn check_and_dispatch_property_body(
             name,
             ty: signature.result,
             span: property.span,
+            context_kind: crate::ast::ContextParameterKind::None,
         });
     }
     let property_storage_type = property
@@ -694,7 +697,6 @@ fn check_and_dispatch_property_body(
         &[],
         CheckedBodyReceiverShape {
             context_receivers,
-            context_value_count: property_header.context_value_count,
             extension_receiver: body_extension_receiver(
                 index,
                 property_declaration,
@@ -906,6 +908,7 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
             name: &parameter.name,
             ty,
             span: parameter.ty.span,
+            context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
     // Defaults were checked and moved to `DefaultArgumentStore` during Pass 1. A declaration with
@@ -935,7 +938,6 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
         &[],
         CheckedBodyReceiverShape {
             context_receivers,
-            context_value_count: callable.shape.context_value_count,
             extension_receiver: body_extension_receiver(
                 index,
                 work.declaration,
@@ -1012,6 +1014,7 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
             name: &parameter.name,
             ty,
             span: parameter.ty.span,
+            context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
     let defaults = function
@@ -1048,7 +1051,6 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
         &defaults,
         CheckedBodyReceiverShape {
             context_receivers,
-            context_value_count: callable.shape.context_value_count,
             extension_receiver: body_extension_receiver(
                 index,
                 work.target,

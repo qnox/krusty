@@ -23,7 +23,7 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     /// Named context parameters, emitted as `Property.context_parameter` (field 17).
-    pub context_params: Vec<(String, Ty)>,
+    pub context_params: Vec<(String, crate::ast::ContextParameterKind, Ty)>,
     /// How SOURCE spelled the declared type and receiver — see [`FnMeta::spellings`].
     pub spellings: crate::spelling::DeclaredSpellings,
     pub is_var: bool,
@@ -52,6 +52,9 @@ pub struct PropMeta {
     /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
+    /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
+    /// has no source parameter declaration and therefore omits `Property.setter_value_parameter`.
+    pub setter_parameter_name: Option<String>,
     /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
     /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
     /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
@@ -91,6 +94,8 @@ pub struct FnMeta {
     /// consuming compiler fills them from the enclosing context rather than demanding them
     /// positionally. `0` for an ordinary member.
     pub context_count: usize,
+    /// Exact source role of each leading context entry in `params`.
+    pub context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
     pub ret: Ty,
     /// Extension-receiver type (`Function.receiver_type` = f5) for a MEMBER EXTENSION
     /// (`class C { operator fun String.invoke(…) }`) — recorded separately from `params` (the
@@ -147,6 +152,7 @@ impl FnMeta {
     pub fn plain(name: String, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
         FnMeta {
             context_count: 0,
+            context_parameter_kinds: Vec::new(),
             name,
             params,
             ret,
@@ -808,7 +814,23 @@ pub fn build_class(
             let rt = type_pb_declared(st, recv, &p.spellings.receiver, &property_type_parameters);
             prop.field_message(5, &rt);
         }
-        for (name, ty) in &p.context_params {
+        if let Some(name) = &p.setter_parameter_name {
+            let mut parameter = Pb::new();
+            parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+            parameter.field_message(3, &ty); // ValueParameter.type = 3
+            prop.field_message(6, &parameter); // Property.setter_value_parameter = 6
+        }
+        for (name, kind, ty) in &p.context_params {
+            if *kind == crate::ast::ContextParameterKind::LegacyReceiver {
+                let ty = type_pb_declared(
+                    st,
+                    *ty,
+                    crate::spelling::Spelled::NONE,
+                    &property_type_parameters,
+                );
+                prop.repeated_message(12, &ty); // Property.context_receiver_type = 12
+                continue;
+            }
             let mut parameter = Pb::new();
             parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
             let ty = type_pb_declared(
@@ -1010,7 +1032,20 @@ pub fn build_class(
             });
             func.field_message(5, &rt);
         }
+        assert_eq!(
+            m.context_parameter_kinds.len(),
+            m.context_count,
+            "metadata member context roles must match the leading parameter prefix"
+        );
         for (i, (pname, pty)) in m.params.iter().enumerate() {
+            if m.context_parameter_kinds.get(i)
+                == Some(&crate::ast::ContextParameterKind::LegacyReceiver)
+            {
+                let ty =
+                    type_pb_declared(st, *pty, m.spellings.param(i), &function_type_parameters);
+                func.repeated_message(10, &ty); // Function.context_receiver_type = 10
+                continue;
+            }
             let mut vp = Pb::new();
             let annotations = m.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
             // `ValueParameter.flags` (f1): DECLARES_DEFAULT_VALUE for a defaulted parameter,
@@ -1392,6 +1427,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: None,
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1464,6 +1500,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1504,6 +1541,7 @@ mod tests {
         let methods = vec![
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component1".into(),
                 equality_bound: None,
@@ -1525,6 +1563,7 @@ mod tests {
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component2".into(),
                 equality_bound: None,
@@ -1546,6 +1585,7 @@ mod tests {
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 equality_bound: None,
@@ -1567,6 +1607,7 @@ mod tests {
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 equality_bound: None,
@@ -1588,6 +1629,7 @@ mod tests {
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 equality_bound: None,
@@ -1609,6 +1651,7 @@ mod tests {
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 equality_bound: None,
@@ -1646,6 +1689,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1669,6 +1713,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1741,6 +1786,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1892,6 +1938,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1951,6 +1998,7 @@ mod tests {
                 type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -1997,7 +2045,7 @@ mod tests {
 
     #[test]
     fn class_metadata_has_expected_strings() {
-        let (_d1, d2) = build_class(
+        let (d1, d2) = build_class(
             crate::types::type_name("demo/Point"),
             &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
             "(ILjava/lang/String;)V",
@@ -2018,6 +2066,7 @@ mod tests {
                     type_params: Vec::new(),
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
+                    setter_parameter_name: None,
                     field_desc: None,
                     field_name: None,
                     annotations: Vec::new(),
@@ -2041,6 +2090,7 @@ mod tests {
                     type_params: Vec::new(),
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
+                    setter_parameter_name: Some("replacement".into()),
                     field_desc: None,
                     field_name: None,
                     annotations: Vec::new(),
@@ -2058,5 +2108,17 @@ mod tests {
         assert!(d2.contains(&"getX".to_string()));
         assert!(d2.contains(&"setY".to_string()));
         assert!(d2.contains(&"(ILjava/lang/String;)V".to_string()));
+        let d1 = String::from_iter(d1.into_iter().map(char::from));
+        let metadata =
+            crate::jvm::metadata::decode_metadata(&[d1], &d2, Some(1), "demo/Point", None, &[])
+                .expect("generated class metadata decodes");
+        assert_eq!(metadata.class_properties.len(), 2);
+        assert_eq!(metadata.class_properties[0].setter_parameter_name, None);
+        assert_eq!(
+            metadata.class_properties[1]
+                .setter_parameter_name
+                .as_deref(),
+            Some("replacement")
+        );
     }
 }

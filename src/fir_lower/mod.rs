@@ -82,6 +82,74 @@ pub struct BodySlots {
     pub first_parameter: u32,
 }
 
+fn callable_parameter_identity(
+    index: &ResolvedModuleIndex,
+    callable: crate::fir::CallableId,
+    ordinal: u32,
+    context_count: u32,
+) -> Option<crate::ir::IrParameterIdentity> {
+    let parameter = index.callable_parameter(callable, ordinal)?;
+    let name = index.callable_parameter_name(callable, ordinal)?;
+    if ordinal < context_count {
+        return Some(match parameter.flags().context_kind() {
+            crate::ast::ContextParameterKind::Named => {
+                crate::ir::IrParameterIdentity::context_value(name)
+            }
+            crate::ast::ContextParameterKind::Anonymous => {
+                crate::ir::IrParameterIdentity::anonymous_context_parameter(ordinal)
+            }
+            crate::ast::ContextParameterKind::LegacyReceiver => {
+                crate::ir::IrParameterIdentity::context_receiver(ordinal)
+            }
+            crate::ast::ContextParameterKind::None => return None,
+        });
+    }
+    if parameter.flags().is_property_setter_value() {
+        return Some(crate::ir::IrParameterIdentity {
+            source_name: None,
+            role: crate::ir::IrParameterRole::PropertySetterValue,
+            provenance: crate::ir::IrParameterProvenance::CompilerGenerated,
+        });
+    }
+    Some(crate::ir::IrParameterIdentity::source(name))
+}
+
+fn resolved_parameter_identity(
+    identity: &crate::fir::ResolvedParameterIdentity,
+) -> crate::ir::IrParameterIdentity {
+    use crate::fir::ResolvedParameterIdentity as Resolved;
+    use crate::ir::{
+        IrGeneratedParameterRole, IrParameterIdentity, IrParameterProvenance, IrParameterRole,
+    };
+
+    match identity {
+        Resolved::Source(name) => IrParameterIdentity::source(name.as_ref()),
+        Resolved::Unnamed { .. } => IrParameterIdentity {
+            source_name: None,
+            role: IrParameterRole::Value,
+            provenance: IrParameterProvenance::SourceDeclared,
+        },
+        Resolved::ContextValue { source_name, .. } => {
+            IrParameterIdentity::context_value(source_name.as_ref())
+        }
+        Resolved::AnonymousContextParameter { ordinal } => {
+            IrParameterIdentity::anonymous_context_parameter(*ordinal)
+        }
+        Resolved::LegacyContextReceiver { ordinal } => {
+            IrParameterIdentity::context_receiver(*ordinal)
+        }
+        Resolved::ExtensionReceiver => IrParameterIdentity::extension_receiver(),
+        Resolved::PropertySetterValue => IrParameterIdentity {
+            source_name: None,
+            role: IrParameterRole::PropertySetterValue,
+            provenance: IrParameterProvenance::CompilerGenerated,
+        },
+        Resolved::SuspendCompletion => {
+            IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoweringState {
     Uncomputed,
@@ -240,6 +308,7 @@ struct BodyLowering<'a> {
     has_dispatch_receiver: bool,
     context_parameter_count: u32,
     context_value_count: u32,
+    context_value_ordinals: Vec<u32>,
     has_extension_receiver: bool,
     capture_count: u32,
     class_constructor_capture_count: u32,
@@ -301,6 +370,13 @@ impl<'a> BodyLowering<'a> {
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();
+        let context_value_ordinals = body
+            .context_parameter_kinds()
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| **kind == crate::ast::ContextParameterKind::Named)
+            .map(|(ordinal, _)| u32::try_from(ordinal).expect("too many FIR context parameters"))
+            .collect::<Vec<_>>();
         let unbound_context_count = context_parameter_count
             .checked_sub(context_value_count)
             .expect("FIR context values exceed context receivers");
@@ -340,6 +416,7 @@ impl<'a> BodyLowering<'a> {
             has_dispatch_receiver,
             context_parameter_count,
             context_value_count,
+            context_value_ordinals,
             has_extension_receiver,
             capture_count,
             class_constructor_capture_count,
@@ -469,16 +546,18 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn value_slot(&self, value: crate::fir::LocalValueId) -> u32 {
-        let mut slot = self.capture_count
+        let parameter_start = self.capture_count
             + self.class_constructor_capture_count
             + self.class_constructor_context_count
-            + value.raw()
             + u32::from(self.has_dispatch_receiver);
-        if value.raw() >= self.context_value_count {
-            slot += self.context_parameter_count - self.context_value_count;
-            slot += u32::from(self.has_extension_receiver);
+        if value.raw() < self.context_value_count {
+            return parameter_start + self.context_value_ordinals[value.raw() as usize];
         }
-        slot
+        parameter_start
+            + self.context_parameter_count
+            + u32::from(self.has_extension_receiver)
+            + value.raw()
+            - self.context_value_count
     }
 
     fn implicit_receiver_slot(&self, current: bool, depth: u32) -> Option<u32> {
@@ -493,7 +572,8 @@ impl<'a> BodyLowering<'a> {
         let receivers = extension
             .into_iter()
             .chain(
-                (self.context_value_count..self.context_parameter_count)
+                (0..self.context_parameter_count)
+                    .filter(|ordinal| !self.context_value_ordinals.contains(ordinal))
                     .rev()
                     .map(|ordinal| context_start + ordinal),
             )

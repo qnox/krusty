@@ -372,6 +372,7 @@ fn attach_bridge_debug_tables(
             let descriptor = local_variable_desc(*parameter);
             if let Some(spelling) = crate::jvm::parameter_names::resolved_local_variable(
                 &bridge.parameter_identities[index],
+                &bridge.name,
             ) {
                 locals.push((spelling, descriptor, slot));
             }

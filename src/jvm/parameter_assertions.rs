@@ -43,11 +43,26 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
 }
 
 pub(super) fn realize(ir: &mut IrFile) {
-    let functions = ir
+    let mut functions = ir
         .checked_callable_functions
         .values()
         .copied()
         .collect::<HashSet<_>>();
+    // Property accessors are source declarations materialized after ordinary callable lowering.
+    // Consume their exact common-IR identity edges rather than recovering accessor shape from a
+    // JVM method name. This also covers context and extension-receiver parameters.
+    for layout in ir.local_property_layouts.values() {
+        let (getter, setter) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+            | crate::ir::IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
+            crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+            | crate::ir::IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+                (Some(*getter), *setter)
+            }
+        };
+        functions.extend(getter);
+        functions.extend(setter);
+    }
     for function in functions {
         realize_function(ir, function);
     }
@@ -56,18 +71,19 @@ pub(super) fn realize(ir: &mut IrFile) {
         if !class.is_source_declared {
             continue;
         }
-        for parameter in &mut class.ctor_args {
+        let assertion_names = crate::jvm::parameter_names::constructor_assertions(&class.ctor_args);
+        for (parameter, assertion_name) in class.ctor_args.iter_mut().zip(assertion_names) {
             if parameter.check.is_some() {
                 continue;
             }
-            let Some(name) = parameter.name.as_ref() else {
+            let Some(name) = assertion_name else {
                 continue;
             };
             let Some(declared) = parameter.declared_ty else {
                 continue;
             };
             if requires_reference_guard(declared) {
-                parameter.check = Some(name.clone());
+                parameter.check = Some(name);
             }
         }
     }

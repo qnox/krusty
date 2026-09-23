@@ -175,7 +175,8 @@ fn declared_functions(
         .overloads
         .into_iter()
         .filter(|function| {
-            function.kind == FnKind::Member && function.visibility != Visibility::Private
+            matches!(function.kind, FnKind::Member | FnKind::Extension)
+                && function.visibility != Visibility::Private
         })
         .collect()
 }
@@ -205,48 +206,59 @@ fn module_parameter_identities(
     callable: crate::fir::CallableId,
     count: usize,
 ) -> Box<[crate::fir::ResolvedParameterIdentity]> {
-    (0..count)
+    let shape = index
+        .callable(callable)
+        .expect("an override implementation has a published callable shape")
+        .shape;
+    let extension_receiver = shape.extension_receiver.is_some();
+    let logical_count = count - usize::from(extension_receiver);
+    assert_eq!(
+        index.callable_parameter_name_count(callable),
+        logical_count,
+        "an override implementation must publish every logical parameter identity"
+    );
+    let names = (0..logical_count)
         .map(|ordinal| {
             index
                 .callable_parameter_name(callable, ordinal as u32)
-                .filter(|name| !name.is_empty())
-                .map(|name| crate::fir::ResolvedParameterIdentity::Source(name.into()))
-                .unwrap_or_else(|| {
-                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
-                        u32::try_from(ordinal).expect("parameter ordinal fits u32"),
-                    )
-                })
+                .expect("an override implementation parameter has a stable identity")
+                .to_string()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Resolved signatures keep the extension receiver in `shape`, not in `parameters`.
+    crate::fir::declaration_parameter_identities(
+        &names,
+        count,
+        shape.context_parameter_count as usize,
+        extension_receiver,
+    )
+}
+
+fn declaration_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
+    let mut parameters = function.semantic_params().into_owned();
+    if let Some(receiver) = function
+        .semantic_receiver()
+        .filter(|_| function.is_extension())
+    {
+        parameters.insert(function.context_count.min(parameters.len()), receiver);
+    }
+    parameters
+}
+
+fn applied_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
+    declaration_parameters_with_receiver(function)
 }
 
 fn function_parameter_identities(
     function: &crate::libraries::FunctionInfo,
     count: usize,
 ) -> Box<[crate::fir::ResolvedParameterIdentity]> {
-    let mut names = vec![None; count];
-    let receiver = (function.kind == crate::libraries::FnKind::Extension)
-        .then_some(function.context_count.min(count));
-    for (logical, name) in function.call_sig.param_names.iter().enumerate() {
-        let physical = logical + usize::from(receiver.is_some_and(|receiver| logical >= receiver));
-        if physical < names.len() && !name.is_empty() {
-            names[physical] = Some(name.as_str());
-        }
-    }
-    names
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, name)| {
-            name.map_or_else(
-                || {
-                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
-                        u32::try_from(ordinal).expect("parameter ordinal fits u32"),
-                    )
-                },
-                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
-            )
-        })
-        .collect()
+    crate::fir::declaration_parameter_identities(
+        &function.call_sig.param_names,
+        count,
+        function.context_count,
+        function.is_extension(),
+    )
 }
 
 fn declaration_formals(
@@ -297,7 +309,7 @@ fn publish_inherited_interface_function_plans(
                 let Some(declared) = raw.get(&overridden) else {
                     continue;
                 };
-                let applied_parameters = applied.semantic_params();
+                let applied_parameters = applied_parameters_with_receiver(&applied);
                 let applied_result = applied.ret.apply(applied.callable.ret).canonical_semantic();
                 let candidates = crate::symbol_resolver::members_in_hierarchy(source, root, name)
                     .functions()
@@ -314,7 +326,7 @@ fn publish_inherited_interface_function_plans(
                                 .is_some_and(|target| target != overridden)
                     })
                     .filter(|candidate| {
-                        let parameters = candidate.semantic_params();
+                        let parameters = applied_parameters_with_receiver(candidate);
                         parameters.len() == applied_parameters.len()
                             && parameters.iter().zip(applied_parameters.iter()).all(
                                 |(&implementation, &base)| equivalent(source, implementation, base),
@@ -349,7 +361,9 @@ fn publish_inherited_interface_function_plans(
                 else {
                     continue;
                 };
-                let declared_parameters = declared.semantic_params();
+                let declared_parameters = declaration_parameters_with_receiver(declared);
+                let implementation_parameters =
+                    declaration_parameters_with_receiver(implementation_declared);
                 overrides.push(ResolvedFunctionOverride {
                     implementation: implementation_target,
                     implementation_owner: implementation.callable.owner,
@@ -374,12 +388,12 @@ fn publish_inherited_interface_function_plans(
                         "applied inherited interface result",
                     ),
                     implementation_parameters: resolved_types(
-                        implementation_declared.semantic_params().iter().copied(),
+                        implementation_parameters.iter().copied(),
                         "inherited implementation parameters",
                     ),
                     implementation_parameter_identities: function_parameter_identities(
                         &implementation,
-                        implementation_declared.semantic_params().len(),
+                        implementation_parameters.len(),
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -661,7 +675,7 @@ fn append_function_override_edges(
             let Some(declared) = raw.get(&overridden) else {
                 continue;
             };
-            let applied_parameters = applied.semantic_params();
+            let applied_parameters = applied_parameters_with_receiver(&applied);
             let applied_formals = applied
                 .generic_sig
                 .as_ref()
@@ -696,7 +710,7 @@ fn append_function_override_edges(
             {
                 continue;
             }
-            let declared_parameters = declared.semantic_params();
+            let declared_parameters = declaration_parameters_with_receiver(declared);
             overrides.push(ResolvedFunctionOverride {
                 implementation: ResolvedFunctionOverrideTarget::Module(implementation_callable),
                 implementation_owner,
@@ -758,42 +772,57 @@ fn function_override_plans(
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
 ) -> Vec<ResolvedFunctionOverride> {
     let mut overrides = Vec::new();
+    let mut append_implementation = |name: &str, implementation: &super::Signature| {
+        if !implementation.is_override() {
+            return;
+        }
+        let Some(declaration) = implementation.stable_declaration else {
+            return;
+        };
+        let Some(implementation_callable) = index.callable_for_declaration(declaration) else {
+            return;
+        };
+        let Some(implementation_signature) = index.signature(declaration) else {
+            return;
+        };
+        let mut implementation_parameters = implementation_signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        if let Some(receiver) = implementation_callable.shape.extension_receiver {
+            implementation_parameters.insert(
+                (implementation_callable.shape.context_parameter_count as usize)
+                    .min(implementation_parameters.len()),
+                receiver.get(),
+            );
+        }
+        let implementation_result = implementation_signature.result.get().canonical_semantic();
+        let implementation_formals = declaration_formals(index, declaration);
+        let mut seen = HashSet::new();
+        append_function_override_edges(
+            index,
+            source,
+            class.internal_name(),
+            name,
+            implementation_callable.id,
+            &implementation_formals,
+            &implementation_parameters,
+            implementation_result,
+            implementation.is_suspend(),
+            hierarchy,
+            &mut seen,
+            &mut overrides,
+        );
+    };
     for (name, implementations) in &class.methods {
         for implementation in implementations {
-            if !implementation.is_override() {
-                continue;
-            }
-            let Some(declaration) = implementation.stable_declaration else {
-                continue;
-            };
-            let Some(implementation_callable) = index.callable_for_declaration(declaration) else {
-                continue;
-            };
-            let Some(implementation_signature) = index.signature(declaration) else {
-                continue;
-            };
-            let implementation_parameters = implementation_signature
-                .parameters
-                .iter()
-                .map(|parameter| parameter.get())
-                .collect::<Vec<_>>();
-            let implementation_result = implementation_signature.result.get().canonical_semantic();
-            let implementation_formals = declaration_formals(index, declaration);
-            let mut seen = HashSet::new();
-            append_function_override_edges(
-                index,
-                source,
-                class.internal_name(),
-                name,
-                implementation_callable.id,
-                &implementation_formals,
-                &implementation_parameters,
-                implementation_result,
-                implementation.is_suspend(),
-                hierarchy,
-                &mut seen,
-                &mut overrides,
-            );
+            append_implementation(name, implementation);
+        }
+    }
+    for (name, implementations) in &class.member_ext_funs {
+        for implementation in implementations {
+            append_implementation(name, implementation.signature());
         }
     }
     publish_inherited_interface_function_plans(
@@ -895,11 +924,17 @@ fn enum_entry_override_plans(
                     let Some(callable) = index.callable_for_declaration(member) else {
                         continue;
                     };
-                    let parameters = signature
+                    let mut parameters = signature
                         .parameters
                         .iter()
                         .map(|parameter| parameter.get())
                         .collect::<Vec<_>>();
+                    if let Some(receiver) = callable.shape.extension_receiver {
+                        parameters.insert(
+                            (callable.shape.context_parameter_count as usize).min(parameters.len()),
+                            receiver.get(),
+                        );
+                    }
                     let formals = declaration_formals(index, member);
                     let mut seen = HashSet::new();
                     append_function_override_edges(
@@ -1004,11 +1039,18 @@ pub(crate) fn publish_checked_local_override_plans(
                             let Some(callable) = index.callable_for_declaration(declaration) else {
                                 continue;
                             };
-                            let parameters = signature
+                            let mut parameters = signature
                                 .parameters
                                 .iter()
                                 .map(|parameter| parameter.get())
                                 .collect::<Vec<_>>();
+                            if let Some(receiver) = callable.shape.extension_receiver {
+                                parameters.insert(
+                                    (callable.shape.context_parameter_count as usize)
+                                        .min(parameters.len()),
+                                    receiver.get(),
+                                );
+                            }
                             let mut seen = HashSet::new();
                             let implementation_formals = declaration_formals(index, declaration);
                             append_function_override_edges(

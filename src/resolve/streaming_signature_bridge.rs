@@ -5647,8 +5647,11 @@ pub(crate) fn finalized_streamed_signature_index(
                     headers
                         .lookup_names
                         .get(parameter.name)
-                        .filter(|name| *name != "_")
+                        .filter(|_| {
+                            parameter.context_kind == crate::ast::ContextParameterKind::Named
+                        })
                         .map(|name| Box::<str>::from(name)),
+                    parameter.context_kind,
                     semantics.resolve_compact_header_type(signature_scope, parameter.ty)?,
                 ))
             })
@@ -6082,12 +6085,7 @@ pub(crate) fn finalized_streamed_signature_index(
         let context_value_count = packed_parameters
             .iter()
             .take(context_count as usize)
-            .filter(|parameter| {
-                headers
-                    .lookup_names
-                    .get(parameter.name)
-                    .is_some_and(|name| name != "_")
-            })
+            .filter(|parameter| parameter.context_kind == crate::ast::ContextParameterKind::Named)
             .count() as u32;
         let callable = crate::fir::CallableId::from_raw(stub.id.raw());
         index.publish_failed_function_shape(
@@ -6241,10 +6239,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     .iter()
                     .take(context_count as usize)
                     .filter(|parameter| {
-                        headers
-                            .lookup_names
-                            .get(parameter.name)
-                            .is_some_and(|name| name != "_")
+                        parameter.context_kind == crate::ast::ContextParameterKind::Named
                     })
                     .count() as u32;
                 index.publish_function_shape(
@@ -6368,10 +6363,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     packed_context_parameters
                         .iter()
                         .filter(|parameter| {
-                            headers
-                                .lookup_names
-                                .get(parameter.name)
-                                .is_some_and(|name| name != "_")
+                            parameter.context_kind == crate::ast::ContextParameterKind::Named
                         })
                         .count(),
                 )
@@ -6396,7 +6388,8 @@ pub(crate) fn finalized_streamed_signature_index(
                             name,
                             crate::fir::ResolvedValueParameterFlags::new(
                                 false, false, false, false,
-                            ),
+                            )
+                            .with_context_kind(parameter.context_kind),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -6617,10 +6610,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 context_parameters
                     .iter()
                     .filter(|parameter| {
-                        headers
-                            .lookup_names
-                            .get(parameter.name)
-                            .is_some_and(|name| name != "_")
+                        parameter.context_kind == crate::ast::ContextParameterKind::Named
                     })
                     .count(),
             )
@@ -6715,31 +6705,19 @@ pub(crate) fn finalized_streamed_signature_index(
             .declaration(property_declaration)
             .expect("an accessor owner must retain compact property syntax");
         let crate::fir::HeaderDeclarationKind::Property {
-            context_parameters, ..
+            context_parameters,
+            setter_parameter_name,
+            ..
         } = declaration.kind
         else {
             unreachable!("an accessor owner must own a property header")
         };
-        let mut parameter_names = headers
-            .syntax
-            .parameters(context_parameters)
-            .iter()
-            .map(|parameter| {
-                (
-                    headers
-                        .lookup_names
-                        .get(parameter.name)
-                        .expect("an accessor context parameter must retain its spelling"),
-                    crate::fir::ResolvedValueParameterFlags::new(false, false, false, false),
-                )
-            })
-            .collect::<Vec<_>>();
-        if is_setter {
-            parameter_names.push((
-                "value",
-                crate::fir::ResolvedValueParameterFlags::new(false, false, false, false),
-            ));
-        }
+        let parameter_names = value_parameter_publication::property_accessor_parameters(
+            headers,
+            context_parameters,
+            setter_parameter_name,
+            is_setter,
+        );
         index.publish_callable_parameters(callable, parameter_names);
     }
     // The forwarding surface is a classifier-header fact, but its selected module targets are the

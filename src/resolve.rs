@@ -2069,6 +2069,7 @@ pub struct DeclaredPropertySig {
     pub annotations: Vec<TypeName>,
     pub getter_name: String,
     pub setter_name: Option<String>,
+    pub setter_parameter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
     /// property's visibility, while an explicit `private set` narrows only this value. Keeping it beside
     /// `setter_name` prevents backend accessor synthesis from accidentally widening the source ABI.
@@ -3603,6 +3604,7 @@ pub struct SourcePropertySig {
     pub package: String,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
+    pub setter_parameter_name: Option<String>,
     pub read_stability: crate::libraries::PropertyReadStability,
     /// Resolved declaration annotation identities projected into the finalized declaration header.
     pub annotations: Vec<TypeName>,
@@ -30980,6 +30982,7 @@ fun box(): String {
                             getter,
                             setter: None,
                             setter_visibility: Visibility::Private,
+                            setter_parameter_name: None,
                             is_const: false,
                             implicit_integer_coercion: false,
                             compile_time_constant: None,
@@ -38466,6 +38469,7 @@ fn install_anonymous_object_captures(
                         annotations: Vec::new(),
                         getter_name: property_getter_name(&capture.name),
                         setter_name: None,
+                        setter_parameter_name: None,
                         setter_visibility: None,
                         has_custom_getter: false,
                         is_abstract: false,

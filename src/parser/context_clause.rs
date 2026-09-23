@@ -61,6 +61,13 @@ impl Parser<'_> {
                 );
             }
             self.pending_context_params = self.parse_param_list();
+            for parameter in &mut self.pending_context_params {
+                parameter.context_kind = if parameter.name == "_" {
+                    crate::ast::ContextParameterKind::Anonymous
+                } else {
+                    crate::ast::ContextParameterKind::Named
+                };
+            }
         } else {
             if !self.context_receivers {
                 self.diags.error(
@@ -94,6 +101,7 @@ impl Parser<'_> {
             receivers.push(Param {
                 name: "_".to_owned(),
                 ty: self.parse_type(),
+                context_kind: crate::ast::ContextParameterKind::LegacyReceiver,
                 is_vararg: false,
                 vararg_span: None,
                 is_materialized_lambda: false,

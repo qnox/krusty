@@ -479,12 +479,16 @@ impl<'a> CommonIrBodySink<'a> {
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
         let mut identities = (0..index.callable_parameter_name_count(callable.id))
-            .filter_map(|ordinal| {
-                index
-                    .callable_parameter_name(callable.id, ordinal as u32)
-                    .map(crate::ir::IrParameterIdentity::source)
+            .map(|ordinal| {
+                super::callable_parameter_identity(
+                    index,
+                    callable.id,
+                    ordinal as u32,
+                    callable.shape.context_parameter_count,
+                )
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if !companion_associated {
             if let Some(receiver) = callable.shape.extension_receiver {
                 let position = callable.shape.context_parameter_count as usize;
@@ -918,6 +922,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // parameter. Leaving it unnamed keeps it out of constructor metadata while the
                     // JVM descriptor and field store still retain the slot.
                     name: None,
+                    context_kind: crate::ast::ContextParameterKind::None,
                     ty: outer_ty,
                     declared_ty: None,
                     is_field: true,
@@ -1039,10 +1044,13 @@ impl<'a> CommonIrBodySink<'a> {
                 .collect::<Vec<_>>();
             let mut identities = (0..index.callable_parameter_name_count(callable.id))
                 .map(|ordinal| {
-                    index
-                        .callable_parameter_name(callable.id, ordinal as u32)
-                        .map(crate::ir::IrParameterIdentity::source)
-                        .expect("published parameter-name count must address every name")
+                    super::callable_parameter_identity(
+                        index,
+                        callable.id,
+                        ordinal as u32,
+                        callable.shape.context_parameter_count,
+                    )
+                    .expect("published parameter-name count must address every identity")
                 })
                 .collect::<Vec<_>>();
             if !companion_associated {

@@ -1163,6 +1163,7 @@ impl JvmLibraries {
                 ),
                 setter,
                 setter_visibility: property.visibility,
+                setter_parameter_name: None,
                 is_const: property.is_const,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
@@ -3727,6 +3728,7 @@ impl JvmLibraries {
             getter,
             setter,
             setter_visibility: field.visibility,
+            setter_parameter_name: None,
             is_const: field.constant.is_some() && field.is_final,
             implicit_integer_coercion: false,
             compile_time_constant: field.constant,
@@ -3999,6 +4001,7 @@ impl JvmLibraries {
                         getter,
                         setter,
                         setter_visibility: mp.visibility,
+                        setter_parameter_name: mp.setter_parameter_name.clone(),
                         is_const: mp.is_const,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
@@ -4141,6 +4144,7 @@ impl JvmLibraries {
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
+                    setter_parameter_name: mp.setter_parameter_name.clone(),
                     is_const: mp.is_const,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4238,6 +4242,7 @@ impl JvmLibraries {
                     getter,
                     setter,
                     setter_visibility: visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4292,6 +4297,7 @@ impl JvmLibraries {
                     getter,
                     setter: None,
                     setter_visibility: function.visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4368,6 +4374,7 @@ impl JvmLibraries {
                         getter,
                         setter,
                         setter_visibility,
+                        setter_parameter_name: None,
                         is_const: false,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
@@ -5012,6 +5019,7 @@ impl JvmLibraries {
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
+                    setter_parameter_name: mp.setter_parameter_name.clone(),
                     is_const: mp.is_const,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -5523,18 +5531,20 @@ impl JvmLibraries {
                         // Normalize the exact Kotlin `Any` declaration while its provider identity
                         // and source member are still together. Later JVM passes consume this role
                         // from the selected callable; they never rediscover it from call spelling.
-                        let semantic_role = (builtin_cn == crate::types::wk::any()
-                            && params.is_empty())
-                        .then(|| match m.name.as_str() {
-                            "hashCode" => {
-                                Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
-                            }
-                            "toString" => {
-                                Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
-                            }
-                            _ => None,
-                        })
-                        .flatten();
+                        let semantic_role =
+                            if builtin_cn == crate::types::wk::any() && params.is_empty() {
+                                match m.name.as_str() {
+                                    "hashCode" => {
+                                        Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
+                                    }
+                                    "toString" => {
+                                        Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
                         let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),
@@ -6127,6 +6137,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     getter,
                     setter,
                     setter_visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,

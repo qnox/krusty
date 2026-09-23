@@ -6,13 +6,13 @@ use crate::ir::{
 };
 use crate::types::{Ty, TypeName};
 
-pub(super) type MethodParameter = (String, u16);
+pub(super) type MethodParameter = (Option<String>, u16);
 
 const SYNTHETIC: u16 = 0x1000;
 const MANDATED: u16 = 0x8000;
 
 fn parameter(name: impl Into<String>, flags: u16) -> MethodParameter {
-    (name.into(), flags)
+    (Some(name.into()), flags)
 }
 
 /// JVM storage spelling for a lexical capture. Common IR retains the source spelling; local and
@@ -118,14 +118,15 @@ pub(super) fn function(
         physical_parameters.len(),
         "recorded function parameter identities must match the physical JVM parameters"
     );
-    let function_name = &ir.functions[function as usize].name;
+    let projected_names =
+        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
+            .expect("published MethodParameters identities have JVM projections");
     let mut parameters = identities
         .into_iter()
         .enumerate()
-        .map(|(_index, identity)| {
-            parameter(
-                crate::jvm::parameter_names::method_parameter(&identity, function_name)
-                    .expect("an emitted MethodParameters entry needs an exact JVM name"),
+        .map(|(index, identity)| {
+            (
+                projected_names[index].clone(),
                 u16::from(matches!(
                     identity.role,
                     IrParameterRole::Generated(
@@ -187,15 +188,8 @@ pub(super) fn primary_constructor(
     );
     let prefix = class.constructor_prefix_count as usize;
     let mut parameters = constructor_prefix(class, prefix);
-    parameters.extend(class.ctor_args[prefix..].iter().map(|argument| {
-        parameter(
-            argument
-                .name
-                .clone()
-                .expect("a declared constructor parameter needs its source name"),
-            0,
-        )
-    }));
+    let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
+    parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
 }
 
@@ -206,9 +200,11 @@ pub(super) fn primary_constructor_identities(
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<String> {
-    primary_constructor(class, physical_parameters)
+    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    assert_eq!(identities.len(), physical_parameters.len());
+    identities
         .into_iter()
-        .map(|(name, _)| name)
+        .map(|name| name.expect("a marker constructor parameter needs a JVM local identity"))
         .collect()
 }
 
@@ -296,7 +292,10 @@ pub(super) fn secondary_constructor_identities(
             .iter()
             .map(|(name, _)| parameter(name.clone(), 0)),
     );
-    parameters.into_iter().map(|(name, _)| name).collect()
+    parameters
+        .into_iter()
+        .map(|(name, _)| name.expect("a secondary constructor identity is named"))
+        .collect()
 }
 
 pub(super) fn enum_constructor(class: &IrClass) -> Vec<MethodParameter> {
@@ -320,18 +319,17 @@ pub(super) fn enum_value_of() -> [MethodParameter; 1] {
 /// Compatibility-holder forwards prepend a JVM-generated receiver to the declaration's parameters.
 /// Metadata/provider boundaries must supply every source identity; inventing `pN` names would make
 /// reflection succeed with a semantically false parameter list.
-pub(super) fn holder_forward(names: &[String], physical_parameters: &[Ty]) -> Vec<MethodParameter> {
+pub(super) fn holder_forward(
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
     assert_eq!(
         names.len(),
         physical_parameters.len(),
         "compatibility-holder parameter identities must match its declaration"
     );
-    assert!(
-        names.iter().all(|name| !name.is_empty()),
-        "a MethodParameters entry must have a non-empty name"
-    );
     std::iter::once(parameter("$this", SYNTHETIC))
-        .chain(names.iter().cloned().map(|name| parameter(name, 0)))
+        .chain(names.iter().cloned().map(|name| (name, 0)))
         .collect()
 }
 

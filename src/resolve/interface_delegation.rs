@@ -443,29 +443,12 @@ fn delegated_function_declaration(
             .unwrap_or_else(|| function.ret.apply(function.callable.ret));
         (target, parameters, result)
     };
-    let mut names = vec![None; parameters.len()];
-    let receiver = (function.kind == FnKind::Extension)
-        .then_some(function.context_count.min(parameters.len()));
-    for (logical, name) in function.call_sig.param_names.iter().enumerate() {
-        let physical = logical + usize::from(receiver.is_some_and(|receiver| logical >= receiver));
-        if physical < names.len() && !name.is_empty() {
-            names[physical] = Some(name.clone().into_boxed_str());
-        }
-    }
-    let parameter_identities = names
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, name)| {
-            name.map_or_else(
-                || {
-                    crate::fir::ResolvedParameterIdentity::CompilerGenerated(
-                        u32::try_from(ordinal).expect("delegated parameter ordinal fits u32"),
-                    )
-                },
-                crate::fir::ResolvedParameterIdentity::Source,
-            )
-        })
-        .collect();
+    let parameter_identities = crate::fir::declaration_parameter_identities(
+        &function.call_sig.param_names,
+        parameters.len(),
+        function.context_count,
+        function.kind == FnKind::Extension,
+    );
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,
@@ -648,6 +631,12 @@ fn delegation_members(
         if getter.context_param_names.len() != context_parameters.len() {
             return None;
         }
+        let context_identities = crate::fir::declaration_parameter_identities(
+            &getter.context_param_names,
+            context_parameters.len(),
+            context_parameters.len(),
+            false,
+        );
         members.push(ResolvedDelegatedMember::Property(
             ResolvedDelegatedProperty {
                 name: getter.name.clone().into_boxed_str(),
@@ -655,10 +644,24 @@ fn delegation_members(
                 context_parameters: getter
                     .context_param_names
                     .iter()
+                    .zip(context_identities.iter())
                     .zip(&context_parameters)
-                    .map(|(name, ty)| {
+                    .map(|((name, identity), ty)| {
+                        let kind = match identity {
+                            crate::fir::ResolvedParameterIdentity::ContextValue { .. } => {
+                                crate::ast::ContextParameterKind::Named
+                            }
+                            crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                                ..
+                            } => crate::ast::ContextParameterKind::Anonymous,
+                            crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                                ..
+                            } => crate::ast::ContextParameterKind::LegacyReceiver,
+                            _ => return None,
+                        };
                         Some(ResolvedDelegatedContextParameter {
                             name: name.clone().into_boxed_str(),
+                            kind,
                             ty: ResolvedTy::new(*ty).ok()?,
                         })
                     })

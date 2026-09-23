@@ -679,6 +679,7 @@ mod tests {
             getter,
             setter,
             setter_visibility: visibility,
+            setter_parameter_name: None,
             is_const: false,
             implicit_integer_coercion: false,
             compile_time_constant: None,

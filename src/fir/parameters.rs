@@ -10,17 +10,20 @@ pub struct ResolvedValueParameterHeader {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResolvedValueParameterFlags(u8);
+pub struct ResolvedValueParameterFlags(u16);
 
 impl ResolvedValueParameterFlags {
-    const VARARG: u8 = 1 << 0;
-    const DEFAULT: u8 = 1 << 1;
-    const PROPERTY: u8 = 1 << 2;
-    const MUTABLE_PROPERTY: u8 = 1 << 3;
-    const IMPLICIT_INTEGER_COERCION: u8 = 1 << 4;
-    const EXACT: u8 = 1 << 5;
-    const NO_INFER: u8 = 1 << 6;
-    const MATERIALIZED_LAMBDA: u8 = 1 << 7;
+    const VARARG: u16 = 1 << 0;
+    const DEFAULT: u16 = 1 << 1;
+    const PROPERTY: u16 = 1 << 2;
+    const MUTABLE_PROPERTY: u16 = 1 << 3;
+    const IMPLICIT_INTEGER_COERCION: u16 = 1 << 4;
+    const EXACT: u16 = 1 << 5;
+    const NO_INFER: u16 = 1 << 6;
+    const MATERIALIZED_LAMBDA: u16 = 1 << 7;
+    const ANONYMOUS_CONTEXT: u16 = 1 << 8;
+    const LEGACY_CONTEXT_RECEIVER: u16 = 1 << 9;
+    const PROPERTY_SETTER_VALUE: u16 = 1 << 10;
 
     pub const fn new(vararg: bool, default: bool, property: bool, mutable_property: bool) -> Self {
         let mut bits = 0;
@@ -101,6 +104,38 @@ impl ResolvedValueParameterFlags {
     /// function-typed — so an expansion that needs the difference must read it here.
     pub const fn materializes_its_lambda(self) -> bool {
         self.0 & Self::MATERIALIZED_LAMBDA != 0
+    }
+
+    pub const fn with_context_kind(mut self, kind: crate::ast::ContextParameterKind) -> Self {
+        match kind {
+            crate::ast::ContextParameterKind::Anonymous => self.0 |= Self::ANONYMOUS_CONTEXT,
+            crate::ast::ContextParameterKind::LegacyReceiver => {
+                self.0 |= Self::LEGACY_CONTEXT_RECEIVER
+            }
+            crate::ast::ContextParameterKind::None | crate::ast::ContextParameterKind::Named => {}
+        }
+        self
+    }
+
+    pub const fn context_kind(self) -> crate::ast::ContextParameterKind {
+        if self.0 & Self::ANONYMOUS_CONTEXT != 0 {
+            crate::ast::ContextParameterKind::Anonymous
+        } else if self.0 & Self::LEGACY_CONTEXT_RECEIVER != 0 {
+            crate::ast::ContextParameterKind::LegacyReceiver
+        } else {
+            crate::ast::ContextParameterKind::Named
+        }
+    }
+
+    pub const fn with_property_setter_value(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= Self::PROPERTY_SETTER_VALUE;
+        }
+        self
+    }
+
+    pub const fn is_property_setter_value(self) -> bool {
+        self.0 & Self::PROPERTY_SETTER_VALUE != 0
     }
 }
 
@@ -203,9 +238,17 @@ impl ResolvedModuleIndex {
         );
         let parameters = parameters
             .into_iter()
-            .map(|(name, flags)| ResolvedValueParameterHeader {
-                name: self.intern_declaration_name(name),
-                flags,
+            .map(|(name, flags)| {
+                let name =
+                    if flags.context_kind() == crate::ast::ContextParameterKind::LegacyReceiver {
+                        ""
+                    } else {
+                        name
+                    };
+                ResolvedValueParameterHeader {
+                    name: self.intern_declaration_name(name),
+                    flags,
+                }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();

@@ -66,6 +66,8 @@ pub struct FnMeta {
     /// `Function.context_parameter` (field 13) so a caller fills them implicitly from the
     /// enclosing context instead of positionally.
     pub context_count: usize,
+    /// Exact source role of each leading context entry in `params`.
+    pub context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
     /// Index into `params` of a `vararg` parameter. Emits `ValueParameter.vararg_element_type`
     /// (field 4) carrying the ELEMENT type next to the declared array type — the only place
     /// vararg-ness survives (`ACC_VARARGS` is not part of `@Metadata`), so a reader admits
@@ -115,6 +117,7 @@ impl FnMeta {
             type_param_bounds: Vec::new(),
             contract: None,
             context_count: 0,
+            context_parameter_kinds: Vec::new(),
             vararg_index: None,
             visibility: crate::types::Visibility::Public,
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -454,7 +457,19 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         let rt = type_pb_declared(st, recv, &f.spellings.receiver, &tps);
         p.field_message(5, &rt);
     }
+    assert_eq!(
+        f.context_parameter_kinds.len(),
+        f.context_count,
+        "metadata function context roles must match the leading parameter prefix"
+    );
     for (i, (pname, pty)) in f.params.iter().enumerate() {
+        if f.context_parameter_kinds.get(i)
+            == Some(&crate::ast::ContextParameterKind::LegacyReceiver)
+        {
+            let ty = type_pb_declared(st, *pty, f.spellings.param(i), &tps);
+            p.repeated_message(10, &ty); // Function.context_receiver_type = 10
+            continue;
+        }
         let mut vp = Pb::new();
         let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): bit 1 =
@@ -584,9 +599,13 @@ pub struct PropMeta {
     pub receiver: Option<Ty>,
     /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
     /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
-    pub context_params: Vec<(String, Ty)>,
+    pub context_params: Vec<(String, crate::ast::ContextParameterKind, Ty)>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+    /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
+    /// has no source parameter declaration and therefore leaves `Property.setter_value_parameter`
+    /// (field 6) absent.
+    pub setter_parameter_name: Option<String>,
     /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
     /// `JvmPropertySignature` (no accessor exists — reads inline the `ConstantValue`).
     pub is_const: bool,
@@ -742,7 +761,18 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
-    for (name, ty) in &m.context_params {
+    if let Some(name) = &m.setter_parameter_name {
+        let mut parameter = Pb::new();
+        parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+        parameter.field_message(3, &ret); // ValueParameter.type = 3
+        p.field_message(6, &parameter); // Property.setter_value_parameter = 6
+    }
+    for (name, kind, ty) in &m.context_params {
+        if *kind == crate::ast::ContextParameterKind::LegacyReceiver {
+            let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
+            p.repeated_message(12, &ty); // Property.context_receiver_type = 12
+            continue;
+        }
         let mut parameter = Pb::new();
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
@@ -954,6 +984,7 @@ mod tests {
                 context_params: Vec::new(),
                 getter: ("getAnswer".into(), "()I".into()),
                 setter: None,
+                setter_parameter_name: None,
                 is_const: false,
                 has_constant,
                 has_backing_field: true,
@@ -1003,6 +1034,7 @@ mod tests {
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
                 ),
                 setter: None,
+                setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: false,
                 has_declared_getter: true,
@@ -1046,9 +1078,14 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 receiver: None,
-                context_params: vec![("_".into(), Ty::Int)],
+                context_params: vec![(
+                    String::new(),
+                    crate::ast::ContextParameterKind::LegacyReceiver,
+                    Ty::Int,
+                )],
                 getter: ("getAnswer".into(), "(I)I".into()),
                 setter: None,
+                setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: false,
                 has_declared_getter: true,
@@ -1072,7 +1109,7 @@ mod tests {
             panic!("context property metadata must retain one declaration")
         };
         assert_eq!(property.context_params.len(), 1);
-        assert_eq!(property.context_params[0].name, "_");
+        assert_eq!(property.context_params[0].name, "");
         assert_eq!(
             property
                 .generic_sig
@@ -1101,6 +1138,7 @@ mod tests {
                 context_params: Vec::new(),
                 getter: ("getRef".into(), "()Lkotlin/reflect/KProperty0;".into()),
                 setter: None,
+                setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: true,
                 has_declared_getter: false,
@@ -1141,6 +1179,7 @@ mod tests {
                 context_params: Vec::new(),
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
+                setter_parameter_name: Some("replacement".into()),
                 is_const: false,
                 has_constant: false,
                 has_backing_field: false,
@@ -1171,6 +1210,10 @@ mod tests {
         assert_eq!(
             property.setter.as_ref().map(|it| it.name.as_str()),
             Some("setLive")
+        );
+        assert_eq!(
+            property.setter_parameter_name.as_deref(),
+            Some("replacement")
         );
     }
 

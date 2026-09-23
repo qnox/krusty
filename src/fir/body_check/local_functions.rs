@@ -64,8 +64,12 @@ impl BodyFirChecker<'_> {
                 .map(|ty| self.resolved_type(function.span, *ty))
                 .collect::<Result<Vec<_>, _>>()?,
         );
-        let context_value_count = function.context_value_count().min(context_count);
-        body.set_context_value_count(context_value_count as u32);
+        body.set_context_parameter_kinds(
+            function.params[..context_count]
+                .iter()
+                .map(|parameter| parameter.context_kind)
+                .collect(),
+        );
         if let Some(receiver) = info.receiver {
             let receiver_span = function
                 .receiver
@@ -200,7 +204,9 @@ impl BodyFirChecker<'_> {
                     value,
                 });
             }
-            if ordinal >= context_value_count && ordinal < context_count {
+            if ordinal < context_count
+                && parameter.context_kind != crate::ast::ContextParameterKind::Named
+            {
                 continue;
             }
             let ty = nested.resolved_type(parameter.ty.span, ty)?;

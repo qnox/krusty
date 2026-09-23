@@ -1467,7 +1467,10 @@ fn publish_checked_local_signatures_selected(
                             context_value_count: owner
                                 .context_params
                                 .iter()
-                                .filter(|parameter| parameter.name != "_")
+                                .filter(|parameter| {
+                                    parameter.context_kind
+                                        == crate::ast::ContextParameterKind::Named
+                                })
                                 .count() as u32,
                             extension_receiver: None,
                         },
@@ -2027,20 +2030,31 @@ fn publish_checked_local_signatures_selected(
                 let mut parameter_names = property
                     .into_iter()
                     .flat_map(|property| property.context_params.iter())
-                    .map(|parameter| parameter.name.as_str())
+                    .map(|parameter| {
+                        (
+                            parameter.name.as_str(),
+                            ResolvedValueParameterFlags::new(false, false, false, false)
+                                .with_context_kind(parameter.context_kind),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 if is_setter {
-                    parameter_names.push("value");
-                }
-                index.publish_callable_parameters(
-                    callable,
-                    parameter_names.into_iter().map(|name| {
-                        (
+                    let setter_parameter_name = property
+                        .and_then(|property| property.setter.as_ref())
+                        .and_then(|setter| setter.param.as_deref());
+                    parameter_names.push(match setter_parameter_name {
+                        Some(name) => (
                             name,
                             ResolvedValueParameterFlags::new(false, false, false, false),
-                        )
-                    }),
-                );
+                        ),
+                        None => (
+                            "",
+                            ResolvedValueParameterFlags::new(false, false, false, false)
+                                .with_property_setter_value(true),
+                        ),
+                    });
+                }
+                index.publish_callable_parameters(callable, parameter_names);
             }
             DeclarationKind::Classifier
             | DeclarationKind::EnumEntry

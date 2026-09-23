@@ -356,6 +356,7 @@ impl BodyLowering<'_> {
                 .push(IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true));
             arguments.push(IrCtorArg {
                 name: Some(capture.name.to_string()),
+                context_kind: crate::ast::ContextParameterKind::None,
                 ty: capture.ty.get(),
                 declared_ty: None,
                 is_field: true,

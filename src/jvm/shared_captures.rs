@@ -125,6 +125,7 @@ mod tests {
         class.ctor_args = vec![
             IrCtorArg {
                 name: Some("shared".to_string()),
+                context_kind: crate::ast::ContextParameterKind::None,
                 ty: Ty::String,
                 declared_ty: None,
                 is_field: true,
@@ -136,6 +137,7 @@ mod tests {
             },
             IrCtorArg {
                 name: Some("plain".to_string()),
+                context_kind: crate::ast::ContextParameterKind::None,
                 ty: Ty::String,
                 declared_ty: None,
                 is_field: true,

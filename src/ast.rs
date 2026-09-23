@@ -584,10 +584,23 @@ pub struct AnnotatedTypeParameter {
     pub annotation_args: Vec<Vec<ExprId>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ContextParameterKind {
+    #[default]
+    None,
+    Named,
+    Anonymous,
+    LegacyReceiver,
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    /// Exact role written in a `context(...)` clause. This distinguishes Kotlin 2.4 anonymous
+    /// context parameters (`_: T`) from legacy unnamed context receivers (`T`); both lack a source
+    /// binding but have different target debug/reflection conventions.
+    pub context_kind: ContextParameterKind,
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,

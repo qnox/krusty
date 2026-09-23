@@ -13,9 +13,77 @@ use crate::types::TypeName;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolvedParameterIdentity {
     Source(Box<str>),
-    CompilerGenerated(u32),
+    /// The declaration/provider publishes no source name for this parameter. The ordinal is stable
+    /// semantic position only; targets must not turn it into a fabricated `pN` spelling.
+    Unnamed {
+        ordinal: u32,
+    },
+    ContextValue {
+        ordinal: u32,
+        source_name: Box<str>,
+    },
+    AnonymousContextParameter {
+        ordinal: u32,
+    },
+    LegacyContextReceiver {
+        ordinal: u32,
+    },
+    ExtensionReceiver,
     PropertySetterValue,
     SuspendCompletion,
+}
+
+/// Build the complete semantic identity list for a declaration parameter layout.
+///
+/// `names` and the context counts describe the logical Kotlin parameters; `parameter_count`
+/// describes the physical list consumed by the target-facing surface and may additionally contain
+/// the extension receiver. Missing provider names stay missing. In particular, this never turns a
+/// stable ordinal into a fabricated `pN` spelling.
+pub(crate) fn declaration_parameter_identities(
+    names: &[String],
+    parameter_count: usize,
+    context_count: usize,
+    extension_receiver: bool,
+) -> Box<[ResolvedParameterIdentity]> {
+    let receiver = extension_receiver.then(|| {
+        assert!(
+            context_count < parameter_count,
+            "an extension declaration must retain its physical receiver parameter"
+        );
+        context_count
+    });
+    (0..parameter_count)
+        .map(|physical| {
+            if receiver == Some(physical) {
+                return ResolvedParameterIdentity::ExtensionReceiver;
+            }
+            let logical = physical
+                .checked_sub(usize::from(
+                    receiver.is_some_and(|receiver| physical > receiver),
+                ))
+                .expect("an extension receiver has one physical slot");
+            let ordinal = u32::try_from(logical).expect("parameter ordinal fits u32");
+            if logical < context_count {
+                match names.get(logical).map(String::as_str).unwrap_or_default() {
+                    "" => ResolvedParameterIdentity::LegacyContextReceiver { ordinal },
+                    "_" | "<unused var>" => {
+                        ResolvedParameterIdentity::AnonymousContextParameter { ordinal }
+                    }
+                    name => ResolvedParameterIdentity::ContextValue {
+                        ordinal,
+                        source_name: name.into(),
+                    },
+                }
+            } else if let Some(name) = names
+                .get(logical)
+                .filter(|name| !name.is_empty() && name.as_str() != "_")
+            {
+                ResolvedParameterIdentity::Source(name.as_str().into())
+            } else {
+                ResolvedParameterIdentity::Unnamed { ordinal }
+            }
+        })
+        .collect()
 }
 
 /// Stable identity of the overridden property declaration.

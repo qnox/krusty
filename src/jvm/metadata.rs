@@ -5,7 +5,7 @@
 pub(super) mod builtin_bridge;
 mod property_identity;
 
-use property_identity::inline_underlying_property_name_id;
+use property_identity::{inline_underlying_property_name_id, parse_jvm_property_signature};
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -1914,6 +1914,9 @@ pub struct MetaProp {
     pub getter: Option<MetaJvmMethodSig>,
     /// The JVM setter (present iff the property is a `var` with an emitted setter).
     pub setter: Option<MetaJvmMethodSig>,
+    /// Explicit custom setter value-parameter name. An absent protobuf field denotes the implicit
+    /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
+    pub setter_parameter_name: Option<String>,
     pub visibility: crate::types::Visibility,
     pub is_const: bool,
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
@@ -2615,7 +2618,18 @@ fn decode_functions(
                                 .flatten()
                         });
                     let context_params = if !pf.context_params.is_empty() {
-                        Some(pf.context_params.iter().map(decode_parameter).collect())
+                        Some(
+                            pf.context_params
+                                .iter()
+                                .map(|parameter| {
+                                    let mut parameter = decode_parameter(parameter);
+                                    if parameter.name == "<unused var>" {
+                                        parameter.name = "_".to_owned();
+                                    }
+                                    parameter
+                                })
+                                .collect(),
+                        )
                     } else {
                         let context_types = pf
                             .context_receiver_bodies
@@ -3365,42 +3379,6 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
     out
 }
 
-/// A `JvmMethodSignature` reference decoded from metadata: `(name string id, descriptor string id)`.
-type JvmSig = Option<ParsedJvmSignature>;
-
-/// Parse a `JvmPropertySignature` extension body → the getter (field 3) and setter (field 4)
-/// `JvmMethodSignature`s. Either is `None` when absent.
-fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
-    let mut pb = Pb::new(body);
-    let mut getter = None;
-    let mut setter = None;
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                if let Some(n) = pb.varint() {
-                    if let Some(b) = pb.bytes(n as usize) {
-                        getter = parse_jvm_signature(b);
-                    }
-                }
-            }
-            (4, 2) => {
-                if let Some(n) = pb.varint() {
-                    if let Some(b) = pb.bytes(n as usize) {
-                        setter = parse_jvm_signature(b);
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    (getter, setter)
-}
-
 /// Decode every `Property` (`prop_field`: 10 in a `Class`, 4 in a `Package`) of this metadata message
 /// into [`MetaProp`]s — the property analogue of [`decode_functions`]. Carries the REAL getter/setter
 /// JVM names from the `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
@@ -3474,6 +3452,7 @@ fn decode_properties(
         let mut receiver_nullable = false;
         let mut type_params = Vec::new();
         let mut context_params = Vec::new();
+        let mut setter_value_parameter = None;
         let mut context_receiver_bodies = Vec::new();
         let mut context_receiver_type_ids = Vec::new();
         while !p.at_end() {
@@ -3543,6 +3522,13 @@ fn decode_properties(
                         .and_then(|cn| resolve_class_name(records, d2, cn as usize))
                         .map(|name| type_name(&name));
                 }
+                (6, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(body) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    setter_value_parameter = Some(parse_value_parameter(body)?);
+                }
                 (10, 0) => {
                     if let Some(tid) = p.varint() {
                         receiver_class = type_of_id(tid);
@@ -3571,6 +3557,8 @@ fn decode_properties(
             continue;
         };
         let (getter_signature, setter_signature) = sig;
+        let setter_parameter_name = setter_value_parameter
+            .and_then(|parameter| resolve_string(records, d2, parameter.name_id as usize));
         let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
             || {
                 legacy_flags.map_or(
@@ -3623,7 +3611,11 @@ fn decode_properties(
             context_params
                 .iter()
                 .map(|parameter| {
-                    resolve_string(records, d2, parameter.name_id as usize).unwrap_or_default()
+                    match resolve_string(records, d2, parameter.name_id as usize).as_deref() {
+                        Some("<unused var>") => "_".to_owned(),
+                        Some(name) => name.to_owned(),
+                        None => String::new(),
+                    }
                 })
                 .collect()
         };
@@ -3699,6 +3691,7 @@ fn decode_properties(
             context_params: decoded_context_params,
             getter,
             setter,
+            setter_parameter_name,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             is_const: flags & is_const_bit != 0,
             is_abstract: (flags >> 4) & 0x3 == 2,

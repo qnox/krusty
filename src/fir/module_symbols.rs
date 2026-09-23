@@ -124,18 +124,58 @@ impl<'a> StreamedModuleSymbols<'a> {
         declaration: DeclarationId,
         context_count: usize,
     ) -> Vec<String> {
-        let property = self.index.property_for_declaration(declaration);
+        if context_count == 0 {
+            return Vec::new();
+        }
+        let getter = self
+            .index
+            .owned_declaration(declaration, DeclarationKind::Accessor, 0)
+            .and_then(|getter| self.index.callable_for_declaration(getter))
+            .expect("a published property getter retains its callable identity");
         (0..context_count)
             .map(|ordinal| {
-                property
-                    .and_then(|property| {
-                        self.index
-                            .property_context_parameter_name(property, ordinal as u32)
-                    })
-                    .unwrap_or("_")
-                    .to_owned()
+                let parameter = self
+                    .index
+                    .callable_parameter(getter.id, ordinal as u32)
+                    .expect("a published property getter retains every context identity");
+                match parameter.flags().context_kind() {
+                    crate::ast::ContextParameterKind::Named => self
+                        .index
+                        .callable_parameter_name(getter.id, ordinal as u32)
+                        .expect("a named property context retains its source name")
+                        .to_owned(),
+                    crate::ast::ContextParameterKind::Anonymous => "<unused var>".to_owned(),
+                    crate::ast::ContextParameterKind::LegacyReceiver => String::new(),
+                    crate::ast::ContextParameterKind::None => {
+                        panic!("a property context prefix cannot contain an ordinary parameter")
+                    }
+                }
             })
             .collect()
+    }
+
+    fn property_setter_parameter_name(
+        &self,
+        declaration: DeclarationId,
+        context_count: usize,
+    ) -> Option<String> {
+        let setter = self
+            .index
+            .owned_declaration(declaration, DeclarationKind::Accessor, 1)?;
+        if self
+            .index
+            .declaration_header(setter)
+            .is_some_and(|header| header.flags.has(DeclarationFlags::COMPILER_GENERATED))
+        {
+            return None;
+        }
+        let callable = self.index.callable_for_declaration(setter)?;
+        Some(
+            self.index
+                .callable_parameter_name(callable.id, context_count as u32)
+                .expect("an explicit property setter retains its source parameter name")
+                .to_owned(),
+        )
     }
 
     pub(crate) fn annotation_retention(
@@ -568,6 +608,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             getter,
             setter,
             setter_visibility,
+            setter_parameter_name: self.property_setter_parameter_name(declaration, context_count),
             is_const: header.flags.has(DeclarationFlags::CONST),
             implicit_integer_coercion: false,
             compile_time_constant: None,
@@ -1101,6 +1142,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 getter,
                 setter,
                 setter_visibility,
+                setter_parameter_name: self
+                    .property_setter_parameter_name(declaration, context_count),
                 is_const: header.flags.has(DeclarationFlags::CONST),
                 implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
@@ -1501,6 +1544,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 getter,
                 setter,
                 setter_visibility,
+                setter_parameter_name: self
+                    .property_setter_parameter_name(declaration, context_count),
                 is_const: header.flags.has(DeclarationFlags::CONST),
                 implicit_integer_coercion: self
                     .index

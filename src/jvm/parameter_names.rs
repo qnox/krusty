@@ -16,6 +16,7 @@ pub(super) fn local_variable(
     }
     match identity.role {
         IrParameterRole::Value | IrParameterRole::ContextValue => None,
+        IrParameterRole::AnonymousContextParameter { .. } => None,
         IrParameterRole::ContextReceiver { ordinal } => {
             Some(format!("$context_receiver_{ordinal}"))
         }
@@ -44,19 +45,43 @@ pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
     }
 }
 
-/// Complete local-variable names for a function surface that requires every physical parameter to
-/// be debug-visible. `None` distinguishes an absent/unnameable contract from an empty parameter list.
-pub(super) fn required_function_locals(ir: &IrFile, function: u32) -> Option<Vec<String>> {
+/// Local-variable spellings for one complete physical parameter identity list. An entry may be
+/// unnamed; that absence is preserved for class-file surfaces that support `name_index = 0` and
+/// omitted LVT rows.
+pub(super) fn function_locals(ir: &IrFile, function: u32) -> Option<Vec<Option<String>>> {
     let function_shape = ir.functions.get(function as usize)?;
-    ir.function_parameter_identities(function)?
-        .iter()
-        .map(|identity| local_variable(identity, &function_shape.name))
-        .collect()
+    let source_name = ir
+        .fn_source_names
+        .get(&function)
+        .map(String::as_str)
+        .unwrap_or(&function_shape.name);
+    Some(
+        ir.function_parameter_identities(function)?
+            .iter()
+            .map(|identity| local_variable(identity, source_name))
+            .collect(),
+    )
 }
 
 /// Kotlin metadata accepts only a declaration/producer-published semantic name.
 pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
-    identity.source_name.as_deref()
+    match identity.role {
+        IrParameterRole::AnonymousContextParameter { .. } => Some("<unused var>"),
+        _ => identity.source_name.as_deref(),
+    }
+}
+
+pub(super) fn metadata_context_kind(
+    identity: &IrParameterIdentity,
+) -> crate::ast::ContextParameterKind {
+    match identity.role {
+        IrParameterRole::ContextValue => crate::ast::ContextParameterKind::Named,
+        IrParameterRole::AnonymousContextParameter { .. } => {
+            crate::ast::ContextParameterKind::Anonymous
+        }
+        IrParameterRole::ContextReceiver { .. } => crate::ast::ContextParameterKind::LegacyReceiver,
+        _ => panic!("a metadata context prefix must retain its semantic role"),
+    }
 }
 
 /// Name of one Java-reflection `MethodParameters` entry.
@@ -65,6 +90,224 @@ pub(super) fn method_parameter(
     function_name: &str,
 ) -> Option<String> {
     local_variable(identity, function_name)
+}
+
+fn anonymous_context_label(ty: crate::types::Ty) -> String {
+    let stem = match ty.non_null() {
+        crate::types::Ty::Obj(name, _) => name.nested_segment_ref(),
+        crate::types::Ty::TyParam(name, _) => name,
+        crate::types::Ty::Unit => "Unit",
+        crate::types::Ty::Fun(_) => "Function",
+        crate::types::Ty::Nothing => "Nothing",
+        unexpected => panic!("anonymous context parameter has no JVM type label: {unexpected:?}"),
+    };
+    format!("$context-{stem}")
+}
+
+fn disambiguated_anonymous_context_labels(
+    identities: &[IrParameterIdentity],
+    types: &[crate::types::Ty],
+) -> Vec<Option<String>> {
+    assert_eq!(identities.len(), types.len());
+    let bases = identities
+        .iter()
+        .zip(types)
+        .map(|(identity, ty)| {
+            matches!(
+                identity.role,
+                IrParameterRole::AnonymousContextParameter { .. }
+            )
+            .then(|| anonymous_context_label(*ty))
+        })
+        .collect::<Vec<_>>();
+    let mut totals = std::collections::HashMap::<&str, usize>::new();
+    for base in bases.iter().flatten() {
+        *totals.entry(base).or_default() += 1;
+    }
+    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    bases
+        .iter()
+        .map(|base| {
+            let base = base.as_deref()?;
+            if totals[base] == 1 {
+                Some(base.to_owned())
+            } else {
+                let ordinal = seen.entry(base).or_default();
+                *ordinal += 1;
+                Some(format!("{base}#{ordinal}"))
+            }
+        })
+        .collect()
+}
+
+fn function_semantic_parameter_types(
+    ir: &IrFile,
+    function: u32,
+    identities: &[IrParameterIdentity],
+    physical_types: &[crate::types::Ty],
+) -> Vec<crate::types::Ty> {
+    let declared = ir
+        .vc_declared_sigs
+        .get(&function)
+        .map(|(_, params, _)| params.as_slice())
+        .or_else(|| {
+            ir.suspend_declared_sigs
+                .get(&function)
+                .map(|(params, _)| params.as_slice())
+        })
+        .or_else(|| {
+            ir.signatures
+                .get(&function)
+                .map(|signature| signature.params.as_slice())
+        })
+        .or_else(|| {
+            ir.member_semantic_sigs
+                .get(&function)
+                .map(|(params, _)| params.as_slice())
+        });
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| match identity.role {
+            IrParameterRole::AnonymousContextParameter { ordinal } => match declared {
+                Some(params) => *params
+                    .get(ordinal as usize)
+                    .expect("an anonymous context parameter retains its declared semantic type"),
+                // These maps are installed only when a representation pass changes a declaration
+                // parameter. Without one, the function's physical list is still the checked common-
+                // IR semantic list; there is no second spelling or descriptor path to consult.
+                None => physical_types[index],
+            },
+            _ => physical_types[index],
+        })
+        .collect()
+}
+
+fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameterIdentity> {
+    let mut context_ordinal = 0u32;
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(physical_ordinal, argument)| {
+            let identity = match argument.context_kind {
+                crate::ast::ContextParameterKind::Named => IrParameterIdentity::context_value(
+                    argument
+                        .name
+                        .as_deref()
+                        .expect("a named classifier context parameter retains its source name"),
+                ),
+                crate::ast::ContextParameterKind::Anonymous => {
+                    IrParameterIdentity::anonymous_context_parameter(context_ordinal)
+                }
+                crate::ast::ContextParameterKind::LegacyReceiver => {
+                    IrParameterIdentity::context_receiver(context_ordinal)
+                }
+                crate::ast::ContextParameterKind::None => match argument.name.as_deref() {
+                    Some(name) => IrParameterIdentity::source(name),
+                    None => IrParameterIdentity::generated(
+                        IrGeneratedParameterRole::Positional {
+                            ordinal: physical_ordinal as u32,
+                        },
+                        None,
+                    ),
+                },
+            };
+            if argument.context_kind != crate::ast::ContextParameterKind::None {
+                context_ordinal += 1;
+            }
+            identity
+        })
+        .collect()
+}
+
+fn constructor_anonymous_labels(
+    arguments: &[crate::ir::IrCtorArg],
+    identities: &[IrParameterIdentity],
+) -> Vec<Option<String>> {
+    let semantic_types = arguments
+        .iter()
+        .map(|argument| argument.declared_ty.unwrap_or(argument.ty))
+        .collect::<Vec<_>>();
+    disambiguated_anonymous_context_labels(identities, &semantic_types)
+}
+
+pub(super) fn constructor_method_parameters(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<Option<String>> {
+    let identities = constructor_identities(arguments);
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            anonymous[index]
+                .clone()
+                .or_else(|| method_parameter(identity, "<init>"))
+        })
+        .collect()
+}
+
+pub(super) fn constructor_local_variables(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<Option<String>> {
+    constructor_identities(arguments)
+        .iter()
+        .map(|identity| local_variable(identity, "<init>"))
+        .collect()
+}
+
+pub(super) fn constructor_assertions(arguments: &[crate::ir::IrCtorArg]) -> Vec<Option<String>> {
+    let identities = constructor_identities(arguments);
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| anonymous[index].clone().or_else(|| assertion(identity)))
+        .collect()
+}
+
+pub(super) fn function_method_parameters(
+    ir: &IrFile,
+    function: u32,
+    types: &[crate::types::Ty],
+) -> Option<Vec<Option<String>>> {
+    let shape = ir.functions.get(function as usize)?;
+    let source_name = ir
+        .fn_source_names
+        .get(&function)
+        .map(String::as_str)
+        .unwrap_or(&shape.name);
+    let identities = ir.function_parameter_identities(function)?;
+    let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
+    Some(
+        identities
+            .iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                anonymous[index]
+                    .clone()
+                    .or_else(|| method_parameter(identity, source_name))
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn function_assertions(
+    ir: &IrFile,
+    function: u32,
+    types: &[crate::types::Ty],
+) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
+    Some(
+        identities
+            .iter()
+            .enumerate()
+            .map(|(index, identity)| anonymous[index].clone().or_else(|| assertion(identity)))
+            .collect(),
+    )
 }
 
 /// Text passed to `Intrinsics.checkNotNullParameter` for one checked parameter.
@@ -86,19 +329,89 @@ pub(super) fn debug_metadata(
 /// Debug name for an override/bridge parameter published before common IR is built.
 pub(super) fn resolved_local_variable(
     identity: &crate::fir::ResolvedParameterIdentity,
+    function_name: &str,
 ) -> Option<String> {
     match identity {
         crate::fir::ResolvedParameterIdentity::Source(name) => Some(name.to_string()),
-        crate::fir::ResolvedParameterIdentity::CompilerGenerated(_) => None,
+        crate::fir::ResolvedParameterIdentity::Unnamed { .. } => None,
+        crate::fir::ResolvedParameterIdentity::ContextValue { source_name, .. } => {
+            Some(source_name.to_string())
+        }
+        crate::fir::ResolvedParameterIdentity::AnonymousContextParameter { .. } => None,
+        crate::fir::ResolvedParameterIdentity::LegacyContextReceiver { ordinal } => {
+            Some(format!("$context_receiver_{ordinal}"))
+        }
+        crate::fir::ResolvedParameterIdentity::ExtensionReceiver => {
+            Some(format!("$this${function_name}"))
+        }
         crate::fir::ResolvedParameterIdentity::PropertySetterValue => Some("<set-?>".to_string()),
         crate::fir::ResolvedParameterIdentity::SuspendCompletion => Some("$completion".to_string()),
     }
 }
 
+fn resolved_anonymous_context_labels(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+) -> Vec<Option<String>> {
+    assert_eq!(identities.len(), semantic_types.len());
+    let projected = identities
+        .iter()
+        .map(|identity| match identity {
+            crate::fir::ResolvedParameterIdentity::AnonymousContextParameter { ordinal } => {
+                IrParameterIdentity::anonymous_context_parameter(*ordinal)
+            }
+            _ => IrParameterIdentity::generated(
+                IrGeneratedParameterRole::Positional { ordinal: 0 },
+                None,
+            ),
+        })
+        .collect::<Vec<_>>();
+    disambiguated_anonymous_context_labels(&projected, semantic_types)
+}
+
+pub(super) fn resolved_method_parameters(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            anonymous[index]
+                .clone()
+                .or_else(|| resolved_local_variable(identity, function_name))
+        })
+        .collect()
+}
+
+pub(super) fn resolved_assertions(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            anonymous[index].clone().or_else(|| match identity {
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver => {
+                    Some("<this>".to_string())
+                }
+                _ => resolved_local_variable(identity, function_name),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrGeneratedParameterRole, IrParameterIdentity};
+    use crate::ir::{
+        FnParamInfo, IrFunction, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
+    };
 
     #[test]
     fn each_jvm_surface_projects_the_receiver_for_its_own_contract() {
@@ -120,5 +433,49 @@ mod tests {
         assert_eq!(local_variable(&generated, "inspect"), None);
         assert_eq!(method_parameter(&generated, "inspect"), None);
         assert_eq!(metadata(&generated), None);
+    }
+
+    #[test]
+    fn anonymous_context_label_uses_the_declared_value_class_not_its_carrier() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "inspect-erased".to_string(),
+            params: vec![crate::types::Ty::String, crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None::<IrParameterCheck>; 2],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![
+                IrParameterIdentity::anonymous_context_parameter(0),
+                IrParameterIdentity::source("value"),
+            ]),
+        );
+        ir.vc_declared_sigs.insert(
+            function,
+            (
+                "inspect".to_string(),
+                vec![
+                    crate::types::Ty::obj("demo/Wrapped"),
+                    crate::types::Ty::String,
+                ],
+                crate::types::Ty::Unit,
+            ),
+        );
+
+        assert_eq!(
+            function_method_parameters(
+                &ir,
+                function,
+                &[crate::types::Ty::String, crate::types::Ty::String],
+            ),
+            Some(vec![
+                Some("$context-Wrapped".to_string()),
+                Some("value".to_string()),
+            ])
+        );
     }
 }

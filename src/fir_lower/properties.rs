@@ -27,48 +27,78 @@ pub(super) fn named_context_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     types: &[Ty],
-) -> Vec<(String, Ty)> {
+) -> Result<Vec<(String, crate::ast::ContextParameterKind, Ty)>, FirFileLoweringFailure> {
     let accessor = index.owned_declaration(declaration, DeclarationKind::Accessor, 0);
     types
         .iter()
         .enumerate()
         .map(|(ordinal, ty)| {
-            let name = accessor
-                .and_then(|accessor| {
-                    index.callable_parameter_name(
-                        crate::fir::CallableId::from_raw(accessor.raw()),
-                        ordinal as u32,
-                    )
-                })
-                .unwrap_or("_")
-                .to_owned();
-            (name, *ty)
+            let callable = accessor
+                .and_then(|accessor| index.callable_for_declaration(accessor))
+                .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+            let parameter = index
+                .callable_parameter(callable.id, ordinal as u32)
+                .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+            let kind = parameter.flags().context_kind();
+            let name = match kind {
+                crate::ast::ContextParameterKind::Named => index
+                    .callable_parameter_name(callable.id, ordinal as u32)
+                    .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?
+                    .to_owned(),
+                crate::ast::ContextParameterKind::Anonymous => "<unused var>".to_owned(),
+                crate::ast::ContextParameterKind::LegacyReceiver => String::new(),
+                crate::ast::ContextParameterKind::None => {
+                    return Err(FirFileLoweringFailure::MissingProperty(declaration));
+                }
+            };
+            Ok((name, kind, *ty))
         })
         .collect()
 }
 
-pub(super) fn set_extension_accessor_parameter_names(
+pub(super) fn set_accessor_parameter_identities(
     index: &ResolvedModuleIndex,
     property: DeclarationId,
     setter: bool,
     function: FunId,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    let accessor = index
-        .owned_declaration(property, DeclarationKind::Accessor, u32::from(setter))
-        .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
+    let Some(accessor) =
+        index.owned_declaration(property, DeclarationKind::Accessor, u32::from(setter))
+    else {
+        let parameter_count = ir.functions[function as usize].params.len();
+        let identities = match (setter, parameter_count) {
+            (false, 0) => Vec::new(),
+            (true, 1) => vec![crate::ir::IrParameterIdentity {
+                source_name: None,
+                role: crate::ir::IrParameterRole::PropertySetterValue,
+                provenance: crate::ir::IrParameterProvenance::CompilerGenerated,
+            }],
+            _ => return Err(FirFileLoweringFailure::MissingCallable(property)),
+        };
+        ir.fn_params
+            .insert(function, crate::ir::FnParamInfo::identities(identities));
+        return Ok(());
+    };
     let callable = index
         .callable_for_declaration(accessor)
         .ok_or(FirFileLoweringFailure::MissingCallable(accessor))?;
     let mut identities = (0..index.callable_parameter_name_count(callable.id))
         .map(|ordinal| {
-            index
-                .callable_parameter_name(callable.id, ordinal as u32)
-                .map(crate::ir::IrParameterIdentity::source)
-                .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
+            super::callable_parameter_identity(
+                index,
+                callable.id,
+                ordinal as u32,
+                callable.shape.context_parameter_count,
+            )
+            .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if callable.shape.extension_receiver.is_some() {
+        let source_name = index
+            .declaration_name(property)
+            .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
+        ir.fn_source_names.insert(function, source_name.to_owned());
         let receiver_position = callable.shape.context_parameter_count as usize;
         if receiver_position > identities.len() {
             return Err(FirFileLoweringFailure::MissingCallable(accessor));
@@ -437,6 +467,10 @@ fn materialize_member_extension_property(
         )),
         None => None,
     };
+    set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+    if let Some(setter) = setter {
+        set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+    }
     let type_params = declaration_type_parameters(index, property.declaration);
     for function in std::iter::once(getter).chain(setter) {
         ir.fn_source_order.insert(function, source_order);
@@ -535,7 +569,7 @@ fn materialize_top_level_property(
                 ));
             }
         };
-        let index = u32::try_from(ir.statics.len())
+        let storage_index = u32::try_from(ir.statics.len())
             .map_err(|_| FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration))?;
         ir.statics.push(IrStatic {
             name: property.name.clone(),
@@ -575,10 +609,16 @@ fn materialize_top_level_property(
                 None,
             )
         });
+        if let Some(getter) = getter {
+            set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+        }
+        if let Some(setter) = setter {
+            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+        }
         realizations.insert(
             property_id,
             IrLocalPropertyLayout::TopLevelStorage {
-                storage: index,
+                storage: storage_index,
                 getter,
                 setter,
                 qualifier: None,
@@ -597,7 +637,6 @@ fn materialize_top_level_property(
         .chain(extension_receiver)
         .collect::<Vec<_>>();
     let declaration = property.declaration;
-    let property_name = property.name.clone();
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -622,9 +661,9 @@ fn materialize_top_level_property(
             None,
         )
     });
-    set_extension_accessor_parameter_names(index, declaration, false, getter, ir)?;
+    set_accessor_parameter_identities(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {
-        set_extension_accessor_parameter_names(index, declaration, true, setter, ir)?;
+        set_accessor_parameter_identities(index, declaration, true, setter, ir)?;
     }
     realizations.insert(
         property_id,
@@ -913,6 +952,7 @@ fn materialize_member_property(
         ir.fn_source_order.insert(getter, source_order);
         ir.open_methods.insert(getter);
         ir.classes[class_id as usize].methods.push(getter);
+        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
         // The accessor of a property typed by an enclosing-class type parameter signs `()TT;`, the
         // same as a member function returning `T`. A declared function gets this from
         // `attach_callable_generic_facts`, which runs over CALLABLES; an accessor is synthesized
@@ -936,6 +976,7 @@ fn materialize_member_property(
             ir.fn_source_order.insert(setter, source_order);
             ir.open_methods.insert(setter);
             ir.classes[class_id as usize].methods.push(setter);
+            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
             ir.member_semantic_sigs.insert(
                 setter,
                 (
@@ -967,6 +1008,12 @@ fn materialize_member_property(
         ir.classes[class_id as usize].methods.push(function);
         function
     });
+    if let Some(getter) = getter {
+        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+    }
+    if let Some(setter) = setter {
+        set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+    }
     // Accessor bodies are streamed after ordinary function declarations, but their declaration
     // position is the property's position. Publish that stable order on every concrete accessor so
     // targets can interleave properties and functions without consulting syntax or names.
@@ -995,7 +1042,7 @@ fn materialize_member_property(
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
-        context_params: named_context_parameters(index, property.declaration, &context_parameters),
+        context_params: named_context_parameters(index, property.declaration, &context_parameters)?,
         source_order,
         decl_line: 0,
         ty: property.ty,

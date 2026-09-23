@@ -64,6 +64,7 @@ impl Parser<'_> {
             params.push(Param {
                 name: pname,
                 ty,
+                context_kind: crate::ast::ContextParameterKind::None,
                 is_vararg,
                 vararg_span,
                 is_materialized_lambda,

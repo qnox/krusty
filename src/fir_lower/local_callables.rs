@@ -990,7 +990,9 @@ impl BodyLowering<'_> {
             let mut position = body.captures().len()
                 + body.implicit_receiver_captures().len()
                 + default.parameter as usize;
-            if body.receiver_type().is_some() && default.parameter >= body.context_value_count() {
+            if body.receiver_type().is_some()
+                && default.parameter >= body.context_receiver_types().len() as u32
+            {
                 position += 1;
             }
             let Some(slot) = defaults.get_mut(position) else {
@@ -1172,16 +1174,29 @@ fn local_function_parameter_identities(
     );
     let context_value_count = body.context_value_count() as usize;
     for ordinal in 0..body.context_receiver_types().len() {
-        let source_name = (ordinal < context_value_count)
-            .then(|| body.parameters().get(ordinal))
-            .flatten()
-            .and_then(|parameter| body.debug_value_name(parameter.value))
-            .map(str::to_owned);
-        identities.push(match source_name {
-            Some(name) => crate::ir::IrParameterIdentity::context_value(name),
-            None => crate::ir::IrParameterIdentity::context_receiver(
-                u32::try_from(ordinal).expect("too many context receiver parameters"),
-            ),
+        let semantic_ordinal = u32::try_from(ordinal).expect("too many context parameters");
+        identities.push(match body.context_parameter_kinds()[ordinal] {
+            crate::ast::ContextParameterKind::Named => {
+                let value_index = body.context_parameter_kinds()[..ordinal]
+                    .iter()
+                    .filter(|kind| **kind == crate::ast::ContextParameterKind::Named)
+                    .count();
+                let name = body
+                    .parameters()
+                    .get(value_index)
+                    .and_then(|parameter| body.debug_value_name(parameter.value))
+                    .expect("a named context parameter carries its source identity");
+                crate::ir::IrParameterIdentity::context_value(name)
+            }
+            crate::ast::ContextParameterKind::Anonymous => {
+                crate::ir::IrParameterIdentity::anonymous_context_parameter(semantic_ordinal)
+            }
+            crate::ast::ContextParameterKind::LegacyReceiver => {
+                crate::ir::IrParameterIdentity::context_receiver(semantic_ordinal)
+            }
+            crate::ast::ContextParameterKind::None => {
+                panic!("a context parameter must have a semantic kind")
+            }
         });
     }
     if body.receiver_type().is_some() {

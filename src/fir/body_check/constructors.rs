@@ -901,7 +901,14 @@ fn add_constructor_delegation(
 }
 
 fn checked_constructor_parameters<'a>(
-    names: impl IntoIterator<Item = (&'a str, Span, Option<ExprId>)>,
+    names: impl IntoIterator<
+        Item = (
+            &'a str,
+            Span,
+            Option<ExprId>,
+            crate::ast::ContextParameterKind,
+        ),
+    >,
     semantic_types: &[ResolvedTy],
 ) -> Result<(Vec<CheckedBodyParameter<'a>>, Vec<CheckedBodyDefault>), CheckedBodyDriverFailure> {
     let source = names.into_iter().collect::<Vec<_>>();
@@ -911,16 +918,17 @@ fn checked_constructor_parameters<'a>(
     let parameters = source
         .iter()
         .zip(semantic_types.iter().copied())
-        .map(|((name, span, _), ty)| CheckedBodyParameter {
+        .map(|((name, span, _, context_kind), ty)| CheckedBodyParameter {
             name,
             ty,
             span: *span,
+            context_kind: *context_kind,
         })
         .collect::<Vec<_>>();
     let defaults = source
         .iter()
         .enumerate()
-        .filter_map(|(parameter, (_, _, value))| value.map(|expression| (parameter, expression)))
+        .filter_map(|(parameter, (_, _, value, _))| value.map(|expression| (parameter, expression)))
         .map(|(parameter, expression)| {
             Ok(CheckedBodyDefault {
                 parameter: u32::try_from(parameter)
@@ -970,16 +978,21 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
             parameter.name.as_str(),
             parameter.ty.span,
             parameter.default,
+            parameter.context_kind,
         )
     });
     let (parameters, defaults, span) = if secondary.is_none() {
         let (parameters, defaults) = checked_constructor_parameters(
-            context_source.clone().chain(
-                class
-                    .props
-                    .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.span, parameter.default)),
-            ),
+            context_source
+                .clone()
+                .chain(class.props.iter().map(|parameter| {
+                    (
+                        parameter.name.as_str(),
+                        parameter.span,
+                        parameter.default,
+                        crate::ast::ContextParameterKind::None,
+                    )
+                })),
             &signature.parameters,
         )?;
         (parameters, defaults, class.span)
@@ -991,6 +1004,7 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
                     parameter.name.as_str(),
                     parameter.ty.span,
                     parameter.default,
+                    crate::ast::ContextParameterKind::None,
                 )
             })),
             &signature.parameters,
@@ -1009,7 +1023,6 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
         &defaults,
         CheckedBodyReceiverShape {
             context_receivers,
-            context_value_count: callable.shape.context_value_count,
             extension_receiver: None,
         },
     )
@@ -1085,6 +1098,9 @@ pub(super) fn check_and_dispatch_constructor_body(
                         |parameter| parameter.ty.span,
                     ),
                     source.and_then(|parameter| parameter.default),
+                    context.map_or(crate::ast::ContextParameterKind::None, |parameter| {
+                        parameter.context_kind
+                    }),
                 )
             }),
             &signature.parameters,
@@ -1098,7 +1114,6 @@ pub(super) fn check_and_dispatch_constructor_body(
             &[],
             CheckedBodyReceiverShape {
                 context_receivers,
-                context_value_count: callable.shape.context_value_count,
                 extension_receiver: None,
             },
         )
@@ -1182,6 +1197,7 @@ pub(super) fn check_and_dispatch_constructor_body(
                     parameter.name.as_str(),
                     parameter.ty.span,
                     parameter.default,
+                    parameter.context_kind,
                 )
             })
             .chain(constructor.params.iter().map(|parameter| {
@@ -1189,6 +1205,7 @@ pub(super) fn check_and_dispatch_constructor_body(
                     parameter.name.as_str(),
                     parameter.ty.span,
                     parameter.default,
+                    crate::ast::ContextParameterKind::None,
                 )
             })),
         &signature.parameters,
@@ -1209,7 +1226,6 @@ pub(super) fn check_and_dispatch_constructor_body(
         &[],
         CheckedBodyReceiverShape {
             context_receivers,
-            context_value_count: callable.shape.context_value_count,
             extension_receiver: None,
         },
     )
