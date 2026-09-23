@@ -1,14 +1,30 @@
-// `use super::super as metadata;` is not valid Rust: `super` cannot be the final segment of a
-// renamed import, so the compiler looks for an ITEM named `super` in this module's parent. The
-// path is spelled out instead.
 use super::*;
-use crate::jvm::metadata;
+use crate::metadata::decode::{
+    field, packed_varints, parse_type_node, parse_type_param, parse_value_parameter, require_wire,
+    Cursor, DecodedPackageFragment, ParameterDecodeError, ParsedTypeArgument, ParsedTypeNode,
+    ParsedTypeParam, ParsedValueParam, ParsedVariance, QName,
+};
+use crate::metadata::semantic as metadata;
 
 fn semantic_error(detail: impl Into<String>) -> PackageFragmentDecodeError {
     PackageFragmentDecodeError {
         offset: 0,
         detail: detail.into(),
     }
+}
+
+fn parameter_error(context: &str, error: ParameterDecodeError) -> PackageFragmentDecodeError {
+    let detail = match error {
+        ParameterDecodeError::MalformedWire => format!("malformed {context}"),
+        ParameterDecodeError::MissingField(field) => {
+            format!("{context} has no {field}")
+        }
+        ParameterDecodeError::InvalidVariance(variance) => {
+            let declaration = context.strip_suffix(" type parameter").unwrap_or(context);
+            format!("invalid type-parameter variance {variance} in {declaration} declaration")
+        }
+    };
+    semantic_error(detail)
 }
 
 fn semantic_string(
@@ -32,18 +48,55 @@ fn semantic_qname(
 ) -> Result<String, PackageFragmentDecodeError> {
     let id = usize::try_from(id)
         .map_err(|_| semantic_error(format!("{context} qualified-name id exceeds host range")))?;
-    if qnames.get(id).is_none() {
-        return Err(semantic_error(format!(
-            "{context} references absent qualified name {id}"
-        )));
-    }
-    let name = metadata::resolve_qname(qnames, strings, id as i64);
+    let name = metadata::resolve_qname(qnames, strings, id)
+        .map_err(|error| semantic_error(format!("{context} {error}")))?;
     if name.is_empty() {
         return Err(semantic_error(format!(
             "{context} resolves to an empty qualified name"
         )));
     }
     Ok(name)
+}
+
+/// Decode the scalar compile-time value carried by a `const val` property record.
+fn semantic_constant(
+    body: &[u8],
+    strings: &[String],
+) -> Result<Option<crate::libraries::LibConst>, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut kind = None;
+    let mut integral = None;
+    let mut float = None;
+    let mut double = None;
+    let mut string = None;
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "constant value")?;
+        match (number, wire) {
+            (1, 0) => kind = Some(cursor.varint("constant value kind")?),
+            (2, 0) => {
+                let raw = cursor.varint("constant integral value")?;
+                integral = Some(((raw >> 1) as i64) ^ -((raw & 1) as i64));
+            }
+            (3, 5) => float = Some(f32::from_bits(cursor.fixed32("constant float value")?)),
+            (4, 1) => double = Some(f64::from_bits(cursor.fixed64("constant double value")?)),
+            (5, 0) => {
+                let id = cursor.varint("constant string value")?;
+                string = Some(semantic_string(strings, id, "constant string value")?);
+            }
+            (_, wire) => cursor.skip(wire, "constant value")?,
+        }
+    }
+    use crate::libraries::LibConst;
+    Ok(match kind {
+        Some(0 | 1 | 2 | 3 | 7) => integral
+            .and_then(|value| i32::try_from(value).ok())
+            .map(LibConst::Int),
+        Some(4) => integral.map(LibConst::Long),
+        Some(5) => float.map(LibConst::Float),
+        Some(6) => double.map(LibConst::Double),
+        Some(8) => string.map(|value| LibConst::Str(crate::kt_string::KtString::from(value))),
+        _ => None,
+    })
 }
 
 fn validate_annotation_value(
@@ -255,7 +308,7 @@ impl SemanticTables<'_> {
         type_parameters: &std::collections::HashMap<u64, String>,
         depth: u32,
         context: &str,
-    ) -> Result<Option<metadata::BuiltinTy>, PackageFragmentDecodeError> {
+    ) -> Result<Option<metadata::KotlinType>, PackageFragmentDecodeError> {
         let mut cursor = Cursor::new(body, 0);
         let mut flexible_inline = Vec::new();
         let mut flexible_ids = Vec::new();
@@ -320,7 +373,7 @@ impl SemanticTables<'_> {
             |inline: Vec<&[u8]>,
              ids: Vec<u64>,
              label: &str|
-             -> Result<Option<metadata::BuiltinTy>, PackageFragmentDecodeError> {
+             -> Result<Option<metadata::KotlinType>, PackageFragmentDecodeError> {
                 match (inline.as_slice(), ids.as_slice()) {
                     ([], []) => Ok(None),
                     ([body], []) => self.ty(body, type_parameters, depth + 1, label).map(Some),
@@ -344,7 +397,7 @@ impl SemanticTables<'_> {
         type_parameters: &std::collections::HashMap<u64, String>,
         depth: u32,
         context: &str,
-    ) -> Result<metadata::BuiltinTy, PackageFragmentDecodeError> {
+    ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
         if depth > 16 {
             return Err(semantic_error(format!(
                 "cyclic or excessively nested type in {context}"
@@ -353,22 +406,24 @@ impl SemanticTables<'_> {
         let node = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
         let flexible_upper = self.validate_type_edges(body, type_parameters, depth, context)?;
+        let shape = self.function_type_shape(&node, context)?;
         let mut arguments = Vec::with_capacity(node.arguments.len());
         for argument in node.arguments {
             let argument = match argument {
                 ParsedTypeArgument::Inline(body, projection) => {
                     let ty = self.ty(body, type_parameters, depth + 1, context)?;
-                    metadata::project_builtin_ty(projection, ty)
+                    metadata::project_kotlin_type(projection, ty)
                 }
                 ParsedTypeArgument::Table(id, projection) => {
                     let ty = self.ty_by_id(id, type_parameters, depth + 1, context)?;
-                    metadata::project_builtin_ty(projection, ty)
+                    metadata::project_kotlin_type(projection, ty)
                 }
                 ParsedTypeArgument::Star => {
-                    metadata::BuiltinTy::OutProjection(Box::new(metadata::BuiltinTy::Class {
+                    metadata::KotlinType::OutProjection(Box::new(metadata::KotlinType::Class {
                         internal: "kotlin/Any".to_string(),
                         args: Vec::new(),
                         nullable: true,
+                        shape: metadata::KotlinFunctionTypeShape::default(),
                     }))
                 }
             };
@@ -386,13 +441,14 @@ impl SemanticTables<'_> {
         let nullable = node.nullable
             || flexible_upper
                 .as_ref()
-                .is_some_and(metadata::BuiltinTy::nullable);
+                .is_some_and(metadata::KotlinType::nullable);
         let nullable = nullable && !node.definitely_non_null;
         if let Some(id) = node.class_id.or(node.type_alias_id) {
-            return Ok(metadata::BuiltinTy::Class {
+            return Ok(metadata::KotlinType::Class {
                 internal: semantic_qname(self.strings, self.qnames, id, context)?,
                 args: arguments,
                 nullable,
+                shape,
             });
         }
         let name = if let Some(id) = node.type_parameter_id {
@@ -406,7 +462,47 @@ impl SemanticTables<'_> {
                 "{context} type has no classifier or type parameter"
             )));
         };
-        Ok(metadata::BuiltinTy::Param { name, nullable })
+        Ok(metadata::KotlinType::Param { name, nullable })
+    }
+
+    fn function_type_shape(
+        &self,
+        node: &ParsedTypeNode<'_>,
+        context: &str,
+    ) -> Result<metadata::KotlinFunctionTypeShape, PackageFragmentDecodeError> {
+        let mut shape = metadata::KotlinFunctionTypeShape {
+            suspend: node.suspend,
+            ..Default::default()
+        };
+        for annotation in &node.annotations {
+            let Some(id) = annotation.class_id() else {
+                continue;
+            };
+            match semantic_qname(self.strings, self.qnames, id, context)?.as_str() {
+                "kotlin/ExtensionFunctionType" => shape.receiver = true,
+                "kotlin/ContextFunctionTypeParams" => {
+                    let count = annotation
+                        .int_arguments()
+                        .find_map(|(name, value)| {
+                            (semantic_string(self.strings, name, context).ok().as_deref()
+                                == Some("count"))
+                            .then_some(value)
+                        })
+                        .ok_or_else(|| {
+                            semantic_error(format!(
+                                "a context function type in {context} declares no count"
+                            ))
+                        })?;
+                    shape.context_count = usize::try_from(count).map_err(|_| {
+                        semantic_error(format!(
+                            "a context function type in {context} declares {count} parameters"
+                        ))
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        Ok(shape)
     }
 
     fn ty_by_id(
@@ -415,7 +511,7 @@ impl SemanticTables<'_> {
         type_parameters: &std::collections::HashMap<u64, String>,
         depth: u32,
         context: &str,
-    ) -> Result<metadata::BuiltinTy, PackageFragmentDecodeError> {
+    ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
         let id = usize::try_from(id)
             .map_err(|_| semantic_error(format!("{context} type id exceeds host range")))?;
         let body = self
@@ -431,20 +527,26 @@ impl SemanticTables<'_> {
             .is_some_and(|first| id >= first && !definitely_non_null)
         {
             Ok(match ty {
-                metadata::BuiltinTy::Class { internal, args, .. } => metadata::BuiltinTy::Class {
+                metadata::KotlinType::Class {
+                    internal,
+                    args,
+                    shape,
+                    ..
+                } => metadata::KotlinType::Class {
                     internal,
                     args,
                     nullable: true,
+                    shape,
                 },
-                metadata::BuiltinTy::Param { name, .. } => metadata::BuiltinTy::Param {
+                metadata::KotlinType::Param { name, .. } => metadata::KotlinType::Param {
                     name,
                     nullable: true,
                 },
-                metadata::BuiltinTy::InProjection(inner) => {
-                    metadata::BuiltinTy::InProjection(inner)
+                metadata::KotlinType::InProjection(inner) => {
+                    metadata::KotlinType::InProjection(inner)
                 }
-                metadata::BuiltinTy::OutProjection(inner) => {
-                    metadata::BuiltinTy::OutProjection(inner)
+                metadata::KotlinType::OutProjection(inner) => {
+                    metadata::KotlinType::OutProjection(inner)
                 }
             })
         } else {
@@ -458,7 +560,7 @@ impl SemanticTables<'_> {
         table_id: Option<u64>,
         type_parameters: &std::collections::HashMap<u64, String>,
         context: &str,
-    ) -> Result<metadata::BuiltinTy, PackageFragmentDecodeError> {
+    ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
         match (inline, table_id) {
             (Some(body), None) => self.ty(body, type_parameters, 0, context),
             (None, Some(id)) => self.ty_by_id(id, type_parameters, 0, context),
@@ -476,7 +578,7 @@ impl SemanticTables<'_> {
         context: &str,
     ) -> Result<
         (
-            Vec<metadata::BuiltinTypeParam>,
+            Vec<metadata::KotlinTypeParameter>,
             std::collections::HashMap<u64, String>,
         ),
         PackageFragmentDecodeError,
@@ -567,7 +669,7 @@ impl SemanticTables<'_> {
                     "type-parameter annotation",
                 )? == "kotlin/internal/OnlyInputTypes";
             }
-            parameters.push(metadata::BuiltinTypeParam {
+            parameters.push(metadata::KotlinTypeParameter {
                 name,
                 bounds,
                 variance: match parameter.variance {
@@ -583,7 +685,7 @@ impl SemanticTables<'_> {
 }
 
 struct SemanticValueParameter {
-    ty: metadata::BuiltinTy,
+    ty: metadata::KotlinType,
     name: String,
     has_default: bool,
     is_vararg: bool,
@@ -683,12 +785,136 @@ fn semantic_value_parameter(
     })
 }
 
+struct SemanticFunctionShape {
+    name_id: u64,
+    has_receiver: bool,
+    value_params: Vec<ParsedValueParam>,
+    type_params: Vec<ParsedTypeParam>,
+    return_body: Option<Vec<u8>>,
+    return_type_id: Option<u64>,
+    receiver_body: Option<Vec<u8>>,
+    receiver_type_id: Option<u64>,
+    context_receiver_bodies: Vec<Vec<u8>>,
+    context_receiver_type_ids: Vec<u64>,
+    context_params: Vec<ParsedValueParam>,
+    visibility: crate::types::Visibility,
+    is_inline: bool,
+    is_suspend: bool,
+    is_abstract: bool,
+    is_operator: bool,
+    is_infix: bool,
+}
+
+/// Read the target-neutral declaration fields of a Kotlin `Function` message. JVM method
+/// signatures and annotations are deliberately left to their owning adapters; a KLIB provider
+/// consumes only the source declaration written in the common protobuf.
+fn semantic_function_shape(
+    body: &[u8],
+) -> Result<SemanticFunctionShape, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut compatibility_flags = None;
+    let mut modern_flags = None;
+    let mut name_id = 0;
+    let mut has_receiver = false;
+    let mut value_params = Vec::new();
+    let mut type_params = Vec::new();
+    let mut return_body = None;
+    let mut return_type_id = None;
+    let mut receiver_body = None;
+    let mut receiver_type_id = None;
+    let mut context_receiver_bodies = Vec::new();
+    let mut context_receiver_type_ids = Vec::new();
+    let mut context_params = Vec::new();
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "function declaration")?;
+        match (number, wire) {
+            (1, 0) => compatibility_flags = Some(cursor.varint("function compatibility flags")?),
+            (9, 0) => modern_flags = Some(cursor.varint("function flags")?),
+            (2, 0) => name_id = cursor.varint("function name")?,
+            (3, 2) => {
+                return_body = Some(cursor.length_delimited("function return type")?.0.to_vec());
+            }
+            (4, 2) => {
+                let body = cursor.length_delimited("function type parameter")?.0;
+                type_params.push(
+                    parse_type_param(body)
+                        .map_err(|error| parameter_error("function type parameter", error))?,
+                );
+            }
+            (5, 2) => {
+                has_receiver = true;
+                receiver_body = Some(
+                    cursor
+                        .length_delimited("function receiver type")?
+                        .0
+                        .to_vec(),
+                );
+            }
+            (6, 2) => {
+                let body = cursor.length_delimited("function value parameter")?.0;
+                value_params.push(
+                    parse_value_parameter(body)
+                        .map_err(|error| parameter_error("function value parameter", error))?,
+                );
+            }
+            (7, 0) => return_type_id = Some(cursor.varint("function return type id")?),
+            (8, 0) => {
+                has_receiver = true;
+                receiver_type_id = Some(cursor.varint("function receiver type id")?);
+            }
+            (10, 2) => context_receiver_bodies.push(
+                cursor
+                    .length_delimited("function context receiver type")?
+                    .0
+                    .to_vec(),
+            ),
+            (11, 0) => {
+                context_receiver_type_ids.push(cursor.varint("function context receiver type id")?)
+            }
+            (11, 2) => {
+                let (packed, _) = cursor.length_delimited("function context receiver type ids")?;
+                context_receiver_type_ids.extend(packed_varints(packed).ok_or_else(|| {
+                    semantic_error("invalid packed function context receiver type ids")
+                })?);
+            }
+            (13, 2) => {
+                let body = cursor.length_delimited("function context parameter")?.0;
+                context_params.push(
+                    parse_value_parameter(body)
+                        .map_err(|error| parameter_error("function context parameter", error))?,
+                );
+            }
+            (_, wire) => cursor.skip(wire, "function declaration")?,
+        }
+    }
+    let flags = modern_flags.or(compatibility_flags).unwrap_or(6);
+    Ok(SemanticFunctionShape {
+        name_id,
+        has_receiver,
+        value_params,
+        type_params,
+        return_body,
+        return_type_id,
+        receiver_body,
+        receiver_type_id,
+        context_receiver_bodies,
+        context_receiver_type_ids,
+        context_params,
+        visibility: crate::types::Visibility::from_metadata((flags >> 1) & 0x7),
+        is_inline: flags & (1 << 10) != 0,
+        is_suspend: flags & (1 << 13) != 0,
+        is_abstract: (flags >> 4) & 0x3 == 2,
+        is_operator: flags & (1 << 8) != 0,
+        is_infix: flags & (1 << 9) != 0,
+    })
+}
+
 fn semantic_function(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &std::collections::HashMap<u64, String>,
     top_level: bool,
-) -> Result<(metadata::BuiltinMember, Option<metadata::BuiltinFunction>), PackageFragmentDecodeError>
+) -> Result<(metadata::KotlinMember, Option<metadata::KotlinFunction>), PackageFragmentDecodeError>
 {
     let contract_type_table = type_table_bodies(body, "function declaration")?;
     validate_annotation_fields(
@@ -698,12 +924,7 @@ fn semantic_function(
         tables.qnames,
         "function declaration",
     )?;
-    let function = metadata::parse_function(body).map_err(|error| match error {
-        metadata::MetadataDecodeError::InvalidVariance(variance) => semantic_error(format!(
-            "invalid type-parameter variance {variance} in function declaration"
-        )),
-        error => semantic_error(format!("invalid semantic function declaration: {error:?}")),
-    })?;
+    let function = semantic_function_shape(body)?;
     let type_parameter_bodies = message_bodies(body, 4, "function declaration")?;
     if function.type_params.len() != type_parameter_bodies.len() {
         return Err(semantic_error(
@@ -723,9 +944,12 @@ fn semantic_function(
         return Err(semantic_error("duplicate function contract"));
     }
     if let Some(contract) = contracts.first() {
+        // Contract type ids address the nearest declared table. A function-local table wins when
+        // present; otherwise the ids address the containing class or package table. Kotlin/Native's
+        // `kotlin.test` fragment relies on the latter shape for all of its declared contracts.
         let (types, first_nullable) = match contract_type_table {
             Some(table) => (table.types, table.first_nullable),
-            None => (Vec::new(), None),
+            None => (tables.types.clone(), tables.first_nullable),
         };
         let contract_tables = SemanticTables {
             strings: tables.strings,
@@ -820,7 +1044,9 @@ fn semantic_function(
     } else {
         None
     };
-    let member = metadata::BuiltinMember {
+    let written = member_params.len();
+    let leading = top_params.len() - written;
+    let member = metadata::KotlinMember {
         name: name.clone(),
         params: member_params,
         ret: ret.clone(),
@@ -830,8 +1056,12 @@ fn semantic_function(
         is_abstract: function.is_abstract,
         formals: formals.clone(),
         ret_nullable,
+        constant: None,
+        param_names: param_names[param_names.len() - written..].to_vec(),
+        param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
+        vararg: vararg.and_then(|index| index.checked_sub(leading)),
     };
-    let top = top_level.then_some(metadata::BuiltinFunction {
+    let top = top_level.then_some(metadata::KotlinFunction {
         name,
         receiver,
         params: top_params,
@@ -860,7 +1090,9 @@ fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &std::collections::HashMap<u64, String>,
-) -> Result<metadata::BuiltinMember, PackageFragmentDecodeError> {
+    top_level: bool,
+) -> Result<(metadata::KotlinMember, Option<metadata::KotlinProperty>), PackageFragmentDecodeError>
+{
     validate_annotation_fields(
         body,
         &[14, 15, 16, 33, 34, 35, 170, 177, 178, 181, 182, 183],
@@ -875,26 +1107,42 @@ fn semantic_property(
     let mut name = None;
     let mut return_body = None;
     let mut return_id = None;
-    let mut legacy_flags = None;
+    let mut compatibility_flags = None;
     let mut modern_flags = None;
+    let mut receiver_body = None;
+    let mut receiver_id = None;
+    let mut context_count = 0usize;
+    let mut constant = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
-            (1, 0) => legacy_flags = Some(cursor.varint("property flags")?),
+            (1, 0) => compatibility_flags = Some(cursor.varint("property compatibility flags")?),
             (2, 0) => name = Some(cursor.varint("property name")?),
             (3, 2) => return_body = Some(cursor.length_delimited("property return type")?.0),
             (9, 0) => return_id = Some(cursor.varint("property return type id")?),
-            (5 | 12 | 18, 2) => {
+            (5, 2) => {
+                let nested = cursor.length_delimited("property receiver type")?.0;
+                tables.ty(nested, &type_parameters, 0, "property receiver type")?;
+                receiver_body = Some(nested);
+            }
+            (10, 0) => {
+                let id = cursor.varint("property receiver type id")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                receiver_id = Some(id);
+            }
+            (12 | 18, 2) => {
                 let nested = cursor.length_delimited("property semantic type")?.0;
                 tables.ty(nested, &type_parameters, 0, "property semantic type")?;
+                context_count += usize::from(number == 12);
             }
-            (10 | 19, 0) => {
+            (19, 0) => {
                 let id = cursor.varint("property semantic type id")?;
-                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property semantic type")?;
             }
             (13, 0) => {
                 let id = cursor.varint("property context receiver type id")?;
                 tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                context_count += 1;
             }
             (13, 2) => {
                 let (packed, base) =
@@ -903,11 +1151,13 @@ fn semantic_property(
                 while !packed.at_end() {
                     let id = packed.varint("property context receiver type id")?;
                     tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                    context_count += 1;
                 }
             }
             (173, 2) => {
                 let value = cursor.length_delimited("property compile-time value")?.0;
                 validate_annotation_value(value, tables.strings, tables.qnames)?;
+                constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
             (6 | 17, 2) => {
@@ -934,10 +1184,14 @@ fn semantic_property(
         "property return type",
     )?;
     let flags = modern_flags
-        .or(legacy_flags)
+        .or(compatibility_flags)
         .unwrap_or(crate::metadata::property_flags::DEFAULT);
-    Ok(metadata::BuiltinMember {
-        name,
+    let receiver = match (receiver_body, receiver_id) {
+        (None, None) => None,
+        (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
+    };
+    let member = metadata::KotlinMember {
+        name: name.clone(),
         params: Vec::new(),
         ret: ret.clone(),
         is_property: true,
@@ -945,9 +1199,24 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
-        formals,
+        formals: formals.clone(),
         ret_nullable: ret.nullable(),
-    })
+        constant: constant.clone(),
+        param_names: Vec::new(),
+        param_defaults: Vec::new(),
+        vararg: None,
+    };
+    let property = top_level.then(|| metadata::KotlinProperty {
+        name,
+        receiver,
+        ty: ret,
+        formals,
+        visibility: metadata::declaration_visibility(flags),
+        is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        context_count,
+        constant,
+    });
+    Ok((member, property))
 }
 
 fn validate_type_alias(
@@ -1004,20 +1273,21 @@ fn validate_type_alias(
     Ok(())
 }
 
-fn validate_enum_entry(
+fn semantic_enum_entry(
     body: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> Result<(), PackageFragmentDecodeError> {
+) -> Result<String, PackageFragmentDecodeError> {
     validate_annotation_fields(body, &[2, 170], strings, qnames, "enum entry")?;
     let mut cursor = Cursor::new(body, 0);
+    let mut name = None;
     let mut names = 0;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "enum entry")?;
         if number == 1 {
             require_wire(&cursor, wire, 0, "enum entry")?;
             let id = cursor.varint("enum-entry name id")?;
-            semantic_string(strings, id, "enum entry")?;
+            name = Some(semantic_string(strings, id, "enum entry")?);
             names += 1;
         } else {
             cursor.skip(wire, "enum entry")?;
@@ -1028,14 +1298,14 @@ fn validate_enum_entry(
             "enum entry has {names} name fields"
         )));
     }
-    Ok(())
+    name.ok_or_else(|| semantic_error("enum entry has no name"))
 }
 
 fn semantic_constructor(
     body: &[u8],
     tables: &SemanticTables<'_>,
     type_parameters: &std::collections::HashMap<u64, String>,
-) -> Result<metadata::BuiltinConstructor, PackageFragmentDecodeError> {
+) -> Result<metadata::KotlinConstructor, PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
         &[3, 170],
@@ -1071,12 +1341,12 @@ fn semantic_constructor(
             (_, wire) => cursor.skip(wire, "constructor declaration")?,
         }
     }
-    Ok(metadata::BuiltinConstructor {
+    Ok(metadata::KotlinConstructor {
         params,
         param_names: names,
         param_defaults: defaults,
         vararg,
-        visibility: crate::types::Visibility::from_metadata(metadata::flags_visibility(flags)),
+        visibility: crate::types::Visibility::from_metadata((flags >> 1) & 0x7),
     })
 }
 
@@ -1113,7 +1383,7 @@ fn semantic_class(
 ) -> Result<
     (
         String,
-        metadata::BuiltinClass,
+        metadata::KotlinClass,
         std::collections::HashMap<u64, String>,
     ),
     PackageFragmentDecodeError,
@@ -1140,6 +1410,9 @@ fn semantic_class(
     let mut supertype_ids = Vec::new();
     let mut supertype_bodies = Vec::new();
     let mut constructors = Vec::new();
+    let mut enum_entries = Vec::new();
+    let mut sealed_subclasses = Vec::new();
+    let mut inline_class_property = None;
     let mut functions = Vec::new();
     let mut properties = Vec::new();
     let mut type_aliases = Vec::new();
@@ -1169,19 +1442,20 @@ fn semantic_class(
             }
             (16, 0) => {
                 let id = cursor.varint("sealed-subclass qualified-name id")?;
-                semantic_qname(strings, qnames, id, "sealed subclass")?;
+                sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
             }
             (16, 2) => {
                 let (packed, base) = cursor.length_delimited("sealed-subclass names")?;
                 let mut packed = Cursor::new(packed, base);
                 while !packed.at_end() {
                     let id = packed.varint("sealed-subclass qualified-name id")?;
-                    semantic_qname(strings, qnames, id, "sealed subclass")?;
+                    sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
                 }
             }
             (17, 0) => {
                 let id = cursor.varint("inline-class property name id")?;
-                semantic_string(strings, id, "inline-class property")?;
+                inline_class_property =
+                    Some(semantic_string(strings, id, "inline-class property")?);
             }
             (6, 2) => supertype_bodies.push(cursor.length_delimited("class supertype")?.0),
             (8, 2) => constructors.push(cursor.length_delimited("class constructor")?.0),
@@ -1190,7 +1464,7 @@ fn semantic_class(
             (11, 2) => type_aliases.push(cursor.length_delimited("class type alias")?.0),
             (13, 2) => {
                 let entry = cursor.length_delimited("enum entry")?.0;
-                validate_enum_entry(entry, strings, qnames)?;
+                enum_entries.push(semantic_enum_entry(entry, strings, qnames)?);
             }
             (18 | 20, 2) => {
                 let nested = cursor.length_delimited("class semantic type")?.0;
@@ -1245,7 +1519,7 @@ fn semantic_class(
         members.push(member);
     }
     for body in properties {
-        members.push(semantic_property(body, &tables, &type_parameters)?);
+        members.push(semantic_property(body, &tables, &type_parameters, false)?.0);
     }
     for body in type_aliases {
         validate_type_alias(body, &tables, &type_parameters)?;
@@ -1256,7 +1530,7 @@ fn semantic_class(
         .is_some_and(|tail| tail.contains('.'));
     Ok((
         fq_name,
-        metadata::BuiltinClass {
+        metadata::KotlinClass {
             supertypes,
             supertype_tys,
             members,
@@ -1264,11 +1538,16 @@ fn semantic_class(
             companion_name,
             type_params,
             nullable_member_returns,
-            kind: metadata::builtin_class_kind(header.flags),
-            visibility: metadata::builtin_class_visibility(header.flags),
+            enum_entries,
+            sealed_subclasses,
+            inline_class_property,
+            kind: metadata::class_kind(header.flags),
+            is_fun_interface: header.flags & (1 << 14) != 0,
+            visibility: metadata::declaration_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
+            modality: metadata::declaration_modality(header.flags),
             is_nested,
-            access: metadata::builtin_class_access(header.flags),
+            metadata_flags: header.flags,
         },
         type_parameters,
     ))
@@ -1276,7 +1555,7 @@ fn semantic_class(
 
 pub(super) fn parse(
     decoded: DecodedPackageFragment<'_>,
-) -> Result<BuiltinPackage, PackageFragmentDecodeError> {
+) -> Result<KotlinPackage, PackageFragmentDecodeError> {
     let DecodedPackageFragment {
         strings,
         qnames,
@@ -1285,7 +1564,7 @@ pub(super) fn parse(
         file_annotations,
         class_names,
     } = decoded;
-    let mut result = BuiltinPackage::default();
+    let mut result = KotlinPackage::default();
     for annotation in file_annotations {
         validate_annotation(annotation, &strings, &qnames)?;
     }
@@ -1311,7 +1590,11 @@ pub(super) fn parse(
             );
         }
         for body in message_bodies(package, 4, "package declaration")? {
-            semantic_property(body, &tables, &std::collections::HashMap::new())?;
+            let (_, property) =
+                semantic_property(body, &tables, &std::collections::HashMap::new(), true)?;
+            result.properties.push(
+                property.ok_or_else(|| semantic_error("top-level property lost its identity"))?,
+            );
         }
         for body in message_bodies(package, 5, "package declaration")? {
             validate_type_alias(body, &tables, &std::collections::HashMap::new())?;
@@ -1333,7 +1616,7 @@ pub(super) fn parse(
     let mut decoded = (0..classes.len()).map(|_| None).collect::<Vec<
         Option<(
             String,
-            metadata::BuiltinClass,
+            metadata::KotlinClass,
             std::collections::HashMap<u64, String>,
         )>,
     >>();
@@ -1679,6 +1962,30 @@ mod tests {
         );
 
         let package = parse_package_fragment_checked(&bytes).expect("valid isolated tables");
+        assert_eq!(package.functions[0].ret.internal(), Some("kotlin/Unit"));
+    }
+
+    #[test]
+    fn contract_type_id_uses_the_containing_table_when_the_function_has_none() {
+        let (strings, qnames) = kotlin_types(&["Unit", "String"]);
+        let package_table = type_table(&[class_type(1), class_type(2)], None);
+        let mut expression = Vec::new();
+        int_field(&mut expression, 5, 1);
+        let mut effect = Vec::new();
+        bytes_field(&mut effect, 3, &expression);
+        let mut contract = Vec::new();
+        bytes_field(&mut contract, 1, &effect);
+        let mut function = function_with_return(None, Some(0));
+        bytes_field(&mut function, 32, &contract);
+        let bytes = fragment(
+            &strings,
+            &qnames,
+            &package_with_function(&function, Some(&package_table)),
+        );
+
+        let package = parse_package_fragment_checked(&bytes)
+            .expect("contract type id must resolve against the package table");
+        assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/Unit"));
     }
 

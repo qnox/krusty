@@ -892,6 +892,8 @@ mod jvmfield_companion_e2e;
 mod kclass_type_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
+#[path = "klib_semantic_e2e.rs"]
+mod klib_semantic_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -1415,12 +1417,18 @@ mod shadowed_method_tparam_e2e;
 mod short_circuit_e2e;
 #[path = "sibling_generic_custom_serializer_e2e.rs"]
 mod sibling_generic_custom_serializer_e2e;
+#[path = "sibling_value_class_data_class_e2e.rs"]
+mod sibling_value_class_data_class_e2e;
+#[path = "sibling_value_class_serialization_e2e.rs"]
+mod sibling_value_class_serialization_e2e;
 #[path = "smart_cast_member_extension_e2e.rs"]
 mod smart_cast_member_extension_e2e;
 #[path = "smartcast_and_e2e.rs"]
 mod smartcast_and_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
+#[path = "source_map_ranges_e2e.rs"]
+mod source_map_ranges_e2e;
 #[path = "source_map_row_count_e2e.rs"]
 mod source_map_row_count_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
@@ -1653,6 +1661,8 @@ mod unsigned_array_e2e;
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]
 mod unsigned_companion_constant_ty_e2e;
+#[path = "unsigned_default_store_e2e.rs"]
+mod unsigned_default_store_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]

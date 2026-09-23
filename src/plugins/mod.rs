@@ -438,7 +438,7 @@ pub fn run_enabled(
     ir: &mut IrFile,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
+    classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     let uses_serialization = ir.exprs.iter().any(|expression| {
@@ -457,6 +457,7 @@ pub fn run_enabled(
     {
         return;
     }
+    record_external_value_classes(ir, classifiers);
     let external = external_serializers(ir, classifiers);
     // `Some(false)` is the only answer that rules a singleton out. A generated `Foo$$serializer`
     // for a CLASSPATH `@Serializable` class is an object kotlinc synthesized, and the provider has
@@ -475,12 +476,86 @@ pub fn run_enabled(
     enabled_plugins(module_name).run(ir, &ctx);
 }
 
+/// Publish the value classes this file's fields refer to without declaring into common IR's one
+/// value-class fact table. Follow underlying types transitively so a field of `Outer`, whose sole
+/// property is sibling-file `Inner`, never depends on an unrelated direct mention of `Inner`.
+fn record_external_value_classes(
+    ir: &mut IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) {
+    fn collect(ty: Ty, out: &mut Vec<TypeName>) {
+        match ty {
+            Ty::Obj(name, arguments) => {
+                out.push(name);
+                for argument in arguments {
+                    collect(*argument, out);
+                }
+            }
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => collect(*inner, out),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                collect(*inner, out)
+            }
+            Ty::Fun(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .copied()
+                    .for_each(|parameter| collect(parameter, out));
+                collect(signature.ret, out);
+            }
+            Ty::TyParam(_, bound) => collect(*bound, out),
+            _ => {}
+        }
+    }
+    let declared = ir
+        .classes
+        .iter()
+        .map(|class| {
+            (
+                class.fq_name,
+                if class.is_value {
+                    class.fields.first().map(|field| field.ty)
+                } else {
+                    None
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut referenced = Vec::new();
+    for class in &ir.classes {
+        for field in &class.fields {
+            collect(field.ty, &mut referenced);
+        }
+    }
+    let mut visited = std::collections::HashSet::new();
+    let mut resolved = Vec::new();
+    while let Some(name) = referenced.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        if let Some(underlying) = declared.get(&name) {
+            if let Some(underlying) = underlying {
+                collect(*underlying, &mut referenced);
+            }
+            continue;
+        }
+        let Some(underlying) = classifiers.classifier_value_underlying(name) else {
+            continue;
+        };
+        collect(underlying, &mut referenced);
+        resolved.push((name, underlying));
+    }
+    for (name, underlying) in resolved {
+        ir.insert_external_value_class_name(name, underlying);
+    }
+}
+
 /// Field classifiers this file does not declare, normalized through the single checked provider.
 /// Which of the runtime-dependent builtin serializers the ACTIVE artifact carries. Only classes that
 /// are not present in every supported kotlinx.serialization version need listing: the long-standing
 /// primitives are always there, so probing them would cost lookups for no decision.
 fn runtime_serializers(
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
+    classifiers: &dyn crate::types::ClassifierFactSource,
 ) -> std::collections::HashSet<TypeName> {
     serialization::element_serializer::runtime_dependent_serializers()
         .filter(|&serializer| classifiers.classifier_annotations(serializer).is_some())
@@ -489,7 +564,7 @@ fn runtime_serializers(
 
 fn external_serializers(
     ir: &IrFile,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
+    classifiers: &dyn crate::types::ClassifierFactSource,
 ) -> std::collections::HashMap<TypeName, TypeName> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     external_classifier_candidates(ir)
@@ -666,16 +741,25 @@ mod tests {
     use super::*;
     use crate::ir::IrFile;
 
-    struct FakeClassifierAnnotations(
-        std::collections::HashMap<crate::types::TypeName, Vec<crate::types::ResolvedAnnotation>>,
-    );
+    #[derive(Default)]
+    struct FakeClassifierFacts {
+        annotations: std::collections::HashMap<
+            crate::types::TypeName,
+            Vec<crate::types::ResolvedAnnotation>,
+        >,
+        value_underlyings: std::collections::HashMap<crate::types::TypeName, Ty>,
+    }
 
-    impl crate::types::ClassifierAnnotationSource for FakeClassifierAnnotations {
+    impl crate::types::ClassifierFactSource for FakeClassifierFacts {
         fn classifier_annotations(
             &self,
             classifier: crate::types::TypeName,
         ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-            self.0.get(&classifier).cloned()
+            self.annotations.get(&classifier).cloned()
+        }
+
+        fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+            self.value_underlyings.get(&classifier).copied()
         }
     }
 
@@ -741,6 +825,46 @@ mod tests {
         host.run(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), 1);
         assert!(ir.classes[0].fq_name_matches("demo/Generated"));
+    }
+
+    #[test]
+    fn external_value_class_facts_are_exact_and_transitively_shared_with_ir() {
+        let local = crate::types::type_name("fixture/LocalId");
+        let left = crate::types::type_name("left/Id");
+        let right = crate::types::type_name("right/Id");
+        let unrelated = crate::types::type_name("other/Id");
+        let mut ir = IrFile::default();
+        let mut local_class = synthetic_class("fixture/LocalId");
+        local_class.is_value = true;
+        local_class.fields.push(crate::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(left),
+        ));
+        ir.add_class(local_class);
+        let mut holder = synthetic_class("fixture/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "id".to_string(),
+            Ty::obj_name(local),
+        ));
+        ir.add_class(holder);
+        let facts = FakeClassifierFacts {
+            value_underlyings: std::collections::HashMap::from([
+                (left, Ty::obj_name(right)),
+                (right, Ty::Int),
+                (unrelated, Ty::String),
+            ]),
+            ..FakeClassifierFacts::default()
+        };
+
+        record_external_value_classes(&mut ir, &facts);
+
+        assert_eq!(
+            ir.external_value_class_name(left),
+            Some(&Ty::obj_name(right))
+        );
+        assert_eq!(ir.external_value_class_name(right), Some(&Ty::Int));
+        assert_eq!(ir.external_value_class_name(local), None);
+        assert_eq!(ir.external_value_class_name(unrelated), None);
     }
 
     #[test]
@@ -821,16 +945,19 @@ mod tests {
                 Ty::obj_args("fixtures/Envelope", &[Ty::obj_name(payload)]),
             )],
         );
-        let annotations = FakeClassifierAnnotations(std::collections::HashMap::from([(
-            payload,
-            vec![crate::types::ResolvedAnnotation {
-                annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
-                arguments: vec![(
-                    "with".to_owned(),
-                    crate::types::AnnotationValue::Class(serializer),
-                )],
-            }],
-        )]));
+        let annotations = FakeClassifierFacts {
+            annotations: std::collections::HashMap::from([(
+                payload,
+                vec![crate::types::ResolvedAnnotation {
+                    annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
+                    arguments: vec![(
+                        "with".to_owned(),
+                        crate::types::AnnotationValue::Class(serializer),
+                    )],
+                }],
+            )]),
+            ..FakeClassifierFacts::default()
+        };
 
         let resolved = external_serializers(&ir, &annotations);
 
