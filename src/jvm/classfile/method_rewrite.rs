@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::temporaries::{self, Body};
-use super::{negated_jumps, redundant_checkcasts, redundant_gotos};
+use super::{negated_jumps, redundant_checkcasts, redundant_gotos, stack_peephole};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
@@ -477,21 +477,35 @@ impl ClassWriter {
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
         let rewrite_late = rewrite.late_labels.clone();
-        let gotos_changed = redundant_gotos::remove(
+        let late_branch = |index: usize| {
+            branch_labels
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(|label| rewrite_late.contains(&label))
+        };
+        let tables = redundant_gotos::Tables {
+            lines: &lines,
+            variable_bounds: &variable_bounds,
+            protected_starts: &protected_starts,
+            late_branch: &late_branch,
+        };
+        // kotlinc's stack peephole runs after the temporaries pass and before the `goto` cleanup.
+        let handler_entries: Vec<usize> = handlers.iter().map(|handler| handler.handler).collect();
+        let peephole_changed = stack_peephole::optimize(
             &mut rewrite.nodes,
-            &redundant_gotos::Tables {
-                lines: &lines,
-                variable_bounds: &variable_bounds,
-                protected_starts: &protected_starts,
-                late_branch: &|index| {
-                    branch_labels
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .is_some_and(|label| rewrite_late.contains(&label))
+            &tables,
+            &handler_entries,
+            &stack_peephole::Pool {
+                unit_instance: &|field| {
+                    matches!(
+                        self.cp.fieldref_parts(field),
+                        Some(("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;"))
+                    )
                 },
             },
         );
+        let gotos_changed = redundant_gotos::remove(&mut rewrite.nodes, &tables);
         let mut labelled: Vec<bool> = lines
             .iter()
             .zip(&variable_bounds)
@@ -509,7 +523,7 @@ impl ClassWriter {
                 .flatten()
                 .is_some_and(|label| rewrite_late.contains(&label))
         });
-        if !folded_any && !gotos_changed && !jumps_negated {
+        if !folded_any && !peephole_changed && !gotos_changed && !jumps_negated {
             return None;
         }
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
