@@ -38,7 +38,10 @@ fn kotlin_native_stdlib_fragments_publish_complete_common_semantics() {
     let archive = KlibArchive::open(&stdlib)
         .unwrap_or_else(|error| panic!("open {}: {error}", stdlib.display()));
     let fragments = archive.package_fragments();
-    assert!(!fragments.is_empty(), "stdlib KLIB has no metadata fragments");
+    assert!(
+        !fragments.is_empty(),
+        "stdlib KLIB has no metadata fragments"
+    );
 
     let mut classes = 0usize;
     let mut functions = 0usize;

@@ -269,7 +269,7 @@ klib-semantics VERSION=`just max-version`:
     set -euo pipefail
     root="$(just kotlin-native "{{VERSION}}")"
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
-      ./run-tests.sh --test klib_semantic_e2e -- --nocapture
+      ./run-tests.sh --test e2e klib_semantic_e2e -- --nocapture
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
