@@ -24,7 +24,7 @@ mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
-use crate::libraries::InlineKind;
+use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use std::collections::{HashMap, HashSet};
 
@@ -1108,7 +1108,7 @@ pub(crate) fn lower_value_classes(
         }
     }
     for function in lowered_value_members.iter().copied() {
-        super::method_parameters::prepend_compiler_generated(ir, function, "arg0");
+        super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
@@ -1982,11 +1982,17 @@ pub(crate) fn lower_value_classes(
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
         }
+        let own_value_class = c.is_value;
         for a in &mut c.ctor_args {
             // Drop the `<init>` null-check on a param that erased to a non-reference, OR whose value-class
             // underlying chain is null-capable (`ZN2(val z: ZN)` where `ZN(val z: Z1?)` → the value can be
-            // null, so kotlinc emits no check). Then erase the param type itself.
-            if !is_ref(&erase(&a.ty, &under)) || vc_underlying_nullable(&a.ty, &under) {
+            // null, so kotlinc emits no check). A value class's own private `<init>` is reached only
+            // from `box-impl` over an already-checked carrier and has none either. Then erase the param
+            // type itself.
+            if own_value_class
+                || !is_ref(&erase(&a.ty, &under))
+                || vc_underlying_nullable(&a.ty, &under)
+            {
                 a.check = None;
             }
             a.ty = erase(&a.ty, &under);
@@ -2783,6 +2789,42 @@ pub(crate) fn lower_value_classes(
                     callee: Callee::Static {
                         owner: *owner,
                         name: format!("{name}-impl"),
+                        descriptor: format!("({}){ret}", desc(&u)),
+                        inline: InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![*receiver],
+                }))
+            }
+            // A selected semantic `Any` operation over a non-null UNBOXED receiver calls the value
+            // class's static `-impl` directly rather than boxing the receiver to dispatch. The
+            // provider attached the role to the exact declaration, and external-call realization
+            // retained it on this exact call; this pass does not rediscover the declaration from a
+            // JVM owner or method spelling.
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if args.is_empty()
+                && ir.semantic_call_roles.contains_key(&id)
+                && repr_ctx.operand_nonnull(*receiver)
+                && matches!(repr_ctx.repr(*receiver), Repr::Unboxed(_)) =>
+            {
+                let (name, ret) = match ir.semantic_call_roles[&id] {
+                    SemanticCallRole::KotlinAnyHashCode => ("hashCode-impl", "I"),
+                    SemanticCallRole::KotlinAnyToString => ("toString-impl", "Ljava/lang/String;"),
+                };
+                let Repr::Unboxed(value_class) = repr_ctx.repr(*receiver) else {
+                    unreachable!("guarded unboxed receiver")
+                };
+                let u = under
+                    .get(&value_class)
+                    .map(|t| erase(t, &under))
+                    .unwrap_or(Ty::Error);
+                Some(Rw::Ctor(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: value_class,
+                        name: name.to_owned(),
                         descriptor: format!("({}){ret}", desc(&u)),
                         inline: InlineKind::None,
                     },
@@ -3686,9 +3728,12 @@ pub(crate) fn lower_value_classes(
             | IrExpr::InvokeFunction { args, .. }
             | IrExpr::Vararg { elements: args, .. }
             // A value-class part of a string template flows into `StringBuilder.append(Object)` /
-            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`).
+            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`) — unless it
+            // is a non-null unboxed value, which kotlinc renders directly through the static
+            // `toString-impl` over its carrier.
             | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
             {
+                let template = matches!(&ir.exprs[id as usize], IrExpr::StringConcat(_));
                 for a in args.clone() {
                     let representation = repr_ctx.repr(a);
                     crate::trace_compiler!(
@@ -3702,7 +3747,11 @@ pub(crate) fn lower_value_classes(
                         }
                     );
                     if let Repr::Unboxed(x) = representation {
-                        ops.push((a, repr_ctx.box_op(a, x)));
+                        let op = match repr_ctx.box_op(a, x) {
+                            BoxOp::Box(x) if template => BoxOp::StringOf(x),
+                            op => op,
+                        };
+                        ops.push((a, op));
                     }
                 }
             }
@@ -4174,6 +4223,7 @@ pub(crate) fn lower_value_classes(
                 BoxOp::Unbox(_) => "Unbox",
                 BoxOp::UnboxNull(_) => "UnboxNull",
                 BoxOp::Narrow(_) => "Narrow",
+                BoxOp::StringOf(_) => "StringOf",
             }
         );
         // Box/unbox a value class at a boundary uniformly — a classpath value class (`kotlin/Result`) has
@@ -4204,6 +4254,7 @@ pub(crate) fn lower_value_classes(
                 fresh += 1;
             }
             BoxOp::Narrow(x) => narrow_wrap(ir, id, x),
+            BoxOp::StringOf(x) => to_string_wrap(ir, id, x, &under),
         }
     }
 
@@ -4668,6 +4719,8 @@ enum BoxOp {
     Unbox(TypeName),
     UnboxNull(TypeName),
     Narrow(TypeName),
+    /// Render a non-null unboxed value as text through its class's static `toString-impl`.
+    StringOf(TypeName),
 }
 
 /// The representation a value-class value currently has.
@@ -6083,6 +6136,25 @@ fn box_nullable_vc_tail(
 }
 
 /// Replace the expr at `id` with `box-impl(<original expr at id>)`.
+/// Replace the unboxed value at `id` with `X.toString-impl(value)`.
+fn to_string_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
+    let new_id = clone_below_representation_wrapper(ir, id);
+    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
+    ir.exprs[id as usize] = IrExpr::Call {
+        callee: Callee::Static {
+            owner: x,
+            name: "toString-impl".to_string(),
+            descriptor: format!("({})Ljava/lang/String;", desc(&u)),
+            inline: InlineKind::None,
+        },
+        dispatch_receiver: None,
+        args: vec![new_id],
+    };
+    ir.physical_types.insert(id, Ty::String);
+    // The part is still a value-class operand: its text is appended as that type, not as a String.
+    ir.logical_types.insert(id, Ty::obj_name(x));
+}
+
 fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     let new_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
