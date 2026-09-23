@@ -64,6 +64,19 @@ pub(super) fn child_cache_element_plan(
         .ok_or(UnderivableChildCacheElement)
 }
 
+/// Preserve an element whose required serializer could not be emitted as an explicit plugin-owned
+/// residual. A literal `null` would turn the invalid state into bytecode and defer the failure to
+/// the serialization runtime; an unhandled placeholder makes every backend decline the file.
+pub(super) fn unsupported_element_serializer(ir: &mut IrFile, ty: Ty) -> ExprId {
+    ir.add_expr(IrExpr::PluginPlaceholder {
+        plugin: "serialization",
+        kind: "element-serializer",
+        exprs: Vec::new(),
+        data: ty.kotlin_class_internal().into_iter().collect(),
+        types: vec![ty],
+    })
+}
+
 #[derive(Clone, Copy)]
 struct BuiltinSerializer {
     classifier: TypeName,
