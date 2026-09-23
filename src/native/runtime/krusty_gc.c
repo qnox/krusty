@@ -221,19 +221,44 @@ static void kt_trace(void) {
 }
 
 /* A word found by scanning the stack or the registers, rather than read from a slot the program
-   declared, may be a pointer one past the end of an object: a C compiler walking an array may keep
-   only the loop's end pointer once the base is dead. When the object fills its slot exactly, that
-   address is the next slot's start, or lies past the chunk altogether, so it also counts for the
-   object that ends there. The price is that a pointer to an object's start keeps the object before
-   it alive as well, for as long as the pointer is found: a bounded false retention per root word.
-   Padding every object instead would never retain a neighbour, but would move every object whose
-   size is exactly a class size, the commonest being a header and one field, up into the next
-   class. A field of a heap object is traced precisely and always holds an object's start, so only
-   the scanned roots pay this. */
+   declared, may be a pointer one past the end of an ARRAY: a C compiler walking an array's
+   elements may keep only the loop's end pointer once the base is dead. When the array fills its
+   slot exactly, that address is the next slot's start, or lies past the chunk altogether, so on its
+   own it would reach the wrong object or none.
+
+   So a scanned word also counts for the array whose elements end exactly there. Only an array: its
+   elements are what a loop walks, and no C code forms the end of a plain object. Only its exact
+   end, read from the array's own length. A pointer to an object's start therefore keeps nothing
+   else alive — the object allocated just before it is retained only if it is an array ending at
+   that very address. A field of a heap object is traced precisely and always holds an object's
+   start, so only the scanned roots are asked this. */
+static void kt_mark_array_ending_at(uintptr_t end) {
+    uintptr_t last = end - 1;
+    KChunk *chunk = kt_chunk_of(last);
+    if (chunk == NULL) {
+        return;
+    }
+    uint32_t index = (uint32_t)((last - (uintptr_t)chunk->objects) / chunk->object_size);
+    if (!kt_bit(chunk->allocated, index)) {
+        return;
+    }
+    const uint8_t *object = chunk->objects + (size_t)index * chunk->object_size;
+    const KType *type = ((const KObjectHeader *)object)->type;
+    if (type == NULL || type->element_size == 0) {
+        return;
+    }
+    const KArray *array = (const KArray *)object;
+    uintptr_t elements_end = (uintptr_t)object + type->instance_size +
+                             (uintptr_t)(uint32_t)array->length * type->element_size;
+    if (elements_end == end) {
+        kt_mark_candidate(last);
+    }
+}
+
 static void kt_mark_scanned(uintptr_t address) {
     kt_mark_candidate(address);
     if (address != 0) {
-        kt_mark_candidate(address - 1);
+        kt_mark_array_ending_at(address);
     }
 }
 
