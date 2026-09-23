@@ -141,7 +141,11 @@ impl CallArgKind {
     /// reads as the declared bound (`ArrayList<Any>`) or stays free (`Set<T>`), and treating either
     /// as evidence discards the element type the expectation would have supplied.
     pub(crate) fn result_is_input_constrained(&self) -> bool {
-        let Self::ExpectedTypeCallable { provisional, generic_sig } = self else {
+        let Self::ExpectedTypeCallable {
+            provisional,
+            generic_sig,
+        } = self
+        else {
             return false;
         };
         // A provisional that still mentions a type parameter is not determined: `"OK" to
