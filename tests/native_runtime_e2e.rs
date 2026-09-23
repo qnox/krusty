@@ -189,7 +189,7 @@ fn every_registered_global_root_is_kept_past_four_thousand() {
 }
 
 #[test]
-fn a_pointer_one_past_an_object_keeps_it_alive() {
+fn only_an_arrays_end_pointer_keeps_it_alive_and_no_neighbour_is_kept() {
     run_driver("gc_end_pointer_keeps_object");
 }
 
@@ -352,6 +352,11 @@ fn an_array_list_of_negative_capacity_raises() {
 #[test]
 fn walking_a_string_is_linear_and_yields_its_utf16_units() {
     run_driver("string_iterator_linear");
+}
+
+#[test]
+fn a_programs_own_text_is_asked_its_length_once_per_step() {
+    run_driver("program_text_walk_asks_length_once_per_step");
 }
 
 #[test]
