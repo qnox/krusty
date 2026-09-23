@@ -18,6 +18,7 @@ pub(super) mod element_serializer;
 mod enum_serializer;
 mod generated_classifier;
 mod generated_members;
+mod property_default;
 mod serialize_body;
 mod value_class_types;
 

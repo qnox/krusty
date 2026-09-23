@@ -324,75 +324,118 @@ impl SerializeBody<'_> {
                 bail = true;
                 break;
             }
-            // OPTIONAL element (a constant default): omit it on encode when it still
-            // equals the default — wrap the just-pushed encode call in
+            // OPTIONAL element: omit it on encode when it still equals the default — wrap the
+            // just-pushed encode call in
             //   if (c.shouldEncodeElementDefault(desc, i) || value.getX() != default) { … }
-            if let Some(Some(dc)) = field_defaults.get(i) {
-                if stmts.len() == n_before + 1 {
-                    let enc_stmt = stmts.pop().unwrap();
-                    let cd = if delegate {
-                        ir.add_expr(IrExpr::GetValue(2))
-                    } else {
-                        this_desc(ir)
-                    };
-                    let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                    let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
-                    let should = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeEncoder",
-                            "shouldEncodeElementDefault",
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
-                        ),
-                        dispatch_receiver: Some(cc),
-                        args: vec![cd, ci],
-                    });
-                    // Re-read the property because one IR expression cannot occupy two tree nodes.
-                    let Some(cur) = read_property(ir, i, pname, ty) else {
-                        bail = true;
-                        break;
-                    };
-                    let def = ir.add_expr(IrExpr::Const(dc.clone()));
-                    // The default value carries the property's own declaration line, as it does in
-                    // the deserialization constructor. The comparison that consumes it is marked
-                    // back to the statement's line by the emitter, which is where that rule lives.
-                    // A `null` default is excluded: it is tested with `ifnull`, which pushes
-                    // nothing, and kotlinc marks no line for it.
-                    if !matches!(dc, IrConst::Null) {
-                        if let Some(line) = ir
-                            .prop_decl_lines
-                            .get(&(serialized_name, pname.clone()))
-                            .copied()
-                            .filter(|line| *line != 0)
-                        {
-                            ir.expr_source_lines.insert(def, line);
+            // A constant default is compared as that constant. Any other default is the property's
+            // checked initializer, evaluated again here with an earlier property read off the
+            // object being written, which is what kotlinc's `write$Self` does.
+            let constant_default = field_defaults.get(i).cloned().flatten();
+            let computed_default = constant_default.is_none()
+                && ir.classes[foo_id as usize]
+                    .fields
+                    .get(i)
+                    .is_some_and(crate::ir::IrField::has_default);
+            if (constant_default.is_some() || computed_default) && stmts.len() == n_before + 1 {
+                let enc_stmt = stmts.pop().unwrap();
+                let cd = if delegate {
+                    ir.add_expr(IrExpr::GetValue(2))
+                } else {
+                    this_desc(ir)
+                };
+                let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
+                let should = ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface(
+                        "kotlinx/serialization/encoding/CompositeEncoder",
+                        "shouldEncodeElementDefault",
+                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
+                    ),
+                    dispatch_receiver: Some(cc),
+                    args: vec![cd, ci],
+                });
+                // Re-read the property because one IR expression cannot occupy two tree nodes.
+                let Some(cur) = read_property(ir, i, pname, ty) else {
+                    bail = true;
+                    break;
+                };
+                let def = match &constant_default {
+                    Some(dc) => {
+                        let def = ir.add_expr(IrExpr::Const(dc.clone()));
+                        // The default value carries the property's own declaration line, as
+                        // it does in the deserialization constructor. The comparison that
+                        // consumes it is marked back to the statement's line by the emitter,
+                        // which is where that rule lives. A `null` default is excluded: it is
+                        // tested with `ifnull`, which pushes nothing, and kotlinc marks no
+                        // line for it.
+                        if !matches!(dc, IrConst::Null) {
+                            if let Some(line) = ir
+                                .prop_decl_lines
+                                .get(&(serialized_name, pname.clone()))
+                                .copied()
+                                .filter(|line| *line != 0)
+                            {
+                                ir.expr_source_lines.insert(def, line);
+                            }
                         }
+                        def
                     }
-                    let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: crate::ir::IrBinOp::Ne,
-                        lhs: cur,
-                        rhs: def,
-                    });
-                    // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
-                    // `true` without reading the property at all, otherwise fall through to the
-                    // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
-                    // in a temp and combines with `ior`, which is a different method body from
-                    // kotlinc's for every defaulted property in the class.
-                    let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-                    let cond = ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(should), encode_anyway), (None, neq)],
-                    });
-                    let guard = ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(cond), enc_stmt)],
-                    });
-                    // The guard is a statement of the class's own declaration, so it carries the
-                    // class's start line. That is also what puts the emitter's "current statement
-                    // line" in effect, which the comparison inside the condition returns to.
-                    let start_line = ir.classes[foo_id as usize].decl_start_line;
-                    if start_line != 0 {
-                        ir.expr_lines.insert(guard, start_line);
+                    None => {
+                        let mut read_parameter = |ir: &mut IrFile, parameter: usize| {
+                            let (name, ty) = fields.get(parameter)?;
+                            read_property(ir, parameter, name, ty)
+                        };
+                        let Some(def) = super::property_default::default_in_write_frame(
+                            ir,
+                            serialized_name,
+                            i,
+                            super::property_default::WriteFrame {
+                                first_free_local: if delegate {
+                                    cache_local + u32::from(plan.is_some())
+                                } else {
+                                    encoder_slot + 1
+                                },
+                                read_property: &mut read_parameter,
+                                property_line: ir
+                                    .prop_decl_lines
+                                    .get(&(serialized_name, pname.clone()))
+                                    .copied()
+                                    .filter(|line| *line != 0),
+                                read_line: Some(ir.classes[foo_id as usize].decl_start_line)
+                                    .filter(|line| *line != 0),
+                            },
+                        ) else {
+                            bail = true;
+                            break;
+                        };
+                        def
                     }
-                    stmts.push(guard);
+                };
+                let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: crate::ir::IrBinOp::Ne,
+                    lhs: cur,
+                    rhs: def,
+                });
+                // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
+                // `true` without reading the property at all, otherwise fall through to the
+                // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
+                // in a temp and combines with `ior`, which is a different method body from
+                // kotlinc's for every defaulted property in the class.
+                let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                let cond = ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(should), encode_anyway), (None, neq)],
+                });
+                let guard = ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(cond), enc_stmt)],
+                });
+                // The guard is a statement of the class's own declaration, so it carries the
+                // class's start line. That is also what puts the emitter's "current statement
+                // line" in effect, which the comparison inside the condition returns to.
+                let start_line = ir.classes[foo_id as usize].decl_start_line;
+                if start_line != 0 {
+                    ir.expr_lines.insert(guard, start_line);
                 }
+                stmts.push(guard);
             }
         }
         let delegated_write_self = delegate.then_some(write_self).flatten();

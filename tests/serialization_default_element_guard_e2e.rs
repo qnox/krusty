@@ -95,3 +95,75 @@ fn a_defaulted_element_is_guarded_the_way_kotlinc_guards_it() {
         "Opt.write$Self$main"
     );
 }
+
+/// A default that is not a constant — an expression over an earlier property — is still a default.
+/// kotlinc re-evaluates the initializer in `write$Self`, reading the earlier property off the object
+/// being written, and skips the element when the value still equals it:
+///
+/// ```text
+/// if (output.shouldEncodeElementDefault(desc, i) || self.next != self.x + 1) { … }
+/// ```
+///
+/// krusty guarded constant defaults only, so every computed default was written unconditionally and
+/// `Json.encodeToString` (which does not encode defaults) produced a different document.
+#[test]
+fn a_computed_default_is_guarded_the_way_kotlinc_guards_it() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Computed(val x: Int, val next: Int = x + 1, val scaled: Long = x * 2L)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("ComputedDefaultGuard", src, "Computed", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_body(&built.reference, "write$Self$main");
+    assert_eq!(
+        want.iter()
+            .filter(|row| row.contains("shouldEncodeElementDefault"))
+            .count(),
+        2,
+        "the fixture must exercise one guard per computed default: {want:?}"
+    );
+    assert_eq!(
+        method_body(&built.krusty, "write$Self$main"),
+        want,
+        "Computed.write$Self$main"
+    );
+}
+
+/// The observable half: with `Json`'s default configuration (`encodeDefaults = false`) an element
+/// still holding its computed default is left out, and decoding the shorter document rebuilds it.
+#[test]
+fn a_computed_default_is_omitted_from_json_like_kotlinc() {
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.json.Json\n\
+               \n\
+               @Serializable\n\
+               data class Computed(\n\
+               \x20   val x: Int,\n\
+               \x20   val tags: List<String> = listOf(\"a\"),\n\
+               \x20   val next: Int = x + 1,\n\
+               \x20   val label: String = \"n$x\",\n\
+               )\n\
+               \n\
+               fun box(): String {\n\
+               \x20   val defaults = Json.encodeToString(Computed.serializer(), Computed(1))\n\
+               \x20   val changed = Json.encodeToString(Computed.serializer(), Computed(1, listOf(\"b\"), 5, \"z\"))\n\
+               \x20   val all = Json { encodeDefaults = true }.encodeToString(Computed.serializer(), Computed(1))\n\
+               \x20   val back = Json.decodeFromString(Computed.serializer(), defaults)\n\
+               \x20   return \"$defaults $changed $all $back\"\n\
+               }\n";
+    let outcome = super::serialization_test_support::both_compilers_box(src, "computed_default");
+    assert_eq!(
+        outcome,
+        "{\"x\":1} {\"x\":1,\"tags\":[\"b\"],\"next\":5,\"label\":\"z\"} \
+         {\"x\":1,\"tags\":[\"a\"],\"next\":2,\"label\":\"n1\"} \
+         Computed(x=1, tags=[a], next=2, label=n1)"
+    );
+}

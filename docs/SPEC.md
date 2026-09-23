@@ -6189,6 +6189,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **A computed property default is an optional element's default too.** A defaulted property is
+  written only when the encoder asks for defaults or the value differs from the default:
+  `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,
+  so `val tags: List<String> = listOf("a")` or `val next: Int = x + 1` was written every time and
+  `Json.encodeToString` (whose `encodeDefaults` is `false`) produced a longer document than kotlinc's.
+  `write$Self` now evaluates the property's checked initializer again, as kotlinc does: a private
+  copy of the constructor default, with each constructor parameter it reads replaced by that
+  property of the object being written and its own locals moved above the method's. An initializer
+  that reads the constructor receiver itself cannot be re-framed and keeps the file unsupported.
+  Tests: `tests/serialization_default_element_guard_e2e.rs`
+  (`a_computed_default_is_guarded_the_way_kotlinc_guards_it`, instruction parity with kotlinc, and
+  `a_computed_default_is_omitted_from_json_like_kotlinc`, the JSON under both compilers).
 - **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
   extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
   `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for
