@@ -109,26 +109,19 @@ fn intrinsic_binary_operation(
     })
 }
 
-/// Operand types of an exact compiler-supplied primitive operation. Arithmetic and bitwise
-/// declarations expose the carrier/result type after Kotlin numeric promotion (`Long.minus(Int)`
-/// returns `Long`, so both operands of the primitive subtraction are `Long`). Shift declarations
-/// deliberately keep their count parameter distinct (`Long.shl(Int)`).
+/// Operation and operand types of an exact compiler-supplied primitive binary declaration. The
+/// operand carriers are the provider-owned rule shared with target realization of references.
 fn intrinsic_binary_semantics(
     intrinsic: crate::libraries::CompilerIntrinsic,
     parameter: Ty,
     result: Ty,
 ) -> Option<(FirBinaryOperation, Ty, Ty)> {
     let operation = intrinsic_binary_operation(intrinsic)?;
-    let result = result.canonical_semantic().non_null();
-    let argument = match intrinsic {
-        crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
-        | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
-        | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight => {
-            parameter.canonical_semantic().non_null()
-        }
-        _ => result,
-    };
-    Some((operation, result, argument))
+    let (receiver, argument) =
+        crate::libraries::builtin_member_realization::primitive_binary_operands(
+            intrinsic, parameter, result,
+        )?;
+    Some((operation, receiver, argument))
 }
 
 impl BodyFirChecker<'_> {
@@ -143,15 +136,10 @@ impl BodyFirChecker<'_> {
         let [parameter] = selected.member.params.as_slice() else {
             return None;
         };
-        let receiver_ty = selected.receiver.canonical_semantic().non_null();
-        let parameter_ty = parameter.canonical_semantic().non_null();
-        if (receiver_ty == Ty::Boolean && parameter_ty == Ty::Boolean)
-            || (receiver_ty == Ty::Char && parameter_ty == Ty::Char)
-        {
-            Some(Ty::Int)
-        } else {
-            Ty::promote(receiver_ty, parameter_ty)
-        }
+        crate::libraries::builtin_member_realization::primitive_compare_operand(
+            selected.receiver,
+            *parameter,
+        )
     }
 
     fn primitive_compare_call(
