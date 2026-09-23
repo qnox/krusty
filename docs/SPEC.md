@@ -5598,6 +5598,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
+  calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
+  arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and
+  the expected type exactly as for `java.util.LinkedHashMap(a)`. krusty handed the expansion, with the
+  alias formals still open, to constructor selection as if it had been written, which bound the
+  constructor's own `K`/`V` to the alias's unrelated `K`/`V`: `LinkedHashMap(a)` with `a: Map<K, V>`
+  was rejected against `Map<out K, out V>!`, and every such call was typed with the alias formals
+  (`HashMap(m)` as `HashMap<K, V>`). Only a target argument that mentions no open alias formal is
+  fixed by the alias (`String` in `typealias Keyed<V> = Entry<String, V>`, so `Keyed(1, 2)` is still
+  an argument mismatch); the others are inference positions, and the expansion decides where each
+  one lands (`typealias Flipped<X, Y> = Entry<Y, X>`). Owner:
+  `src/resolve/alias_constructor_application.rs`. Tests:
+  `tests/typealias_constructor_inference_e2e.rs::an_omitted_stdlib_alias_argument_is_inferred_from_the_constructor_arguments`,
+  `tests/typealias_constructor_inference_e2e.rs::an_omitted_source_alias_argument_is_inferred_through_the_alias_expansion`.
 - **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
