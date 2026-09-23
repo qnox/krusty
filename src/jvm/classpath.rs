@@ -28,6 +28,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode, ReadError};
+use crate::jvm::compilation_inputs::{
+    classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
+};
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
@@ -39,11 +42,7 @@ use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 /// An explicit home takes precedence over `JAVA_HOME`. Missing or invalid homes are a no-op so
 /// callers can combine this with an explicit classpath without making environment setup mandatory.
 pub fn platform_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
-    let base = jdk_home
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
-    let modules = base.join("lib").join("modules");
-    modules.is_file().then_some(modules)
+    super::compilation_inputs::selected_jdk_modules(jdk_home)
 }
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
@@ -1468,30 +1467,10 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
 /// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
 /// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
 pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
-    use super::metadata::BuiltinTy;
-    let ty = match t {
-        BuiltinTy::Class { internal, args, .. } => {
-            let args = args
-                .iter()
-                .map(|argument| builtin_ty(argument, bounds))
-                .collect();
-            super::metadata::gsig_from_kotlin_class(internal, args, false, 0)
-        }
-        BuiltinTy::Param { name, .. } => {
-            let bound = bounds
-                .get(name)
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            Ty::ty_param(name, bound)
-        }
-        BuiltinTy::InProjection(inner) => Ty::in_projection(builtin_ty(inner, bounds)),
-        BuiltinTy::OutProjection(inner) => Ty::out_projection(builtin_ty(inner, bounds)),
-    };
-    if t.nullable() {
-        Ty::nullable(ty)
-    } else {
-        ty
-    }
+    crate::metadata::semantic::semantic_ty(
+        &super::metadata::builtin_bridge::ty_to_common(t),
+        bounds,
+    )
 }
 
 /// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
@@ -2127,29 +2106,20 @@ impl Classpath {
             .iter()
             .map(|path| friend_paths.contains(path))
             .collect::<Vec<_>>();
+        let common_expectation_klib =
+            JvmCompilationInputInventory::from_effective_classpath(&paths)
+                .common_expectation_klib()
+                .map(Path::to_path_buf);
         let entries: Vec<Entry> = paths
             .into_iter()
-            .map(|p| {
-                let is_archive = p
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("jar") || e.eq_ignore_ascii_case("zip"))
-                    .unwrap_or(false);
-                // A JDK jimage is conventionally `<jdk>/lib/modules` (a file named `modules`).
-                let is_jimage = p.is_file() && p.file_name().map_or(false, |n| n == "modules");
-                let is_ct_sym = p.is_file() && p.file_name().map_or(false, |n| n == "ct.sym");
-                if is_ct_sym && jdk_release.is_some() {
-                    Entry::CtSym {
-                        path: p,
-                        release: jdk_release.expect("guarded JDK release"),
-                    }
-                } else if is_jimage {
-                    Entry::Jimage(p)
-                } else if is_archive {
-                    Entry::Jar(p)
-                } else {
-                    Entry::Dir(p)
-                }
+            .map(|path| match classify_classpath_entry(&path, jdk_release) {
+                JvmClasspathEntryKind::CtSym => Entry::CtSym {
+                    path,
+                    release: jdk_release.expect("classified with a JDK release"),
+                },
+                JvmClasspathEntryKind::JdkImage => Entry::Jimage(path),
+                JvmClasspathEntryKind::Archive => Entry::Jar(path),
+                JvmClasspathEntryKind::Directory => Entry::Dir(path),
             })
             .collect();
         let snapshot = entries
@@ -2165,17 +2135,6 @@ impl Classpath {
                 jdk_release: entry.jdk_release(),
             })
             .collect::<Vec<_>>();
-        let common_expectation_klib = entries.iter().find_map(|entry| {
-            let Entry::Jar(stdlib) = entry else {
-                return None;
-            };
-            let file_name = stdlib.file_name()?.to_str()?;
-            if file_name != "kotlin-stdlib.jar" {
-                return None;
-            }
-            let klib = stdlib.parent()?.join("kotlin-stdlib-wasm-js.klib");
-            klib.exists().then_some(klib)
-        });
         // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
         // thrashes (every eviction re-composes a type/namespace record or re-decodes metadata). The
@@ -3346,149 +3305,17 @@ impl Classpath {
                             }
                         });
                     let physical_name = (physical_name != m.name).then_some(physical_name);
-                    let builtin_scalar = |name: TypeName| {
-                        [
-                            ("kotlin/Int", Ty::Int),
-                            ("kotlin/Byte", Ty::Byte),
-                            ("kotlin/Short", Ty::Short),
-                            ("kotlin/Long", Ty::Long),
-                            ("kotlin/Float", Ty::Float),
-                            ("kotlin/Double", Ty::Double),
-                            ("kotlin/Char", Ty::Char),
-                            ("kotlin/Boolean", Ty::Boolean),
-                        ]
-                        .into_iter()
-                        .find_map(|(candidate, ty)| name.matches(candidate).then_some(ty))
-                    };
-                    let declared_result_scalar = match m.generic_sig.ret.non_null() {
-                        Ty::Obj(name, _) => builtin_scalar(name),
-                        result => result.scalar_value_repr(),
-                    };
-                    let realization = match (internal_id, m.name.as_str()) {
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar.is_some()
-                                && matches!(name, "unaryPlus" | "unaryMinus") =>
-                        {
-                            let operation = if name == "unaryPlus" {
-                                crate::libraries::PrimitiveUnaryIntrinsic::Identity
-                            } else {
-                                crate::libraries::PrimitiveUnaryIntrinsic::Negate
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveUnary(operation),
-                            )
-                        }
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar.is_some()
-                                && matches!(
-                                    name,
-                                    "toInt"
-                                        | "toByte"
-                                        | "toShort"
-                                        | "toLong"
-                                        | "toFloat"
-                                        | "toDouble"
-                                        | "toChar"
-                                ) =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::NumericConversion,
-                            )
-                        }
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.len() == 1
-                                && declared_result_scalar.is_some()
-                                && matches!(name, "plus" | "minus" | "times" | "div" | "rem") =>
-                        {
-                            let operation = match name {
-                                "plus" => crate::libraries::PrimitiveBinaryIntrinsic::Add,
-                                "minus" => crate::libraries::PrimitiveBinaryIntrinsic::Subtract,
-                                "times" => crate::libraries::PrimitiveBinaryIntrinsic::Multiply,
-                                "div" => crate::libraries::PrimitiveBinaryIntrinsic::Divide,
-                                "rem" => crate::libraries::PrimitiveBinaryIntrinsic::Remainder,
-                                _ => unreachable!("guard admits only primitive binary arithmetic"),
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveBinary(operation),
-                            )
-                        }
-                        (owner, "compareTo")
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.len() == 1
-                                && declared_result_scalar == Some(Ty::Int)
-                                && match m.generic_sig.params[0].non_null() {
-                                    Ty::Obj(parameter, _) => builtin_scalar(parameter).is_some(),
-                                    parameter => parameter.is_jvm_scalar(),
-                                } =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveCompare,
-                            )
-                        }
-                        (owner, "not")
-                            if builtin_scalar(owner) == Some(Ty::Boolean)
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar == Some(Ty::Boolean) =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::BooleanNot,
-                            )
-                        }
-                        (owner, name)
-                            if matches!(
-                                builtin_scalar(owner),
-                                Some(Ty::Int | Ty::Long | Ty::Boolean)
-                            ) && m.generic_sig.ret == builtin_scalar(owner).unwrap()
-                                && ((name == "inv" && m.generic_sig.params.is_empty())
-                                    || (matches!(name, "and" | "or" | "xor")
-                                        && m.generic_sig.params.as_slice()
-                                            == [builtin_scalar(owner).unwrap()])
-                                    || (matches!(name, "shl" | "shr" | "ushr")
-                                        && matches!(
-                                            builtin_scalar(owner),
-                                            Some(Ty::Int | Ty::Long)
-                                        )
-                                        && m.generic_sig.params.as_slice() == [Ty::Int])) =>
-                        {
-                            let intrinsic = match name {
-                                "and" => crate::libraries::CompilerIntrinsic::PrimitiveBitAnd,
-                                "or" => crate::libraries::CompilerIntrinsic::PrimitiveBitOr,
-                                "xor" => crate::libraries::CompilerIntrinsic::PrimitiveBitXor,
-                                "shl" => crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft,
-                                "shr" => crate::libraries::CompilerIntrinsic::PrimitiveShiftRight,
-                                "ushr" => {
-                                    crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
-                                }
-                                "inv" => crate::libraries::CompilerIntrinsic::PrimitiveBitNot,
-                                _ => unreachable!("guard admits only primitive bit operations"),
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(intrinsic)
-                        }
-                        (owner, "plus")
-                            if owner.matches("kotlin/String")
-                                && m.generic_sig.params.as_slice()
-                                    == [Ty::nullable(Ty::obj("kotlin/Any"))]
-                                && m.generic_sig.ret == Ty::String =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::StringPlus,
-                            )
-                        }
-                        (_, "rangeTo") => crate::libraries::MemberRealization::RangeConstruction {
-                            open_end: false,
+                    let realization = crate::libraries::builtin_member_realization::realization(
+                        crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                            owner: internal_id,
+                            name: &m.name,
+                            params: &m.generic_sig.params,
+                            ret: m.generic_sig.ret,
+                            is_property: m.is_property,
+                            is_operator: m.is_operator,
+                            is_infix: m.is_infix,
                         },
-                        (_, "rangeUntil") => {
-                            crate::libraries::MemberRealization::RangeConstruction {
-                                open_end: true,
-                            }
-                        }
-                        _ => crate::libraries::MemberRealization::Dispatch,
-                    };
+                    );
                     crate::libraries::LibraryMember {
                         external_identity: None,
                         external_default_provider: None,
@@ -4326,16 +4153,6 @@ impl Classpath {
                 .insert(internal_id, found.clone());
         }
         found
-    }
-
-    /// Exact JVM value-class declaration facts for one dependency classifier. This is a physical
-    /// realization query: overload selection and Kotlin type inference have already completed.
-    pub(super) fn value_class_declaration(
-        &self,
-        internal: TypeName,
-    ) -> Option<super::value_class_declarations::ValueClassDeclaration> {
-        let class = self.find_name(internal)?;
-        super::value_class_declarations::from_class_info(&class)
     }
 
     /// JVM storage for an already-resolved Kotlin singleton classifier. FIR/common IR carry only

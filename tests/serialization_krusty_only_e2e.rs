@@ -595,11 +595,11 @@ fun box(): String {
 
 #[test]
 fn collection_field_serializer_in_krusty() {
-    // Standard COLLECTION fields (`List<T>`/`Set<T>`/`Map<K,V>`) serialize through the kotlinx builtin
-    // collection serializers — `ListSerializer(elem)`, `SetSerializer(elem)`, `MapSerializer(k, v)` (from
-    // `BuiltinSerializersKt`), over recursively-derived element serializers — INCLUDING deeply-nested
-    // generics (`List<List<String>>`, whose inner element types are recovered recursively). Full
-    // encode + decode round-trip.
+    // Standard COLLECTION fields (`List<T>`/`Set<T>`/`Map<K,V>`) construct the kotlinx runtime's
+    // `ArrayListSerializer`, `LinkedHashSetSerializer`, or `LinkedHashMapSerializer` over
+    // recursively-derived element serializers — INCLUDING deeply-nested generics
+    // (`List<List<String>>`, whose inner element types are recovered recursively). Full encode +
+    // decode round-trip.
     let src = r#"import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
