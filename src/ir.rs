@@ -2712,14 +2712,14 @@ pub struct IrFile {
     /// classpath analogue of the IR inliner's `reified_subst` (which only has same-file bodies). The
     /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
-    /// Members a compiler plugin generated that must emit AFTER the serialization deserialization
-    /// constructor rather than with the declared members.
+    /// Exact methods the serialization child cache generated: its factories and accessor.
     ///
     /// kotlinc's member order for a `@Serializable` class puts the deserialization `<init>`
     /// directly after `write$Self`, and the child-serializer cache's factories and `…$cp` accessor
-    /// after it. Both are generated, so neither carries a source order to sort by; the constructor
-    /// is already placed explicitly and these follow it.
-    pub members_after_serialization_ctor: std::collections::HashSet<u32>,
+    /// after it. They carry no source order or source-callable generic signature; this identity set
+    /// lets the JVM boundary realize both facts without treating every synthetic method alike.
+    pub serialization_cache_methods: std::collections::HashSet<u32>,
+
     /// Extension-call `ExprId` → the extension's DECLARED (un-erased) receiver source type, forwarded
     /// verbatim from the checked callable's `source_receiver`. Common lowering records it with no
     /// value-class reasoning; the value-class pass reads it to decide box/unbox at the receiver. The signal
@@ -3080,6 +3080,18 @@ impl IrFile {
             self.classes[class as usize].fq_name_id(),
             role,
         )
+    }
+
+    /// Whether this ordinal is a constructor the compiler GENERATED for `owner`.
+    ///
+    /// Such a constructor records no generic `Signature`: the attribute exists for a source or Java
+    /// caller, and nothing in source can name it.
+    pub(crate) fn is_generated_secondary_constructor(&self, owner: TypeName, ordinal: u32) -> bool {
+        self.generated_secondary_constructors
+            .iter()
+            .any(|((registered_owner, _), registered)| {
+                *registered_owner == owner && *registered == ordinal
+            })
     }
 
     pub(crate) fn generated_secondary_constructor_by_owner(

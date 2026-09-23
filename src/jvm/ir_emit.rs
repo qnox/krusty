@@ -6268,7 +6268,7 @@ fn emit_class(
     for &fid in c
         .methods
         .iter()
-        .filter(|fid| ir.members_after_serialization_ctor.contains(fid))
+        .filter(|fid| ir.serialization_cache_methods.contains(fid))
     {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -6444,16 +6444,19 @@ fn emit_class(
             let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
             for (static_index, s) in &clinit_statics {
                 let pc = clinit.bytes.len() as u16;
-                if ir.is_jvm_companion_hoisted_static(*static_index) {
-                    if let Some(&line) = c
-                        .companion_class
+                // A hoisted companion property's line lives on the companion. A static a compiler
+                // plugin generated has no property to look up and carries its own.
+                let line = if ir.is_jvm_companion_hoisted_static(*static_index) {
+                    c.companion_class
                         .as_ref()
                         .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
-                    {
-                        if line != 0 {
-                            clinit_lines.push((pc, line));
-                        }
-                    }
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    s.line
+                };
+                if line != 0 {
+                    clinit_lines.push((pc, line));
                 }
                 e.emit_static_initializer_store(&fq_name, s, &mut clinit);
             }
@@ -10765,7 +10768,13 @@ fn emit_method_inner_with_holder(
         f.params,
     );
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
-    let method_sig = method_signature(&signature_formatter, ir, fid, f);
+    // The cache's compiler-invented factories and accessor record no generic `Signature`: the
+    // attribute exists for a source or Java caller, and nothing can name these methods to call
+    // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
+    // still have a source-visible generic contract.
+    let method_sig = (!ir.serialization_cache_methods.contains(&fid))
+        .then(|| method_signature(&signature_formatter, ir, fid, f))
+        .flatten();
     let reserved_sig = match holder_receiver {
         Some(receiver) => holder_method_signature(
             &signature_formatter,
