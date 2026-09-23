@@ -1854,6 +1854,32 @@ fn reference_compile_in(
     }
 }
 
+/// `KRUSTY_BYTE_DIFF_DUMP=<dir>`: write a divergent file's two class sets side by side
+/// (`<dir>/<stem>-<hash>/{krusty,kotlinc}/…`) so divergences can be classified offline.
+fn dump_class_sets(
+    dir: &Path,
+    stem: &str,
+    src: &str,
+    krusty: &[(String, Vec<u8>)],
+    reference: &std::collections::BTreeMap<String, Vec<u8>>,
+) {
+    let root = dir.join(format!("{stem}-{:016x}", fnv64(src.as_bytes())));
+    let write = |side: &str, name: &str, bytes: &[u8]| {
+        let p = root.join(side).join(format!("{name}.class"));
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(p, bytes);
+    };
+    for (name, bytes) in krusty {
+        write("krusty", name, bytes);
+    }
+    for (name, bytes) in reference {
+        write("kotlinc", name, bytes);
+    }
+    let _ = fs::write(root.join("source.kt"), src);
+}
+
 /// The full per-file byte-diff decision: gate un-mirrored shapes, reference-compile, compare.
 fn byte_diff_file(
     src: &str,
@@ -1871,7 +1897,12 @@ fn byte_diff_file(
         Err(e) => ByteDiff::RefFail(e),
         Ok(ref_classes) => match compare_class_sets(classes, &ref_classes) {
             Ok(()) => ByteDiff::Identical,
-            Err(why) => ByteDiff::Divergent(why),
+            Err(why) => {
+                if let Some(dump) = env("KRUSTY_BYTE_DIFF_DUMP") {
+                    dump_class_sets(Path::new(&dump), stem, src, classes, &ref_classes);
+                }
+                ByteDiff::Divergent(why)
+            }
         },
     }
 }
