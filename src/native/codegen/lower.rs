@@ -128,6 +128,22 @@ fn carrier(ty: Ty) -> Carrier {
     }
 }
 
+/// The carrier a PARAMETER position uses.
+///
+/// `Unit` is a VALUE in Kotlin, and the runtime owns one singleton of it that a program can compare
+/// by identity (`y !== Unit`) and declare extensions on (`fun Unit.foo()`). So a parameter of that
+/// type carries the reference to it, exactly as the JVM passes `kotlin.Unit.INSTANCE`.
+///
+/// Only a RETURN of `Unit` is nothing: a function that answers `Unit` answers the one value there
+/// is, and a caller that needs it can name it without being handed it. That asymmetry is why this
+/// is separate from [`carrier`] rather than a change to it.
+fn parameter_carrier(ty: Ty) -> Carrier {
+    match carrier(ty) {
+        Carrier::Void => Carrier::Ref,
+        carried => carried,
+    }
+}
+
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
 /// address linked by krusty's own linker; the verifier stays on while the lowering is young.
 fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
@@ -630,9 +646,11 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match carrier(*param).abi_param() {
+            match parameter_carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
-                None => return Err("a `Unit` parameter".to_string()),
+                // `parameter_carrier` answers `Void` for nothing, so this is unreachable; the arm
+                // stays because a new carrier with no ABI shape must not silently pass.
+                None => return Err(format!("a parameter carried as `{:?}`", carrier(*param))),
             }
         }
         if let Some(abi) = carrier(ret).abi_param() {
@@ -1063,8 +1081,21 @@ pub(super) struct PendingFinally {
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
-        let Some(clif) = carrier(ty).clif() else {
-            return Err("a `Unit`-typed local".to_string());
+        // A `Unit` PARAMETER is carried as the reference to the singleton, so its slot holds one;
+        // see [`parameter_carrier`]. The slot is recorded as holding a reference rather than as
+        // holding `Unit`, because that is what it holds: everything downstream — a comparison, a
+        // pass-on, a store into a field — is then the ordinary reference path, and `y !== Unit`
+        // compares the singleton against itself as it should.
+        //
+        // A `Unit`-typed LOCAL never arrives here: its declaration stores nothing at all and is
+        // remembered in `unit_values` instead.
+        let ty = if carrier(ty) == Carrier::Void {
+            any()
+        } else {
+            ty
+        };
+        let Some(clif) = parameter_carrier(ty).clif() else {
+            return Err(format!("a local carried as `{:?}`", carrier(ty)));
         };
         let variable = self.builder.declare_var(clif);
         self.values.insert(slot, (variable, ty));
@@ -3687,6 +3718,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
             let value = match parameters.get(index) {
+                // A `Unit` parameter is carried as the reference to the singleton (see
+                // [`parameter_carrier`]), so the argument is coerced to a reference rather than to
+                // the declared type — `coerce` materializes the singleton for a position that
+                // wants one, and evaluates the argument for its effects either way.
+                Some(ty) if parameter_carrier(*ty) != carrier(*ty) => {
+                    self.coerce(*argument, any())?
+                }
                 Some(ty) => self.coerce(*argument, *ty)?,
                 None => self.expression(*argument)?,
             };

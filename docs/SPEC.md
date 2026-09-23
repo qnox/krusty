@@ -7350,6 +7350,22 @@ and behavior is checked by RUNNING the emitted program.
   mistakes, and Kotlin reports them as such.
   Tests: `tests/native_text_members_e2e.rs` (`text_answers_its_single_char`).
 
+- **A `Unit` RETURN is nothing; a `Unit` PARAMETER is the singleton.** A function that answers
+  `Unit` answers the one value there is, and a caller that needs it can name it without being
+  handed it — so the return carries nothing, which is what keeps a `Unit`-returning call free. A
+  parameter cannot do the same: the program can compare it by identity (`y !== Unit`), pass it on,
+  store it as `Any`, and declare extensions whose receiver it is (`fun Unit.foo()`), so it carries
+  the reference to the runtime's singleton exactly as the JVM passes `kotlin.Unit.INSTANCE`. The
+  asymmetry is why `parameter_carrier` is separate from `carrier` rather than a change to it. A
+  `Unit`-typed LOCAL is a third case and keeps its own treatment: its declaration stores nothing
+  and a read of it materializes the singleton.
+  Tests: `tests/native_unit_value_e2e.rs`; the corpus cases are `codegen/box/basics/unit4.kt`,
+  `codegen/box/extensionFunctions/extensionFunctionDifferentReceivers.kt` and
+  `codegen/box/extensionProperties/extensionPropertyDifferentReceiver.kt`. krusty's JVM backend
+  does not lower these shapes yet — it emits a body the verifier rejects with
+  `Operand stack underflow` at the store after a `Unit`-valued expression — so those tests take
+  kotlinc as the oracle and require only the native backend to match.
+
 - **A receiver typed `Collection` proves nothing about its LAYOUT.** `Collection` is admitted as a
   list type, because the list entry points answer every question a list-shaped collection is asked.
   But a `Set` is a collection too and is not shaped like a list, so `kt_list_size` read its count

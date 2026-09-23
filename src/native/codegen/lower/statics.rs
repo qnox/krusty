@@ -369,8 +369,16 @@ impl BodyLowering<'_, '_, '_> {
             }
         };
         for (operand, ty) in supplied.iter().zip(&parameters) {
-            let Some(argument) = self.coerce(*operand, *ty)? else {
-                return Err("a `Unit` operand of a property accessor".to_string());
+            // A `Unit` parameter is carried as the reference to the singleton, so the operand is
+            // coerced to a reference rather than to the declared type; `coerce` materializes the
+            // singleton for a position that wants one. See `lower::parameter_carrier`.
+            let target = if carrier(*ty) == Carrier::Void {
+                any()
+            } else {
+                *ty
+            };
+            let Some(argument) = self.coerce(*operand, target)? else {
+                return Err(format!("an operand carried as `{:?}`", carrier(*ty)));
             };
             if self.terminated {
                 return Ok(None);

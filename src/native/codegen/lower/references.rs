@@ -901,8 +901,15 @@ impl BodyLowering<'_, '_, '_> {
         let params = self.file.ir.functions[accessor as usize].params.clone();
         let mut arguments = Vec::with_capacity(params.len());
         for (operand, ty) in object.into_iter().chain(value).zip(&params) {
+            // A `Unit` parameter is carried as the reference to the singleton, and the operand
+            // already IS a reference here — so there is nothing to convert, and converting would
+            // answer "no value" for a position that has one. See `lower::parameter_carrier`.
+            if carrier(*ty) == Carrier::Void {
+                arguments.push(operand);
+                continue;
+            }
             let Some(argument) = self.convert(operand, Some(any()), *ty)? else {
-                return Err("a `Unit` operand of a property accessor".to_string());
+                return Err(format!("an operand carried as `{:?}`", carrier(*ty)));
             };
             arguments.push(argument);
         }
