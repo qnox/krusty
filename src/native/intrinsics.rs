@@ -1197,6 +1197,11 @@ pub(super) fn scalar_member(
             ("first", []) => Some(("kt_string_first", vec![reference], Ty::Char)),
             ("last", []) => Some(("kt_string_last", vec![reference], Ty::Char)),
             ("single", []) => Some(("kt_string_single", vec![reference], Ty::Char)),
+            ("toCharArray", []) => Some((
+                "kt_string_to_char_array",
+                vec![reference],
+                Ty::array(Ty::Char),
+            )),
             // `sb[i] = c`: Kotlin declares it beside the builder rather than on it, so it arrives
             // as a member of the facade with the builder as its receiver. Both operands are
             // machine values the generator must not box to hand over.

@@ -799,6 +799,8 @@ kt_char kt_string_last(KRef self);
 /* `s.single()`: the one char of a text of length one — `NoSuchElementException` when empty and
    `IllegalArgumentException` when longer, which are Kotlin's two different complaints. */
 kt_char kt_string_single(KRef self);
+/* `s.toCharArray()`: the text's UTF-16 units as a `CharArray`. */
+KRef kt_string_to_char_array(KRef self);
 /* `c in s`: a single unit rather than one text inside another, which `kt_string_contains` asks. */
 kt_boolean kt_string_contains_char(KRef self, kt_char value);
 /* `s.toInt()` / `s.toLong()` and their `OrNull` forms. The parse is Kotlin's: an optional sign,

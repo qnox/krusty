@@ -207,3 +207,24 @@ fun box(): String {
         "java.lang.StringBuilder.substring",
     );
 }
+
+/// `s.toCharArray()`: the text's UTF-16 units, which is what a `CharArray` holds.
+#[test]
+fn text_hands_over_its_units_as_an_array() {
+    let source = r#"
+fun box(): String {
+    val units = "OK".toCharArray()
+    if (units.size != 2) return "fail size " + units.size
+    if (units[0] != 'O' || units[1] != 'K') return "fail units"
+    if ("".toCharArray().isNotEmpty()) return "fail empty"
+    // The array is the caller's own: writing through it does not reach the text.
+    units[0] = 'X'
+    if ("OK"[0] != 'O') return "fail the text changed"
+    var joined = ""
+    for (unit in "abc".toCharArray()) joined += unit
+    if (joined != "abc") return "fail walked " + joined
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_to_char_array", source);
+}

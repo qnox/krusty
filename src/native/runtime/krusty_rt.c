@@ -782,6 +782,21 @@ kt_char kt_string_last(KRef self) {
     return kt_string_get(self, kt_string_length(self) - 1);
 }
 
+/* `s.toCharArray()`: the text's UTF-16 units, which is what a `CharArray` holds.
+
+   Unit by unit through `kt_string_get`, which walks the UTF-8 to find each one — quadratic in the
+   length, and the straightforward reading of "what Kotlin counts". A text long enough for that to
+   matter is not what a `toCharArray` is for. */
+KRef kt_string_to_char_array(KRef self) {
+    kt_int length = kt_string_length(self);
+    KRef array = kt_array_new(&kt_type_char_array, length);
+    kt_char *units = (kt_char *)((KArray *)array + 1);
+    for (kt_int at = 0; at < length; at++) {
+        units[at] = kt_string_get(self, at);
+    }
+    return array;
+}
+
 /* `s.single()`: the one char of a text of length one. Kotlin raises `NoSuchElementException` for an
    empty text and `IllegalArgumentException` for a longer one — two different complaints, because
    "there is none" and "there is more than one" are different mistakes. */
