@@ -95,7 +95,14 @@ impl<'a> SymbolResolver<'a> {
             if selected
                 .call_sig
                 .parameter_contributes_to_inference(parameter_index)
-                && argument.contributes_type_to_inference()
+                // A nested generic call reaches here as a provisional, which is normally not
+                // evidence. It IS evidence when its own inputs fix its result — `xs.map { B(it) }`
+                // binds `R` from the transform it was given — and without it `a + b + c` fails
+                // where `a + b` does not: the inner sum arrives as a provisional, contributes
+                // nothing, and the shared `T` of `Iterable<T>.plus(Iterable<T>)` stays pinned at
+                // the receiver's element type.
+                && (argument.contributes_type_to_inference()
+                    || argument.result_is_input_constrained())
             {
                 unify_inferred_ty_with_source(
                     &self.src,
