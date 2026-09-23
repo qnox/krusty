@@ -1,6 +1,6 @@
 //! JVM layout for safe-call guards and chains.
 
-use super::{when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
+use super::{discard, when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
 
 impl Emitter<'_> {
     /// Emit a discarded safe call with the discard inside its guard, as kotlinc writes it. The
@@ -16,7 +16,7 @@ impl Emitter<'_> {
         } = node
         {
             let shared = matches!(self.safe_call_null_exits.get(value), Some((_, false)));
-            if self.ir.safe_call_guards.contains(value) && !shared {
+            if self.ir.null_guards.contains(value) && !shared {
                 self.emit(expression, code);
                 return true;
             }
@@ -24,15 +24,32 @@ impl Emitter<'_> {
         if let IrExpr::When { branches } = node {
             if let [(Some(guard), null_result), (None, selector)] = branches.as_slice() {
                 let shared = matches!(self.safe_call_null_exits.get(&expression), Some((_, false)));
-                if self.ir.safe_call_guards.contains(&expression) && !shared {
+                if self.ir.null_guards.contains(&expression) && !shared {
                     let end = code.new_label();
                     let entry_height = code.stack_height().max(0) as u16;
+                    let elvis = self.ir.elvis_safe_call_guards.contains(&expression);
+                    let result_ty = elvis
+                        .then(|| self.value_ty_of_when(branches))
+                        .unwrap_or(Ty::Unit);
+                    let result_stack = elvis
+                        .then(|| self.verif_stack(result_ty))
+                        .unwrap_or_default();
                     self.emit_safe_call_guard(
                         expression,
                         (*guard, *null_result, *selector),
-                        when::Emission::new(true, Ty::Unit, &[], entry_height, end, None),
+                        when::Emission::new(
+                            !elvis,
+                            result_ty,
+                            &result_stack,
+                            entry_height,
+                            end,
+                            None,
+                        ),
                         code,
                     );
+                    if elvis && !self.diverges(expression) {
+                        discard(result_ty, code);
+                    }
                     return true;
                 }
             }
@@ -47,7 +64,7 @@ impl Emitter<'_> {
         emission: when::Emission<'_>,
         code: &mut CodeBuilder,
     ) -> bool {
-        if !self.ir.safe_call_guards.contains(&expression) {
+        if !self.ir.null_guards.contains(&expression) {
             return false;
         }
         let [(Some(guard), null_result), (None, selector)] = branches else {
@@ -71,7 +88,7 @@ impl Emitter<'_> {
             IrExpr::Block {
                 stmts,
                 value: Some(value),
-            } if emitter.ir.safe_call_guards.contains(value) => Some((stmts.clone(), *value)),
+            } if emitter.ir.null_guards.contains(value) => Some((stmts.clone(), *value)),
             _ => None,
         };
         let Some((stmts, outer)) = guard_of(self, block) else {
