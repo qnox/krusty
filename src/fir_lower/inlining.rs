@@ -369,6 +369,7 @@ impl BodyLowering<'_> {
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
                     }
