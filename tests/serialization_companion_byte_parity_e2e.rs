@@ -3286,3 +3286,99 @@ fn inner_class_access(bytes: &[u8], inner: &str) -> Option<u16> {
         .find(|entry| entry.inner == inner)
         .map(|entry| entry.access)
 }
+/// The ordered `Utf8` entries of a `javap -v` constant pool, filtered to the ones asked for.
+///
+/// The whole pool cannot be compared here: `@Metadata`'s `d1` strings are pool entries too, and the
+/// in-process compilation path these helpers take records different function flags there than the
+/// shipped CLI. The ORDER of the entries this test names is the fact at issue and is unaffected.
+fn pool_utf8_order(disassembly: &str, wanted: &[&str]) -> Vec<String> {
+    disassembly
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.split_once("= Utf8"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| wanted.contains(&value.as_str()))
+        .collect()
+}
+
+/// Each property's `$annotations` marker is emitted directly after that property's accessors, and
+/// kotlinc interns its name and annotation entries THERE — before `componentN`. A private property
+/// has no accessor, so its marker occupies the property's position on its own.
+///
+/// A data class seeds its synthesized members' pool entries in one pass before any member is
+/// emitted, and that seeder knew nothing about the marker, so the marker's four entries landed
+/// about forty slots late. Every member matched, every attribute matched, and the class still
+/// differed from kotlinc's byte for byte: the pool is part of the output.
+#[test]
+fn property_markers_follow_their_public_or_private_property_before_componentn() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Target(AnnotationTarget.PROPERTY)\n\
+               @Retention(AnnotationRetention.RUNTIME)\n\
+               annotation class OwnedMark(val label: String)\n\
+               @Serializable\n\
+               data class Perm(\n\
+               \x20   @OwnedMark(\"public_val\") val publicVal: Boolean,\n\
+               \x20   @OwnedMark(\"public_var\") var publicVar: Int,\n\
+               \x20   @OwnedMark(\"private_val\") private val privateVal: Long,\n\
+               \x20   val plain: Int,\n\
+               )\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("PropertyMarkerPool", src, "Perm", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let wanted = [
+        "getPublicVal",
+        "getPublicVal$annotations",
+        "LOwnedMark;",
+        "label",
+        "public_val",
+        "getPublicVar",
+        "setPublicVar",
+        "getPublicVar$annotations",
+        "public_var",
+        "getPrivateVal$annotations",
+        "private_val",
+        "getPlain",
+        "component1",
+        "component2",
+        "component3",
+        "component4",
+        "copy",
+    ];
+    let want = pool_utf8_order(&built.reference, &wanted);
+    assert_eq!(
+        want,
+        vec![
+            "getPublicVal",
+            "getPublicVal$annotations",
+            "LOwnedMark;",
+            "label",
+            "public_val",
+            "getPublicVar",
+            "setPublicVar",
+            "getPublicVar$annotations",
+            "public_var",
+            "getPrivateVal$annotations",
+            "private_val",
+            "getPlain",
+            "component1",
+            "component2",
+            "component3",
+            "component4",
+            "copy",
+        ],
+        "kotlinc's interning order, stated so a change in the reference is visible here"
+    );
+    assert_eq!(
+        pool_utf8_order(&built.krusty, &wanted),
+        want,
+        "krusty interns the marker where kotlinc does"
+    );
+}
