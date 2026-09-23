@@ -4184,6 +4184,7 @@ fn emit_pass(
             continue;
         }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
+        // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
         facade_has_method = true;
         // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
@@ -11036,7 +11037,7 @@ fn emit_method_inner_with_holder(
         if let Some(&close) = ir.fn_close_lines.get(&fid) {
             code.mark_line(close);
         }
-        code.ret_void();
+        code.implicit_ret_void();
     }
     // The dispatch's states live inside the spliced body, where only a marker could name them.
     // Bind each one where its marker ended up, then erase every marker: they exist to survive the

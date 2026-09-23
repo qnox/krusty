@@ -1381,6 +1381,8 @@ mod serialization_coverage_e2e;
 mod serialization_default_element_guard_e2e;
 #[path = "serialization_default_member_e2e.rs"]
 mod serialization_default_member_e2e;
+#[path = "serialization_generated_debug_e2e.rs"]
+mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]

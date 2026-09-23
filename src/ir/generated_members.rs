@@ -11,6 +11,13 @@ pub enum IrGeneratedDeclarationDebug {
     None,
     LocalsOnly,
     DeclarationLine(NonZeroU32),
+    /// Map the declaration body to `line` and an emitter-owned implicit void return to
+    /// `fallthrough`. The producer opts into this role explicitly; a backend never infers it from
+    /// the function's name, owner, return type, or generated status.
+    DeclarationLineWithFallthrough {
+        line: NonZeroU32,
+        fallthrough: NonZeroU32,
+    },
 }
 
 impl IrGeneratedDeclarationDebug {
@@ -20,14 +27,33 @@ impl IrGeneratedDeclarationDebug {
         NonZeroU32::new(line).map_or(Self::LocalsOnly, Self::DeclarationLine)
     }
 
+    pub fn declaration_line_with_fallthrough(line: u32, fallthrough: u32) -> Self {
+        match (NonZeroU32::new(line), NonZeroU32::new(fallthrough)) {
+            (Some(line), Some(fallthrough)) => {
+                Self::DeclarationLineWithFallthrough { line, fallthrough }
+            }
+            (Some(line), None) => Self::DeclarationLine(line),
+            (None, _) => Self::LocalsOnly,
+        }
+    }
+
     pub fn records_locals(self) -> bool {
         !matches!(self, Self::None)
     }
 
     pub fn line(self) -> Option<u32> {
         match self {
-            Self::DeclarationLine(line) => Some(line.get()),
+            Self::DeclarationLine(line) | Self::DeclarationLineWithFallthrough { line, .. } => {
+                Some(line.get())
+            }
             Self::None | Self::LocalsOnly => None,
+        }
+    }
+
+    pub fn fallthrough_line(self) -> Option<u32> {
+        match self {
+            Self::DeclarationLineWithFallthrough { fallthrough, .. } => Some(fallthrough.get()),
+            Self::None | Self::LocalsOnly | Self::DeclarationLine(_) => None,
         }
     }
 }
@@ -98,6 +124,10 @@ impl IrFile {
                 member.parameter_names.iter().all(|name| !name.is_empty()),
                 "generated parameter identities are never empty"
             );
+            assert!(
+                member.debug.fallthrough_line().is_none() || function.ret == crate::types::Ty::Unit,
+                "only a Unit function can publish implicit void-return debug provenance"
+            );
         }
         assert!(
             self.generated_member_publications
@@ -138,6 +168,15 @@ mod tests {
         assert_eq!(
             IrGeneratedDeclarationDebug::declaration_line(7).line(),
             Some(7)
+        );
+        assert_eq!(
+            IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(7, 11)
+                .fallthrough_line(),
+            Some(11)
+        );
+        assert_eq!(
+            IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(7, 0),
+            IrGeneratedDeclarationDebug::declaration_line(7)
         );
     }
 }

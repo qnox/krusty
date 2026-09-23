@@ -1679,9 +1679,9 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             let serializer_name = type_name(&ser_fq);
-            let (owner_start_line, owner_header_line) = {
+            let (owner_start_line, owner_header_line, owner_end_line) = {
                 let owner = &ir.classes[class_id as usize];
-                (owner.decl_start_line, owner.decl_line)
+                (owner.decl_start_line, owner.decl_line, owner.decl_end_line)
             };
             let GeneratedSerializerMembers {
                 descriptor,
@@ -1694,6 +1694,7 @@ impl IrPlugin for SerializationPlugin {
                 serializer_name,
                 serialized_ty,
                 owner_start_line,
+                owner_end_line,
                 !type_params.is_empty(),
             );
 
