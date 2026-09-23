@@ -6125,6 +6125,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
+  runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
+  that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
+  `NaN`/`Infinity`/`-0.0` spelled out). Where one significant digit would do, Java's rule also weighs
+  the two-digit decimals and takes the nearer, which is why `Double.MIN_VALUE` is `4.9E-324` and not
+  `5E-324`; the output matches JDK 19+ (the reference compiler's JVM). `%` is IEEE's remainder
+  truncated toward zero (C's `fmod`), computed exactly on the significands, and `a.mod(b)` is
+  Kotlin's own definition, `val r = a % b; if (r != 0.0 && r.sign != b.sign) r + b else r`. NaN BITS
+  are not Kotlin's to specify and differ between JVM hosts, so `%` follows IEEE 754: a NaN operand
+  comes back quieted with its sign and payload, and an invalid operation (`Inf % x`, `x % 0.0`)
+  answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
+  answers the positive `0x7FF8…` instead.
+  Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
 
 ## 8. Success criteria for the PoC
 
