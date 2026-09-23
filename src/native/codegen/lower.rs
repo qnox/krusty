@@ -3018,8 +3018,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 .is_some_and(|ty| ty.is_array())
                             {
                                 let mut operands = vec![self.reference(receiver)?];
-                                for argument in args {
-                                    operands.push(self.reference(*argument)?);
+                                for (index, argument) in args.iter().enumerate() {
+                                    // The table says what each operand is carried AS. Most are
+                                    // references; `copyOf`'s size is an `Int` the generator must
+                                    // not box to hand over, and handing one over anyway is a
+                                    // signature the verifier rejects rather than a slow path.
+                                    let target =
+                                        carried.get(index + 1).copied().unwrap_or_else(any);
+                                    let Some(value) = self.coerce(*argument, target)? else {
+                                        return Ok(None);
+                                    };
+                                    operands.push(value);
                                 }
                                 if self.terminated {
                                     return Ok(None);

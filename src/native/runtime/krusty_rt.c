@@ -3106,6 +3106,81 @@ KRef kt_array_reversed_array(KRef array) {
     return copy;
 }
 
+/* `a.copyOf()` and `a.copyOf(n)`: a new array of the receiver's OWN kind holding as much of it as
+   fits. A longer one is padded with the element type's zero — `null` for a reference array, `0` or
+   `false` for the rest — which is what a fresh array already holds, so there is nothing to write.
+   As in `kt_array_reversed_array`, the elements move as BYTES: the descriptor's stride is what
+   says how wide one is, and that serves a reference array and a `DoubleArray` alike. */
+KRef kt_array_copy_of(KRef array, kt_int length) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (length < 0) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8("Requested array size is less than zero.", 39)));
+        return NULL;
+    }
+    const KType *type = array->header.type;
+    KRef copy = kt_array_new(type, length);
+    kt_int have = ((const KArray *)array)->length;
+    kt_int take = have < length ? have : length;
+    memcpy((char *)copy + type->instance_size, (const char *)array + type->instance_size,
+           (size_t)take * (size_t)type->element_size);
+    return copy;
+}
+
+/* `a.copyOf()` with no size: the receiver's own length, which only the array can supply — a table
+   entry cannot hand over a constant it does not know. */
+KRef kt_array_copy_of_same(KRef array) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return kt_array_copy_of(array, ((const KArray *)array)->length);
+}
+
+/* `Arrays.deepToString`: `contentToString`, recursing into any element that is itself an array.
+
+   An array may hold ITSELF, at any nesting depth, and Kotlin renders such a reference as `[...]`
+   rather than looping forever. The arrays currently being rendered are therefore kept as a chain
+   of frames on the C stack — bounded by the nesting rather than by the element count, and a root
+   for the collector like any other local. */
+typedef struct KDeepFrame {
+    KRef array;
+    const struct KDeepFrame *outer;
+} KDeepFrame;
+
+static void kt_array_deep_append(KRef builder, KRef value, const KDeepFrame *outer) {
+    if (value == NULL || !kt_is_array(value->header.type)) {
+        kt_string_builder_append(builder, value);
+        return;
+    }
+    for (const KDeepFrame *frame = outer; frame != NULL; frame = frame->outer) {
+        if (frame->array == value) {
+            kt_string_builder_append(builder, kt_string_utf8("[...]", 5));
+            return;
+        }
+    }
+    KDeepFrame frame = {value, outer};
+    kt_string_builder_append(builder, kt_string_utf8("[", 1));
+    kt_int length = ((const KArray *)value)->length;
+    for (kt_int index = 0; index < length; index++) {
+        if (index != 0) {
+            kt_string_builder_append(builder, kt_string_utf8(", ", 2));
+        }
+        kt_array_deep_append(builder, kt_array_element(value, index), &frame);
+    }
+    kt_string_builder_append(builder, kt_string_utf8("]", 1));
+}
+
+KRef kt_array_content_deep_to_string(KRef array) {
+    if (array == NULL) {
+        return kt_string_utf8("null", 4);
+    }
+    KRef builder = kt_string_builder_new();
+    kt_array_deep_append(builder, array, NULL);
+    return kt_to_string(builder);
+}
+
 /* An annotation member's array, compared by CONTENT — `Arrays.equals`, which is what Kotlin gives
    an annotation instance's `equals` for an array member and what separates it from a data class's
    (that one compares arrays by identity).

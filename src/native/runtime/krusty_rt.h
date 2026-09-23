@@ -330,6 +330,13 @@ KRef kt_array_reversed_array(KRef array);
 kt_boolean kt_array_content_equals(KRef left, KRef right);
 kt_int kt_array_content_hash_code(KRef array);
 KRef kt_array_content_to_string(KRef array);
+/* `contentToString` recursing into any element that is itself an array; an array that holds itself
+   at any depth renders as `[...]`, as Kotlin's does. */
+KRef kt_array_content_deep_to_string(KRef array);
+/* `a.copyOf()` / `a.copyOf(n)`: a new array of the receiver's own kind, padded with the element
+   type's zero when it is longer. */
+KRef kt_array_copy_of(KRef array, kt_int length);
+KRef kt_array_copy_of_same(KRef array);
 KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);

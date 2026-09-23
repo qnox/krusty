@@ -7366,6 +7366,18 @@ and behavior is checked by RUNNING the emitted program.
   `Operand stack underflow` at the store after a `Unit`-valued expression — so those tests take
   kotlinc as the oracle and require only the native backend to match.
 
+- **An array member's operands are carried as its TABLE says, not all as references.** Every entry
+  on that path took references, which is right for all of them but one: `copyOf`'s size is an
+  `Int`, and boxing it to hand it over is not a slow path but a signature Cranelift's verifier
+  rejects outright. The call site now coerces each operand to the carried type the entry names.
+  Tests: `tests/native_array_members_e2e.rs` (`an_array_copies_itself_to_a_length`).
+
+- **`contentDeepToString` renders an array that contains itself as `[...]`.** At any nesting depth,
+  and without looping: the arrays currently being rendered are a chain of frames on the C stack,
+  bounded by the nesting rather than by the element count. This is Java's `deepToString` rule and
+  Kotlin's documented one.
+  Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
+
 - **A map's three lookups disagree about a stored NULL, on purpose.** `getValue` is written in
   terms of "absent" and raises only then, so a key whose value is null answers that null.
   `getOrElse` and `getOrPut` are written in terms of "null" and run their lambda for a stored null

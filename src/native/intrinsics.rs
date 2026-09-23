@@ -1568,6 +1568,16 @@ pub(super) fn array_member(
             vec![reference],
             Ty::obj("kotlin/String"),
         ),
+        // `copyOf()` takes the receiver's own length, which only the array can supply — a table
+        // entry cannot hand over a constant it does not know — so the two arities are two entry
+        // points rather than one with a defaulted operand.
+        ("copyOf", []) => ("kt_array_copy_of_same", vec![reference], reference),
+        ("copyOf", [Ty::Int]) => ("kt_array_copy_of", vec![reference, Ty::Int], reference),
+        ("contentDeepToString", []) => (
+            "kt_array_content_deep_to_string",
+            vec![reference],
+            Ty::obj("kotlin/String"),
+        ),
         _ => return None,
     })
 }
