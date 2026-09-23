@@ -8517,6 +8517,7 @@ mod tests {
             name: "make$default".to_string(),
             reflection_name: None,
             compiler_intrinsic: None,
+            semantic_role: None,
             inline_body_plan: None,
             plugin_expression: None,
             params: vec![Ty::Int],

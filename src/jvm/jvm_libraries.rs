@@ -5611,6 +5611,21 @@ impl JvmLibraries {
                                 &m.name,
                                 params.len(),
                             );
+                        // Normalize the exact Kotlin `Any` declaration while its provider identity
+                        // and source member are still together. Later JVM passes consume this role
+                        // from the selected callable; they never rediscover it from call spelling.
+                        let semantic_role = (builtin_cn == crate::types::wk::any()
+                            && params.is_empty())
+                        .then(|| match m.name.as_str() {
+                            "hashCode" => {
+                                Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
+                            }
+                            "toString" => {
+                                Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
+                            }
+                            _ => None,
+                        })
+                        .flatten();
                         let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),
@@ -5618,6 +5633,7 @@ impl JvmLibraries {
                             suspend,
                             context_count: m.context_count,
                             member_realization: m.realization,
+                            semantic_role,
                             signature: m.signature.clone(),
                             // Preserve the declaration-level return recovered when the class member
                             // was aligned with metadata. This overload view is the common input to

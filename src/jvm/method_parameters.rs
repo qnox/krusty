@@ -29,7 +29,10 @@ pub(super) fn capture_field_name(class: &IrClass, index: usize) -> Option<String
     })
 }
 
-pub(super) fn prepend_compiler_generated(ir: &mut IrFile, function: u32, name: &str) {
+/// Record parameter 0 of a value-class member lowered to a static `-impl`: the former receiver,
+/// compiler-generated and — like kotlinc's — without a nullability annotation.
+pub(super) fn prepend_value_class_receiver(ir: &mut IrFile, function: u32, name: &str) {
+    ir.jvm_value_class_receiver_impls.insert(function);
     let expected = ir.functions[function as usize].params.len();
     let info = ir
         .fn_params
