@@ -184,7 +184,7 @@ fn every_registered_global_root_is_kept_past_four_thousand() {
 }
 
 #[test]
-fn a_pointer_one_past_an_object_keeps_it_alive() {
+fn only_an_arrays_end_pointer_keeps_it_alive_and_no_neighbour_is_kept() {
     run_driver("gc_end_pointer_keeps_object");
 }
 
