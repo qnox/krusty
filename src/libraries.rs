@@ -201,6 +201,14 @@ pub enum MemberRealization {
     RangeConstruction { open_end: bool },
 }
 
+/// Semantic role attached by a declaration provider after exact callable selection. A target may
+/// consume it when the selected language member has no ordinary dispatch on a chosen representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticCallRole {
+    KotlinAnyHashCode,
+    KotlinAnyToString,
+}
+
 /// One member (constructor, member function/property accessor, or companion member) of a library
 /// type, in Kotlin terms. `descriptor` is an opaque backend token (a JVM method descriptor) the
 /// matching emitter consumes verbatim — the front end matches on `params`/`ret`, never parsing it.
@@ -912,6 +920,7 @@ impl LibraryCallable {
             name: name.into(),
             reflection_name: None,
             compiler_intrinsic: None,
+            semantic_role: None,
             plugin_expression: None,
             inline_body_plan: None,
             physical_params: params.clone(),
@@ -1027,6 +1036,9 @@ pub struct LibraryCallable {
     /// body on the target. Selection remains completely ordinary; the backend consumes this tag only
     /// after the checker has committed the call target.
     pub compiler_intrinsic: Option<CompilerIntrinsic>,
+    /// Exact language-level role of this declaration, when target realization needs more than its
+    /// stable callable identity. Providers assign it at the declaration boundary.
+    pub semantic_role: Option<SemanticCallRole>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,

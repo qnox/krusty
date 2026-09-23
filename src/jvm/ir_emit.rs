@@ -17972,6 +17972,12 @@ impl<'a> Emitter<'a> {
                 self.append_top(Ty::String, code);
                 return;
             }
+            // A value class rendered through its `toString-impl` is appended at its own static type,
+            // which selects `append(Object)` as kotlinc does, although the rendered text is a String.
+            if self.is_value_class_ty(&semantic) {
+                self.append_top(Ty::obj("java/lang/Object"), code);
+                return;
+            }
         }
         self.append_top(ty, code);
     }

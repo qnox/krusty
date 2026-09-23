@@ -2763,6 +2763,9 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Exact provider-selected language-member roles retained on their call expressions. This is
+    /// declaration identity data, not a spelling-based backend lookup.
+    pub semantic_call_roles: std::collections::HashMap<ExprId, crate::libraries::SemanticCallRole>,
     /// Call `ExprId` → the callee's DECLARED (un-erased, pre-substitution) return type, forwarded
     /// verbatim from the checked external call's `declared_ret`. Common lowering records it with no
     /// value-class reasoning; the value-class pass reads it to decide the RESULT's
