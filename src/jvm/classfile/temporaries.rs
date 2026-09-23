@@ -72,6 +72,9 @@ pub(crate) struct Body<'a> {
     pub marks: &'a [bool],
     /// Named locals: `(start index, end index, slot)`, end exclusive.
     pub named: &'a [(usize, usize, u16)],
+    /// `checkcast`s kotlinc's `RedundantCheckCastEliminationMethodTransformer` removes, by original
+    /// index. That pass runs before this one, so they are gone before any rule here looks.
+    pub redundant_casts: &'a [usize],
     /// The label each branch jumps to, by original index, where the builder recorded one. Several
     /// labels can stand at one index; kotlinc's rules tell them apart.
     pub branch_labels: &'a [Option<u32>],
@@ -816,6 +819,10 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             .collect(),
     };
     let mut eliminated = Vec::new();
+    let casts_removed = !body.redundant_casts.is_empty();
+    working.nodes.retain(|(_, placement)| {
+        !matches!(placement, Placement::Original(index) if body.redundant_casts.contains(index))
+    });
     // `xload; pop` — the value loaded only to be discarded.
     let mut trivially_removed = BTreeSet::new();
     let mut at = 0;
@@ -876,7 +883,7 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         &mut late_labels,
     )?);
     let temporaries = temporaries(body, &removed)?;
-    let mut changed = removed_nop || !removed.is_empty();
+    let mut changed = casts_removed || removed_nop || !removed.is_empty();
     for (store, loads) in temporaries {
         let Some(store_at) = working.position(store) else {
             continue;
@@ -1025,6 +1032,7 @@ mod tests {
             arrivals: &arrival,
             marks: &mark,
             named,
+            redundant_casts: &[],
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| field == 1,
@@ -1508,6 +1516,7 @@ mod tests {
             arrivals: &arrivals,
             marks: &marks,
             named: &[],
+            redundant_casts: &[],
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|_| false,

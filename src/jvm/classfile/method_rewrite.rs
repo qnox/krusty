@@ -348,6 +348,116 @@ impl ClassWriter {
             variable_bounds[end] = true;
             named.push((start, end, slot));
         }
+        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
+        let mut entry = Vec::new();
+        if source.access & 0x0008 == 0 {
+            entry.push(if source.name == "<init>" {
+                VerifType::UninitializedThis
+            } else {
+                VerifType::ObjectName(self.internal_name.clone())
+            });
+        }
+        if !Self::append_param_verif_types(&source.desc, &mut entry) {
+            return None;
+        }
+        let entry = expand_slots(&entry);
+        let original_graph = ControlGraph::build(&insns, &handlers)?;
+        // The verifier's types before each original instruction, computed at most once.
+        let original_types_cell = std::cell::OnceCell::new();
+        let original_types = || -> Option<&FrameTypes> {
+            original_types_cell
+                .get_or_init(|| {
+                    let original_frames = self
+                        .merged_frames(&source.builder)
+                        .into_iter()
+                        .map(|(at, locals, stack)| {
+                            Some((index_of(at)?, expand_slots(&locals), stack))
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)
+                })
+                .as_ref()
+        };
+        // kotlinc's `RedundantCheckCastEliminationMethodTransformer`: a `checkcast` of a value that
+        // is `null`, or whose type is exactly the cast's, goes; no class hierarchy is consulted. A
+        // local loaded inside its named range has the table's declared type there. A method with a
+        // reified type operation keeps every cast, as does a cast to a multi-dimensional array.
+        let reified = insns.iter().any(|insn| match insn {
+            Insn::Plain { op: 0xb8, operands } if operands.len() == 2 => self
+                .methodref_parts(u16::from_be_bytes([operands[0], operands[1]]))
+                .is_some_and(|(owner, name, _)| {
+                    owner == "kotlin/jvm/internal/Intrinsics" && name == "reifiedOperationMarker"
+                }),
+            _ => false,
+        });
+        let mut redundant_casts = Vec::new();
+        if !reified {
+            let named_types: Vec<(usize, usize, u16, String)> = method
+                .lvt
+                .iter()
+                .filter_map(|&(_, desc, slot, start, len)| {
+                    let (start, end) = range(start, len);
+                    let desc = self.cp.utf8_at(desc)?;
+                    let ty = desc
+                        .strip_prefix('L')
+                        .and_then(|name| name.strip_suffix(';'))
+                        .unwrap_or(desc)
+                        .to_string();
+                    Some((index_of(start)?, index_of(end)?, slot, ty))
+                })
+                .collect();
+            for (at, insn) in insns.iter().enumerate() {
+                let Insn::Plain { op: 0xc0, operands } = insn else {
+                    continue;
+                };
+                let Some(cast) = operands
+                    .get(..2)
+                    .and_then(|bytes| self.class_name_at(u16::from_be_bytes([bytes[0], bytes[1]])))
+                else {
+                    continue;
+                };
+                if cast.starts_with("[[") {
+                    continue;
+                }
+                let Some(types) = original_types() else {
+                    break;
+                };
+                let Some(top) = types.before(at).and_then(|state| state.stack.last()) else {
+                    continue;
+                };
+                let declared = at
+                    .checked_sub(1)
+                    .filter(|&load| {
+                        matches!(
+                            insns[load],
+                            Insn::Plain {
+                                op: 0x19 | 0x2a..=0x2d,
+                                ..
+                            }
+                        )
+                    })
+                    .and_then(|load| {
+                        let (slot, _) = var_slot(&insns[load])?;
+                        named_types
+                            .iter()
+                            .find(|(start, end, named, _)| {
+                                *named == slot && (*start..*end).contains(&load)
+                            })
+                            .map(|(_, _, _, ty)| ty.as_str())
+                    });
+                // kotlinc reads a named local as its declared type; the verifier reads the value
+                // that flowed in. Both have to say the cast is a no-op before it goes.
+                let flowed = match top {
+                    VerificationType::Null => true,
+                    VerificationType::Reference(name) => name == cast,
+                    _ => false,
+                };
+                let redundant = flowed && declared.is_none_or(|declared| declared == cast);
+                if redundant {
+                    redundant_casts.push(at);
+                }
+            }
+        }
         // Which label each branch jumps to, and the labels bound at each index in the order they
         // stand: kotlinc's rules see labels, and several can share one offset.
         let mut branch_labels: Vec<Option<u32>> = vec![None; n];
@@ -382,6 +492,7 @@ impl ClassWriter {
             arrivals: &arrivals,
             marks: &marks,
             named: &named,
+            redundant_casts: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| {
@@ -565,32 +676,11 @@ impl ClassWriter {
         };
         let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
-        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
-        let mut entry = Vec::new();
-        if source.access & 0x0008 == 0 {
-            entry.push(if source.name == "<init>" {
-                VerifType::UninitializedThis
-            } else {
-                VerifType::ObjectName(self.internal_name.clone())
-            });
-        }
-        if !Self::append_param_verif_types(&source.desc, &mut entry) {
-            return None;
-        }
-        let entry = expand_slots(&entry);
-
         // A null check that now keeps its value on the stack leaves it there at the jump target:
         // that target's frame gains it, typed as the checked local was at each check.
-        let original_graph = ControlGraph::build(&insns, &handlers)?;
         let mut pushed: Vec<(usize, VerifType)> = Vec::new();
         if !rewrite.stack_at_target.is_empty() {
-            let original_frames = self
-                .merged_frames(&source.builder)
-                .into_iter()
-                .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
-                .collect::<Option<Vec<_>>>()?;
-            let types =
-                FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)?;
+            let types = original_types()?;
             for (target, loads) in &rewrite.stack_at_target {
                 let mut value: Option<VerificationType> = None;
                 for &load in loads {

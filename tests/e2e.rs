@@ -1180,6 +1180,8 @@ mod omitted_default_generic_overload_e2e;
 mod one_armed_when_fallthrough_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "redundant_checkcast_e2e.rs"]
+mod redundant_checkcast_e2e;
 #[path = "temporary_elimination_e2e.rs"]
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
