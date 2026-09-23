@@ -106,7 +106,7 @@ impl VerificationType {
     /// What two edges into one point agree on. Two references meet at `Object`, which either is
     /// assignable to; `null` meets a reference at that reference; anything else that differs is
     /// unusable past the join.
-    fn join(&self, other: &VerificationType) -> VerificationType {
+    pub(crate) fn join(&self, other: &VerificationType) -> VerificationType {
         use VerificationType::*;
         match (self, other) {
             (a, b) if a == b => a.clone(),
@@ -409,6 +409,63 @@ impl FrameTypes {
     /// The state immediately BEFORE `index` executes; `None` where the instruction is unreachable.
     pub(crate) fn before(&self, index: usize) -> Option<&FrameState> {
         self.before.get(index)?.as_ref()
+    }
+
+    /// Whether every normal edge into a recorded frame arrives with a state that frame accepts:
+    /// the same stack height, and each value the frame names typed compatibly. [`Self::analyze`]
+    /// takes a recorded frame as given; a rewrite that moved values onto and off the stack uses
+    /// this to prove the frames it edited still describe the code. The class hierarchy is not
+    /// modelled, so differing non-null reference names are declined rather than guessed assignable.
+    pub(crate) fn frames_hold(
+        &self,
+        insns: &[Insn],
+        graph: &ControlGraph,
+        frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
+        pool: &dyn PoolView,
+    ) -> bool {
+        let recorded: HashMap<usize, FrameState> = frames
+            .iter()
+            .map(|(index, locals, stack)| (*index, FrameState::from_verif(locals, stack, pool)))
+            .collect();
+        let assignable = |value: &VerificationType, to: &VerificationType| {
+            use VerificationType::*;
+            match (value, to) {
+                (_, Top) => true,
+                (Null, Reference(_)) => true,
+                (Reference(value), Reference(expected)) => value == expected,
+                (value, to) => value == to,
+            }
+        };
+        for index in 0..insns.len() {
+            let Some(state) = self.before(index) else {
+                continue;
+            };
+            let Some(after) = step(insns, index, state, pool) else {
+                return false;
+            };
+            for &to in graph.normal_successors(index) {
+                let Some(frame) = recorded.get(&to) else {
+                    continue;
+                };
+                let holds = frame.stack.len() == after.stack.len()
+                    && frame
+                        .stack
+                        .iter()
+                        .zip(&after.stack)
+                        .all(|(to, value)| assignable(value, to))
+                    && frame.locals.iter().enumerate().all(|(slot, to)| {
+                        assignable(after.locals.get(slot).unwrap_or(&VerificationType::Top), to)
+                    });
+                if !holds {
+                    crate::trace_compiler!(
+                        "bytecode",
+                        "frame at {to} does not hold for the edge from {index}: {after:?} into {frame:?}"
+                    );
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 

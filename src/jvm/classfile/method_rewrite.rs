@@ -9,11 +9,14 @@
 //! ranges), line numbers, local ranges, the implicit return — moves with the instruction it
 //! described.
 //!
-//! A rewrite adds no constant and only clears frame slots to `top`, so rebuilding the stack map
-//! interns nothing new: the constant pool is exactly what emission made it.
+//! A rewrite adds no instruction operand. It clears frame slots to `top`, and pushes onto a jump
+//! target's frame the type a null check left on the stack; rebuilding the stack map interns that
+//! type's class if no frame named it before, after every constant emission interned — where
+//! kotlinc's writer also adds the classes its computed frames name.
 //!
-//! The rewritten body is only kept if the forward frame analysis still accepts it; otherwise the
-//! method is written exactly as emitted.
+//! The rewritten body is only kept if the forward frame analysis still accepts it and every edge
+//! into a recorded frame agrees with that frame; otherwise the method is written exactly as
+//! emitted.
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::temporaries::{self, Body};
@@ -156,7 +159,78 @@ fn reached_by(insns: &[Insn], graph: &ControlGraph, store: usize, slot: u16) -> 
     reached
 }
 
+/// Two stack entries at one rewritten offset that are provably the same verifier value. `null`
+/// may meet a reference at that reference. Distinct non-null references are deliberately refused:
+/// without the class hierarchy, widening them to `Object` could make a later narrow receiver or
+/// argument fail verification.
+fn join_stack_entry(a: &VerifType, b: &VerifType, cp: &super::ConstPool) -> Option<VerifType> {
+    let reference = |v: &VerifType| matches!(v, VerifType::Object(_) | VerifType::ObjectName(_));
+    if super::verif_eq(a, b, cp) {
+        Some(a.clone())
+    } else if *a == VerifType::Null && reference(b) {
+        Some(b.clone())
+    } else if *b == VerifType::Null && reference(a) {
+        Some(a.clone())
+    } else {
+        None
+    }
+}
+
+/// Whether every short branch still reaches its target after a rewrite. [`assemble`] encodes these
+/// operands as signed 16-bit deltas, so accepting a larger delta would wrap and corrupt the method.
+fn short_branches_fit(insns: &[Insn], offsets: &[usize]) -> bool {
+    insns.iter().enumerate().all(|(at, insn)| match insn {
+        Insn::Branch {
+            target: BranchTarget::Internal(target),
+            ..
+        } => offsets.get(*target).is_some_and(|target_offset| {
+            i16::try_from(*target_offset as isize - offsets[at] as isize).is_ok()
+        }),
+        Insn::Branch { .. } => false,
+        _ => true,
+    })
+}
+
 impl ClassWriter {
+    /// Give every frame bound at one offset the same stack, joined entry by entry; `None` when
+    /// their heights differ or an entry has no join.
+    fn unify_stacks_at_shared_offsets(&self, frames: &mut CodeBuilder) -> Option<()> {
+        let pcs: Vec<Option<usize>> = frames
+            .frames
+            .iter()
+            .map(|(label, _, _)| {
+                frames
+                    .labels
+                    .get(*label as usize)
+                    .copied()
+                    .filter(|&pc| pc != usize::MAX)
+            })
+            .collect();
+        for (first, pc) in pcs.iter().enumerate() {
+            let Some(pc) = *pc else {
+                continue;
+            };
+            let sharing: Vec<usize> = (first..pcs.len()).filter(|&n| pcs[n] == Some(pc)).collect();
+            if sharing.len() < 2 || pcs[..first].contains(&Some(pc)) {
+                continue;
+            }
+            let mut stack = frames.frames[first].2.clone();
+            for &n in &sharing[1..] {
+                let other = &frames.frames[n].2;
+                if other.len() != stack.len() {
+                    return None;
+                }
+                for (entry, theirs) in stack.iter_mut().zip(other) {
+                    *entry = join_stack_entry(entry, theirs, &self.cp)?;
+                }
+            }
+            for &n in &sharing {
+                frames.frames[n].2.clone_from(&stack);
+            }
+        }
+        Some(())
+    }
+
     /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
     pub(super) fn rewrite_methods(&mut self) {
         for index in 0..self.methods.len() {
@@ -334,7 +408,7 @@ impl ClassWriter {
             .collect();
         let new_offsets = insn_offsets_at(&new_insns, 0);
         let new_len = new_offsets[new_insns.len()];
-        if new_len > usize::from(u16::MAX) {
+        if new_len > usize::from(u16::MAX) || !short_branches_fit(&new_insns, &new_offsets) {
             return None;
         }
         // An original offset maps to where the instruction that began there now begins; a removed
@@ -345,19 +419,72 @@ impl ClassWriter {
         };
         let map16 = |pc: u16| map(usize::from(pc)) as u16;
 
+        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
+        let mut entry = Vec::new();
+        if source.access & 0x0008 == 0 {
+            entry.push(if source.name == "<init>" {
+                VerifType::UninitializedThis
+            } else {
+                VerifType::ObjectName(self.internal_name.clone())
+            });
+        }
+        if !Self::append_param_verif_types(&source.desc, &mut entry) {
+            return None;
+        }
+        let entry = expand_slots(&entry);
+
+        // A null check that now keeps its value on the stack leaves it there at the jump target:
+        // that target's frame gains it, typed as the checked local was at each check.
+        let original_graph = ControlGraph::build(&insns, &handlers)?;
+        let mut pushed: Vec<(usize, VerifType)> = Vec::new();
+        if !rewrite.stack_at_target.is_empty() {
+            let original_frames = self
+                .merged_frames(&source.builder)
+                .into_iter()
+                .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
+                .collect::<Option<Vec<_>>>()?;
+            let types =
+                FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)?;
+            for (target, loads) in &rewrite.stack_at_target {
+                let mut value: Option<VerificationType> = None;
+                for &load in loads {
+                    let (slot, _) = var_slot(&insns[load])?;
+                    let local = types.before(load)?.local(slot).clone();
+                    value = Some(match value {
+                        Some(value) => value.join(&local),
+                        None => local,
+                    });
+                }
+                let value = value?;
+                if !matches!(
+                    value,
+                    VerificationType::Reference(_) | VerificationType::Null
+                ) {
+                    return None;
+                }
+                pushed.push((offsets[*target], value.to_verif()));
+            }
+        }
+
         // An eliminated store's slot is `top` in every recorded frame its value reached: those frames
         // typed the slot with a value the rewritten body no longer stores.
-        let original_graph = ControlGraph::build(&insns, &handlers)?;
         let reach: Vec<(u16, Vec<bool>)> = rewrite
             .eliminated
             .iter()
             .map(|&(store, slot)| (slot, reached_by(&insns, &original_graph, store, slot)))
             .collect();
         let mut frames = source.builder.clone();
-        for (label, locals, _) in &mut frames.frames {
+        let mut received = vec![false; pushed.len()];
+        for (label, locals, stack) in &mut frames.frames {
             let Some(&pc) = source.builder.labels.get(*label as usize) else {
                 continue;
             };
+            for (n, (at, value)) in pushed.iter().enumerate() {
+                if *at == pc {
+                    stack.push(value.clone());
+                    received[n] = true;
+                }
+            }
             let Some(index) = index_of(pc) else {
                 continue;
             };
@@ -374,6 +501,10 @@ impl ClassWriter {
                 *locals = compress_slots(&slots);
             }
         }
+        // A target with no recorded frame has nothing to carry the value: keep the method as it was.
+        if received.contains(&false) {
+            return None;
+        }
         frames.bytes = assemble(&new_insns);
         frames.fixups.clear();
         frames.switch_fixups.clear();
@@ -381,6 +512,13 @@ impl ClassWriter {
             if *label != usize::MAX {
                 *label = map(*label);
             }
+        }
+        // A removed reload can leave its jump target and the join after it at one offset, each with
+        // its own frame: the target's carries the checked value's type, the join's whatever every
+        // path into it agreed on. Both describe the one point now, so each stack entry is what they
+        // all accept.
+        if !pushed.is_empty() {
+            self.unify_stacks_at_shared_offsets(&mut frames)?;
         }
         let exceptions: Vec<(u16, u16, u16, u16)> = method
             .exceptions
@@ -413,19 +551,6 @@ impl ClassWriter {
             return None;
         }
 
-        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
-        let mut entry = Vec::new();
-        if source.access & 0x0008 == 0 {
-            entry.push(if source.name == "<init>" {
-                VerifType::UninitializedThis
-            } else {
-                VerifType::ObjectName(self.internal_name.clone())
-            });
-        }
-        if !Self::append_param_verif_types(&source.desc, &mut entry) {
-            return None;
-        }
-        let entry = expand_slots(&entry);
         let new_handlers: Vec<Handler> = exceptions
             .iter()
             .map(|&(start, end, handler, _)| {
@@ -451,6 +576,9 @@ impl ClassWriter {
             })
             .collect::<Option<Vec<_>>>()?;
         let types = FrameTypes::analyze(&new_insns, &new_graph, &entry, &merged, self)?;
+        if !types.frames_hold(&new_insns, &new_graph, &merged, self) {
+            return None;
+        }
         let mut max_stack = 0usize;
         for index in 0..=new_insns.len() {
             if let Some(state) = types.before(index) {
@@ -488,7 +616,9 @@ impl ClassWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::is_expression_null_check;
+    use super::{is_expression_null_check, join_stack_entry, short_branches_fit};
+    use crate::jvm::classfile::{ConstPool, VerifType};
+    use crate::jvm::inline::{insn_offsets_at, BranchTarget, Insn};
 
     #[test]
     fn expression_null_check_identity_includes_its_descriptor() {
@@ -506,6 +636,53 @@ mod tests {
             "fixture/Intrinsics",
             "checkNotNullExpressionValue",
             "(Ljava/lang/Object;Ljava/lang/String;)V",
+        ));
+    }
+
+    #[test]
+    fn a_rewrite_declines_a_short_branch_that_grows_out_of_range() {
+        fn body(nops: usize) -> Vec<Insn> {
+            let target = nops + 1;
+            let mut insns = vec![Insn::Branch {
+                op: 0xa7,
+                target: BranchTarget::Internal(target),
+            }];
+            insns.extend((0..nops).map(|_| Insn::Plain {
+                op: 0x00,
+                operands: Vec::new(),
+            }));
+            insns.push(Insn::Plain {
+                op: 0xb1,
+                operands: Vec::new(),
+            });
+            insns
+        }
+
+        let at_limit = body(32_764);
+        assert!(short_branches_fit(
+            &at_limit,
+            &insn_offsets_at(&at_limit, 0)
+        ));
+        let too_far = body(32_765);
+        assert!(!short_branches_fit(&too_far, &insn_offsets_at(&too_far, 0)));
+    }
+
+    #[test]
+    fn shared_offsets_do_not_widen_distinct_references_without_a_hierarchy() {
+        let pool = ConstPool::default();
+        assert!(join_stack_entry(
+            &VerifType::ObjectName("java/lang/String".to_owned()),
+            &VerifType::ObjectName("java/lang/CharSequence".to_owned()),
+            &pool,
+        )
+        .is_none());
+        assert!(matches!(
+            join_stack_entry(
+                &VerifType::Null,
+                &VerifType::ObjectName("java/lang/CharSequence".to_owned()),
+                &pool,
+            ),
+            Some(VerifType::ObjectName(name)) if name == "java/lang/CharSequence"
         ));
     }
 }
