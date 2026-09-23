@@ -390,14 +390,23 @@ pub(crate) fn lower_suspend(
         // passes above stop at a lambda. Normalize them now, then re-read the suspensions — hoisting
         // rewrites the very expressions just collected. Each body is typed in its own lambda's value
         // numbering, not this function's. A value-`try` the desugar could not reach (one nested
-        // inside an expression) still keeps the call's raw `Object` in a scalar arm, and a non-local
-        // `return` is not boxed to the CPS result yet; such a body is declined after normalization,
-        // exactly as before the machine existed.
+        // inside an expression) still keeps the call's raw `Object` in a scalar arm; such a body is
+        // declined after normalization, exactly as before the machine existed.
+        //
+        // A direct non-local `return` out of such a body is NOT a reason to decline: `box_returns`
+        // walks a lambda's retained `inline_body`, so the return already yields the CPS `Object`
+        // result. A return that crosses `finally` remains declined until that control transfer can
+        // be normalized inside a retained inline body.
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
                 hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
-                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
-                    || cps::spliced_body_returns(ir, b, &suspend_set);
+                // Do not let an explicitly unsupported control transfer fall through to emission
+                // and masquerade as an unrelated continuation-arity error. This backend pass owns
+                // the limitation and declines the file at the exact boundary that detects it.
+                if cps::spliced_return_crosses_finally(ir, b) {
+                    return false;
+                }
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
@@ -2429,31 +2438,56 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
-/// How many functions with this one's continuation NAME the file declares before it.
+/// How many SUSPEND functions sharing this one's continuation NAME the file declares before it.
 ///
 /// A continuation class is named after the method it re-enters, so two overloads would share one —
 /// and they do not share a spill layout, so whichever class loses the name resumes against fields it
 /// does not have (`NoSuchFieldError`). Both machines number the later one.
-pub(crate) fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
+///
+/// This answers for a suspend function that has NO source declaration behind it — a lowering-made
+/// one, which no frontend pass could have reserved a position for. A declared function reads its
+/// position from [`continuation_ordinal`] instead of counting anything here.
+fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
     let function = &ir.functions[fid as usize];
     let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
     let name = bare(&function.name);
     ir.functions
         .iter()
+        .enumerate()
         .take(fid as usize)
-        .filter(|other| {
-            bare(&other.name) == name && other.dispatch_receiver == function.dispatch_receiver
+        .filter(|(other_fid, other)| {
+            bare(&other.name) == name
+                && other.dispatch_receiver == function.dispatch_receiver
+                && ir.suspend_funs.contains(&(*other_fid as u32))
         })
         .count()
 }
 
-/// The continuation class for `fid`: `<owner>$<function>$1`, and `$2`, `$3`, … for the overloads
-/// that follow it.
-pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
-    match ordinal {
-        0 => format!("{owner}${function}$1"),
-        n => format!("{owner}${function}${}", n + 1),
+/// The 1-based `$N` the continuation class of `fid` takes in its `<owner>$<function>` sequence.
+///
+/// The sequence is shared with the anonymous objects those bodies declare, and the pass that names
+/// those objects is the one that leaves a position free for each suspend function, in declaration
+/// order. It publishes which position it left — `IrFile::fn_continuation_ordinal` — so there is one
+/// numbering, computed once. Nothing here re-derives it from a class name.
+pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
+    match ir.fn_continuation_ordinal.get(&fid) {
+        Some(&ordinal) => ordinal as usize,
+        None => {
+            assert!(
+                !ir.fn_source_order.contains_key(&fid),
+                "source suspend function {fid} has no published continuation ordinal"
+            );
+            // A lowering-made function has no source declaration, so no anonymous source object
+            // can consume its generated sequence. Its target-private overloads number themselves.
+            same_name_ordinal(ir, fid) + 1
+        }
     }
+}
+
+/// The continuation class for an ordinal from [`continuation_ordinal`]. The one place a generated
+/// continuation class is spelled.
+pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
+    format!("{owner}${function}${ordinal}")
 }
 
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
@@ -2781,7 +2815,7 @@ fn build_state_machine(
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
     let cont_internal =
-        continuation_class_name(&cont_owner, cont_fname, same_name_ordinal(ir, fid));
+        continuation_class_name(&cont_owner, cont_fname, continuation_ordinal(ir, fid));
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;

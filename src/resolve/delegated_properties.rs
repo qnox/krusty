@@ -12,14 +12,18 @@ enum DelegateGetValueAttempt {
 }
 
 enum DelegateOperatorSelection {
-    Selected(DelegateGetValueTarget),
+    /// Boxed: `DelegateGetValueTarget` is the only large payload here, and this enum is returned
+    /// through several convention rungs.
+    Selected(Box<DelegateGetValueTarget>),
     None,
     Failure(DelegateOperatorFailure),
 }
 
 enum OrdinaryDelegateSelection {
     None(Vec<crate::libraries::FunctionInfo>),
-    Selected(crate::libraries::FunctionInfo, Ty, Ty),
+    /// `FunctionInfo` alone is ~1.2 KiB and is what makes this variant large; the two `Ty`s are
+    /// `Copy` and a couple of words each, so only the callable is boxed.
+    Selected(Box<crate::libraries::FunctionInfo>, Ty, Ty),
     Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
@@ -189,7 +193,8 @@ pub(crate) struct DelegateConventionDiagnosticCandidate {
 
 pub(crate) enum DelegateConventionSelection {
     None(Vec<crate::libraries::FunctionInfo>),
-    Selected(crate::libraries::FunctionInfo, Ty),
+    /// See [`OrdinaryDelegateSelection::Selected`]: the callable is the large half.
+    Selected(Box<crate::libraries::FunctionInfo>, Ty),
     Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
@@ -1202,9 +1207,9 @@ impl Checker<'_> {
         );
         if let Some(provide_target) = provide_target {
             self.delegate_provide_targets
-                .insert(delegate, provide_target);
+                .insert(delegate, *provide_target);
         }
-        self.delegate_getvalue_targets.insert(delegate, target);
+        self.delegate_getvalue_targets.insert(delegate, *target);
         DelegateGetValueAttempt::Complete(Some(ret))
     }
 
@@ -1313,7 +1318,7 @@ impl Checker<'_> {
             }
         };
         crate::trace_compiler!("fir", "selected delegate setValue target={target:?}");
-        self.delegate_setvalue_targets.insert(delegate, target);
+        self.delegate_setvalue_targets.insert(delegate, *target);
         Some(())
     }
 
@@ -1463,7 +1468,7 @@ impl Checker<'_> {
                             .expect("a selected source delegate convention must retain its shape"),
                         None => selected.declared_params.clone(),
                     };
-                    return DelegateOperatorSelection::Selected(
+                    return DelegateOperatorSelection::Selected(Box::new(
                         DelegateGetValueTarget::MemberExtension {
                             stable_declaration: selected.stable_declaration,
                             external_identity: selected.external_identity,
@@ -1485,7 +1490,7 @@ impl Checker<'_> {
                             declared_ret: selected.declared_ret,
                             interface,
                         },
-                    );
+                    ));
                 }
                 match select_kind(crate::libraries::FnKind::Extension) {
                     OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
@@ -1544,14 +1549,15 @@ impl Checker<'_> {
                     callable,
                     stable_declaration,
                 }) {
-                Some(target) => DelegateOperatorSelection::Selected(target),
+                Some(target) => DelegateOperatorSelection::Selected(Box::new(target)),
                 None => DelegateOperatorSelection::None,
             };
         }
         let Some(internal) = delegate_ty.obj_internal() else {
             return DelegateOperatorSelection::None;
         };
-        let resolved = resolver.materialize_member_function(delegate_ty, &call_args, &[], selected);
+        let resolved =
+            resolver.materialize_member_function(delegate_ty, &call_args, &[], *selected);
         let owner = match resolved.member.owner {
             Some(owner) => owner,
             None => internal,
@@ -1560,7 +1566,7 @@ impl Checker<'_> {
             || resolver
                 .classifier(owner)
                 .is_some_and(|classifier| classifier.is_interface());
-        DelegateOperatorSelection::Selected(DelegateGetValueTarget::Member {
+        DelegateOperatorSelection::Selected(Box::new(DelegateGetValueTarget::Member {
             applied_receiver,
             declared_receiver,
             declared_params,
@@ -1579,7 +1585,7 @@ impl Checker<'_> {
             physical_ret: resolved.member.physical_ret,
             descriptor: resolved.member.descriptor,
             interface,
-        })
+        }))
     }
 
     /// The DECLARED shape of a current-module convention: its extension receiver or dispatch
@@ -1624,5 +1630,22 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         let result = signature.result.get();
         Some((receiver, parameters, result))
+    }
+}
+
+#[cfg(test)]
+mod selection_sizes {
+    use std::mem::size_of;
+
+    /// Every delegate-convention rung returns one of these by value. Boxing the selected callable
+    /// keeps each selection a few words.
+    ///
+    /// Exact sizes, not an upper bound: a regression here is a field silently moving back inline,
+    /// and a loose bound would not catch it. Update the numbers deliberately if a payload changes.
+    #[test]
+    fn delegate_selections_carry_a_pointer_to_their_callable() {
+        assert_eq!(size_of::<super::DelegateOperatorSelection>(), 72);
+        assert_eq!(size_of::<super::OrdinaryDelegateSelection>(), 72);
+        assert_eq!(size_of::<super::DelegateConventionSelection>(), 40);
     }
 }

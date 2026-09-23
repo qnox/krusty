@@ -27,6 +27,7 @@ pub enum MetadataDecodeError {
     MalformedWire,
     MissingField(&'static str),
     InvalidVariance(u64),
+    InvalidReturnValueStatus(u64),
 }
 
 impl From<ParameterDecodeError> for MetadataDecodeError {
@@ -489,6 +490,17 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
 const IS_SUSPEND_BIT: u64 = 1 << 13;
 
+/// `Function.flags` bits 16..=17 encode Kotlin's `ReturnValueStatus` enum. Value 3 is reserved and
+/// rejected rather than being coerced into one of the two meaningful policies.
+fn return_value_status(flags: u64) -> MetadataResult<crate::types::ReturnValueStatus> {
+    match (flags >> 16) & 0x3 {
+        0 => Ok(crate::types::ReturnValueStatus::Unspecified),
+        1 => Ok(crate::types::ReturnValueStatus::MustUse),
+        2 => Ok(crate::types::ReturnValueStatus::ExplicitlyIgnorable),
+        value => Err(MetadataDecodeError::InvalidReturnValueStatus(value)),
+    }
+}
+
 /// `Visibility` enum value from a Function/Class `flags` word: `hasAnnotations` is bit 0, then
 /// `Visibility` occupies the next 3 bits (kotlin metadata `Flags.VISIBILITY`). Enum order:
 /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5.
@@ -503,6 +515,7 @@ const VIS_PUBLIC: u64 = 3;
 struct ParsedFunction {
     is_inline: bool,
     is_suspend: bool,
+    return_value_status: crate::types::ReturnValueStatus,
     /// Kotlin declaration modality from metadata. This is deliberately independent of the
     /// realization method's classfile access: under `-jvm-default=disable`, a concrete interface
     /// declaration is represented by an abstract interface method plus a static holder body.
@@ -697,6 +710,7 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
     Ok(ParsedFunction {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
+        return_value_status: return_value_status(flags)?,
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_final: (flags >> 4) & 0x3 == 0,
         is_synthesized: (flags >> 6) & 0x3 == 3,
@@ -1740,6 +1754,7 @@ pub struct MetaFn {
     /// Kotlin return type is nullable (`T?`, `Type.nullable`); the JVM descriptor/`Signature` erase this,
     /// only `@Metadata` carries it, and it drives the elvis null-check for a nullable-returning scope fn.
     pub flags: MfnFlags,
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
     /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
     pub receiver_class: Option<TypeName>,
@@ -2196,11 +2211,14 @@ fn metadata_class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
+/// each one's declared BOUNDS (one inner `Vec` per parameter, in the same order), and the direct
+/// applied SUPERTYPES.
+type ClassSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
+
 /// Decode a Kotlin class's own type parameters and direct applied supertypes from the Class proto.
 /// Both inline `supertype` (field 6) and table-backed `supertype_id` (field 2) are valid encodings.
-fn decode_class_signature(
-    ctx: &MetaCtx<'_>,
-) -> MetadataResult<(Vec<String>, Vec<Vec<Ty>>, Vec<Ty>)> {
+fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
     let parsed_params = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
         .into_iter()
         .map(parse_type_param)
@@ -2761,6 +2779,7 @@ fn decode_functions(
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),
+                        return_value_status: pf.return_value_status,
                         receiver_class,
                         ret_class,
                         value_params,
@@ -4415,8 +4434,8 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         decode_metadata_type, decode_properties, klib_validation, parse_function, parse_type_alias,
-        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
-        BuiltinTy, MetaCtx, ParsedValueParam,
+        parse_type_facts, primary_erasure_bounds, read_kotlin_module, return_value_status,
+        value_parameter_type, BuiltinTy, MetaCtx, MetadataDecodeError, ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -4537,6 +4556,22 @@ mod module_reader_tests {
         let ordinary = parse_function(&[]).expect("default function message");
         assert!(operator.is_operator);
         assert!(!ordinary.is_operator);
+    }
+
+    #[test]
+    fn function_return_value_status_is_typed_and_rejects_the_reserved_value() {
+        use crate::types::ReturnValueStatus;
+
+        assert_eq!(return_value_status(0), Ok(ReturnValueStatus::Unspecified));
+        assert_eq!(return_value_status(1 << 16), Ok(ReturnValueStatus::MustUse));
+        assert_eq!(
+            return_value_status(2 << 16),
+            Ok(ReturnValueStatus::ExplicitlyIgnorable)
+        );
+        assert_eq!(
+            return_value_status(3 << 16),
+            Err(MetadataDecodeError::InvalidReturnValueStatus(3))
+        );
     }
 
     #[test]

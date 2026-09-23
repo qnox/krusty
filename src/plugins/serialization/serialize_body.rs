@@ -173,6 +173,11 @@ impl SerializeBody<'_> {
                 } else {
                     "encodeSerializableElement"
                 };
+                let inst = super::deserialize_body::narrowed(
+                    ir,
+                    inst,
+                    "kotlinx/serialization/SerializationStrategy",
+                );
                 stmts.push(ir.add_expr(IrExpr::Call {
                     callee: virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
@@ -196,6 +201,11 @@ impl SerializeBody<'_> {
                 } else {
                     "encodeSerializableElement"
                 };
+                let inst = super::deserialize_body::narrowed(
+                    ir,
+                    inst,
+                    "kotlinx/serialization/SerializationStrategy",
+                );
                 stmts.push(ir.add_expr(IrExpr::Call {
                     callee: virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
@@ -213,6 +223,11 @@ impl SerializeBody<'_> {
                 } else {
                     "encodeSerializableElement"
                 };
+                let inst = super::deserialize_body::narrowed(
+                    ir,
+                    inst,
+                    "kotlinx/serialization/SerializationStrategy",
+                );
                 stmts.push(ir.add_expr(IrExpr::Call {
                     callee: virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
@@ -242,6 +257,11 @@ impl SerializeBody<'_> {
                 } else {
                     "encodeSerializableElement"
                 };
+                let inst = super::deserialize_body::narrowed(
+                    ir,
+                    inst,
+                    "kotlinx/serialization/SerializationStrategy",
+                );
                 stmts.push(ir.add_expr(IrExpr::Call {
                     callee: virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
@@ -255,6 +275,11 @@ impl SerializeBody<'_> {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
                 if let Some(inst) = element_serializer(ir, ctx, i, ty) {
+                    let inst = super::deserialize_body::narrowed(
+                        ir,
+                        inst,
+                        "kotlinx/serialization/SerializationStrategy",
+                    );
                     stmts.push(ir.add_expr(IrExpr::Call {
                         callee: virtual_iface(
                             "kotlinx/serialization/encoding/CompositeEncoder",
@@ -281,6 +306,11 @@ impl SerializeBody<'_> {
             } else if let Some(inst) = element_serializer(ir, ctx, i, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
+                let inst = super::deserialize_body::narrowed(
+                    ir,
+                    inst,
+                    "kotlinx/serialization/SerializationStrategy",
+                );
                 stmts.push(ir.add_expr(IrExpr::Call {
                     callee: virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
@@ -322,19 +352,46 @@ impl SerializeBody<'_> {
                         break;
                     };
                     let def = ir.add_expr(IrExpr::Const(dc.clone()));
+                    // The default value carries the property's own declaration line, as it does in
+                    // the deserialization constructor. The comparison that consumes it is marked
+                    // back to the statement's line by the emitter, which is where that rule lives.
+                    // A `null` default is excluded: it is tested with `ifnull`, which pushes
+                    // nothing, and kotlinc marks no line for it.
+                    if !matches!(dc, IrConst::Null) {
+                        if let Some(line) = ir
+                            .prop_decl_lines
+                            .get(&(serialized_name, pname.clone()))
+                            .copied()
+                            .filter(|line| *line != 0)
+                        {
+                            ir.expr_source_lines.insert(def, line);
+                        }
+                    }
                     let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: crate::ir::IrBinOp::Ne,
                         lhs: cur,
                         rhs: def,
                     });
-                    let cond = ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: crate::ir::IrBinOp::Or,
-                        lhs: should,
-                        rhs: neq,
+                    // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
+                    // `true` without reading the property at all, otherwise fall through to the
+                    // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
+                    // in a temp and combines with `ior`, which is a different method body from
+                    // kotlinc's for every defaulted property in the class.
+                    let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                    let cond = ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(should), encode_anyway), (None, neq)],
                     });
-                    stmts.push(ir.add_expr(IrExpr::When {
+                    let guard = ir.add_expr(IrExpr::When {
                         branches: vec![(Some(cond), enc_stmt)],
-                    }));
+                    });
+                    // The guard is a statement of the class's own declaration, so it carries the
+                    // class's start line. That is also what puts the emitter's "current statement
+                    // line" in effect, which the comparison inside the condition returns to.
+                    let start_line = ir.classes[foo_id as usize].decl_start_line;
+                    if start_line != 0 {
+                        ir.expr_lines.insert(guard, start_line);
+                    }
+                    stmts.push(guard);
                 }
             }
         }

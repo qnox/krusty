@@ -2602,7 +2602,7 @@ impl<'a> SymbolResolver<'a> {
             expected_result,
         ) {
             ReceiverFunctionSelection::Selected((selected, params, ret, _)) => {
-                CandidateSelection::Selected((selected, params, ret))
+                CandidateSelection::Selected((*selected, params, ret))
             }
             ReceiverFunctionSelection::None => CandidateSelection::None,
             ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
@@ -6037,15 +6037,9 @@ fn select_overload_tracking_with_functions(
         if o.flags.suspend {
             return None;
         }
-        let Some(vararg_index) = o.call_sig.vararg_index else {
-            return None;
-        };
-        let Some(array) = lp.get(vararg_index).copied() else {
-            return None;
-        };
-        let Some(elem) = array.array_read_elem() else {
-            return None;
-        };
+        let vararg_index = o.call_sig.vararg_index?;
+        let array = lp.get(vararg_index).copied()?;
+        let elem = array.array_read_elem()?;
         let applicable = args.len() >= vararg_index
             && lp[..vararg_index].iter().zip(args).all(|(p, a)| {
                 let ty = a.ty();

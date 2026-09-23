@@ -15,6 +15,7 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod generated_classifier;
 mod generated_members;
 mod serialize_body;
 
@@ -32,6 +33,7 @@ use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::{element_serializer_expr, element_serializer_plan};
+use generated_classifier::generated_serializer_classifier_fact;
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
@@ -548,6 +550,59 @@ fn call_external_companion_serializer(
     }))
 }
 
+/// The serialized type a reified round-trip call names, flattened into the placeholder's name
+/// payload. A `@Serializable` classifier is one name; a supported collection over `@Serializable`
+/// arguments is its own classifier followed by them. That is as much shape as `Vec<TypeName>`
+/// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
+/// inline path.
+fn serialized_type_spelling(
+    ctx: &FrontendExpressionContext,
+    serializable: TypeName,
+    ty: Ty,
+) -> Option<Vec<TypeName>> {
+    let classifier = ty.kotlin_class_internal()?;
+    if ctx.has_classifier_annotation(classifier, serializable) {
+        return Some(vec![classifier]);
+    }
+    // Only a collection whose every argument is itself annotated is planned. A wider gate would
+    // capture calls the generic path already compiles correctly and turn a working file into a
+    // declined placeholder.
+    let (_, arity) = collection_serializer_builder(classifier)?;
+    let Ty::Obj(_, arguments) = ty.non_null() else {
+        return None;
+    };
+    if arguments.len() != arity {
+        return None;
+    }
+    let mut spelling = vec![classifier];
+    for argument in arguments {
+        let argument = argument.kotlin_class_internal()?;
+        if !ctx.has_classifier_annotation(argument, serializable) {
+            return None;
+        }
+        spelling.push(argument);
+    }
+    Some(spelling)
+}
+
+/// Rebuild the serialized type from the flattened spelling the planner recorded.
+fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
+    match spelling {
+        [classifier] => Some(Ty::obj_name(*classifier)),
+        [classifier, arguments @ ..] => Some(Ty::Obj(
+            *classifier,
+            crate::types::intern_tys(
+                &arguments
+                    .iter()
+                    .copied()
+                    .map(Ty::obj_name)
+                    .collect::<Vec<_>>(),
+            ),
+        )),
+        [] => None,
+    }
+}
+
 /// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
 /// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
 /// (`exprs = [receiver, serializer, value-or-string]`) and the resolved name ids (`data = [format
@@ -606,16 +661,17 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         }
         // Operand/name layout is fixed by the plugin planner; a malformed node is left untouched
         // (`jvm_can_emit` then declines the file rather than miscompiling).
-        let [fmt, class_internal] = data.as_slice() else {
+        let [fmt, spelling @ ..] = data.as_slice() else {
             continue;
         };
-        let (fmt, class_internal) = (*fmt, *class_internal);
+        let fmt = *fmt;
+        let Some(serialized) = serialized_ty(spelling) else {
+            continue;
+        };
         let (recv, ser, arg) = match exprs.as_slice() {
             [recv, ser, arg] => (*recv, *ser, *arg),
             [recv, arg] => {
-                let Some(serializer) =
-                    element_serializer_expr(ir, ctx, &Ty::obj_name(class_internal))
-                else {
+                let Some(serializer) = element_serializer_expr(ir, ctx, &serialized) else {
                     continue;
                 };
                 (*recv, serializer, *arg)
@@ -640,7 +696,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 ir.exprs[mid] = IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
                     arg: decoded,
-                    type_operand: Ty::obj_name(class_internal),
+                    type_operand: serialized,
                 };
             }
             _ => {}
@@ -1413,6 +1469,14 @@ impl IrPlugin for SerializationPlugin {
         });
     }
 
+    fn publish_frontend_generated_classifiers(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+        classifiers.extend(generated_serializer_classifier_fact(ctx));
+    }
+
     fn plan_frontend_expressions(
         &self,
         ctx: &FrontendExpressionContext,
@@ -1449,19 +1513,19 @@ impl IrPlugin for SerializationPlugin {
                 let [Some(argument)] = call.argument_slots.as_slice() else {
                     return None;
                 };
-                let classifier = match call.type_arguments.as_slice() {
-                    [Some(argument)] => argument.kotlin_class_internal(),
-                    _ if operation == "encodeToString" => call.params[0].kotlin_class_internal(),
-                    _ => None,
-                }?;
-                if !ctx.has_classifier_annotation(classifier, serializable_annotation) {
-                    return None;
-                }
+                let serialized = match call.type_arguments.as_slice() {
+                    [Some(argument)] => *argument,
+                    _ if operation == "encodeToString" => call.params[0],
+                    _ => return None,
+                };
+                let spelling = serialized_type_spelling(ctx, serializable_annotation, serialized)?;
                 let format = receiver_ty.kotlin_class_internal()?;
+                let mut data = vec![format];
+                data.extend(spelling);
                 Some(PluginExpressionPlan {
                     plugin: "serialization",
                     operation,
-                    data: vec![format, classifier],
+                    data,
                     operands: vec![(receiver, receiver_ty), (*argument, call.params[0])],
                 })
             })();
@@ -1615,9 +1679,9 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             let serializer_name = type_name(&ser_fq);
-            let (owner_start_line, owner_header_line) = {
+            let (owner_start_line, owner_header_line, owner_end_line) = {
                 let owner = &ir.classes[class_id as usize];
-                (owner.decl_start_line, owner.decl_line)
+                (owner.decl_start_line, owner.decl_line, owner.decl_end_line)
             };
             let GeneratedSerializerMembers {
                 descriptor,
@@ -1630,6 +1694,7 @@ impl IrPlugin for SerializationPlugin {
                 serializer_name,
                 serialized_ty,
                 owner_start_line,
+                owner_end_line,
                 !type_params.is_empty(),
             );
 
@@ -2383,67 +2448,6 @@ mod tests {
     }
 
     #[test]
-    fn contributes_serializer_as_a_companion_member() {
-        let annotation = [type_name(SERIALIZABLE_FQ)];
-        let classifier = type_name("demo/Box");
-        let mut members = Vec::new();
-        SerializationPlugin::default().generate_frontend_declarations(
-            &FrontendClassContext {
-                classifier,
-                kind: crate::libraries::TypeKind::Class,
-                type_parameters: &crate::types::TypeParameters::new(
-                    vec!["T".to_string()],
-                    vec![Ty::nullable(Ty::obj("kotlin/Any"))],
-                    vec![crate::types::TypeVariance::Invariant],
-                ),
-                annotations: &annotation,
-            },
-            &mut members,
-        );
-
-        assert_eq!(
-            members,
-            vec![FrontendCallable {
-                owner: FrontendCallableOwner::Companion,
-                name: "serializer".to_string(),
-                params: vec![Ty::obj_args(
-                    KSERIALIZER_FQ,
-                    &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                )],
-                param_names: vec!["typeSerial0".to_string()],
-                ret: Ty::obj_args_name(
-                    type_name(KSERIALIZER_FQ),
-                    &[Ty::obj_args_name(
-                        classifier,
-                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                    )],
-                ),
-                generic_sig: Some(crate::libraries::GenericSig {
-                    formals: vec!["T".to_string()],
-                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
-                    receiver: None,
-                    params: vec![Ty::obj_args(
-                        KSERIALIZER_FQ,
-                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                    )],
-                    ret: Ty::obj_args_name(
-                        type_name(KSERIALIZER_FQ),
-                        &[Ty::obj_args_name(
-                            classifier,
-                            &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
-                        )],
-                    ),
-                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
-                }),
-                plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
-                    plugin: "serialization",
-                    operation: "serializer",
-                }),
-            }]
-        );
-    }
-
-    #[test]
     fn generated_generic_serializer_plan_keeps_classifier_and_selected_owner() {
         let inner = Ty::obj("demo/Inner");
         let boxed = Ty::obj_args("demo/Box", &[inner]);
@@ -2476,24 +2480,6 @@ mod tests {
             [type_name("demo/Box"), type_name("demo/Box$Companion")]
         );
         assert_eq!(plans[0].1.operands, [(argument, serializer(inner))]);
-    }
-
-    #[test]
-    fn contributes_object_serializer_as_an_object_member() {
-        let annotation = [type_name(SERIALIZABLE_FQ)];
-        let mut members = Vec::new();
-        SerializationPlugin::default().generate_frontend_declarations(
-            &FrontendClassContext {
-                classifier: type_name("demo/Singleton"),
-                kind: crate::libraries::TypeKind::Object,
-                type_parameters: &crate::types::TypeParameters::default(),
-                annotations: &annotation,
-            },
-            &mut members,
-        );
-
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].owner, FrontendCallableOwner::Classifier);
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.

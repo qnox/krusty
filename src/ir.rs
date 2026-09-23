@@ -365,6 +365,13 @@ pub struct IrCheckedProperty {
     /// output metadata, not a source locator: property realization copies it to the common-IR
     /// declarations it creates after the syntax unit has already been dropped.
     pub decl_line: u32,
+    /// For a PRIMARY-CONSTRUCTOR property, the line its declaration starts on with its annotations
+    /// included; 0 for every other property and whenever the syntax unit carried no line.
+    ///
+    /// Accepted on the same terms as [`Self::decl_line`], and kept beside it rather than folded
+    /// into it because the two describe different members: the constructor's store of the property
+    /// maps here, its accessors map to `decl_line`.
+    pub decl_start_line: u32,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
     pub initialization_order: Option<u32>,
@@ -1309,6 +1316,11 @@ impl IrfFlags {
 pub struct IrField {
     pub name: String,
     pub ty: Ty,
+    /// Source line for the compiler-generated PRIMARY-CONSTRUCTOR store into this exact field.
+    /// Zero for non-constructor-property fields or when no source line was retained. This semantic
+    /// debug role is recorded on the resolved field coordinate so a backend never has to recover
+    /// the property from its emitted field name.
+    pub constructor_store_line: u32,
     /// The source type-parameter NAME the field was declared with (`val x: T` → `Some("T")`), else
     /// `None`. Platform-neutral; lets the value-class pass pick the CORRECT bound for a generic
     /// underlying (vs guessing), independent of erasure dropping the name.
@@ -1335,6 +1347,7 @@ impl IrField {
         IrField {
             name,
             ty,
+            constructor_store_line: 0,
             type_param: None,
             default: None,
             flags: IrfFlags::default().with_is_private(true),
@@ -2086,8 +2099,11 @@ pub struct IrStatic {
     pub init: ExprId,
     /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
     pub is_var: bool,
-    /// `const val` ⇒ kotlinc keeps the field `public static final` (inlined at use) with no accessor;
-    /// a plain top-level `val`/`var` is `private static [final]` + a `public static` getter/setter.
+    /// `const val` ⇒ kotlinc keeps the field `static final` (inlined at use) with no accessor, at the
+    /// DECLARATION's own visibility: `private const val` is a private field, while `internal` and
+    /// `public` are both public (`internal` is a Kotlin boundary with no JVM spelling). A plain
+    /// top-level `val`/`var` is `private static [final]` + a `public static` getter/setter whatever
+    /// the source said, because every reader goes through the accessor.
     pub is_const: bool,
     /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
@@ -2146,6 +2162,11 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// JVM suspend-interface body carriers, keyed by carrier function id, with the exact interface
+    /// owner and source-declaration function id. The JVM signature/default-stub boundaries consume
+    /// these identities; they must not recover either one from the generated `$suspendImpl`
+    /// spelling.
+    pub(crate) jvm_suspend_interface_bodies: std::collections::HashMap<FunId, (TypeName, FunId)>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications:
@@ -2186,6 +2207,10 @@ pub struct IrFile {
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
     /// a JVM `$` spelling, where a backticked `$` is indistinguishable from a physical separator.
     class_source_qualified_names: std::collections::HashMap<ClassId, KtString>,
+    /// Exact stable-FIR declaration order for every source-declared classifier. Class metadata
+    /// consumes this semantic order directly; a backend must not reconstruct it from debug lines,
+    /// arena layout, or classifier spelling.
+    class_source_orders: std::collections::HashMap<ClassId, u32>,
     /// Stable `(classifier declaration, interface-delegation ordinal)` to its generated storage
     /// field. Common lowering predeclares this source-ordered layout once and both checked
     /// constructor initializers and forwarding-plan materialization consume the exact coordinate.
@@ -2233,6 +2258,10 @@ pub struct IrFile {
     /// the holder representation from this exact coordinate without inferring it from a field name,
     /// constructor position, or expression shape.
     pub shared_class_capture_fields: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
+    /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
+    pub(crate) class_capture_identities:
+        std::collections::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
     /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
     /// ordinary function marker rather than constructor/value-class markers.
     pub class_static_local_functions: std::collections::HashSet<FunId>,
@@ -2279,6 +2308,10 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: std::collections::HashMap<u32, DeclarationAnnotations>,
+    /// Effective source-declared return-value-use policy for a function. Inherited policies travel
+    /// on exact override edges; this sparse table owns explicit function/class annotation policy.
+    pub function_return_value_statuses:
+        std::collections::HashMap<u32, crate::types::ReturnValueStatus>,
     /// `(class, property name)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
@@ -2644,6 +2677,14 @@ pub struct IrFile {
     /// synthetic, an appended lambda impl, an access bridge) keeps its position after the declared
     /// members. Resolution-facing indexes never see the sorted order.
     pub fn_source_order: std::collections::HashMap<u32, u32>,
+    /// FunId → the position this `suspend` function's continuation class takes in the
+    /// generated-class sequence its enclosing scope numbers, 1-based in declaration order.
+    ///
+    /// That sequence is shared with the anonymous objects those bodies declare, and the pass that
+    /// names them is the only one that can say which positions it left free. This is that answer,
+    /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
+    /// with no entry has no source declaration behind it.
+    pub fn_continuation_ordinal: std::collections::HashMap<u32, u32>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,
@@ -3002,6 +3043,8 @@ pub struct IrFunctionOverride {
     pub applied_result: Ty,
     pub implementation_parameters: Vec<Ty>,
     pub implementation_result: Ty,
+    /// Effective return-value-use contract of the implementing declaration.
+    pub return_value_status: crate::types::ReturnValueStatus,
     pub suspend: bool,
     pub depth: u32,
 }
@@ -3082,6 +3125,19 @@ impl IrFile {
 
     pub(crate) fn class_source_qualified_name(&self, class: ClassId) -> Option<KtString> {
         self.class_source_qualified_names.get(&class).cloned()
+    }
+
+    pub(crate) fn record_class_source_order(&mut self, class: ClassId, source_order: u32) {
+        assert!(
+            self.class_source_orders
+                .insert(class, source_order)
+                .is_none(),
+            "a source classifier has one stable declaration order"
+        );
+    }
+
+    pub(crate) fn class_source_order(&self, class: ClassId) -> Option<u32> {
+        self.class_source_orders.get(&class).copied()
     }
 
     pub fn with_package(package: Option<String>) -> Self {

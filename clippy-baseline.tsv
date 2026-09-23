@@ -55,12 +55,12 @@
 1	src/jvm/classpath.rs	called `expect` on `jdk_release` after checking its variant with `is_some`
 1	src/jvm/external_calls.rs	unnecessary closure used with `bool::then`
 1	src/jvm/inline.rs	the loop variable `k` is used to index `insns`
+1	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
 1	src/jvm/ir_emit.rs	this method chain can be written more clearly with `if .. else ..`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*result`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[*index as usize].ty`
 1	src/jvm/java_stub.rs	unnecessary closure used with `bool::then`
 1	src/jvm/jvm_libraries.rs	unnecessarily eager cloning of iterator items
-1	src/jvm/jvm_libraries.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/metadata.rs	this function has too many arguments (8/7)
 1	src/jvm/ranges.rs	this function has too many arguments (8/7)
 1	src/jvm/shared_captures.rs	you seem to want to iterate on a map's keys
@@ -106,13 +106,11 @@
 1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
 1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
 1	src/resolve/delegated_properties.rs	this `if` statement can be collapsed
-1	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
 1	src/resolve/delegated_properties.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `arguments.contains(&ret)`
 1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
 1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
 1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
-1	src/resolve/qualified_call_shaping.rs	this function has too many arguments (8/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -139,28 +137,29 @@
 1	tests/kotlin_box_ir_jvm_conformance.rs	this function has too many arguments (8/7)
 1	tests/safe_call_origin_narrowing_e2e.rs	this function has too many arguments (8/7)
 10	src/fir/body_check/driver_tests.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
-18	src/parser.rs	this `map_or` can be simplified
+17	src/parser.rs	this `map_or` can be simplified
 2	src/fir/body_check.rs	unnecessary closure used to substitute value for `Option::None`
 2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/fir/signature.rs	this function has too many arguments (10/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
 2	src/fir/signature.rs	this function has too many arguments (9/7)
 2	src/fir_lower/checked.rs	this function has too many arguments (8/7)
-2	src/fir_lower/inlining.rs	unneeded `return` statement
 2	src/fir_lower/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/fir_lower/tests.rs	the method `accept_inline_bodies` doesn't need a mutable reference
 2	src/frontend/inline_preparation.rs	the function `crate::fir::check_and_dispatch_body_in_session` doesn't need a mutable reference
-2	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
+2	src/jvm/classpath.rs	this `map_or` can be simplified
 2	src/jvm/ir_emit.rs	unneeded `return` statement
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/jvm/suspend.rs	usage of `bool::then` in `filter_map`
 2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
 2	src/resolve.rs	the `Err`-variant returned from this function is very large
+2	src/resolve.rs	this `if` statement can be collapsed
 2	src/resolve.rs	this `map_or` can be simplified
 2	src/resolve.rs	this `match` can be collapsed into the outer `match`
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/resolve/streaming_signature_bridge.rs	unneeded `return` statement
+2	src/resolve/streaming_signature_bridge/delegates.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
 2	src/resolve/streaming_signature_bridge/semantics.rs	matching on `Some` with `ok()` is redundant
@@ -171,15 +170,12 @@
 3	src/fir/header.rs	this function has too many arguments (8/7)
 3	src/fir/header.rs	this function has too many arguments (9/7)
 3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
-3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `d`
-3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `n`
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
-3	src/resolve.rs	this `if` statement can be collapsed
-4	src/jvm/classpath.rs	this `map_or` can be simplified
 4	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
+4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
+5	src/jvm/ir_emit.rs	this `map_or` can be simplified
 5	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`
 6	src/conformance.rs	doc list item without indentation
-6	src/jvm/ir_emit.rs	this `map_or` can be simplified
 7	src/resolve.rs	this function has too many arguments (9/7)
 9	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions

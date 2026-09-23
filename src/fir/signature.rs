@@ -1578,6 +1578,10 @@ pub struct ResolvedModuleIndex {
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
     source_orders: HashMap<DeclarationId, u32>,
+    /// The generated-class position each `suspend` function's continuation holds in its scope's
+    /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
+    /// sequence; every consumer reads it rather than deriving a second answer.
+    continuation_ordinals: HashMap<DeclarationId, u32>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
@@ -1594,6 +1598,16 @@ pub struct ResolvedModuleIndex {
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
     /// policy without reopening a parser arena or a coordinate-keyed frontend table.
     declaration_annotation_string_arguments: HashMap<(DeclarationId, u32), Box<[Box<str>]>>,
+    /// Resolved CLASS arguments parallel to selected declaration annotations — the identity behind
+    /// `@Serializable(with = X::class)`, already resolved to a classifier rather than a written
+    /// path. A backend fact for one file of a module is read by the others, which never see this
+    /// declaration's syntax, and a class-valued argument is exactly as much a semantic fact as the
+    /// string arguments beside it.
+    declaration_annotation_class_arguments: HashMap<(DeclarationId, u32), Box<[TypeName]>>,
+    /// Exact plugin-generated classifier declarations published with their owning source header.
+    /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
+    /// generated name conventions.
+    generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -1806,6 +1820,7 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
     pub interface: bool,
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2171,6 +2186,21 @@ impl ResolvedModuleIndex {
         order
     }
 
+    /// The position `declaration`'s continuation class takes in its scope's generated-class
+    /// sequence, or `None` when the declaration is not a source `suspend` function.
+    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
+        self.continuation_ordinals.get(&declaration).copied()
+    }
+
+    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
+        assert!(
+            self.continuation_ordinals
+                .insert(declaration, ordinal)
+                .is_none_or(|existing| existing == ordinal),
+            "a suspend declaration holds exactly one continuation ordinal"
+        );
+    }
+
     pub fn declaration_header(
         &self,
         declaration: DeclarationId,
@@ -2192,6 +2222,27 @@ impl ResolvedModuleIndex {
     ) -> &[Box<str>] {
         self.declaration_annotation_string_arguments
             .get(&(declaration, annotation_ordinal))
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
+    pub fn declaration_annotation_class_arguments(
+        &self,
+        declaration: DeclarationId,
+        annotation_ordinal: u32,
+    ) -> &[TypeName] {
+        self.declaration_annotation_class_arguments
+            .get(&(declaration, annotation_ordinal))
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
+    pub fn generated_classifiers(
+        &self,
+        declaration: DeclarationId,
+    ) -> &[crate::types::GeneratedClassifierFact] {
+        self.generated_classifiers
+            .get(&declaration)
             .map(Box::as_ref)
             .unwrap_or_default()
     }
@@ -2412,6 +2463,79 @@ impl ResolvedModuleIndex {
             self.function_overrides.insert(owner, overrides).is_none(),
             "a source classifier or enum entry may publish function overrides only once"
         );
+    }
+
+    /// Close return-value-use inheritance over exact module override identities while all selected
+    /// edges are still frontend facts. A backend receives the effective status and never traverses
+    /// names, descriptors, or classpath hierarchies to recreate it.
+    pub(crate) fn finalize_function_return_value_statuses(&mut self) {
+        use crate::types::ReturnValueStatus;
+
+        fn effective(
+            target: super::ResolvedFunctionOverrideTarget,
+            edges: &[super::ResolvedFunctionOverride],
+            memo: &mut HashMap<super::ResolvedFunctionOverrideTarget, ReturnValueStatus>,
+            visiting: &mut std::collections::HashSet<super::ResolvedFunctionOverrideTarget>,
+        ) -> ReturnValueStatus {
+            if let Some(status) = memo.get(&target) {
+                return *status;
+            }
+            if !visiting.insert(target) {
+                return ReturnValueStatus::Unspecified;
+            }
+            let nearest = edges
+                .iter()
+                .filter(|edge| edge.implementation == target)
+                .map(|edge| edge.depth)
+                .min();
+            let mut statuses = nearest
+                .into_iter()
+                .flat_map(|depth| {
+                    edges
+                        .iter()
+                        .filter(move |edge| edge.implementation == target && edge.depth == depth)
+                })
+                .map(|edge| {
+                    if edge.return_value_status != ReturnValueStatus::Unspecified {
+                        edge.return_value_status
+                    } else {
+                        effective(edge.overridden, edges, memo, visiting)
+                    }
+                })
+                .filter(|status| *status != ReturnValueStatus::Unspecified)
+                .collect::<Vec<_>>();
+            statuses.sort_by_key(|status| match status {
+                ReturnValueStatus::Unspecified => 0,
+                ReturnValueStatus::MustUse => 1,
+                ReturnValueStatus::ExplicitlyIgnorable => 2,
+            });
+            statuses.dedup();
+            let status = if statuses.len() == 1 {
+                statuses[0]
+            } else {
+                ReturnValueStatus::Unspecified
+            };
+            visiting.remove(&target);
+            memo.insert(target, status);
+            status
+        }
+
+        let snapshot = self
+            .function_overrides
+            .values()
+            .flat_map(|overrides| overrides.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut memo = HashMap::new();
+        for overrides in self.function_overrides.values_mut() {
+            for edge in overrides.iter_mut() {
+                edge.return_value_status = effective(
+                    edge.implementation,
+                    &snapshot,
+                    &mut memo,
+                    &mut std::collections::HashSet::new(),
+                );
+            }
+        }
     }
 
     pub fn type_alias_header(
@@ -2705,6 +2829,44 @@ impl ResolvedModuleIndex {
         );
     }
 
+    pub fn publish_declaration_annotation_class_arguments(
+        &mut self,
+        declaration: DeclarationId,
+        annotation_ordinal: u32,
+        arguments: impl IntoIterator<Item = TypeName>,
+    ) {
+        let arguments = arguments.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        if arguments.is_empty() {
+            return;
+        }
+        assert!(
+            self.declaration_annotation_class_arguments
+                .insert((declaration, annotation_ordinal), arguments)
+                .is_none(),
+            "a stable annotation occurrence may publish its class arguments only once"
+        );
+    }
+
+    pub fn publish_generated_classifiers(
+        &mut self,
+        declaration: DeclarationId,
+        classifiers: impl IntoIterator<Item = crate::types::GeneratedClassifierFact>,
+    ) {
+        let classifiers = classifiers
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if classifiers.is_empty() {
+            return;
+        }
+        assert!(
+            self.generated_classifiers
+                .insert(declaration, classifiers)
+                .is_none(),
+            "a stable declaration may publish generated classifiers only once"
+        );
+    }
+
     pub fn publish_classifier_header(
         &mut self,
         declaration: DeclarationId,
@@ -2971,6 +3133,9 @@ impl ResolvedModuleIndex {
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
+            && self.declaration_annotation_class_arguments.is_empty()
+            && self.continuation_ordinals.is_empty()
+            && self.generated_classifiers.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3322,6 +3487,9 @@ impl ResolvedModuleIndex {
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
+            + self.declaration_annotation_class_arguments.len()
+                * (std::mem::size_of::<(DeclarationId, u32)>()
+                    + std::mem::size_of::<Box<[TypeName]>>())
             + self
                 .declaration_annotation_string_arguments
                 .values()
@@ -3330,6 +3498,25 @@ impl ResolvedModuleIndex {
                         + arguments
                             .iter()
                             .map(|argument| argument.len())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self
+                .declaration_annotation_class_arguments
+                .values()
+                .map(|arguments| arguments.len() * std::mem::size_of::<TypeName>())
+                .sum::<usize>()
+            + self.generated_classifiers.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[crate::types::GeneratedClassifierFact]>>())
+            + self
+                .generated_classifiers
+                .values()
+                .map(|classifiers| {
+                    classifiers.len() * std::mem::size_of::<crate::types::GeneratedClassifierFact>()
+                        + classifiers
+                            .iter()
+                            .map(|classifier| classifier.source_name.len())
                             .sum::<usize>()
                 })
                 .sum::<usize>()

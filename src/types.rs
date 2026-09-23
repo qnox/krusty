@@ -2015,6 +2015,33 @@ pub enum Visibility {
     PackagePrivate,
 }
 
+/// Kotlin's declaration-level return-value-use contract. This is a three-state semantic fact, not
+/// a boolean flag: an override may explicitly make an inherited must-use result ignorable.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ReturnValueStatus {
+    #[default]
+    Unspecified,
+    MustUse,
+    ExplicitlyIgnorable,
+}
+
+impl ReturnValueStatus {
+    pub(crate) fn from_annotations(
+        annotations: &[TypeName],
+        owner_annotations: &[TypeName],
+    ) -> Self {
+        let ignorable_return_value = type_name("kotlin/IgnorableReturnValue");
+        let must_use_return_values = type_name("kotlin/MustUseReturnValues");
+        if annotations.contains(&ignorable_return_value) {
+            Self::ExplicitlyIgnorable
+        } else if owner_annotations.contains(&must_use_return_values) {
+            Self::MustUse
+        } else {
+            Self::Unspecified
+        }
+    }
+}
+
 /// Kotlin annotation retention after frontend resolution. `Default` is runtime retention without
 /// an explicit `@Retention` declaration; keeping it distinct lets metadata emission omit the Kotlin
 /// meta-annotation while still stamping the JVM runtime policy.
@@ -2060,10 +2087,41 @@ pub struct ResolvedAnnotation {
     pub arguments: Vec<(String, AnnotationValue)>,
 }
 
+/// A plugin-generated classifier published with the source header that owns it. The common
+/// frontend records semantic declaration facts; a representation backend maps them to its own
+/// class flags without recognizing generated JVM spellings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedClassifierFact {
+    pub classifier: TypeName,
+    pub lexical_owner: TypeName,
+    pub source_name: Box<str>,
+    pub visibility: Visibility,
+    pub kind: GeneratedClassifierKind,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub captures_outer: bool,
+    pub compiler_generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratedClassifierKind {
+    Class,
+    Interface,
+    Annotation,
+    Enum,
+}
+
 /// Provider-neutral resolved annotations for a classifier. Consumers receive stable identities and
 /// typed values without gaining name lookup, callable selection, or backend access.
 pub trait ClassifierAnnotationSource {
     fn classifier_annotations(&self, classifier: TypeName) -> Option<Vec<ResolvedAnnotation>>;
+
+    /// Whether this classifier's single instance is reachable as an object value. A plugin that
+    /// names a classifier it does not declare must not infer this from its name or type arity:
+    /// reading `INSTANCE` off an ordinary class is a link-time failure.
+    fn classifier_is_object(&self, _classifier: TypeName) -> Option<bool> {
+        None
+    }
 }
 
 /// A resolved annotation application, including its declaration-ordered element values and

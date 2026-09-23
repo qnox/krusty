@@ -449,6 +449,7 @@ fn delegated_function_declaration(
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,
         interface: function.callable.owner_is_interface,
+        return_value_status: function.return_value_status,
     })
 }
 

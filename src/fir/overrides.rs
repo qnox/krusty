@@ -69,6 +69,9 @@ pub struct ResolvedFunctionOverride {
     /// The frontend has already selected the declaration; a backend only erases this shape.
     pub implementation_parameters: Box<[ResolvedTy]>,
     pub implementation_result: ResolvedTy,
+    /// Effective return-value-use contract of the implementing declaration after applying its own
+    /// annotation policy and, when unspecified, the exact overridden edge.
+    pub return_value_status: crate::types::ReturnValueStatus,
     pub suspend: bool,
     pub depth: u32,
 }

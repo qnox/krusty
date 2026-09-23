@@ -613,7 +613,7 @@ fn null_only(actual: Ty) -> bool {
 
 pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
     let actual = inference_actual(actual);
-    let Some(current) = current else {
+    let Some(current) = current.map(inference_actual) else {
         return actual;
     };
     if actual == Ty::Nothing {

@@ -362,20 +362,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // types are already erased and whose owner prepends nothing.
             (signature != sc_desc).then_some(signature)
         })();
-        cw.add_method_sig(
-            sc_access,
-            "<init>",
-            &sc_desc,
-            &sctor,
-            sc_signature.as_deref(),
-        );
-        if let Some((pc, line)) =
-            delegation_pc.zip((sc.lines.delegation_line != 0).then_some(sc.lines.delegation_line))
-        {
-            cw.set_method_lines("<init>", &sc_desc, &[(pc, line)]);
-        }
-        cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
-        if sc.generated_debug.records_locals() {
+        // The debug locals are built BEFORE the method is added so their names and descriptors can
+        // be interned first: `add_method` computes the `StackMapTable`, which interns each
+        // parameter's verification type, and kotlinc's writer visits the locals before the frames.
+        let debug_locals = sc.generated_debug.records_locals().then(|| {
             assert_eq!(
                 owner_prefix_tys.len() + sc.named_params.len(),
                 sc_param_tys.len(),
@@ -394,12 +384,62 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 locals.push((name.clone(), type_descriptor(*physical), slot));
                 slot += slot_words(*physical);
             }
+            locals
+        });
+        if let Some(locals) = &debug_locals {
+            cw.reserve_method_lvt(locals);
+        }
+        let body_line_marks = sctor.line_marks().to_vec();
+        cw.add_method_sig(
+            sc_access,
+            "<init>",
+            &sc_desc,
+            &sctor,
+            sc_signature.as_deref(),
+        );
+        if let Some((pc, line)) =
+            delegation_pc.zip((sc.lines.delegation_line != 0).then_some(sc.lines.delegation_line))
+        {
+            cw.set_method_lines("<init>", &sc_desc, &[(pc, line)]);
+        }
+        cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
+        if let Some(locals) = &debug_locals {
             cw.set_method_debug(
                 "<init>",
                 &sc_desc,
                 sc.generated_debug.line().map(|line| (0, line)),
-                &locals,
+                locals,
             );
+        }
+        // A constructor's line table is CURATED: `add_method` drops the marks a body emitted,
+        // because an ordinary `<init>` builds its table from the class declaration and its property
+        // initializers instead. A GENERATED constructor has no such curation to fall back on, and
+        // its body's marks are exactly the table kotlinc writes — the default value of each
+        // defaulted property on that property's own line, the store after it back on the class's.
+        // So they are handed back explicitly here rather than left dropped.
+        if sc.generated_debug.records_locals() && !body_line_marks.is_empty() {
+            // The declaration's own entry opens the table: the constructor's prologue runs before
+            // any statement the body marked, so its first mark is not at pc 0.
+            let opening = sc
+                .generated_debug
+                .line()
+                .filter(|_| body_line_marks.first().is_none_or(|&(pc, _)| pc != 0))
+                .map(|line| (0u16, line));
+            // Consecutive entries for the SAME line collapse, exactly as `CodeBuilder::mark_line`
+            // collapses them within one body: the opening entry and the body's first mark are both
+            // the declaration's line, and kotlinc writes it once.
+            let mut entries: Vec<(u16, u32)> = Vec::new();
+            for (pc, line) in opening.into_iter().chain(
+                body_line_marks
+                    .iter()
+                    .map(|&(pc, line)| (pc, u32::from(line))),
+            ) {
+                if entries.last().is_some_and(|&(_, last)| last == line) {
+                    continue;
+                }
+                entries.push((pc, line));
+            }
+            cw.set_method_lines("<init>", &sc_desc, &entries);
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).

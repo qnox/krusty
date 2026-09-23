@@ -250,6 +250,7 @@ impl BackendMemberFact {
 /// Finalized current-module classifier records, frozen before Pass 2 starts.
 pub struct BackendModuleFacts {
     classifiers: HashMap<TypeName, Arc<BackendClassifierFact>>,
+    generated_classifiers: Box<[crate::types::GeneratedClassifierFact]>,
     /// Stable identities of classifiers declared inside ordinary bodies. Their completed semantic
     /// shape belongs to the active Pass-2 IR file, never to the pre-Pass-2 module snapshot. Keeping
     /// only the identity prevents an accidental lookup of a same-named dependency classifier.
@@ -268,6 +269,7 @@ impl BackendModuleFacts {
         let mut body_local_classifiers = HashSet::new();
         let mut source_value_classes = HashMap::new();
         let mut metadata_readable_value_classes = HashSet::new();
+        let mut generated_classifiers = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -282,6 +284,21 @@ impl BackendModuleFacts {
             let declaration_header = index.declaration_header(declaration).ok_or(
                 BackendFactError::IncompleteClassifier(classifier.classifier),
             )?;
+            for generated in index.generated_classifiers(declaration) {
+                assert_eq!(
+                    generated.lexical_owner, classifier.classifier,
+                    "a generated classifier must name its exact source owner"
+                );
+                assert!(
+                    generated_classifiers.iter().all(
+                        |existing: &crate::types::GeneratedClassifierFact| {
+                            existing.classifier != generated.classifier
+                        }
+                    ),
+                    "a generated classifier identity may be published only once"
+                );
+                generated_classifiers.push(generated.clone());
+            }
             let flags = declaration_header.flags;
             let kind = if flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS) {
                 crate::libraries::TypeKind::Annotation
@@ -511,9 +528,23 @@ impl BackendModuleFacts {
                     .declaration_annotations(declaration)
                     .iter()
                     .copied()
-                    .map(|annotation| crate::types::ResolvedAnnotation {
+                    .enumerate()
+                    .map(|(ordinal, annotation)| crate::types::ResolvedAnnotation {
                         annotation,
-                        arguments: Vec::new(),
+                        // The class-valued arguments the frontend resolved for this occurrence.
+                        // A dependency's annotations reach a backend with their arguments intact;
+                        // one declared in ANOTHER FILE OF THIS MODULE must too, or the two sides of
+                        // the same boundary answer the same question differently.
+                        arguments: index
+                            .declaration_annotation_class_arguments(declaration, ordinal as u32)
+                            .iter()
+                            .map(|&classifier| {
+                                (
+                                    String::new(),
+                                    crate::types::AnnotationValue::Class(classifier),
+                                )
+                            })
+                            .collect(),
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -539,6 +570,7 @@ impl BackendModuleFacts {
         }
         Ok(Self {
             classifiers,
+            generated_classifiers: generated_classifiers.into_boxed_slice(),
             body_local_classifiers,
             source_value_classes,
             metadata_readable_value_classes,
@@ -569,6 +601,7 @@ impl BackendModuleFacts {
         }
         Ok(Self {
             classifiers,
+            generated_classifiers: Box::default(),
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
@@ -583,6 +616,10 @@ impl BackendModuleFacts {
         self.classifiers
             .iter()
             .map(|(classifier, shape)| (*classifier, shape.as_ref()))
+    }
+
+    pub fn generated_classifiers(&self) -> &[crate::types::GeneratedClassifierFact] {
+        &self.generated_classifiers
     }
 
     pub fn is_body_local(&self, classifier: TypeName) -> bool {
@@ -643,6 +680,11 @@ impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> 
         classifier: TypeName,
     ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
         BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
+    }
+
+    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
+        BackendClassifierSource::classifier(self, classifier)
+            .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
     }
 }
 

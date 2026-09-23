@@ -99,8 +99,11 @@ pub enum FrontendCallableOwner {
 pub struct FrontendClassContext<'a> {
     pub classifier: TypeName,
     pub kind: crate::libraries::TypeKind,
+    pub is_sealed: bool,
     pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
+    /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.
+    pub annotation_class_arguments: &'a [(u32, TypeName)],
 }
 
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
@@ -118,6 +121,10 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
+    /// External serializers the provider confirms are object values. A class needs ordinary
+    /// constructor selection before generated code may instantiate it; the post-check plugin must
+    /// not infer that call from type-parameter arity.
+    external_serializer_singletons: std::collections::HashSet<TypeName>,
 }
 
 impl Default for PluginContext {
@@ -127,6 +134,7 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
+            external_serializer_singletons: std::collections::HashSet::new(),
         }
     }
 }
@@ -138,6 +146,7 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
+            external_serializer_singletons: self.external_serializer_singletons.clone(),
         }
     }
 }
@@ -181,6 +190,19 @@ impl PluginContext {
     /// already exists outside this file.
     pub fn external_serializer(&self, classifier: TypeName) -> Option<TypeName> {
         self.external_serializers.get(&classifier).copied()
+    }
+
+    /// Record which external serializers have a provider-confirmed singleton value.
+    pub fn with_external_serializer_singletons(
+        mut self,
+        serializers: std::collections::HashSet<TypeName>,
+    ) -> Self {
+        self.external_serializer_singletons = serializers;
+        self
+    }
+
+    pub fn external_serializer_is_singleton(&self, serializer: TypeName) -> bool {
+        self.external_serializer_singletons.contains(&serializer)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -372,6 +394,15 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// Publish exact generated nested-class identities alongside the source classifier header.
+    /// Consumers must not reconstruct these declarations from annotation or JVM-name spellings.
+    fn publish_frontend_generated_classifiers(
+        &self,
+        _ctx: &FrontendClassContext<'_>,
+        _classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+    }
+
     /// Attach plugin-owned expression plans after core has selected declarations and overloads.
     /// Implementations must identify an exact selected declaration; this hook is not a fallback name
     /// resolver and must never change the type checker's result.
@@ -417,8 +448,20 @@ pub fn run_enabled(
     {
         return;
     }
+    let external = external_serializers(ir, classifiers);
+    // `Some(false)` is the only answer that rules a singleton out. A generated `Foo$$serializer`
+    // for a CLASSPATH `@Serializable` class is an object kotlinc synthesized, and the provider has
+    // no classifier view of a synthetic it never read a declaration for — it answers `None`. Taking
+    // `None` as "not a singleton" leaves that element underivable and bails the whole file, which is
+    // exactly the failure this plugin path exists to prevent.
+    let external_singletons = external
+        .values()
+        .copied()
+        .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
+        .collect();
     let ctx = ctx
-        .with_external_serializers(external_serializers(ir, classifiers))
+        .with_external_serializers(external)
+        .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
     enabled_plugins(module_name).run(ir, &ctx);
 }
@@ -446,15 +489,20 @@ fn external_serializers(
             let application = annotations
                 .iter()
                 .find(|annotation| annotation.annotation == serializable);
+            // `@Serializable`'s only element is `with`, so its class-valued argument IS the
+            // serializer whether or not the provider carried the element name: a dependency read
+            // from a class file names its elements, while a sibling file of this module publishes
+            // the resolved identity positionally. The same-file path reads the first value for the
+            // same reason.
             let custom = application.and_then(|annotation| {
-                annotation.arguments.iter().find_map(|(name, value)| {
-                    (name == "with")
-                        .then_some(value)
-                        .and_then(|value| match value {
-                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
-                            _ => None,
-                        })
-                })
+                annotation
+                    .arguments
+                    .iter()
+                    .filter(|(name, _)| name.is_empty() || name == "with")
+                    .find_map(|(_, value)| match value {
+                        crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                        _ => None,
+                    })
             });
             custom
                 .or_else(|| application.map(|_| classifier.nested_child("$serializer")))
@@ -477,6 +525,15 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         .iter()
         .flat_map(|class| class.fields.iter().map(|field| field.ty))
         .collect();
+    // A reified type argument names a classifier the plugin may have to build a serializer for
+    // without it appearing as any field's type — `element<JsonElement>("v")` inside a hand-written
+    // `KSerializer` is exactly that, and its serializer is the `@Serializable(with = …)` one the
+    // dependency declares.
+    candidates.extend(
+        ir.reified_call_subst
+            .values()
+            .flat_map(|substitutions| substitutions.iter().map(|(_, ty)| *ty)),
+    );
     let mut seen = std::collections::HashSet::new();
     let mut external = Vec::new();
     for expression in &ir.exprs {
@@ -556,6 +613,16 @@ impl PluginHost {
         }
     }
 
+    pub fn publish_frontend_generated_classifiers(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+        for plugin in &self.plugins {
+            plugin.publish_frontend_generated_classifiers(ctx, classifiers);
+        }
+    }
+
     pub fn plan_frontend_expressions(
         &self,
         ctx: &FrontendExpressionContext,
@@ -589,6 +656,19 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
 mod tests {
     use super::*;
     use crate::ir::IrFile;
+
+    struct FakeClassifierAnnotations(
+        std::collections::HashMap<crate::types::TypeName, Vec<crate::types::ResolvedAnnotation>>,
+    );
+
+    impl crate::types::ClassifierAnnotationSource for FakeClassifierAnnotations {
+        fn classifier_annotations(
+            &self,
+            classifier: crate::types::TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            self.0.get(&classifier).cloned()
+        }
+    }
 
     struct TouchPlugin;
     impl IrPlugin for TouchPlugin {
@@ -690,5 +770,84 @@ mod tests {
             crate::types::type_name("kotlinx/serialization/UseContextualSerialization"),
             crate::types::type_name("demo/External")
         ));
+    }
+    /// A classifier named ONLY by a reified type argument is still offered to the external-serializer
+    /// map.
+    ///
+    /// `element<JsonElement>("v")` inside a hand-written `KSerializer` names a dependency type that
+    /// is no field's type and appears in no plugin placeholder, so it reached neither candidate
+    /// source and the plugin could not build its serializer — which left the reified `element` call
+    /// on the splice path, and that refusal bails the whole file.
+    #[test]
+    fn a_reified_type_argument_is_an_external_classifier_candidate() {
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            7,
+            vec![(
+                "T".to_owned(),
+                Ty::obj("kotlinx/serialization/json/JsonElement"),
+            )],
+        );
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            candidates.contains(&crate::types::type_name(
+                "kotlinx/serialization/json/JsonElement"
+            )),
+            "a reified type argument must be a candidate: {candidates:?}"
+        );
+    }
+
+    /// The production provider boundary, not a classifier spelling, decides which serializer a
+    /// reified-only dependency type uses. Nest the payload in another user type so this also proves
+    /// candidate traversal reaches type arguments rather than consulting only the outer classifier.
+    #[test]
+    fn reified_only_classifier_uses_its_metadata_named_serializer() {
+        let payload = crate::types::type_name("fixtures/ExternalPayload");
+        let serializer = crate::types::type_name("fixtures/PayloadCodec");
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            11,
+            vec![(
+                "Payload".to_owned(),
+                Ty::obj_args("fixtures/Envelope", &[Ty::obj_name(payload)]),
+            )],
+        );
+        let annotations = FakeClassifierAnnotations(std::collections::HashMap::from([(
+            payload,
+            vec![crate::types::ResolvedAnnotation {
+                annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
+                arguments: vec![(
+                    "with".to_owned(),
+                    crate::types::AnnotationValue::Class(serializer),
+                )],
+            }],
+        )]));
+
+        let resolved = external_serializers(&ir, &annotations);
+
+        assert_eq!(
+            resolved,
+            std::collections::HashMap::from([(payload, serializer)])
+        );
+        let context = PluginContext::default().with_external_serializers(resolved);
+        assert_eq!(context.external_serializer(payload), Some(serializer));
+        assert_eq!(
+            context.external_serializer(crate::types::type_name("fixtures/Envelope")),
+            None
+        );
+    }
+
+    /// A type the module DECLARES is not external, however it is named.
+    #[test]
+    fn a_declared_classifier_is_not_an_external_candidate() {
+        let mut ir = IrFile::default();
+        ir.add_class(synthetic_class("demo/Own"));
+        ir.reified_call_subst
+            .insert(7, vec![("T".to_owned(), Ty::obj("demo/Own"))]);
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            !candidates.contains(&crate::types::type_name("demo/Own")),
+            "a declared classifier must not be external: {candidates:?}"
+        );
     }
 }

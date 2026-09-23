@@ -28,6 +28,8 @@ pub enum FirFileLoweringFailure {
     MissingCallable(DeclarationId),
     MissingProperty(DeclarationId),
     MissingSourceOrder(DeclarationId),
+    MissingContinuationOrdinal(DeclarationId),
+    MissingClassSourceQualifiedName(DeclarationId),
     MissingSourcePackage(crate::fir::SourceFileId),
     UnsupportedPropertyShape(DeclarationId),
     MissingClassifier(DeclarationId),
@@ -100,10 +102,30 @@ fn lower_function_override_plans(
                 .map(|ty| ty.get())
                 .collect(),
             implementation_result: edge.implementation_result.get(),
+            return_value_status: edge.return_value_status,
             suspend: edge.suspend,
             depth: edge.depth,
         })
         .collect()
+}
+
+fn record_source_return_value_status(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    function: u32,
+    ir: &mut IrFile,
+) {
+    let owner_annotations = index
+        .enclosing_classifier(declaration)
+        .map(|owner| index.declaration_annotations(owner.declaration))
+        .unwrap_or_default();
+    let status = crate::types::ReturnValueStatus::from_annotations(
+        index.declaration_annotations(declaration),
+        owner_annotations,
+    );
+    if status != crate::types::ReturnValueStatus::Unspecified {
+        ir.function_return_value_statuses.insert(function, status);
+    }
 }
 
 /// One-file consuming FIR sink. It owns no syntax or checker side table: stable module headers
@@ -186,6 +208,7 @@ impl<'a> CommonIrBodySink<'a> {
         )?;
         self.predeclare_functions(index)?;
         finalize_constructors(index, self.ir)?;
+        super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
         finalize_constructor_field_indices(index, self.ir)?;
@@ -504,6 +527,7 @@ impl<'a> CommonIrBodySink<'a> {
             is_static: dispatch_receiver.is_none(),
             dispatch_receiver,
         });
+        record_source_return_value_status(index, declaration, function, self.ir);
         self.ir.inline_fns.insert(function);
         self.ir.inline_only_fns.insert(function);
         self.ir.foreign_inline_templates.insert(function);
@@ -701,7 +725,11 @@ impl<'a> CommonIrBodySink<'a> {
             } else {
                 None
             };
+            let source_order = index
+                .source_order(declaration)
+                .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?;
             let class = self.ir.add_class(class);
+            self.ir.record_class_source_order(class, source_order);
             if let Some(source_qualified_name) = source_qualified_name {
                 self.ir
                     .record_class_source_qualified_name(class, source_qualified_name);
@@ -1082,6 +1110,7 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            record_source_return_value_status(index, declaration, function, self.ir);
             self.ir.fn_source_order.insert(
                 function,
                 index
@@ -1103,6 +1132,10 @@ impl<'a> CommonIrBodySink<'a> {
                 .flags
                 .has(crate::fir::DeclarationFlags::SUSPEND)
             {
+                let ordinal = index.continuation_ordinal(declaration).ok_or(
+                    FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
+                )?;
+                self.ir.fn_continuation_ordinal.insert(function, ordinal);
                 self.ir.suspend_funs.push(function);
             }
             if declaration_header

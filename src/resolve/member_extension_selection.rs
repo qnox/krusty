@@ -40,7 +40,8 @@ impl MemberExtensionConventionDiagnosticCandidate {
 }
 
 pub(crate) enum MemberExtensionFunctionSelection {
-    Selected(MemberExtensionFunctionCandidate),
+    /// Boxed: the candidate is ~950 bytes while the diagnostic variants carry only a `Vec`.
+    Selected(Box<MemberExtensionFunctionCandidate>),
     None(Vec<MemberExtensionConventionDiagnosticCandidate>),
     Ambiguous(Vec<MemberExtensionFunctionCandidate>),
 }
@@ -89,7 +90,7 @@ impl MemberExtensionFunctionSelection {
         self,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
         match self {
-            Self::Selected(selected) => Ok(Some(selected)),
+            Self::Selected(selected) => Ok(Some(*selected)),
             Self::None(_) => Ok(None),
             Self::Ambiguous(_) => Err(()),
         }
@@ -127,5 +128,15 @@ impl MemberExtensionFunctionCandidate {
             interface,
             vararg_index: self.physical_vararg_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemberExtensionFunctionSelection;
+
+    #[test]
+    fn a_selection_carries_a_pointer_to_its_callable() {
+        assert_eq!(std::mem::size_of::<MemberExtensionFunctionSelection>(), 32);
     }
 }

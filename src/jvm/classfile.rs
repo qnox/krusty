@@ -197,11 +197,31 @@ pub struct DataAccessorInfo {
     pub signature: Option<String>,
 }
 
+/// A property's `$annotations` marker at its interning position: the method's own name, and the
+/// annotations whose pool entries it brings with it.
+///
+/// The annotations are carried whole rather than pre-rendered to strings, so the seeder interns them
+/// through the SAME encoder the real emission uses. A hand-listed set of utf8s would be a second
+/// answer to what an annotation puts in the pool, and would drift the first time one gained an
+/// element kind.
+pub struct PropertyMarkerSeed {
+    pub name: String,
+    pub annotations: crate::ir::DeclarationAnnotations,
+}
+
+/// One declared data-class property event in JVM emission order. A marker is its own event because
+/// a private property emits no accessor but still emits its `$annotations` method.
+pub enum DataDeclaredMemberSeed {
+    Accessor(DataAccessorInfo),
+    PropertyMarker(PropertyMarkerSeed),
+}
+
 /// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
 /// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
 pub struct DataMemberInfo<'a> {
-    /// Declared property accessors in emission order. These precede `componentN` in a data class.
-    pub accessors: &'a [DataAccessorInfo],
+    /// Declared property accessors and annotation markers in exact emission order. These precede
+    /// `componentN` in a data class; a private property contributes only its marker event.
+    pub declared_members: &'a [DataDeclaredMemberSeed],
     /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
     /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
     pub hashcode_owners: &'a [Option<String>],
@@ -608,6 +628,10 @@ struct MethodInfo {
     max_locals: u16,
     /// `None` for an abstract method (no `Code` attribute).
     code: Option<Vec<u8>>,
+    /// Bytecode position of the implicit void return appended by declared-function emission. This
+    /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
+    /// leave it absent.
+    implicit_void_return_pc: Option<u16>,
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
     /// constant-pool class index, or 0 for a catch-all.
     exceptions: Vec<(u16, u16, u16, u16)>,
@@ -1214,6 +1238,7 @@ impl ClassWriter {
             max_stack: 0,
             max_locals: 0,
             code: None,
+            implicit_void_return_pc: None,
             exceptions: Vec::new(),
             stackmap: None,
             signature: sig,
@@ -2016,17 +2041,31 @@ impl ClassWriter {
         // Declared property accessors precede the synthesized data members. Ordinary classes intern
         // accessors at their exact declaration sites, but a data class's synthetic-member seeder must
         // preserve this boundary before it interns `componentN`/`copy`/the Object overrides.
-        for accessor in info.accessors {
-            self.cp.utf8(&accessor.name);
-            self.cp.utf8(&accessor.desc);
-            if let Some(signature) = &accessor.signature {
-                self.cp.utf8(signature);
-            }
-            if accessor.setter_kind >= 1 {
-                self.cp.utf8("<set-?>");
-            }
-            if accessor.setter_kind == 2 {
-                self.cp.string("<set-?>");
+        for member in info.declared_members {
+            match member {
+                DataDeclaredMemberSeed::Accessor(accessor) => {
+                    self.cp.utf8(&accessor.name);
+                    self.cp.utf8(&accessor.desc);
+                    if let Some(signature) = &accessor.signature {
+                        self.cp.utf8(signature);
+                    }
+                    if accessor.setter_kind >= 1 {
+                        self.cp.utf8("<set-?>");
+                    }
+                    if accessor.setter_kind == 2 {
+                        self.cp.string("<set-?>");
+                    }
+                }
+                // kotlinc visits the property's `$annotations` marker as soon as it has finished
+                // that property's accessors — or directly at the property for a private one.
+                // Encoding through the real annotation encoder keeps this from becoming a second
+                // description of an annotation's pool footprint.
+                DataDeclaredMemberSeed::PropertyMarker(marker) => {
+                    self.cp.utf8(&marker.name);
+                    self.cp.utf8("()V");
+                    let annotations = marker.annotations.clone();
+                    let _ = self.encode_declaration_annotations(&annotations);
+                }
             }
         }
 
@@ -2478,6 +2517,21 @@ impl ClassWriter {
         }
     }
 
+    /// Intern a method's `LocalVariableTable` names and descriptors BEFORE its code is added.
+    ///
+    /// ASM visits `visitLocalVariable` before `visitMaxs`, so kotlinc's pool carries a local's name
+    /// and descriptor ahead of every class constant the frame computation introduces. krusty builds
+    /// the `StackMapTable` inside `add_method`, which interns each parameter's verification type —
+    /// so without this reservation a parameter whose class appears NOWHERE else in the class file
+    /// (the serialization constructor's marker) lands ahead of the local names instead of behind
+    /// them.
+    pub fn reserve_method_lvt(&mut self, locals: &[(String, String, u16)]) {
+        for (name, descriptor, _) in locals {
+            self.cp.utf8(name);
+            self.cp.utf8(descriptor);
+        }
+    }
+
     pub fn add_method_sig(
         &mut self,
         access: u16,
@@ -2524,6 +2578,7 @@ impl ClassWriter {
             max_stack: code.max_stack,
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
+            implicit_void_return_pc: code.implicit_void_return_pc,
             exceptions: code.resolved_exceptions(),
             stackmap,
             signature: sig,
@@ -2668,82 +2723,6 @@ impl ClassWriter {
         let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
         if let Some(f) = self.fields.iter_mut().find(|f| f.name == n) {
             f.invisible_anns = vec![ann];
-        }
-    }
-
-    /// Attach kotlinc-style debug tables to a previously-added method (matched by name+descriptor):
-    /// a `LineNumberTable` mapping pc 0 → `decl_line`, and a `LocalVariableTable` listing `locals`
-    /// (`(name, jvm_descriptor, slot)`), each live for the whole method body. Interns the attribute
-    /// names and each local's name/descriptor here, so the call ORDER fixes their constant-pool
-    /// position (kotlinc adds them per method, ctor before accessors). No-op if the method isn't found.
-    pub fn set_method_debug(
-        &mut self,
-        name: &str,
-        desc: &str,
-        // `Some((start_pc, line))` emits a LineNumberTable; `None` emits none — kotlinc gives a
-        // LineNumberTable to `<init>`/accessors but NOT to a data class's synthesized methods
-        // (component/copy/equals/hashCode/toString), which carry a LocalVariableTable only.
-        lnt: Option<(u16, u32)>,
-        locals: &[(String, String, u16)],
-    ) {
-        // Resolve WITHOUT interning first: describing a method that was never emitted (e.g. the ctor /
-        // accessors of an `interface`, which has neither) must not perturb the constant pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        // An ABSTRACT method (an interface member, or `abstract fun`) has no Code attribute, so it
-        // has nowhere to hang a LineNumberTable or LocalVariableTable — kotlinc emits neither.
-        if !self
-            .methods
-            .iter()
-            .any(|m| m.name == n && m.desc == d && m.code.is_some())
-        {
-            return;
-        }
-        // Fill only debug tables that body emission did not produce.
-        let (needs_lnt, needs_lvt) = match self.methods.iter().find(|m| m.name == n && m.desc == d)
-        {
-            Some(m) => (m.lnt.is_empty(), m.lvt.is_empty()),
-            None => return,
-        };
-        if !needs_lnt && !needs_lvt {
-            return;
-        }
-        let lvt: Vec<LvtEntry> = if needs_lvt {
-            locals
-                .iter()
-                .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None, None))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            if needs_lnt {
-                m.lnt = lnt
-                    .map(|(pc, line)| (pc, line as u16))
-                    .into_iter()
-                    .collect();
-            }
-            if needs_lvt {
-                m.lvt = lvt;
-            }
-        }
-    }
-
-    /// Replace a method's LineNumberTable with MULTIPLE `(start_pc, line)` entries. kotlinc gives a
-    /// constructor one entry per source construct it runs: the super call on the class-declaration
-    /// line, each body-property initializer on its own line, then the trailing `return` back on the
-    /// class line. Lookup-only, like [`set_method_debug`] — never perturbs the constant pool.
-    pub fn set_method_lines(&mut self, name: &str, desc: &str, entries: &[(u16, u32)]) {
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if let Some(m) = self
-            .methods
-            .iter_mut()
-            .find(|m| m.name == n && m.desc == d && m.code.is_some())
-        {
-            m.lnt = entries.iter().map(|&(pc, l)| (pc, l as u16)).collect();
         }
     }
 
@@ -3536,6 +3515,9 @@ pub struct CodeBuilder {
     retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
+    /// Offset of the implicit void return appended by declared-function emission. Ordinary
+    /// `ret_void` calls intentionally do not populate it.
+    implicit_void_return_pc: Option<u16>,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
     /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
     /// appended in that state are dead code the type-checking verifier rejects — it demands a
@@ -3583,6 +3565,7 @@ impl CodeBuilder {
             line_marks: Vec::new(),
             retained_line_mark: None,
             local_entries: Vec::new(),
+            implicit_void_return_pc: None,
             dead: false,
             dead_bound: Vec::new(),
         }
@@ -4231,6 +4214,18 @@ impl CodeBuilder {
     pub fn ret_void(&mut self) {
         self.op(0xb1, 0);
         self.dead = true;
+    }
+
+    pub fn implicit_ret_void(&mut self) {
+        if self.dead {
+            return;
+        }
+        let pc = u16::try_from(self.bytes.len()).expect("a JVM method body fits in u16");
+        assert!(
+            self.implicit_void_return_pc.replace(pc).is_none(),
+            "a method has only one implicit void return"
+        );
+        self.ret_void();
     }
 
     // calls / fields. `arg_words`/`ret_words` describe the stack effect from the descriptor.
