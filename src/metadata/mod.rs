@@ -8,6 +8,7 @@ pub(crate) mod decode;
 pub mod encoding;
 pub mod module;
 pub mod protobuf;
+pub mod semantic;
 mod type_encoder;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags
