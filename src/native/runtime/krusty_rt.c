@@ -3310,6 +3310,15 @@ KRef kt_array_content_to_string(KRef array) {
     return kt_to_string(builder);
 }
 
+/* Whether a walk reads a `CharSequence` the PROGRAM implements. Such a walk steps the way Kotlin's
+   own `CharIterator` does: `hasNext` asks `length`, and `next` is `get(index++)` and nothing more,
+   so an index past the end is the program's `get` to answer. Asking `length` again before each
+   read would call the program's getter twice per element, which it can observe. */
+static kt_boolean kt_walk_reads_program_text(KRef iterator) {
+    return iterator->header.type == &kt_type_chars_iterator &&
+           ((const KWalk *)iterator)->over->header.type->walk_length != NULL;
+}
+
 static kt_boolean kt_walk_has_next(KRef iterator) {
     const KWalk *walk = (const KWalk *)iterator;
     if (iterator->header.type == &kt_type_chars_iterator) {
@@ -3324,7 +3333,7 @@ static kt_boolean kt_walk_has_next(KRef iterator) {
    routing above went wrong rather than that a pointer should be returned as an integer. */
 static kt_long kt_walk_next_long(KRef iterator) {
     KWalk *walk = (KWalk *)iterator;
-    if (!kt_walk_has_next(iterator)) {
+    if (!kt_walk_reads_program_text(iterator) && !kt_walk_has_next(iterator)) {
         KT_FAIL("krusty: no more elements in this iterator\n");
     }
     if (iterator->header.type == &kt_type_chars_iterator) {
@@ -4230,7 +4239,7 @@ KRef kt_iterator_next(KRef iterator) {
         /* Asked before the read, because neither read checks: an array's element past the end is
            whatever follows the storage, and a string's raises the wrong exception. Kotlin's
            iterators raise `NoSuchElementException`. */
-        if (!kt_walk_has_next(iterator)) {
+        if (!kt_walk_reads_program_text(iterator) && !kt_walk_has_next(iterator)) {
             kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
             return NULL;
         }
