@@ -243,6 +243,7 @@ pub(super) fn add_child_serializer_cache(
         // dereference is the defect this pass exists to remove, and silently omitting the cache
         // would merely select the legacy inline lowering after the cache plan had failed.
         let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
+        let mut factories = 0usize;
         for (index, (_, ty)) in foo_fields.iter().enumerate() {
             if !cached[index] {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
@@ -279,15 +280,64 @@ pub(super) fn add_child_serializer_cache(
                 });
                 return None;
             };
+            // The point of the cache is that a serializer is built on FIRST USE, so a slot holds a
+            // `Lazy` over a FACTORY rather than an already-built serializer. kotlinc emits that
+            // factory as a private static synthetic and binds it as a `Function0` through
+            // `LambdaMetafactory` — which is what an `IrExpr::Lambda` over that function compiles
+            // to. Building eagerly and wrapping with `lazyOf` produces the same values while
+            // defeating the deferral the cache exists for.
+            //
+            // The naming is kotlinc's, measured on a two-slot class: the first factory is bare and
+            // the rest are suffixed from zero, so a second one is `…$_anonymous_$0`.
+            let factory_name = match factories {
+                0 => "_childSerializers$_anonymous_".to_string(),
+                n => format!("_childSerializers$_anonymous_${}", n - 1),
+            };
+            factories += 1;
+            let returned = ir.add_expr(IrExpr::Return(Some(es)));
+            let factory_body = ir.add_expr(IrExpr::Block {
+                stmts: vec![returned],
+                value: None,
+            });
+            let factory = ir.add_fun(IrFunction {
+                name: factory_name,
+                params: vec![],
+                ret: class_ty(super::KSERIALIZER_FQ),
+                body: Some(factory_body),
+                is_static: true,
+                dispatch_receiver: None,
+                param_checks: Vec::new(),
+            });
+            ir.synthetic_methods.insert(factory);
+            ir.members_after_serialization_ctor.insert(factory);
+            // PRIVATE, as kotlinc emits it: nothing outside the class initializer that binds it may
+            // call the factory, and publishing it would put a method on the class's ABI that the
+            // reference compiler does not have.
+            ir.private_methods.insert(factory);
+            ir.classes[class_id as usize].methods.push(factory);
+            let supplier = ir.add_expr(IrExpr::Lambda {
+                impl_fn: factory,
+                arity: 0,
+                captures: Vec::new(),
+                sam: None,
+                inline_body: None,
+            });
+            let mode = ir.add_expr(IrExpr::ExternalStaticField {
+                owner: type_name("kotlin/LazyThreadSafetyMode"),
+                name: "PUBLICATION".to_string(),
+                descriptor: "Lkotlin/LazyThreadSafetyMode;".to_string(),
+            });
             elems.push(ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
                     owner: type_name("kotlin/LazyKt"),
-                    name: "lazyOf".to_string(),
-                    descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                    name: "lazy".to_string(),
+                    descriptor:
+                        "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
+                            .to_string(),
                     inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
-                args: vec![es],
+                args: vec![mode, supplier],
             }));
         }
         let arr = ir.add_expr(IrExpr::Vararg {
