@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "cast_operand_reread_e2e.rs"]
+mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
 #[path = "common/e2e.rs"]

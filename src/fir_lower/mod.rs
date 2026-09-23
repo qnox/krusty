@@ -6,6 +6,9 @@
 mod array_references;
 mod arrays;
 mod assertions;
+mod binding_stability;
+#[cfg(test)]
+mod binding_stability_tests;
 #[cfg(feature = "trace")]
 mod body_trace;
 #[cfg(test)]
@@ -244,6 +247,9 @@ struct BodyLowering<'a> {
     capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
+    /// Checked source-binding reassignment facts, inventoried before expression lowering so every
+    /// declaration form has the same answer independent of lowering order.
+    binding_stability: HashMap<crate::fir::LocalValueId, crate::ir::IrBindingStability>,
     local_class_captures: HashMap<crate::types::TypeName, Vec<(ExprId, crate::types::Ty)>>,
     local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
     published_local_callables:
@@ -341,6 +347,7 @@ impl<'a> BodyLowering<'a> {
             capture_slots,
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
+            binding_stability: binding_stability::inventory(body),
             local_class_captures: HashMap::new(),
             local_callable_scopes,
             published_local_callables,

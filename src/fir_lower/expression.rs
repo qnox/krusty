@@ -117,7 +117,11 @@ impl BodyLowering<'_> {
                 if let Some(element) = self.shared_local_type(*value) {
                     self.shared_cell_read(self.value_slot(*value), element)
                 } else {
-                    self.ir.add_expr(IrExpr::GetValue(self.value_slot(*value)))
+                    let read = self.ir.add_expr(IrExpr::GetValue(self.value_slot(*value)));
+                    if let Some(stability) = self.binding_stability.get(value).copied() {
+                        self.ir.binding_read_stability.insert(read, stability);
+                    }
+                    read
                 }
             }
             FirExprKind::LateinitRead { value, name } => {

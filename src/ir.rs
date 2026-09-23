@@ -22,6 +22,17 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
+/// Whether a source-language binding read may observe a later assignment to that binding.
+///
+/// This is a semantic property of the binding, not of any backend storage chosen for it. Function
+/// parameters, `val` locals, destructuring `val`s, loop variables, and catch parameters are stable;
+/// a source `var` is mutable even when the current backend happens to keep it in an ordinary local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrBindingStability {
+    Stable,
+    Mutable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrNodeOrigin {
     Fir(crate::fir::OriginId),
@@ -2406,6 +2417,9 @@ pub struct IrFile {
     /// The value is their final semantic result type. Backends use this to preserve value flow and
     /// emit the mandatory no-match failure path without re-running exhaustiveness analysis.
     pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
+    /// Source binding reads and the checked binding's reassignment contract. The expression key is
+    /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
+    pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
