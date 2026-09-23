@@ -58,3 +58,32 @@ fn a_number_subclass_is_a_number_and_no_boxed_primitive() {
     expect_box_ok_with_stdlib(source, "NumberSubclassIsNumber");
     expect_native_box(source, "NumberSubclassIsNumber", "OK");
 }
+
+/// A call through the `Number` TYPE, with a boxed primitive and a program's object reaching the
+/// same call site — the case that has to tell them apart at run time.
+#[test]
+fn a_conversion_through_the_number_type_tells_the_two_apart() {
+    let source = "object FortyTwo : Number() {\n\
+         \x20   override fun toDouble() = 42.0\n\
+         \x20   override fun toFloat() = 42.0f\n\
+         \x20   override fun toLong() = 42L\n\
+         \x20   override fun toInt() = 42\n\
+         \x20   override fun toShort() = 42.toShort()\n\
+         \x20   override fun toByte() = 42.toByte()\n\
+         }\n\
+         fun numberToDouble(n: Number) = n.toDouble()\n\
+         fun numberToInt(n: Number) = n.toInt()\n\
+         fun numberToLong(n: Number) = n.toLong()\n\
+         fun box(): String {\n\
+         \x20   if (numberToDouble(FortyTwo) != 42.0) return \"fail mine double\"\n\
+         \x20   if (numberToInt(FortyTwo) != 42) return \"fail mine int\"\n\
+         \x20   if (numberToLong(FortyTwo) != 42L) return \"fail mine long\"\n\
+         \x20   // The same call site, reached with a box the runtime made.\n\
+         \x20   if (numberToDouble(7) != 7.0) return \"fail box double\"\n\
+         \x20   if (numberToInt(7L) != 7) return \"fail box int\"\n\
+         \x20   if (numberToLong(7.9) != 7L) return \"fail box long\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "NumberThroughTheType");
+    expect_native_box(source, "NumberThroughTheType", "OK");
+}

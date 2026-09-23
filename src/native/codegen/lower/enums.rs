@@ -321,6 +321,43 @@ impl BodyLowering<'_, '_, '_> {
         )))
     }
 
+    /// `Color.values()`: a fresh array holding every constant, in declaration order.
+    pub(super) fn enum_values(
+        &mut self,
+        classifier: TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(classifier, "the enum")?;
+        let count = self.file.ir.classes[class as usize].enum_entries.len();
+        let slots = self.file.enum_entries[&class].slots.clone();
+        self.build_enum(class)?;
+        // The constants first, then the array: a constant's construction allocates, and a
+        // half-filled array must not be what a collection finds.
+        let mut values = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let address = self.data_address(slot);
+            values.push(self.builder.ins().load(types::I64, trusted(), address, 0));
+        }
+        let element = Ty::Obj(classifier, &[]);
+        let shape = self.array_shape(Ty::obj_args("kotlin/Array", &[element]))?;
+        let descriptor = self.data_address(shape.descriptor);
+        let length = self.builder.ins().iconst(types::I32, count as i64);
+        let array = self
+            .runtime_call(
+                "kt_array_new",
+                &[any(), Ty::Int],
+                any(),
+                &[descriptor, length],
+            )?
+            .expect("`kt_array_new` returns the array");
+        for (ordinal, value) in values.into_iter().enumerate() {
+            let offset = super::arrays::ELEMENTS + (ordinal as i64) * i64::from(shape.stride);
+            self.builder
+                .ins()
+                .store(trusted(), value, array, offset as i32);
+        }
+        Ok(Some(array))
+    }
+
     /// `Color.valueOf(text)`: the constant of that name, or a loud failure.
     pub(super) fn enum_value_of(
         &mut self,

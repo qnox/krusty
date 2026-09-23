@@ -6241,6 +6241,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
   `a_throwing_enum_constant_leaves_no_constants_behind`,
   `a_throwing_top_level_initializer_stops_before_the_entry`).
+- **Native: a `Unit`-answering override read as a value is `Unit`.** A member dispatched by
+  implementor whose override answers `Unit` yields no machine value; where the site wants a
+  reference it is handed Kotlin's `Unit` object rather than `null`.
+  Tests: `tests/native_read_only_property_delegate_e2e.rs`
+  (`a_unit_answering_delegate_reads_as_the_unit_object`).
 
 ## 8. Success criteria for the PoC
 

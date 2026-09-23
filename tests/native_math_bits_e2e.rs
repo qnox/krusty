@@ -81,6 +81,35 @@ fn the_identity_assertions_pass_on_the_same_object_only() {
     expect_native_box(source, "AssertSame", "OK");
 }
 
+/// A builder is walkable text, and the walk re-reads its length every step.
+#[test]
+fn a_string_builder_is_iterated_as_the_text_it_holds() {
+    let source = "fun box(): String {\n\
+         \x20   var seen = \"\"\n\
+         \x20   for (c in StringBuilder(\"OK\")) seen += c\n\
+         \x20   if (seen != \"OK\") return \"fail walk\"\n\
+         \x20   var indexed = \"\"\n\
+         \x20   for ((index, c) in StringBuilder(\"ab\").withIndex()) indexed += \"\" + index + c\n\
+         \x20   if (indexed != \"0a1b\") return \"fail withIndex \" + indexed\n\
+         \x20   // A `CharSequence` holding a builder walks the same way.\n\
+         \x20   val text: CharSequence = StringBuilder(\"xy\")\n\
+         \x20   var through = \"\"\n\
+         \x20   for (c in text) through += c\n\
+         \x20   if (through != \"xy\") return \"fail charsequence\"\n\
+         \x20   // The bound is re-read each step, so shortening the builder stops the loop.\n\
+         \x20   val shrinking = StringBuilder(\"abcd\")\n\
+         \x20   var visited = \"\"\n\
+         \x20   for (c in shrinking) {\n\
+         \x20       visited += c\n\
+         \x20       shrinking.setLength(0)\n\
+         \x20   }\n\
+         \x20   if (visited != \"a\") return \"fail shrinking \" + visited\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "BuilderWalk");
+    expect_native_box(source, "BuilderWalk", "OK");
+}
+
 /// `setLength` counts UTF-16 units: shorter truncates, longer pads with NUL.
 #[test]
 fn setting_a_builders_length_truncates_or_pads_with_nul() {

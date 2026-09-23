@@ -95,3 +95,17 @@ fn two_read_only_delegates_are_told_apart() {
          }\n";
     every_backend_agrees_with_kotlinc("TwoReadOnlyDelegates", source);
 }
+
+/// A delegate whose `getValue` answers `Unit`, read where a reference is wanted. The override
+/// yields no machine value, and the read still hands back Kotlin's `Unit` object, not `null`.
+#[test]
+fn a_unit_answering_delegate_reads_as_the_unit_object() {
+    let source = "import kotlin.properties.ReadOnlyProperty\n\
+         import kotlin.reflect.KProperty\n\
+         class Nothingness : ReadOnlyProperty<Any?, Unit> {\n\
+         \x20   override fun getValue(thisRef: Any?, property: KProperty<*>) {}\n\
+         }\n\
+         val x: Any by Nothingness()\n\
+         fun box(): String = if (x.toString() == \"kotlin.Unit\") \"OK\" else \"fail: $x\"\n";
+    every_backend_agrees_with_kotlinc("UnitDelegate", source);
+}

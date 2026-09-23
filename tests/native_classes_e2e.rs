@@ -309,6 +309,39 @@ fn a_failed_cast_fails_loudly_naming_both_types() {
 }
 
 #[test]
+fn a_failed_cast_to_an_array_fails_loudly_too() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An array is not a class the program declares, so there was no class id to look a descriptor
+    // up by and the cast fell through to a coercion — which changes nothing about a reference, and
+    // therefore let an `Array<String>` be read as an `IntArray`: four bytes out of every
+    // eight-byte slot, and a pointer answered as a number. The runtime names every array type it
+    // lays out, so this is the same check a class already gets.
+    let output = execute(
+        "fun main() {\n\
+         \x20   println(\"before\")\n\
+         \x20   val value: Any = arrayOf(\"a\")\n\
+         \x20   val ints = value as IntArray\n\
+         \x20   println(ints[0])\n\
+         }\n",
+    );
+    assert!(
+        !output.status.success(),
+        "a failed cast must not let the program continue"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("kotlin.Array")
+            && stderr.contains("cannot be cast to")
+            && stderr.contains("kotlin.IntArray"),
+        "the failure must name both array types: {stderr:?}"
+    );
+}
+
+#[test]
 fn a_failed_cast_to_a_string_fails_loudly_too() {
     if !available() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -820,6 +853,36 @@ fn an_abstract_member_carries_the_default_its_override_is_called_with() {
              \x20   println(c.f(42))\n\
              }\n"),
         "C:23\nD:23\nC:42\n"
+    );
+}
+
+#[test]
+fn a_default_on_an_abstract_member_reads_the_receiver_it_was_declared_on() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The default is an expression in the CALLEE's frame, so it may read the receiver — which is
+    // the whole reason it cannot be computed at the call site. Here it reads an abstract property
+    // each implementation answers differently, so a wrapper evaluating it against the wrong
+    // receiver, or once and for all, prints the wrong line.
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   val tag: String\n\
+             \x20   fun greet(who: String = tag): String\n\
+             }\n\
+             class A : Named {\n\
+             \x20   override val tag = \"a\"\n\
+             \x20   override fun greet(who: String) = \"A->\" + who\n\
+             }\n\
+             class B : Named {\n\
+             \x20   override val tag = \"b\"\n\
+             \x20   override fun greet(who: String) = \"B->\" + who\n\
+             }\n\
+             fun main() {\n\
+             \x20   for (n in listOf<Named>(A(), B())) println(n.greet())\n\
+             }\n"),
+        "A->a\nB->b\n"
     );
 }
 

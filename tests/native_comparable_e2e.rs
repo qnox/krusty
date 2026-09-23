@@ -103,3 +103,30 @@ fn a_file_that_declares_an_enum_declines() {
         "Comparable.compareTo",
     );
 }
+
+/// A class of this file's standing behind a `Comparable` receiver is ordered by its OWN
+/// `compareTo`, and a boxed primitive at the same call site by the descriptor's.
+///
+/// The order the runtime reads is a descriptor's, and a program's object has no entry in those
+/// tables — which is why a `Comparable` receiver declines wherever the answer could only be the
+/// runtime's. Where the file OVERRIDES `Comparable.compareTo` it knows the classes that could be
+/// there, so the call site tests the receiver and dispatches on the implementor's own slot,
+/// falling through to the descriptor otherwise.
+#[test]
+fn a_declared_comparable_is_ordered_by_its_own_compare_to() {
+    let source = "class Box(val value: Int) : Comparable<Box> {\n\
+         \x20   override fun compareTo(other: Box): Int = value - other.value\n\
+         }\n\
+         fun <T> order(a: Comparable<T>, b: T): Int = a.compareTo(b)\n\
+         fun box(): String {\n\
+         \x20   if (order(Box(1), Box(2)) >= 0) return \"fail mine less\"\n\
+         \x20   if (order(Box(2), Box(1)) <= 0) return \"fail mine greater\"\n\
+         \x20   if (order(Box(3), Box(3)) != 0) return \"fail mine equal\"\n\
+         \x20   // The same call site, reached with values the runtime orders from the descriptor.\n\
+         \x20   if (order(1, 2) >= 0) return \"fail int\"\n\
+         \x20   if (order(\"b\", \"a\") <= 0) return \"fail string\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "DeclaredComparableDispatch");
+    expect_native_box(source, "DeclaredComparableDispatch", "OK");
+}
