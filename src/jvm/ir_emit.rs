@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
+    Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrDataClassMemberRole, IrExpr, IrField, IrFile,
+    IrFunction, IrTypeOp,
 };
 use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
@@ -53,7 +54,9 @@ mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
 use inline_body_emission::collect_body_var_types;
-use member_schedule::{source_ordered_members, SourceOrderedMember};
+use member_schedule::{
+    source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
+};
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
 
@@ -947,23 +950,37 @@ fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
     c.is_data && !c.is_singleton()
 }
 
-/// The synthesized `copy` method's IR function id on a data class, if present. The lowering
-/// registers `copy` as an ordinary method, so its visibility (under
-/// `DataClassCopyRespectsConstructorVisibility`) lives in `ir.private_methods`/`ir.internal_methods`
-/// like any declared member's. The parameter-list check keeps a DECLARED same-named overload (a
-/// different signature by necessity — the synthesized one cannot be redeclared) from being mistaken
-/// for the synthesized member, whose params are exactly the primary-ctor property types.
-fn data_copy_fid(ir: &IrFile, c: &crate::ir::IrClass) -> Option<u32> {
-    let n = c.ctor_param_count as usize;
-    c.methods.iter().copied().find(|&fid| {
-        let f = &ir.functions[fid as usize];
-        f.name == "copy"
-            && f.params.len() == n
-            && f.params
-                .iter()
-                .zip(c.fields.iter().take(n))
-                .all(|(p, field)| *p == field.ty)
+struct DataClassMemberRealization {
+    jvm_name: Option<String>,
+    descriptor: Option<String>,
+}
+
+/// Physical JVM realization of one exact common data-class declaration. The role was bound to its
+/// [`crate::ir::FunId`] before backend renaming, so this reads the final function directly rather
+/// than recovering it from a source/physical name pair.
+fn data_class_member_realization(
+    ir: &IrFile,
+    owner: TypeName,
+    role: IrDataClassMemberRole,
+    source_name: &str,
+    declared_params: &[Ty],
+    declared_ret: Ty,
+) -> Option<DataClassMemberRealization> {
+    let function = &ir.functions[ir.data_class_member(owner, role)? as usize];
+    let physical = ir_method_desc(&function.params, &function.ret);
+    let declared = method_descriptor(declared_params, declared_ret);
+    let has_boxed_primitive = std::iter::once(declared_ret)
+        .chain(declared_params.iter().copied())
+        .any(|ty| ty.is_nullable() && ty.non_null().is_jvm_scalar());
+    Some(DataClassMemberRealization {
+        jvm_name: (function.name != source_name).then(|| function.name.clone()),
+        descriptor: (has_boxed_primitive || physical != declared).then_some(physical),
     })
+}
+
+/// The synthesized `copy` declaration's exact common-IR identity, if this class owns one.
+fn data_copy_fid(ir: &IrFile, c: &crate::ir::IrClass) -> Option<u32> {
+    ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Copy)
 }
 
 /// `Function.flags` for the synthesized `copy`: [`COPY_FN_FLAGS`] (public final SYNTHESIZED member)
@@ -1056,18 +1073,6 @@ fn build_class_metadata(
     } else {
         Vec::new()
     };
-    let data_method_names: std::collections::HashSet<String> = if c.is_data {
-        let mut s: std::collections::HashSet<String> = (1..=data_component_fields.len())
-            .map(|i| format!("component{i}"))
-            .collect();
-        s.extend(["equals", "hashCode", "toString"].map(String::from));
-        if synthesizes_copy {
-            s.insert("copy".to_string());
-        }
-        s
-    } else {
-        std::collections::HashSet::new()
-    };
     // The only methods allowed in this bounded shape are the properties' own accessors (`getX`/`setX`)
     // plus a data class's synthesized set; any other real method is a shape not computed yet.
     // Accessor spellings are matched by name AND shape below, so the getter and setter names stay
@@ -1154,7 +1159,9 @@ fn build_class_metadata(
                         crate::jvm::names::type_descriptor(jvm_declared_ty(&function.params[0]))
                             == *descriptor
                     }));
-            !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
+            !accessor_shaped
+                && !ir.is_data_class_member(c.fq_name_id(), fid)
+                && !value_method_names.contains(n)
         })
         .collect();
     declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
@@ -1616,14 +1623,6 @@ fn build_class_metadata(
     };
     // kotlinc's synthesized data-class methods, in declaration order: componentN, copy, equals,
     // hashCode, toString. Their shapes come entirely from the primary-ctor properties.
-    // A boxed nullable primitive (`Int?` → `Ljava/lang/Integer;`): its JVM descriptor is not derivable
-    // from the proto type alone, so kotlinc records a `JvmMethodSignature` on any synthesized method
-    // whose param/return is one. The descriptor (name derivable) is emitted only when needed.
-    let is_boxed_prim = |t: Ty| t.is_nullable() && t.non_null().is_jvm_scalar();
-    let boxed_fn_sig = |params: &[Ty], ret: Ty| -> Option<String> {
-        (is_boxed_prim(ret) || params.iter().copied().any(is_boxed_prim))
-            .then(|| method_descriptor(params, ret))
-    };
     let declared_methods = || {
         declared_fids
             .iter()
@@ -1852,15 +1851,22 @@ fn build_class_metadata(
     };
     let class_ty = Ty::obj(&c.fq_name());
     let inferred_methods: Vec<FnMeta> = if c.is_data {
-        let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
-        let mut m: Vec<FnMeta> = data_component_fields
-            .iter()
-            .zip(&data_component_properties)
-            .enumerate()
-            .map(|(i, (field, property))| FnMeta {
+        let mut m = Vec::new();
+        for (i, property) in data_component_properties.iter().enumerate() {
+            let name = format!("component{}", i + 1);
+            let realization = data_class_member_realization(
+                ir,
+                c.fq_name_id(),
+                IrDataClassMemberRole::Component(i as u32),
+                &name,
+                &[],
+                property.ty,
+            )?;
+            m.push(FnMeta {
+                jvm_sig_name: realization.jvm_name,
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
-                name: format!("component{}", i + 1),
+                name,
                 params: vec![],
                 ret: property.ty,
                 type_params: Vec::new(),
@@ -1871,16 +1877,28 @@ fn build_class_metadata(
                 receiver: None,
                 param_defaults: Vec::new(),
                 vararg_index: None,
-                jvm_sig: boxed_fn_sig(&[], field.ty),
-                jvm_sig_name: None,
+                jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
                 equality_bound: None,
-            })
-            .collect();
+            });
+        }
         if synthesizes_copy {
+            let declared = data_component_properties
+                .iter()
+                .map(|property| property.ty)
+                .collect::<Vec<_>>();
+            let realization = data_class_member_realization(
+                ir,
+                c.fq_name_id(),
+                IrDataClassMemberRole::Copy,
+                "copy",
+                &declared,
+                class_ty,
+            )?;
             m.push(FnMeta {
+                jvm_sig_name: realization.jvm_name,
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
@@ -1897,7 +1915,61 @@ fn build_class_metadata(
                 receiver: None,
                 param_defaults: Vec::new(),
                 vararg_index: None,
-                jvm_sig: boxed_fn_sig(&field_tys, class_ty),
+                jvm_sig: realization.descriptor,
+                annotations: Vec::new(),
+                param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
+                equality_bound: None,
+            });
+        }
+        if ir
+            .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Equals)
+            .is_some()
+        {
+            m.push(FnMeta {
+                context_count: 0,
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                name: "equals".into(),
+                params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
+                ret: Ty::Boolean,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                flags: EQUALS_FN_FLAGS,
+                params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
+                jvm_sig: None,
+                jvm_sig_name: None,
+                annotations: Vec::new(),
+                param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
+                // Kotlin's data-class flag makes the synthesized equals refinement implicit. kotlinc
+                // does not serialize ValueParameter.equality_bound_type for this member; our metadata
+                // reader reconstructs the semantic fact from IS_DATA plus SYNTHESIZED member kind.
+                equality_bound: None,
+            });
+        }
+        if ir
+            .data_class_member(c.fq_name_id(), IrDataClassMemberRole::HashCode)
+            .is_some()
+        {
+            m.push(FnMeta {
+                context_count: 0,
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                name: "hashCode".into(),
+                params: vec![],
+                ret: Ty::Int,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
+                jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
@@ -1905,72 +1977,32 @@ fn build_class_metadata(
                 equality_bound: None,
             });
         }
-        m.push(FnMeta {
-            context_count: 0,
-            spellings: crate::spelling::DeclaredSpellings::default(),
-            name: "equals".into(),
-            params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
-            ret: Ty::Boolean,
-            type_params: Vec::new(),
-            semantic_type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
-            flags: EQUALS_FN_FLAGS,
-            params_have_defaults: false,
-            receiver: None,
-            param_defaults: Vec::new(),
-            vararg_index: None,
-            jvm_sig: None,
-            jvm_sig_name: None,
-            annotations: Vec::new(),
-            param_annotations: Vec::new(),
-            no_infer_params: Vec::new(),
-            // Kotlin's data-class flag makes the synthesized equals refinement implicit. kotlinc
-            // does not serialize ValueParameter.equality_bound_type for this member; our metadata
-            // reader reconstructs the semantic fact from IS_DATA plus SYNTHESIZED member kind.
-            equality_bound: None,
-        });
-        m.push(FnMeta {
-            context_count: 0,
-            spellings: crate::spelling::DeclaredSpellings::default(),
-            name: "hashCode".into(),
-            params: vec![],
-            ret: Ty::Int,
-            type_params: Vec::new(),
-            semantic_type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
-            flags: HASHCODE_TOSTRING_FN_FLAGS,
-            params_have_defaults: false,
-            receiver: None,
-            param_defaults: Vec::new(),
-            vararg_index: None,
-            jvm_sig: None,
-            jvm_sig_name: None,
-            annotations: Vec::new(),
-            param_annotations: Vec::new(),
-            no_infer_params: Vec::new(),
-            equality_bound: None,
-        });
-        m.push(FnMeta {
-            context_count: 0,
-            spellings: crate::spelling::DeclaredSpellings::default(),
-            name: "toString".into(),
-            params: vec![],
-            ret: Ty::String,
-            type_params: Vec::new(),
-            semantic_type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
-            flags: HASHCODE_TOSTRING_FN_FLAGS,
-            params_have_defaults: false,
-            receiver: None,
-            param_defaults: Vec::new(),
-            vararg_index: None,
-            jvm_sig: None,
-            jvm_sig_name: None,
-            annotations: Vec::new(),
-            param_annotations: Vec::new(),
-            no_infer_params: Vec::new(),
-            equality_bound: None,
-        });
+        if ir
+            .data_class_member(c.fq_name_id(), IrDataClassMemberRole::ToString)
+            .is_some()
+        {
+            m.push(FnMeta {
+                context_count: 0,
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                name: "toString".into(),
+                params: vec![],
+                ret: Ty::String,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
+                jvm_sig: None,
+                jvm_sig_name: None,
+                annotations: Vec::new(),
+                param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
+                equality_bound: None,
+            });
+        }
         m.extend(declared_methods());
         m
     } else if c.is_value {
@@ -3189,9 +3221,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         .map(|f| ann(&f.name, f.ty))
         .collect();
     let ctor_desc = format!("({})V", ctor_field_descs(c));
-    // A primary hidden behind its marker accessor is private, and kotlinc annotates neither it nor the
-    // synthetic accessor.
-    if ctor_params.iter().any(|p| p.is_some()) && !ir.has_value_param_ctor(&c.fq_name()) {
+    // A value class's synthetic primary and an ordinary primary hidden behind a marker accessor are
+    // private JVM realization details; kotlinc annotates neither them nor their accessors.
+    if ctor_params.iter().any(|p| p.is_some())
+        && !c.is_value
+        && !ir.has_value_param_ctor(&c.fq_name())
+    {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -3248,34 +3283,54 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     // return is `@NotNull`.
     if c.is_data {
         let not_null = "Lorg/jetbrains/annotations/NotNull;";
-        let self_ref = format!("L{};", c.fq_name());
         let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
         // A `data object` synthesizes no `copy` (see the metadata assembly), so it takes no annotations.
         // A PRIVATE `copy` (its ctor's visibility under `DataClassCopyRespectsConstructorVisibility`)
         // takes none either: kotlinc omits nullability annotations — return and parameters — on the
         // now-private method.
-        let copy_is_private =
-            data_copy_fid(ir, c).is_some_and(|fid| ir.private_methods.contains(&fid));
+        let copy = data_copy_fid(ir, c);
+        let copy_is_private = copy.is_some_and(|fid| ir.private_methods.contains(&fid));
         if !data_fields.is_empty() && !copy_is_private {
-            let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
+            let fid = copy.expect("a non-singleton data class records its generated copy identity");
+            let function = &ir.functions[fid as usize];
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
             let copy_params: Vec<Option<&str>> =
                 data_fields.iter().map(|f| ann(&f.name, f.ty)).collect();
-            cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
+            cw.set_method_nullability(
+                &function.name,
+                &ir_method_desc(&function.params, &function.ret),
+                Some(not_null),
+                &copy_params,
+            );
         }
-        cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
-        cw.set_method_nullability(
-            "equals",
-            "(Ljava/lang/Object;)Z",
-            None,
-            &[Some("Lorg/jetbrains/annotations/Nullable;")],
-        );
+        if let Some(fid) = ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::ToString) {
+            let function = &ir.functions[fid as usize];
+            cw.set_method_nullability(
+                &function.name,
+                &ir_method_desc(&function.params, &function.ret),
+                Some(not_null),
+                &[],
+            );
+        }
+        if let Some(fid) = ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Equals) {
+            let function = &ir.functions[fid as usize];
+            cw.set_method_nullability(
+                &function.name,
+                &ir_method_desc(&function.params, &function.ret),
+                None,
+                &[Some("Lorg/jetbrains/annotations/Nullable;")],
+            );
+        }
         for (i, f) in data_fields.iter().enumerate() {
             if let Some(a) = ann(&f.name, f.ty) {
+                let fid = ir
+                    .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
+                    .expect("a data-class component records its generated identity");
+                let function = &ir.functions[fid as usize];
                 cw.set_method_nullability(
-                    &format!("component{}", i + 1),
-                    &format!("(){}", desc(f.ty)),
+                    &function.name,
+                    &ir_method_desc(&function.params, &function.ret),
                     Some(a),
                     &[],
                 );
@@ -3288,7 +3343,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         if let Some(f0) = c.fields.first() {
             if let Some(a) = ann(&f0.name, f0.ty) {
                 let u = desc(f0.ty);
-                cw.set_method_nullability("constructor-impl", &format!("({u}){u}"), Some(a), &[]);
+                cw.set_method_nullability(
+                    "constructor-impl",
+                    &format!("({u}){u}"),
+                    Some(a),
+                    &[Some(a)],
+                );
             }
         }
     }
@@ -5268,6 +5328,130 @@ fn emit_declared_property_accessors(
     }
 }
 
+/// What emitting one member of a class's source schedule needs besides the writer.
+struct ScheduledMemberEmission<'a> {
+    ir: &'a IrFile,
+    class: &'a crate::ir::IrClass,
+    fq_name: &'a str,
+    facade: &'a str,
+    signature_formatter: &'a JvmSignatureFormatter<'a>,
+    param_assertions: bool,
+    env: &'a EmitEnv<'a>,
+    markers: &'a std::collections::HashSet<u32>,
+}
+
+/// Emit one member of the class's source schedule: a property's accessors (and its annotation
+/// marker), a secondary constructor, or a method with its access bridges and `$default` stub.
+fn emit_scheduled_member(
+    emission: &ScheduledMemberEmission<'_>,
+    member: SourceOrderedMember<'_>,
+    cw: &mut ClassWriter,
+) {
+    let ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name,
+        facade,
+        signature_formatter,
+        param_assertions,
+        env,
+        markers,
+    } = *emission;
+    let fid = match member {
+        SourceOrderedMember::Property(property) => {
+            emit_declared_property_accessor(
+                ir,
+                c,
+                property,
+                fq_name,
+                cw,
+                signature_formatter,
+                param_assertions,
+            );
+            // The property's own annotations ride a synthetic marker method, which kotlinc emits
+            // directly after that property's accessors — it has no source order of its own.
+            if let Some(&marker) = ir
+                .property_annotation_markers
+                .get(&(c.fq_name_id(), property.name.clone()))
+            {
+                // The marker is STATIC (kotlinc's shape): no `this` slot.
+                emit_method(ir, marker, fq_name, facade, cw, false, env);
+            }
+            return;
+        }
+        SourceOrderedMember::Function(fid)
+            if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
+        {
+            return;
+        }
+        SourceOrderedMember::Function(fid) => fid,
+        SourceOrderedMember::SecondaryConstructor(ordinal, constructor) => {
+            // Each `<init>(p)` delegates to an exact checked target, then runs its body. A
+            // `super(…)`-reaching body already includes the class initialization steps.
+            SecondaryConstructorEmitter {
+                ir,
+                class: c,
+                owner: fq_name,
+                facade,
+                env,
+                writer: cw,
+                owner_prefix: &OwnerConstructorPrefix::none(),
+            }
+            .emit(ordinal, constructor);
+            return;
+        }
+    };
+    let f = &ir.functions[fid as usize];
+    if f.body.is_some() {
+        // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
+        // `this` slot; an ordinary member is an instance method.
+        emit_method(ir, fid, fq_name, facade, cw, !f.is_static, env);
+        if env
+            .run
+            .private_member_access_bridges
+            .borrow()
+            .contains(&fid)
+        {
+            access_bridges::emit_private_member_access_bridge(ir, fid, fq_name, cw, false);
+        }
+        if ir.function_reference_access_bridges.contains(&fid) {
+            access_bridges::emit_function_reference_access_bridge(ir, fid, fq_name, cw, false);
+        }
+    } else {
+        cw.add_abstract_method_sig(
+            0x0001 | 0x0400,
+            &f.name,
+            &ir_method_desc(&f.params, &f.ret),
+            method_signature(signature_formatter, ir, fid, f).as_deref(),
+        );
+    }
+    // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
+    // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
+    // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
+    // uses the self-carrying variant.
+    if let Some(defaults) = ir.param_defaults(fid) {
+        if f.is_static {
+            // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
+            // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
+            emit_facade_default_stub(
+                ir,
+                fid,
+                fq_name,
+                cw,
+                defaults,
+                env,
+                if f.name == "constructor-impl" && !ir.class_static_local_functions.contains(&fid) {
+                    Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
+                } else {
+                    Ty::obj("java/lang/Object")
+                },
+            );
+        } else {
+            emit_default_stub(ir, fid, fq_name, facade, cw, defaults, env, false);
+        }
+    }
+}
+
 /// The `$annotations` marker methods emitted with their property's accessors, by fid. kotlinc emits a
 /// marker directly after the accessors of the property it describes, not after every property's — so
 /// the class's method loop must skip a marker it already wrote here.
@@ -5817,6 +6001,31 @@ fn emit_class(
         c.ctor_param_count,
         c.explicit_param_stores,
     );
+    let serialization_constructor = ir.generated_secondary_constructor_by_owner(
+        c.fq_name_id(),
+        crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
+    );
+    let markers = property_annotation_marker_fids(ir, c);
+    let member_emission = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq_name,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+    };
+    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
+    // which its generated representation members follow; every other class starts with `<init>`.
+    let (before_primary, after_primary) = split_around_primary_constructor(
+        ir,
+        c,
+        source_ordered_members(ir, c, serialization_constructor),
+    );
+    for member in before_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
+    }
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -6048,7 +6257,11 @@ fn emit_class(
             // anonymous class, so treating that semantic capture like a declared value-class
             // parameter would make the only reachable constructor private.
             0x0000
-        } else if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
+        } else if c.is_value {
+            // A value class is never constructed through `new` outside its own `box-impl`; kotlinc
+            // marks the private primary synthetic as well.
+            0x1002
+        } else if c.is_singleton() || value_param_ctor || c.is_sealed {
             0x0002
         } else {
             // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
@@ -6160,112 +6373,8 @@ fn emit_class(
         }
     } // end `if c.has_primary_ctor`
 
-    let serialization_constructor = ir.generated_secondary_constructor_by_owner(
-        c.fq_name_id(),
-        crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
-    );
-    let ordered = source_ordered_members(ir, c, serialization_constructor);
-    let markers = property_annotation_marker_fids(ir, c);
-    for member in ordered {
-        let fid = match member {
-            SourceOrderedMember::Property(property) => {
-                emit_declared_property_accessor(
-                    ir,
-                    c,
-                    property,
-                    &fq_name,
-                    &mut cw,
-                    &signature_formatter,
-                    opts.param_assertions,
-                );
-                // The property's own annotations ride a synthetic marker method, which kotlinc emits
-                // directly after that property's accessors — it has no source order of its own.
-                if let Some(&marker) = ir
-                    .property_annotation_markers
-                    .get(&(c.fq_name_id(), property.name.clone()))
-                {
-                    // The marker is STATIC (kotlinc's shape): no `this` slot.
-                    emit_method(ir, marker, &fq_name, facade, &mut cw, false, env);
-                }
-                continue;
-            }
-            SourceOrderedMember::Function(fid)
-                if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
-            {
-                continue;
-            }
-            SourceOrderedMember::Function(fid) => fid,
-            SourceOrderedMember::SecondaryConstructor(ordinal, constructor) => {
-                // Each `<init>(p)` delegates to an exact checked target, then runs its body. A
-                // `super(…)`-reaching body already includes the class initialization steps.
-                SecondaryConstructorEmitter {
-                    ir,
-                    class: c,
-                    owner: &fq_name,
-                    facade,
-                    env,
-                    writer: &mut cw,
-                    owner_prefix: &OwnerConstructorPrefix::none(),
-                }
-                .emit(ordinal, constructor);
-                continue;
-            }
-        };
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
-            // `this` slot; an ordinary member is an instance method.
-            emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
-            if env
-                .run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&fid)
-            {
-                access_bridges::emit_private_member_access_bridge(
-                    ir, fid, &fq_name, &mut cw, false,
-                );
-            }
-            if ir.function_reference_access_bridges.contains(&fid) {
-                access_bridges::emit_function_reference_access_bridge(
-                    ir, fid, &fq_name, &mut cw, false,
-                );
-            }
-        } else {
-            cw.add_abstract_method_sig(
-                0x0001 | 0x0400,
-                &f.name,
-                &ir_method_desc(&f.params, &f.ret),
-                method_signature(&signature_formatter, ir, fid, f).as_deref(),
-            );
-        }
-        // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
-        // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
-        // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
-        // uses the self-carrying variant.
-        if let Some(defaults) = ir.param_defaults(fid) {
-            if f.is_static {
-                // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
-                // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
-                emit_facade_default_stub(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    defaults,
-                    env,
-                    if f.name == "constructor-impl"
-                        && !ir.class_static_local_functions.contains(&fid)
-                    {
-                        Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
-                    } else {
-                        Ty::obj("java/lang/Object")
-                    },
-                );
-            } else {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
-            }
-        }
+    for member in after_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
     }
     // The exact serialization-plugin deserialization constructor emits after every declared member
     // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.
@@ -10862,7 +10971,8 @@ fn emit_method_inner_with_holder(
         .map(|(i, t)| {
             let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
                 || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
-            if lambda_impl || reified_body || is_tparam {
+            let carrier_receiver = i == 0 && ir.jvm_value_class_receiver_impls.contains(&fid);
+            if lambda_impl || reified_body || is_tparam || carrier_receiver {
                 None
             } else if declared_nullable
                 .and_then(|v| v.get(i))
@@ -10897,7 +11007,8 @@ fn emit_method_inner_with_holder(
     // nullability annotation, the same way it gets no generic `Signature`.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
         && !ir.private_methods.contains(&fid)
-        && !ir.synthetic_methods.contains(&fid);
+        && !ir.synthetic_methods.contains(&fid)
+        && !ir.jvm_nullability_unannotated_methods.contains(&fid);
     // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
     // annotations, then the whole `RuntimeVisibleParameterAnnotations` attribute, then
     // `RuntimeInvisible…`, interning each type as it writes it. `reserve_method_pool_with_annotations`
@@ -17909,6 +18020,12 @@ impl<'a> Emitter<'a> {
                     .methodref(&owner.render(), "toString-impl", &descriptor);
                 code.invokestatic(method, slot_words(carrier) as i32, 1);
                 self.append_top(Ty::String, code);
+                return;
+            }
+            // A value class rendered through its `toString-impl` is appended at its own static type,
+            // which selects `append(Object)` as kotlinc does, although the rendered text is a String.
+            if self.is_value_class_ty(&semantic) {
+                self.append_top(Ty::obj("java/lang/Object"), code);
                 return;
             }
         }
