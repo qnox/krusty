@@ -29,6 +29,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode, ReadError};
+use crate::jvm::compilation_inputs::{
+    classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
+};
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
@@ -40,11 +43,7 @@ use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 /// An explicit home takes precedence over `JAVA_HOME`. Missing or invalid homes are a no-op so
 /// callers can combine this with an explicit classpath without making environment setup mandatory.
 pub fn platform_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
-    let base = jdk_home
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
-    let modules = base.join("lib").join("modules");
-    modules.is_file().then_some(modules)
+    super::compilation_inputs::selected_jdk_modules(jdk_home)
 }
 
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
@@ -2108,29 +2107,20 @@ impl Classpath {
             .iter()
             .map(|path| friend_paths.contains(path))
             .collect::<Vec<_>>();
+        let common_expectation_klib =
+            JvmCompilationInputInventory::from_effective_classpath(&paths)
+                .common_expectation_klib()
+                .map(Path::to_path_buf);
         let entries: Vec<Entry> = paths
             .into_iter()
-            .map(|p| {
-                let is_archive = p
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("jar") || e.eq_ignore_ascii_case("zip"))
-                    .unwrap_or(false);
-                // A JDK jimage is conventionally `<jdk>/lib/modules` (a file named `modules`).
-                let is_jimage = p.is_file() && p.file_name().map_or(false, |n| n == "modules");
-                let is_ct_sym = p.is_file() && p.file_name().map_or(false, |n| n == "ct.sym");
-                if is_ct_sym && jdk_release.is_some() {
-                    Entry::CtSym {
-                        path: p,
-                        release: jdk_release.expect("guarded JDK release"),
-                    }
-                } else if is_jimage {
-                    Entry::Jimage(p)
-                } else if is_archive {
-                    Entry::Jar(p)
-                } else {
-                    Entry::Dir(p)
-                }
+            .map(|path| match classify_classpath_entry(&path, jdk_release) {
+                JvmClasspathEntryKind::CtSym => Entry::CtSym {
+                    path,
+                    release: jdk_release.expect("classified with a JDK release"),
+                },
+                JvmClasspathEntryKind::JdkImage => Entry::Jimage(path),
+                JvmClasspathEntryKind::Archive => Entry::Jar(path),
+                JvmClasspathEntryKind::Directory => Entry::Dir(path),
             })
             .collect();
         let snapshot = entries
@@ -2146,17 +2136,6 @@ impl Classpath {
                 jdk_release: entry.jdk_release(),
             })
             .collect::<Vec<_>>();
-        let common_expectation_klib = entries.iter().find_map(|entry| {
-            let Entry::Jar(stdlib) = entry else {
-                return None;
-            };
-            let file_name = stdlib.file_name()?.to_str()?;
-            if file_name != "kotlin-stdlib.jar" {
-                return None;
-            }
-            let klib = stdlib.parent()?.join("kotlin-stdlib-wasm-js.klib");
-            klib.exists().then_some(klib)
-        });
         // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
         // thrashes (every eviction re-composes a type/namespace record or re-decodes metadata). The

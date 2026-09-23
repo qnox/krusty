@@ -6,12 +6,16 @@ description = "Module graph, ABI fingerprinting and cache keys for a Go-like kru
 license = "Apache-2.0"
 
 [dependencies]
-# Nothing, on purpose. `docs/ARCHITECTURE.md` makes the dependency question an explicit build-layer
-# decision rather than one hidden inside a phase: lifting the LSP's project model would add
-# `roxmltree`, `url`, `fs2` and `sha2` to the shipped compiler binary. Keeping the graph and the
-# hasher on std alone shows that this half of the crate never needs them. The ABI module lands
-# next and takes the compiler's own class reader for its class-file adapter; only the build
-# providers (Gradle/Maven/BSP/JPS), which are not here at all, raise the third-party question.
+# The only dependency, and only for `abi`'s class-file adapter: the compiler's own class reader
+# yields signatures, `ConstantValue`s and decoded `@kotlin.Metadata` while carrying no method
+# bodies, which is exactly the ABI/Impl cut this crate needs.
+#
+# NOTHING third-party is pulled in on purpose. `docs/ARCHITECTURE.md` makes the dependency question
+# an explicit build-layer decision rather than one hidden inside a phase: lifting the LSP's project
+# model would add `roxmltree`, `url`, `fs2` and `sha2` to the shipped compiler binary. Keeping the
+# graph/cache/abi core on std alone shows that half of the crate never needs them; only the build
+# providers (Gradle/Maven/BSP/JPS), which are not here yet, raise the question at all.
+krusty = { path = "../.." }
 
 [lib]
 name = "krusty_build"
