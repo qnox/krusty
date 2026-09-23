@@ -444,6 +444,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_nullable_value_class_e2e;
 #[path = "data_class_param_check_e2e.rs"]
 mod data_class_param_check_e2e;
+#[path = "data_class_value_class_metadata_e2e.rs"]
+mod data_class_value_class_metadata_e2e;
 #[path = "data_copy_e2e.rs"]
 mod data_copy_e2e;
 #[path = "data_object_e2e.rs"]
@@ -1174,6 +1176,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "temporary_elimination_e2e.rs"]
+mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
 mod try_debug_lines_e2e;
 
@@ -1705,16 +1709,26 @@ mod value_class_e2e;
 mod value_class_init_validate_e2e;
 #[path = "value_class_map_key_e2e.rs"]
 mod value_class_map_key_e2e;
+#[path = "value_class_member_nullability_e2e.rs"]
+mod value_class_member_nullability_e2e;
+#[path = "value_class_member_order_e2e.rs"]
+mod value_class_member_order_e2e;
 #[path = "value_class_nullable_widen_return_e2e.rs"]
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_private_init_e2e.rs"]
+mod value_class_private_init_e2e;
 #[path = "value_class_property_argument_e2e.rs"]
 mod value_class_property_argument_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
+#[path = "value_class_structural_bodies_e2e.rs"]
+mod value_class_structural_bodies_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
 mod value_class_template_lambda_e2e;
+#[path = "value_class_text_e2e.rs"]
+mod value_class_text_e2e;
 #[path = "value_param_constructor_accessor_e2e.rs"]
 mod value_param_constructor_accessor_e2e;
 #[path = "var_extension_property_e2e.rs"]
