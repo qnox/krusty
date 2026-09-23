@@ -46,6 +46,7 @@ mod inline_call;
 mod interface_compatibility;
 mod member_schedule;
 mod object_static_initialization;
+mod operand_representation;
 mod operand_stack;
 mod property_access;
 mod property_reference_values;
@@ -12699,10 +12700,6 @@ struct Emitter<'a> {
     /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
     /// common IR. Blocks pass it only to their terminal statement.
     terminal_statement_target: Option<Label>,
-    /// A generated class initializer has no source expression that owns JVM reference-boundary
-    /// casts. Keep that representation choice in emission instead of inserting semantic casts into
-    /// common/plugin IR.
-    generated_initializer: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -12754,36 +12751,6 @@ impl<'a> Emitter<'a> {
             pending_return_spills: Vec::new(),
             finally_regions: Vec::new(),
             terminal_statement_target: None,
-            generated_initializer: false,
-        }
-    }
-
-    /// Materialize a generated initializer's verifier-visible reference boundary. The common IR
-    /// retains only the semantic value and destination; the JVM backend owns whether an otherwise
-    /// valid upcast is written as `checkcast` for classfile parity.
-    fn adapt_generated_initializer_reference(
-        &mut self,
-        expression: crate::ir::ExprId,
-        source: Ty,
-        physical: Ty,
-        code: &mut CodeBuilder,
-    ) {
-        if !self.generated_initializer
-            || !source.is_reference()
-            || !physical.is_reference()
-            || type_descriptor(source) == type_descriptor(physical)
-            || jvm_is_erased_top(ir_ty_to_jvm(&source))
-            || !matches!(
-                self.ir.expr(expression),
-                IrExpr::GetValue(_) | IrExpr::ExternalStaticInstance { .. }
-            )
-        {
-            return;
-        }
-        let internal = crate::jvm::names::instanceof_internal_name(physical);
-        if internal != "java/lang/Object" {
-            let class = self.cw.class_ref(&internal);
-            code.checkcast(class);
         }
     }
 
@@ -14365,22 +14332,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
-    /// when a value out of an ERASED slot (a type parameter's `Object`, a generic `Array<T>`'s `Object[]`)
-    /// flows to a more specific reference (a `return`/argument/receiver of that type). Keyed on the value's
-    /// ACTUAL physical type: a concrete source (already the target, or an unrelated concrete type such as a
-    /// value class's unboxed underlying) is left alone — the backend owns this erasure decision.
-    fn emit_value_as(&mut self, e: u32, expected: &Ty, code: &mut CodeBuilder) {
-        self.emit_value(e, code);
-        let src = self.value_ty(e);
-        self.narrow_on_stack(src, expected, code);
-    }
-
-    /// Narrow the value on top of the stack (whose actual type is `src`) to the CONSUMPTION type
-    /// `expected` — the `checkcast` kotlinc inserts when an ERASED value (a type parameter's `Object`, a
-    /// generic `Array<T>`'s `Object[]`) flows to a more specific reference. Keyed on `src`: a concrete
-    /// source (already the target, or an unrelated concrete type such as a value class's unboxed
-    /// underlying) is left alone.
     /// Realize `IrExpr::PropertyRead` — the one place that decides what reading a Kotlin property
     /// COMPILES to. The owner's class file names the accessor or field (via `@Metadata`'s
     /// `JvmPropertySignature`, so a `@JvmName` or value-class-mangled spelling is honoured, never guessed)
@@ -14617,7 +14568,7 @@ impl<'a> Emitter<'a> {
         if let Some(temps) = &spilled {
             let (slot, receiver_ty, _) = temps[0];
             load(receiver_ty, slot, code);
-            self.narrow_on_stack(receiver_ty, &Ty::obj(&access_owner), code);
+            self.narrow_on_stack(receiver_ty, Ty::obj(&access_owner), code);
         } else if let Some(receiver) = operation.receiver {
             let receiver_ty = accessor_receiver_ty(&access, &access_owner);
             self.emit_property_receiver(
@@ -14673,7 +14624,7 @@ impl<'a> Emitter<'a> {
                 semantic_scalar_adapter(*operation.ty, target),
             );
         } else {
-            self.narrow_on_stack(source, &target, code);
+            self.narrow_on_stack(source, target, code);
         }
         match access {
             PropertyAccess::Field {
@@ -14795,7 +14746,7 @@ impl<'a> Emitter<'a> {
     ) {
         if takes_receiver {
             self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), expected, code);
+            self.narrow_on_stack(self.value_ty(receiver), *expected, code);
             return;
         }
         // A receiverless realization does not make the receiver expression disappear. Elide only an
@@ -15165,33 +15116,6 @@ impl<'a> Emitter<'a> {
         };
         matches!(&access, PropertyAccess::Field { owner, name, .. }
             if self.is_lateinit_field(owner, name))
-    }
-
-    /// Whether `ty` names a `@JvmInline value class`, whose values are represented as their underlying.
-    fn is_value_class_ty(&self, ty: &Ty) -> bool {
-        ty.non_null().obj_internal().is_some_and(|fq_name| {
-            self.ir
-                .classes
-                .iter()
-                .any(|c| c.is_value && c.fq_name == fq_name)
-                || self.ir.has_external_value_class_name(fq_name)
-        })
-    }
-
-    fn narrow_on_stack(&mut self, src: Ty, expected: &Ty, code: &mut CodeBuilder) {
-        let s = ir_ty_to_jvm(&src);
-        if !jvm_is_erased_top(s) {
-            return;
-        }
-        let exp = ir_ty_to_jvm(expected);
-        if !exp.is_reference() || type_descriptor(s) == type_descriptor(exp) {
-            return;
-        }
-        let internal = crate::jvm::names::instanceof_internal_name(exp);
-        if internal != "java/lang/Object" {
-            let ci = self.cw.class_ref(&internal);
-            code.checkcast(ci);
-        }
     }
 
     fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
@@ -15874,24 +15798,12 @@ impl<'a> Emitter<'a> {
                         f.name.clone()
                     };
                     let args = args.clone();
-                    // Same arity/descriptor net as `MethodCall` above: an unthreaded suspend call
-                    // (the CPS transform appended a `Continuation` param this site never passes)
-                    // must bail the file, never emit an unverifiable call.
-                    if args.len() != param_tys.len() {
-                        crate::trace_compiler!(
-                            "emit",
-                            "call arity mismatch for {}.{name} ({} args vs {} params)",
-                            self.facade,
-                            args.len(),
-                            param_tys.len()
-                        );
-                        self.run.set_inline_bail("call arity mismatch");
-                        if ret != Ty::Unit {
-                            push_zero(ret, code, self.cw);
-                        }
+                    // Same arity/descriptor contract as `MethodCall` above: an unthreaded suspend
+                    // call must bail the file, never emit an unverifiable invocation.
+                    if let Err(mismatch) = self.emit_source_call_operands(&args, &param_tys, code) {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
-                    self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
                     let m = self
@@ -15904,22 +15816,10 @@ impl<'a> Emitter<'a> {
                     let f = &self.ir.functions[*function as usize];
                     let param_tys = jvm_function_params(self.ir, *function);
                     let ret = jvm_declared_ty(&f.ret);
-                    if args.len() != param_tys.len() {
-                        crate::trace_compiler!(
-                            "emit",
-                            "class-static call arity mismatch for {}.{} ({} args vs {} params)",
-                            owner,
-                            f.name,
-                            args.len(),
-                            param_tys.len()
-                        );
-                        self.run.set_inline_bail("call arity mismatch");
-                        if ret != Ty::Unit {
-                            push_zero(ret, code, self.cw);
-                        }
+                    if let Err(mismatch) = self.emit_source_call_operands(args, &param_tys, code) {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
-                    self.emit_operands(args, code);
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
@@ -15946,7 +15846,12 @@ impl<'a> Emitter<'a> {
                     let param_tys =
                         static_default_stub_params(self.ir, *function, Ty::obj("java/lang/Object"));
                     let ret = jvm_declared_ty(&f.ret);
-                    self.emit_call_operands(e, args, code);
+                    if let Err(mismatch) =
+                        self.emit_source_default_call_operands(e, args, &param_tys, code)
+                    {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
@@ -15966,7 +15871,12 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(&f.ret);
                     let name = format!("{}$default", f.name);
                     let args = args.clone();
-                    self.emit_call_operands(e, &args, code);
+                    if let Err(mismatch) =
+                        self.emit_source_default_call_operands(e, &args, &param_tys, code)
+                    {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
                     let m = self
@@ -16490,7 +16400,15 @@ impl<'a> Emitter<'a> {
                         let descriptor = method_descriptor(&ptys, ret);
                         let mut ops = vec![recv];
                         ops.extend(args.iter().copied());
-                        self.emit_operands(&ops, code);
+                        // The receiver is already of the class the call names; only the arguments
+                        // are materialized at the parameter types.
+                        let mut physical = vec![self.value_ty(recv)];
+                        physical.extend(ptys.iter().copied());
+                        if let Err(mismatch) = self.emit_source_call_operands(&ops, &physical, code)
+                        {
+                            self.bail_descriptor_arity(&mismatch, ret, code);
+                            return;
+                        }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         if interface {
                             let m = self.cw.interface_methodref(&owner, &name, &descriptor);
@@ -17913,120 +17831,6 @@ impl<'a> Emitter<'a> {
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         self.emit_operands_adapted(None, ops, code, |_, _, _| {});
-    }
-
-    /// Adapt one semantic value to the physical slot named by a JVM descriptor. Wrapper identity and
-    /// primitive carriers are backend facts: core resolution has already selected the callable and
-    /// never needs to know whether this boundary boxes, unboxes, narrows, or performs a numeric JVM
-    /// conversion.
-    fn adapt_physical_operand(
-        &mut self,
-        source: Ty,
-        semantic: Ty,
-        destination_semantic: Option<Ty>,
-        physical: Ty,
-        code: &mut CodeBuilder,
-    ) {
-        // `source` comes from `value_ty`/a spill slot and is already the verifier-visible stack type.
-        // Re-running semantic erasure here would turn the boxed `Obj("kotlin/Int")` back into scalar
-        // `Int` and box it a second time.
-        let source_jvm = source;
-        crate::trace_compiler!(
-            "value_classes",
-            "descriptor operand source={source:?} semantic={semantic:?} jvm={source_jvm:?} physical={physical:?}"
-        );
-        // A checked value-class value can reach a physical carrier slot as its BOX object (for
-        // example, an element read from `Collection<Item>` inside an inlined `all` lambda). Primitive
-        // wrapper unboxing is not applicable: `Item` is not `Integer`, even when its carrier is `int`.
-        // The semantic classifier and verifier-visible source agree that this is the value-class box;
-        // invoke its backend adapter before handing the carrier to the selected descriptor. A value
-        // already represented by its carrier (`source == physical`, as in `with(A("K"))`) deliberately
-        // does not enter this branch.
-        let boxed_value_class = semantic.non_null().obj_internal().filter(|classifier| {
-            source_jvm.non_null().obj_internal() == Some(*classifier)
-                && self.is_value_class_ty(&semantic)
-        });
-        let value_class_carrier = boxed_value_class.and_then(|classifier| {
-            self.ir
-                .value_class_underlying_name(classifier)
-                .map(|underlying| jvm_declared_ty(&underlying))
-        });
-        if let (Some(classifier), Some(carrier)) = (boxed_value_class, value_class_carrier) {
-            // A reference supertype/generic descriptor consumes the BOX itself. Unbox only when the
-            // selected descriptor consumes this value class's actual carrier. An `Object` descriptor
-            // alone cannot decide that for an object-backed carrier: the selected Kotlin declaration
-            // may instead expose an erased type-parameter slot, whose already-boxed value must remain
-            // boxed (for example `Continuation<ResultId>.resume(ResultId(...))`).
-            let destination_is_concrete_value_class =
-                destination_semantic.is_none_or(|destination| {
-                    destination.non_null().obj_internal() == Some(classifier)
-                });
-            if destination_is_concrete_value_class
-                && type_descriptor(carrier) == type_descriptor(physical)
-            {
-                let descriptor = format!("(){}", type_descriptor(carrier));
-                let method = self
-                    .cw
-                    .methodref(&classifier.render(), "unbox-impl", &descriptor);
-                code.invokevirtual(method, 0, slot_words(carrier) as i32);
-            }
-            return;
-        }
-        if source_jvm.is_jvm_scalar() && physical.is_reference() {
-            let semantic = if physical.non_null().is_unsigned() {
-                physical.non_null()
-            } else {
-                semantic
-            };
-            box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, source_jvm));
-        } else if source_jvm.is_reference() && physical.is_jvm_scalar() {
-            unbox_prim(self.cw, code, semantic_scalar_adapter(semantic, physical));
-        } else if source_jvm.is_jvm_scalar() && physical.is_jvm_scalar() {
-            emit_num_conv(source_jvm, physical, code);
-        } else if source_jvm.is_reference() && physical.is_reference() {
-            self.narrow_on_stack(source_jvm, &physical, code);
-        }
-    }
-
-    fn adapt_physical_operand_for(
-        &mut self,
-        expression: crate::ir::ExprId,
-        source: Ty,
-        physical: Ty,
-        code: &mut CodeBuilder,
-    ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
-        self.adapt_physical_operand(source, semantic, None, physical, code);
-        self.adapt_generated_initializer_reference(expression, source, physical, code);
-    }
-
-    fn adapt_physical_call_operand_for(
-        &mut self,
-        call_expression: u32,
-        parameter_index: usize,
-        expression: u32,
-        source: Ty,
-        physical: Ty,
-        code: &mut CodeBuilder,
-    ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
-        let destination_semantic = self
-            .ir
-            .call_declared_params
-            .get(&call_expression)
-            .and_then(|parameters| parameters.get(parameter_index))
-            .copied();
-        self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
 
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,

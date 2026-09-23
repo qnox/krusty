@@ -1214,6 +1214,8 @@ mod temporary_elimination_e2e;
 mod try_debug_lines_e2e;
 #[path = "uncast_continuation_operand_e2e.rs"]
 mod uncast_continuation_operand_e2e;
+#[path = "upcast_checkcast_e2e.rs"]
+mod upcast_checkcast_e2e;
 
 #[path = "child_serializer_accessor_body_e2e.rs"]
 mod child_serializer_accessor_body_e2e;

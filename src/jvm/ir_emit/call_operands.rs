@@ -166,14 +166,45 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Operands of `call`, with the call's own line put back in effect at the start of every run of
-    /// operands the CALL synthesized — the placeholder for an omitted argument, and the trailing
-    /// mask/marker group. A supplied argument between two such runs puts its own line in effect, and
-    /// the next run restores the call's, which is what kotlinc records. A call that synthesizes
-    /// nothing marks nothing here and takes its line at the invoke, as before.
-    pub(super) fn emit_call_operands(&mut self, call: u32, ops: &[u32], code: &mut CodeBuilder) {
+    /// Operands of a call to a function this module declares. Lowering already realized every
+    /// representation change its checked arguments need, so each reference operand is only
+    /// materialized at its parameter's type, the cast kotlinc writes for an upcast.
+    pub(super) fn emit_source_call_operands(
+        &mut self,
+        ops: &[u32],
+        physical: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Result<(), DescriptorArityMismatch> {
+        DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
+        let mut index = 0usize;
+        self.emit_operands_adapted(None, ops, code, |this, source, code| {
+            let target = physical[index];
+            index += 1;
+            this.coerce_reference_on_stack(source, target, code);
+        });
+        Ok(())
+    }
+
+    /// The same representation boundary for a source `$default` stub. Unlike an ordinary source
+    /// call, default realization has inserted placeholders, mask words, and the marker into `ops`;
+    /// preserve their recorded line ownership while materializing every operand at the stub's
+    /// already-realized parameter type.
+    pub(super) fn emit_source_default_call_operands(
+        &mut self,
+        call: u32,
+        ops: &[u32],
+        physical: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Result<(), DescriptorArityMismatch> {
+        DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let origins = self.default_operand_origins(call, ops, true);
-        self.emit_operands_adapted(Some((call, &origins)), ops, code, |_, _, _| {});
+        let mut index = 0usize;
+        self.emit_operands_adapted(Some((call, &origins)), ops, code, |this, source, code| {
+            let target = physical[index];
+            index += 1;
+            this.coerce_reference_on_stack(source, target, code);
+        });
+        Ok(())
     }
 
     /// Put `call`'s line in effect if the operand at `position` opens a run of operands the CALL
@@ -275,6 +306,16 @@ impl Emitter<'_> {
             let operand = ops[index];
             let target = physical[index];
             if index == 0 {
+                // A dispatch receiver is materialized at the class the call names only out of an
+                // erased `Object`: kotlinc names the receiver's own class, so it never widens one,
+                // and an `invokespecial` must see the current class, not the interface it calls.
+                let target = if source.is_reference()
+                    && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
+                {
+                    source
+                } else {
+                    target
+                };
                 this.adapt_physical_operand_for(operand, source, target, code);
             } else {
                 this.adapt_physical_call_operand_for(
