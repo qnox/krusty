@@ -2142,6 +2142,7 @@ pub(crate) fn lower_value_classes(
         })
         .collect::<HashSet<_>>();
     let mut erased_variable_defaults = Vec::new();
+    let mut value_class_parameter_constructions = Vec::new();
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
@@ -2176,6 +2177,11 @@ pub(crate) fn lower_value_classes(
                 ctor_params: Some(ps),
                 ..
             } if !serialization_constructor_calls.contains(&(i as u32)) => {
+                // Preserve the exact selected declaration fact before erasure. It applies uniformly
+                // to local secondary and sibling-file constructors; owner origin is irrelevant.
+                if ps.iter().any(is_vc_ty) {
+                    value_class_parameter_constructions.push(i as ExprId);
+                }
                 ps.iter_mut().for_each(|p| *p = erase(p, &under));
             }
             // A function value's `invoke` returns its declared type through the `FunctionN` generic slot — a
@@ -2220,6 +2226,9 @@ pub(crate) fn lower_value_classes(
             IrExpr::Try { result, .. } => *result = erase(result, &under),
             _ => {}
         }
+    }
+    for call in value_class_parameter_constructions {
+        ir.mark_value_class_parameter_construction(call);
     }
     for (init, erased) in erased_variable_defaults {
         if matches!(

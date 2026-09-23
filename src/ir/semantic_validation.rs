@@ -641,7 +641,7 @@ impl IrFile {
         )?;
         reject_all(
             "value-class constructor parameter",
-            self.vc_ctor_declared_params.values().flatten().copied(),
+            self.vc_ctor_declared_param_types(),
         )?;
         for (params, ret) in self.suspend_declared_sigs.values() {
             reject_all("suspend declaration parameter", params.iter().copied())?;
