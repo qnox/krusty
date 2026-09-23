@@ -72,7 +72,7 @@ fn lower_property_override_plans(
             implementation_type: edge.implementation_type.get(),
             overridden_mutable: edge.overridden_mutable,
             implementation_mutable: edge.implementation_mutable,
-            superclass_overrides: edge.superclass_overrides.to_vec(),
+            has_kotlin_superclass_override: edge.has_kotlin_superclass_override,
             depth: edge.depth,
         })
         .collect()
@@ -105,7 +105,7 @@ fn lower_function_override_plans(
             implementation_parameter_identities: edge.implementation_parameter_identities.to_vec(),
             implementation_result: edge.implementation_result.get(),
             suspend: edge.suspend,
-            superclass_overrides: edge.superclass_overrides.to_vec(),
+            has_kotlin_superclass_override: edge.has_kotlin_superclass_override,
             depth: edge.depth,
         })
         .collect()

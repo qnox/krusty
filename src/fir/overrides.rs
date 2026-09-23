@@ -46,11 +46,10 @@ pub struct ResolvedPropertyOverride {
     pub implementation_type: ResolvedTy,
     pub overridden_mutable: bool,
     pub implementation_mutable: bool,
-    /// Superclass (non-interface) declarations among the implementation's other overridden
-    /// properties that themselves override `overridden`: the class chain through which `overridden`
-    /// already reaches the implementation. A target realization of `overridden` (such as a JVM
-    /// renamed-builtin bridge) may therefore already be owned by one of them.
-    pub superclass_overrides: Box<[ResolvedPropertyOverrideTarget]>,
+    /// Whether a Kotlin superclass declaration among the implementation's other overridden
+    /// properties itself overrides `overridden`. A target realization of `overridden` (such as a
+    /// JVM renamed-builtin bridge) may therefore already be owned by that superclass.
+    pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }
 
@@ -86,9 +85,9 @@ pub struct ResolvedFunctionOverride {
     pub implementation_parameter_identities: Box<[ResolvedParameterIdentity]>,
     pub implementation_result: ResolvedTy,
     pub suspend: bool,
-    /// Superclass (non-interface) declarations among the implementation's other overridden
-    /// functions that themselves override `overridden`; see
-    /// [`ResolvedPropertyOverride::superclass_overrides`].
-    pub superclass_overrides: Box<[ResolvedFunctionOverrideTarget]>,
+    /// Whether a Kotlin superclass declaration among the implementation's other overridden
+    /// functions itself overrides `overridden`; see
+    /// [`ResolvedPropertyOverride::has_kotlin_superclass_override`].
+    pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }

@@ -89,23 +89,27 @@ fn may_supply_inherited_implementation(
 /// belong to a superclass (not an interface) which inherits the first one's owner. Such a
 /// superclass member itself overrides that declaration, so the declaration reaches the
 /// implementation through the superclass chain rather than first at the implementation.
-fn superclass_overrides<Target: Copy>(
+fn has_kotlin_superclass_override(
     source: &dyn SymbolSource,
-    overridden: impl Iterator<Item = (Target, crate::types::TypeName, bool)>,
-) -> Vec<Box<[Target]>> {
+    overridden: impl Iterator<Item = (crate::types::TypeName, bool)>,
+) -> Vec<bool> {
     let overridden = overridden.collect::<Vec<_>>();
     overridden
         .iter()
-        .map(|&(_, owner, _)| {
+        .map(|&(owner, _)| {
             overridden
                 .iter()
-                .filter(|&&(_, superclass, superclass_is_interface)| {
+                .any(|&(superclass, superclass_is_interface)| {
                     !superclass_is_interface
                         && superclass != owner
                         && owner_already_has_obligation(source, superclass, owner)
+                        && source
+                            .classifier(superclass)
+                            .unwrap_or_else(|| {
+                                panic!("override owner {superclass} must remain resolvable")
+                            })
+                            .is_kotlin
                 })
-                .map(|&(target, _, _)| target)
-                .collect()
         })
         .collect()
 }
@@ -384,7 +388,7 @@ fn publish_inherited_interface_function_plans(
                         "inherited implementation result",
                     ),
                     suspend: implementation.flags.suspend,
-                    superclass_overrides: Box::default(),
+                    has_kotlin_superclass_override: false,
                     depth: supertype.depth,
                 });
             }
@@ -492,7 +496,7 @@ fn publish_inherited_interface_property_plans(
                     ),
                     overridden_mutable: applied.setter.is_some(),
                     implementation_mutable: implementation.setter.is_some(),
-                    superclass_overrides: Box::default(),
+                    has_kotlin_superclass_override: false,
                     depth: supertype.depth,
                 });
             }
@@ -559,24 +563,20 @@ fn append_property_override_edges(
                 implementation_type,
                 overridden_mutable: applied.setter.is_some(),
                 implementation_mutable,
-                superclass_overrides: Box::default(),
+                has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
         }
     }
     let edges = &mut overrides[first..];
-    let covering = superclass_overrides(
+    let covering = has_kotlin_superclass_override(
         source,
-        edges.iter().map(|edge| {
-            (
-                edge.overridden,
-                edge.overridden_owner,
-                edge.overridden_is_interface,
-            )
-        }),
+        edges
+            .iter()
+            .map(|edge| (edge.overridden_owner, edge.overridden_is_interface)),
     );
-    for (edge, covering) in edges.iter_mut().zip(covering) {
-        edge.superclass_overrides = covering;
+    for (edge, covered) in edges.iter_mut().zip(covering) {
+        edge.has_kotlin_superclass_override = covered;
     }
 }
 
@@ -734,24 +734,20 @@ fn append_function_override_edges(
                     "overriding function result",
                 ),
                 suspend,
-                superclass_overrides: Box::default(),
+                has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
         }
     }
     let edges = &mut overrides[first..];
-    let covering = superclass_overrides(
+    let covering = has_kotlin_superclass_override(
         source,
-        edges.iter().map(|edge| {
-            (
-                edge.overridden,
-                edge.overridden_owner,
-                edge.overridden_is_interface,
-            )
-        }),
+        edges
+            .iter()
+            .map(|edge| (edge.overridden_owner, edge.overridden_is_interface)),
     );
-    for (edge, covering) in edges.iter_mut().zip(covering) {
-        edge.superclass_overrides = covering;
+    for (edge, covered) in edges.iter_mut().zip(covering) {
+        edge.has_kotlin_superclass_override = covered;
     }
 }
 

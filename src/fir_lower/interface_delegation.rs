@@ -311,7 +311,7 @@ fn materialize_delegation(
                         suspend: member.call.suspend,
                         // A delegation forwarder implements an interface obligation no superclass
                         // declaration of this class overrides.
-                        superclass_overrides: Vec::new(),
+                        has_kotlin_superclass_override: false,
                         depth: 0,
                     });
                 if member.call.suspend {

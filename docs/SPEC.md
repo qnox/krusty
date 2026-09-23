@@ -4048,11 +4048,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for every stdlib `AbstractList`/`AbstractSet` — and never again below it (measured: a subclass of
   `AbstractList<T>` overriding `val size` publishes only an open `getSize()`). Redeclaring it in a
   subclass overrides a final method, and the JVM rejects the class at load time with
-  `IncompatibleClassChangeError`. The frontend records, on each override edge, the superclass
-  (non-interface) declarations among the implementation's other overridden members whose owner
-  inherits the edge's owner (`superclass_overrides`); the JVM bridge pass skips a RENAMED bridge
-  when one of them is a Kotlin declaration (this module, or a classpath class with Kotlin
-  metadata). A Java superclass realizes the member under the JVM name itself, and a superclass
+  `IncompatibleClassChangeError`. The frontend records, on each override edge, whether a Kotlin
+  superclass declaration among the implementation's other overridden members inherits the edge's
+  owner (`has_kotlin_superclass_override`); the JVM bridge pass skips a RENAMED bridge when that
+  fact is set. A Java superclass realizes the member under the JVM name itself, and a superclass
   property that only shares the name does not override the builtin, so neither owns the bridge and
   the implementation keeps emitting it. Ordinary erasure bridges are unaffected: kotlinc
   regenerates those in every overriding class. The custom accessors of an overriding property are

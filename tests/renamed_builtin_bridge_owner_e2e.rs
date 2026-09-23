@@ -159,6 +159,50 @@ fn a_subclass_of_a_kotlinc_compiled_collection_loads() {
     assert_eq!(result, "OK");
 }
 
+/// A Java superclass realizes `Collection.size` directly under its JVM name rather than owning a
+/// Kotlin renamed bridge. The Kotlin subclass must therefore still emit `size()` for its `size`
+/// property; inheriting the Java implementation would return the stale superclass value.
+#[test]
+fn a_java_superclass_does_not_suppress_the_size_bridge() {
+    let java = [(
+        "lib/Base.java".to_string(),
+        "package lib;\n\
+         public class Base extends java.util.AbstractCollection<String> {\n\
+         \x20   @Override public int size() { return 1; }\n\
+         \x20   @Override public java.util.Iterator<String> iterator() {\n\
+         \x20       return java.util.Collections.emptyIterator();\n\
+         \x20   }\n\
+         }\n"
+        .to_string(),
+    )];
+    let Some((classes, _)) = common::javac_compile(&java, &[]) else {
+        panic!("javac must compile the Java collection fixture");
+    };
+    let root = classes.parent().map(std::path::Path::to_path_buf);
+    let jdk = common::jdk_modules();
+    let classpath = vec![classes, common::stdlib_jar()];
+    let source = "import lib.Base\n\
+         class Leaf : Base() {\n\
+         \x20   override val size: Int get() = 5\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val erased: Collection<String> = Leaf()\n\
+         \x20   return if (erased.size == 5) \"OK\" else \"fail: ${erased.size}\"\n\
+         }\n";
+    let result =
+        common::compile_and_run_box(source, "JavaSuperclass", &classpath, Some(jdk.as_path()));
+    if result.is_none() {
+        panic!(
+            "Java superclass fixture failed: {:?}",
+            common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+        );
+    }
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(result.as_deref(), Some("OK"));
+}
+
 /// A superclass property that merely shares the name does not override `Collection.size`, so it
 /// owns no bridge and the implementing class still needs its own `size()`.
 #[test]
