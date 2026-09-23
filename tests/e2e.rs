@@ -1411,6 +1411,8 @@ mod smart_cast_member_extension_e2e;
 mod smartcast_and_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
+#[path = "source_map_row_count_e2e.rs"]
+mod source_map_row_count_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
 mod spliced_lambda_nonlocal_return_e2e;
 #[path = "spliced_lambda_try_e2e.rs"]
