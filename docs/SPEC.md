@@ -2398,6 +2398,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/is_nullable_and_notnull_smartcast_e2e.rs`.
 - **A `finally { return … }` / `finally { throw … }`** that itself transfers control suppresses the
   catch-all's exception re-raise (emitting the dead `athrow` left an unframed instruction → verify error).
+- **A narrowing recorded for a bare member access belongs to the implicit `this` inside it, not to
+  the value the access produces.** `resolve` records `narrowed_this_member` against the *access*
+  (`node` for an implicit `this.node`) so the lowerer narrows the `this` it loads before reading the
+  field. When such an access is itself a CALL's receiver — `node.tag()` — the checked call path must
+  not read that map again: the access has already applied the narrowing, and casting a second time
+  checks the PROPERTY's value against the receiver's narrowed type. `node.tag()` inside
+  `if (this is Light)` emitted `checkcast Light` twice, the second on the `Node` that `getNode`
+  answered, which the verifier rejects outright (`Type 'Light' is not assignable to 'Node'`). Only
+  `selected_value_smartcasts` — a cast of the receiver's OWN value — belongs at a call's receiver.
+  `tests/narrowed_this_member_call_e2e.rs`; the corpus case is
+  `codegen/box/smartCasts/kt44814.kt`.
 - **`is`/`as`/`as?` to `IntArray`/`CharArray`/…** resolves to the primitive array type before the
   classpath-class fallback (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`). `is UInt`/
   `is ULong` and smart-casting a reference to an unsigned value type are rejected (value-type boxing).
@@ -2549,6 +2560,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+- **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no signed case
+  narrower than `Int` and no `UByte`/`UShort` case, so a constant expression's checked TYPE is the
+  only thing carrying those widths — which is why `lower_constant` already reads it to tell `UByte`
+  from `UInt`. It did not read it for the signed narrow pair, so every `Byte`-typed constant was
+  recorded as an `Int`.
+
+  That is invisible to a consumer which reads the type a constant is ASSIGNED to, and wrong for one
+  which reads the constant's own SHAPE: a box made from a `Byte` constant came out an `Int`, so an
+  `is Byte` test answered false and two equal bytes compared unequal once boxed through a generic
+  parameter. `IrConst::Byte` and `IrConst::Short` are already produced elsewhere and already handled
+  across the JVM backend, the metadata builder and suspend hoisting, so emitting them here stays
+  inside the existing contract rather than widening it.
+
+  A value the named width cannot hold is a lowering FAILURE, not a truncation — the checker produces
+  none, and saying so keeps a later widening of this path from silently wrapping. ARITHMETIC is
+  unaffected: `Byte + Byte` is an `Int` in Kotlin, and that promotion belongs to the operation rather
+  than to the constant.
+  Tests: `fir_lower::tests::a_narrow_integral_constant_keeps_the_width_named_by_its_checked_type`,
+  `::an_integral_constant_too_wide_for_its_checked_type_fails`, and
+  `tests/narrow_integral_constant_e2e.rs`.
+
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -5979,6 +6011,120 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backends (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
   Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
   first).
+
+- **A value class delegating an interface uses its own UNDERLYING VALUE, not a field of the
+  delegation's.** A value class has exactly one field, and `value class IC(val i: I) : I by i` names
+  that very field as the delegate. Kotlin synthesizes no `$$delegate_0` there — the underlying value
+  IS the delegate, and every forwarder reads it — and it could not: a second field is not a shape a
+  value class has.
+
+  Common lowering synthesized one anyway. That gave the class two fields, which the JVM emitter
+  turned into a `putfield` of the wrong type in `constructor-impl` — the class was rejected at load
+  with `VerifyError: Bad type on operand stack in putfield` — and which the native code generator
+  refused by name.
+
+  WHICH field the delegate is cannot be decided where the delegation field used to be created: the
+  property's own field does not exist yet at that point, and the delegate field was being pushed
+  ahead of it. So nothing is pushed for this shape and the edge is recorded later, where the
+  constructor's field indices are known. The delegate must be the first CONSTRUCTOR PARAMETER, which
+  is what the underlying value is; a value class delegating to anything else is not this shape and
+  keeps the ordinary field, to be refused as before rather than silently pointed at the wrong
+  storage.
+  Tests: `tests/value_class_delegation_e2e.rs`, each cross-checked against the reference compiler:
+  the forwarder reached through both types, the underlying value still readable as its own property,
+  a generic underlying type, and an ORDINARY class still delegating through a field of its own.
+  Corpus: `codegen/box/inlineClasses/delegationByUnderlyingType/` (all six).
+
+- **A local class whose SUPERCLASS is a local class with captures passes them on.** A capturing
+  local class takes its captures as synthetic PREFIX parameters of its constructor, ahead of the
+  ones the source wrote. A subclass's `super(…)` spells only the written ones — the prefix is not in
+  the source and there is no expression there for a resolved-constructor lookup to find — so the
+  call was one value short per capture. kotlinc compiles these; krusty rejected them on both
+  backends, the JVM's with `VerifyError: Bad type on operand stack` putting `this` where the capture
+  belonged.
+
+  Two halves, neither sufficient alone:
+
+  - Selection records the superclass's captures as the subclass's own, read from the RESOLVED
+    SUPERTYPE (`resolved_body_local_supertypes`) rather than from a call. That is the one edge a
+    supertype constructor gives: `class Derived : Local(true)` records the base classifier and its
+    arguments and nothing in between.
+  - Common lowering prepends the matching prefix reads to `super_args`. Each transitive capture
+    retains the superclass field's stable semantic coordinate, so matching never depends on a
+    synthetic field spelling. Only a call short by exactly the parent's prefix is filled; any other
+    shape is left to the arity check downstream.
+
+  The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
+  and is then found to need `x` for a declaration it reaches carries one field, not two — the second
+  is a duplicate field of the same name, which the class file format rejects outright
+  (`ClassFormatError: Duplicate field name`). The merge previously keyed a dependency-required
+  capture on the dependency alone, so an identical own capture did not match it.
+
+  Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
+  they also carry a superclass capture that their own body never mentions.
+  Tests: `tests/local_superclass_capture_e2e.rs`, seven shapes, each cross-checked against the
+  reference compiler. Corpus: `codegen/box/localClass/localHierarchy.kt`,
+  `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
+  `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
+  `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
+
+- **A collection literal's `operator fun of` dispatches on the companion, not on nothing.**
+  `val list: MyList = ["O", "K"]` selects `MyList.Companion.of`, which is an ordinary MEMBER of
+  that companion object — the same declaration a spelled `MyList.of("O", "K")` reaches. The literal
+  spells no receiver, so the selected member reached the backend with no dispatch receiver recorded
+  and the call would be made with the arguments alone: one value short of the declaration it had
+  selected. Selection now records the exact classifier-value receiver returned with the candidate
+  family, including when an inherited declaration has a non-object owner. A companion EXTENSION
+  keeps its own path — it already carries the receiver it
+  extends — and an implicit classifier callable (`values`/`valueOf`) has no instance at all and
+  keeps none.
+  Tests: `fir::body_check::collection_literal_tests::custom_collection_literal_keeps_the_selected_companion_operator`
+  and `inherited_collection_literal_operator_keeps_the_companion_receiver`.
+- **An `is` check asks a scalar operand through its box.** Kotlin has no subtyping among the
+  primitive types, so `n is Long` where `n` is an `Int` does not even compile and an `is` on a
+  scalar reads as settled — but `5 is Number` and `1u is Comparable<UInt>` are true, and answering
+  those needs the hierarchy. Each primitive's box carries the descriptor that has it, an unsigned
+  one its own (which is what makes `(1u as Any) is Int` false), so boxing the operand and asking is
+  both correct and the only rule needed.
+
+  The emitter has TWO shapes for the same check, and only one of them boxed. In value position it
+  emits the operand, boxes it and leaves a `Boolean` behind; in CONDITION position it fuses
+  `instanceof` with the branch it feeds, and that shape emitted the operand raw — so
+  `if (n is Number)` put an `int` where the verifier wants an object and the class was rejected with
+  `VerifyError: Bad type on operand stack`. The question is the same either way, so both box, and
+  the boxing reads the operand's SEMANTIC type so an unsigned value boxes as itself.
+  Tests: `tests/scalar_instance_check_e2e.rs`, each case cross-checked against the reference
+  compiler; the corpus cases are `codegen/box/boxingOptimization/kt5844.kt`,
+  `codegen/box/dataClasses/unitComponent.kt`,
+  `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
+  `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
+
+- **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
+  property's declaration store when its value is the one the field already holds, and that is
+  observable: a base constructor that dispatches to an override runs before the subclass's
+  initializers, so a value the override wrote survives the omitted store and is wiped by a kept one.
+  `0u`, `0uL` and the `UByte`/`UShort` zeros are their carrier's zero, so they are omitted too —
+  krusty kept them and reset what the override wrote.
+  Tests: `tests/unsigned_default_store_e2e.rs` (cross-checked against the reference compiler) and
+  `jvm::property_storage::tests::an_unsigned_zero_is_a_jvm_default`.
+- **A `Unit` tailrec's `f(x); return` is a tail call in any block.** Nothing of the function runs
+  after a `return`, so the statement right before one is in tail position whether the block ends
+  the body or sits inside an `if`, a `when` arm or a loop. Only the body's own last block was
+  rewritten, so `if (n > 0) { …; f(n - 1); return }` followed by more code kept recursing and
+  overflowed at a depth kotlinc runs flat. The sweep over `return`s now rewrites that statement
+  wherever it finds the pair, under the same ownership rules as a `return f(x)`: not inside a
+  `try` or an inlined lambda, and only on a singly reached node.
+  Tests: `tests/tailrec_e2e.rs` (`a_unit_tailrec_bare_return_loops_wherever_it_stands`,
+  cross-checked against the reference compiler).
+- **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
+  `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
+  `deserialize` did not. A property whose type has no derivable serializer made the whole
+  `deserialize` a throwing stub although `X` was right there, and a property whose type HAS one
+  (a `String`) decoded through the type's builtin, so what `X` wrote was misread. The element decode
+  now takes the same order as the encode — contextual, type parameter, explicit property
+  serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
+  Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
+  `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
 
 ## 8. Success criteria for the PoC
 

@@ -8,6 +8,7 @@ use crate::ir::{FunId, IrFile};
 
 pub(super) fn validate(ir: &IrFile) -> Result<(), String> {
     for class in &ir.classes {
+        reject_duplicate_constructors(class)?;
         let Some(properties) = ir.member_ext_props.get(&class.fq_name) else {
             continue;
         };
@@ -15,6 +16,30 @@ pub(super) fn validate(ir: &IrFile) -> Result<(), String> {
             for accessor in std::iter::once(property.getter).chain(property.setter) {
                 reject_duplicate_method(ir, class, accessor)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), String> {
+    let mut descriptors = std::collections::HashSet::new();
+    if class.has_primary_ctor {
+        descriptors.insert(crate::jvm::names::method_descriptor(
+            &crate::jvm::ir_emit::class_ctor_jvm_tys(class),
+            crate::types::Ty::Unit,
+        ));
+    }
+    for constructor in &class.secondary_ctors {
+        let parameters = crate::jvm::ir_emit::jvm_tys(&constructor.prefix_params)
+            .into_iter()
+            .chain(crate::jvm::ir_emit::jvm_tys(&constructor.params))
+            .collect::<Vec<_>>();
+        let descriptor = crate::jvm::names::method_descriptor(&parameters, crate::types::Ty::Unit);
+        if !descriptors.insert(descriptor.clone()) {
+            return Err(format!(
+                "platform declaration clash: '{}' contains duplicate JVM constructor <init>{descriptor}",
+                class.fq_name
+            ));
         }
     }
     Ok(())

@@ -153,41 +153,30 @@ fun box(): String {{\n\
     both_compilers_box(&main, "plus_declared_val");
 }
 
-/// Seeding from the expectation must not accept operands that genuinely do not fit: an `Int` element
-/// has no common element type with the declared `List<P>` result.
+/// Seeding from the expectation must not accept operands that genuinely do not fit: an `Int`
+/// element joins with `A` only at `Any`, which the declared `List<P>` result rejects.
 #[test]
 fn an_operand_that_does_not_fit_the_expectation_is_still_rejected() {
     let main = format!("{DECLARATIONS}fun pick(): List<P> = listOf(A()) + listOf(1)\n");
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
-    // Both compilers reject. They place the blame differently, and the reason is the rule under
-    // test: krusty pins `T = P` from the declared result and reports the operand that cannot meet
-    // it, while kotlinc lets inference widen to `List<Any>` and reports the RETURN that no longer
-    // matches. Recorded exactly rather than as a rejection check — a nonzero exit passes on an
-    // unrelated rejection. The divergence is not introduced here: without the expectation krusty
-    // reported the same argument mismatch against `Iterable<A>`, the receiver's element type.
+    // Both compilers reject, at the same place and in the same words: inference widens the element
+    // type to `Any` and the declared `List<P>` return no longer matches. Recorded exactly rather
+    // than as a rejection check — a nonzero exit passes on an unrelated rejection.
+    //
+    // krusty used to blame the operand instead (`'List<Int>' against 'Iterable<P>'` at column 37),
+    // because `T` was pinned from the receiver before the argument was examined. It now joins both
+    // operands, which is what makes this the same diagnostic the reference compiler writes.
+    let expected = [common::CompilerError {
+        file: "Main.kt".to_string(),
+        line: 13,
+        column: 23,
+        message: "return type mismatch: expected 'List<P>', actual 'List<Any>'.".to_string(),
+    }];
     assert_eq!(
         common::compiler_errors(&result.krusty_stdout),
         [],
         "krusty writes diagnostics to stderr"
     );
-    assert_eq!(
-        common::compiler_errors(&result.krusty_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 13,
-            column: 37,
-            message: "argument type mismatch: actual type is 'List<Int>', but 'Iterable<P>' was \
-                      expected."
-                .to_string(),
-        }]
-    );
-    assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 13,
-            column: 23,
-            message: "return type mismatch: expected 'List<P>', actual 'List<Any>'.".to_string(),
-        }]
-    );
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
 }
