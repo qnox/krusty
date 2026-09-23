@@ -31,9 +31,7 @@ pub(super) fn attach_declared_function_debug(
         return;
     }
     let param_tys = jvm_function_params(ir, fid);
-    let parameter_names = generated
-        .map(|publication| publication.parameter_names.as_slice())
-        .or_else(|| ir.param_names(fid));
+    let parameter_names = ir.function_parameter_identities(fid);
     if !param_tys.is_empty() {
         let parameter_names =
             parameter_names.expect("a debug-published function carries exact parameter identities");
@@ -68,6 +66,26 @@ pub(super) fn attach_declared_function_debug(
         &descriptor,
         line.map(|line| (body_pc, line)),
         &locals,
+    );
+    // Only the generating producer may request a closing-line entry, and only the declared-method
+    // emitter can identify the implicit fallthrough return's exact bytecode position. A diverging
+    // body has no recorded return and therefore retains the declaration-line-only table.
+    let Some(start) = line else { return };
+    let Some(fallthrough_line) =
+        generated.and_then(|publication| publication.debug.fallthrough_line())
+    else {
+        return;
+    };
+    let Some(return_pc) = cw.method_implicit_void_return_pc(&function.name, &descriptor) else {
+        return;
+    };
+    if return_pc <= body_pc {
+        return;
+    }
+    cw.set_method_lines(
+        &function.name,
+        &descriptor,
+        &[(body_pc, start), (return_pc, fallthrough_line)],
     );
 }
 

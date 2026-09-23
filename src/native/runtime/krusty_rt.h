@@ -1,4 +1,5 @@
-/* krusty native runtime — generated; do not edit. */
+/* krusty native runtime: the contract generated code is written against. Hand-written; build.rs
+   compiles the runtime that implements it for every target. */
 #ifndef KRUSTY_RT_H
 #define KRUSTY_RT_H
 
@@ -192,16 +193,16 @@ KRef kt_float_companion(void);
 KRef kt_double_companion(void);
 KRef kt_string_companion(void);
 
-/* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
-   machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
-   being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
-   its bits. */
 /* `kotlin.Number` and `kotlin.Comparable` exist only as descriptors to point at: no value has one
    as its own type, and an `is` against either is answered by the interface list of the box. */
 extern const KType kt_type_number;
 extern const KType kt_type_comparable;
 /* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
 extern const KType kt_type_char_sequence;
+/* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
+   machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
+   being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
+   its bits. */
 extern const KType kt_type_ubyte;
 extern const KType kt_type_ushort;
 extern const KType kt_type_uint;
@@ -254,10 +255,6 @@ extern const KType kt_type_ulong_array;
 
 /* ---- lists --------------------------------------------------------------------------------- */
 
-/* `listOf(...)` as a value: an immutable list over the `Array<T>` a vararg call already built,
-   which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
-   that array sound — nothing a program can write through reaches it. `MutableList` is a different
-   type and is not one of these. */
 /* `kotlin.Function` and its arities. A function value is an object of a type of its own — one per
    lambda or callable reference — so an `is` against a function type cannot ask about that type. It
    asks about these markers, which every function value's descriptor names.
@@ -309,6 +306,10 @@ extern const KType kt_type_kmutable_property2;
    neither of those types, so both name this marker instead. It has no instances of its own. */
 extern const KType kt_type_list_interface;
 
+/* `listOf(...)` as a value: an immutable list over the `Array<T>` a vararg call already built,
+   which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
+   that array sound — nothing a program can write through reaches it. `MutableList` is a different
+   type and is not one of these. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
 
@@ -445,14 +446,14 @@ KRef kt_iterable_reversed(KRef iterable);
 kt_int kt_iterable_index_of(KRef iterable, KRef value);
 kt_boolean kt_iterable_contains(KRef iterable, KRef value);
 
-/* `xs + x` and `xs + ys`: a NEW read-only list. Which one a call means is decided by the CALLER
-   from the declaration's physical parameter, as it is for `plusAssign`. */
 /* `xs.sumOf { … }`, one per width the selector may answer: the answer's type is the selector's,
    and summing at one width and narrowing afterwards would give a different answer on overflow. */
 kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector);
 kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector);
 kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector);
 
+/* `xs + x` and `xs + ys`: a NEW read-only list. Which one a call means is decided by the CALLER
+   from the declaration's physical parameter, as it is for `plusAssign`. */
 KRef kt_iterable_plus_element(KRef iterable, KRef element);
 KRef kt_iterable_plus_all(KRef iterable, KRef tail);
 
@@ -629,12 +630,12 @@ KRef kt_cast(KRef object, const KType *type);
 KRef kt_cast_non_null(KRef object, const KType *type);
 KRef kt_safe_cast(KRef object, const KType *type);
 
-/* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
-   failure rather than a jump through NULL. */
 /* `x!!` — yields `x`, or fails when it is null. Kotlin throws a NullPointerException here; with no
    exception machinery yet the honest realization is a diagnosable exit. */
 KRef kt_not_null(KRef value);
 
+/* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
+   failure rather than a jump through NULL. */
 void kt_abstract_method_called(void);
 
 /* The standard-library throws a program writes on purpose: `TODO()`, `error(message)`, and a
@@ -897,7 +898,7 @@ void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was);
 /* `throw e`: record the exception in the one pending slot and RETURN. The caller's next act is
    `kt_pending_exception`, and that check is what turns the return into propagation. The slot is a
    GC root, because between the throw and the `catch` that names it the exception is reachable from
-   no frame. See "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md`. */
+   no frame. */
 void kt_throw(KRef thrown);
 
 /* The exception in flight, or NULL. Generated code LOADS this slot after every call rather than
@@ -1031,9 +1032,6 @@ kt_long kt_shl_long(kt_long a, kt_int bits);
 kt_long kt_shr_long(kt_long a, kt_int bits);
 kt_long kt_ushr_long(kt_long a, kt_int bits);
 
-/* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
-   operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
-   (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */
 /* `kotlin.math.abs`. The integral ones WRAP at the minimum, as Kotlin's do — there is no positive
    value to answer with. The floating ones clear the SIGN BIT rather than negating, so `abs(-0.0)` is
    `0.0`: `-0.0 < 0.0` is false, and a comparison-driven negation hands back what it was given. */
@@ -1052,6 +1050,9 @@ kt_long kt_double_to_bits(kt_double value);
 kt_float kt_float_from_bits(kt_int bits);
 kt_double kt_double_from_bits(kt_long bits);
 
+/* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
+   operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
+   (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */
 kt_int kt_compare_byte(kt_byte a, kt_byte b);
 kt_int kt_compare_short(kt_short a, kt_short b);
 kt_int kt_compare_int(kt_int a, kt_int b);

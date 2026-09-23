@@ -2060,10 +2060,58 @@ pub struct ResolvedAnnotation {
     pub arguments: Vec<(String, AnnotationValue)>,
 }
 
-/// Provider-neutral resolved annotations for a classifier. Consumers receive stable identities and
-/// typed values without gaining name lookup, callable selection, or backend access.
-pub trait ClassifierAnnotationSource {
+/// A plugin-generated classifier published with the source header that owns it. The common
+/// frontend records semantic declaration facts; a representation backend maps them to its own
+/// class flags without recognizing generated JVM spellings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedClassifierFact {
+    pub classifier: TypeName,
+    pub lexical_owner: TypeName,
+    pub source_name: Box<str>,
+    pub visibility: Visibility,
+    pub kind: GeneratedClassifierKind,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub captures_outer: bool,
+    pub compiler_generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratedClassifierKind {
+    Class,
+    Interface,
+    Annotation,
+    Enum,
+}
+
+/// Provider-neutral checked facts for a classifier. Consumers receive stable identities and typed
+/// declaration facts without gaining name lookup, callable selection, or backend access.
+pub trait ClassifierFactSource {
     fn classifier_annotations(&self, classifier: TypeName) -> Option<Vec<ResolvedAnnotation>>;
+
+    /// Whether this classifier's single instance is reachable as an object value. A plugin that
+    /// names a classifier it does not declare must not infer this from its name or type arity:
+    /// reading `INSTANCE` off an ordinary class is a link-time failure.
+    fn classifier_is_object(&self, _classifier: TypeName) -> Option<bool> {
+        None
+    }
+
+    /// The underlying type of this classifier when it is a `value class`, as declared — its sole
+    /// property's type, carrying its own nullability. `None` for any other classifier, and for one
+    /// the provider does not know.
+    ///
+    /// A plugin sees only the file it runs on, so a value class declared in a SIBLING file of the
+    /// module, or on the classpath, is visible to it only through this answer.
+    fn classifier_value_underlying(&self, _classifier: TypeName) -> Option<Ty> {
+        None
+    }
+
+    /// Source identity of the sole underlying property for a value class. This travels beside the
+    /// underlying type so a representation backend never has to reopen metadata or inspect a
+    /// classfile to recover it.
+    fn classifier_value_property(&self, _classifier: TypeName) -> Option<String> {
+        None
+    }
 }
 
 /// A resolved annotation application, including its declaration-ordered element values and
