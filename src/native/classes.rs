@@ -2250,6 +2250,7 @@ mod tests {
                 applied_parameters: Vec::new(),
                 applied_result: Ty::Unit,
                 implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
                 implementation_result: Ty::Unit,
                 suspend: false,
                 depth: 1,
