@@ -201,7 +201,7 @@ pub(super) fn emit_bridges(
             code.pop();
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
-            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
+            attach_bridge_debug_tables(c, cw, b, &erased_desc);
             continue;
         }
         if b.concrete_ret == Ty::Nothing {
@@ -215,7 +215,7 @@ pub(super) fn emit_bridges(
             }
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
-            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
+            attach_bridge_debug_tables(c, cw, b, &erased_desc);
             continue;
         }
         if let Some(owner) = &b.box_ret {
@@ -327,7 +327,7 @@ pub(super) fn emit_bridges(
         }
         emit_return(er, &mut code);
         finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
-        attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
+        attach_bridge_debug_tables(c, cw, b, &erased_desc);
     }
 }
 
@@ -343,7 +343,6 @@ pub(super) fn emit_bridges(
 /// strings are interned when they are recorded, and kotlinc interns them with the method they
 /// belong to. Deferring the whole set moved `Ljava/lang/Object;` past the next bridge's descriptor.
 fn attach_bridge_debug_tables(
-    ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     bridge: &crate::ir::Bridge,
@@ -362,23 +361,25 @@ fn attach_bridge_debug_tables(
     };
     let this_desc = format!("L{};", c.fq_name());
     {
-        let target_names = bridge
-            .target_function
-            .and_then(|function| ir.fn_params.get(&function))
-            .map(|parameters| parameters.names.as_slice())
-            .unwrap_or_default();
+        assert_eq!(
+            bridge.parameter_identities.len(),
+            bridge.erased_params.len(),
+            "bridge debug identities exactly match physical arity"
+        );
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
         for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
             let descriptor = local_variable_desc(*parameter);
-            let spelling = target_names
-                .get(index)
-                .cloned()
-                .or_else(|| {
-                    (bridge.kind == crate::ir::BridgeKind::PropertySetter)
-                        .then(|| "<set-?>".to_string())
-                })
-                .unwrap_or_else(|| format!("p{index}"));
+            let spelling = match &bridge.parameter_identities[index] {
+                crate::fir::ResolvedParameterIdentity::Source(name) => name.to_string(),
+                crate::fir::ResolvedParameterIdentity::CompilerGenerated(ordinal) => {
+                    format!("p{ordinal}")
+                }
+                crate::fir::ResolvedParameterIdentity::PropertySetterValue => "<set-?>".to_string(),
+                crate::fir::ResolvedParameterIdentity::SuspendCompletion => {
+                    "$completion".to_string()
+                }
+            };
             locals.push((spelling, descriptor, slot));
             slot += slot_words(*parameter);
         }

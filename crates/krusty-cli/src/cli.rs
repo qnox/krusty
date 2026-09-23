@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use krusty::features::LangFeatures;
-use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
 
 pub struct Options {
@@ -339,9 +339,12 @@ impl Options {
             }
         }
         if !self.no_jdk {
-            if let Some(modules) = platform_jdk_modules(self.jdk_home.as_deref()) {
-                cp.push(modules);
-            }
+            cp = JvmCompilationInputInventory::from_explicit_classpath_and_jdk(
+                &cp,
+                self.jdk_home.as_deref(),
+            )
+            .effective_classpath()
+            .to_vec();
         }
         Ok(cp)
     }
@@ -862,6 +865,31 @@ mod tests {
             o.effective_classpath().unwrap(),
             vec![PathBuf::from("a.jar")]
         );
+    }
+
+    #[test]
+    fn effective_classpath_uses_the_shared_jvm_input_inventory_for_the_jdk() {
+        let root = scratch("jdk_inventory");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let modules = root.join("lib/modules");
+        std::fs::write(&modules, b"JIMAGE").unwrap();
+
+        let options = parse_args(&[
+            "-no-stdlib",
+            "-jdk-home",
+            root.to_str().expect("UTF-8 scratch path"),
+            "f.kt",
+        ]);
+        let actual = options.effective_classpath().unwrap();
+        let inventory =
+            JvmCompilationInputInventory::from_explicit_classpath_and_jdk(&[], Some(&root));
+        assert_eq!(actual, vec![modules]);
+        assert_eq!(
+            actual,
+            inventory.effective_classpath(),
+            "the CLI must pass exactly the inventory's selected classpath roots"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

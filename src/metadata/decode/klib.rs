@@ -18,6 +18,12 @@ impl std::fmt::Display for PackageFragmentDecodeError {
 
 impl std::error::Error for PackageFragmentDecodeError {}
 
+impl PackageFragmentDecodeError {
+    pub(crate) fn into_parts(self) -> (usize, String) {
+        (self.offset, self.detail)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct KlibModuleHeader {
     pub(crate) module_name: String,
@@ -112,13 +118,13 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn absolute(&self) -> usize {
+    pub(crate) fn position(&self) -> usize {
         self.base + self.offset
     }
 
     fn error(&self, detail: impl Into<String>) -> PackageFragmentDecodeError {
         PackageFragmentDecodeError {
-            offset: self.absolute(),
+            offset: self.position(),
             detail: detail.into(),
         }
     }
@@ -171,6 +177,22 @@ impl<'a> Cursor<'a> {
     ) -> Result<(&'a [u8], usize), PackageFragmentDecodeError> {
         let length = self.varint(&format!("{context} length"))?;
         self.bytes(length, context)
+    }
+
+    /// A 32-bit little-endian protobuf field (wire type 5).
+    pub(crate) fn fixed32(&mut self, context: &str) -> Result<u32, PackageFragmentDecodeError> {
+        let (bytes, _) = self.bytes(4, context)?;
+        Ok(u32::from_le_bytes(
+            bytes.try_into().expect("four bytes were read"),
+        ))
+    }
+
+    /// A 64-bit little-endian protobuf field (wire type 1).
+    pub(crate) fn fixed64(&mut self, context: &str) -> Result<u64, PackageFragmentDecodeError> {
+        let (bytes, _) = self.bytes(8, context)?;
+        Ok(u64::from_le_bytes(
+            bytes.try_into().expect("eight bytes were read"),
+        ))
     }
 
     pub(crate) fn skip(

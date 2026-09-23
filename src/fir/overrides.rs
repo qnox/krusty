@@ -8,6 +8,16 @@
 use super::{CallableId, ExternalCallableId, PropertyId, ResolvedTy};
 use crate::types::TypeName;
 
+/// Source identity or semantic compiler-generated role of a callable parameter. Target backends
+/// format generated roles for their ABI; common phases never invent a platform spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedParameterIdentity {
+    Source(Box<str>),
+    CompilerGenerated(u32),
+    PropertySetterValue,
+    SuspendCompletion,
+}
+
 /// Stable identity of the overridden property declaration.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ResolvedPropertyOverrideTarget {
@@ -68,6 +78,7 @@ pub struct ResolvedFunctionOverride {
     /// Declaration-side implementation shape before applying the inheriting class's type arguments.
     /// The frontend has already selected the declaration; a backend only erases this shape.
     pub implementation_parameters: Box<[ResolvedTy]>,
+    pub implementation_parameter_identities: Box<[ResolvedParameterIdentity]>,
     pub implementation_result: ResolvedTy,
     pub suspend: bool,
     pub depth: u32,
