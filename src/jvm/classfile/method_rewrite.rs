@@ -21,8 +21,8 @@
 use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
-use super::redundant_gotos;
 use super::temporaries::{self, Body};
+use super::{negated_jumps, redundant_gotos};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
@@ -442,7 +442,24 @@ impl ClassWriter {
                 },
             },
         );
-        if !folded_any && !gotos_changed {
+        let mut labelled: Vec<bool> = lines
+            .iter()
+            .zip(&variable_bounds)
+            .map(|(&line, &bound)| line || bound)
+            .collect();
+        for handler in &handlers {
+            for at in [handler.start, handler.end, handler.handler] {
+                labelled[at] = true;
+            }
+        }
+        let jumps_negated = negated_jumps::negate(&mut rewrite.nodes, &labelled, &|index| {
+            branch_labels
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(|label| rewrite_late.contains(&label))
+        });
+        if !folded_any && !gotos_changed && !jumps_negated {
             return None;
         }
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a

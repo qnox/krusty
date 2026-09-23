@@ -432,6 +432,8 @@ impl FrameTypes {
             match (value, to) {
                 (_, Top) => true,
                 (Null, Reference(_)) => true,
+                // Every reference is an `Object`; that needs no class hierarchy.
+                (Reference(_), Reference(expected)) if expected == "java/lang/Object" => true,
                 (Reference(value), Reference(expected)) => value == expected,
                 (value, to) => value == to,
             }
