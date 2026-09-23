@@ -183,6 +183,19 @@ pub(super) fn primary_constructor(
     parameters
 }
 
+/// Exact source/compiler identities carried by a primary constructor, independent of whether the
+/// JVM `MethodParameters` attribute was requested. Synthetic marker accessors still need these for
+/// their `LocalVariableTable`; omitting that table must not be used as a substitute for identities.
+pub(super) fn primary_constructor_identities(
+    class: &IrClass,
+    physical_parameters: &[Ty],
+) -> Vec<String> {
+    primary_constructor(class, physical_parameters)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Everything a class KIND prepends to EVERY constructor it declares, ahead of what the
 /// declaration wrote: an `enum class` carries `(String $enum$name, int $enum$ordinal)` on its
 /// primary and on each secondary alike. Carried as ONE description — the physical types and the
@@ -242,6 +255,32 @@ pub(super) fn secondary_constructor(
             .map(|(name, _)| parameter(name.clone(), 0)),
     );
     parameters
+}
+
+/// Exact identities for a secondary constructor's physical parameters. Unlike
+/// [`secondary_constructor`], this includes compiler-generated constructors: those do not publish
+/// `MethodParameters`, but an emitted marker accessor must still use the identities common IR
+/// recorded instead of inventing `pN` names or silently dropping its debug locals.
+pub(super) fn secondary_constructor_identities(
+    class: &IrClass,
+    constructor: &IrSecondaryCtor,
+    owner_prefix: &OwnerConstructorPrefix,
+    physical_parameters: &[Ty],
+) -> Vec<String> {
+    assert_eq!(
+        owner_prefix.len() + constructor.prefix_params.len() + constructor.named_params.len(),
+        physical_parameters.len(),
+        "secondary constructor identities must match its physical JVM parameters"
+    );
+    let mut parameters = owner_prefix.parameters.clone();
+    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(
+        constructor
+            .named_params
+            .iter()
+            .map(|(name, _)| parameter(name.clone(), 0)),
+    );
+    parameters.into_iter().map(|(name, _)| name).collect()
 }
 
 pub(super) fn enum_constructor(class: &IrClass) -> Vec<MethodParameter> {
