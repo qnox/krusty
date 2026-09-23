@@ -1062,6 +1062,8 @@ mod named_super_arg_e2e;
 mod narrow_integral_constant_e2e;
 #[path = "narrowed_this_member_call_e2e.rs"]
 mod narrowed_this_member_call_e2e;
+#[path = "native_runtime_e2e.rs"]
+mod native_runtime_e2e;
 #[path = "nested_anon_object_capture_e2e.rs"]
 mod nested_anon_object_capture_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]
