@@ -2541,7 +2541,7 @@ pub struct IrFile {
     /// Internal names of classes carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
     /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
     deprecated_classes: std::collections::HashSet<TypeName>,
-    /// JVM realization facts for constructors whose declarations mention value classes.
+    /// Target-neutral declaration and selected-call facts for constructors that mention value classes.
     value_class_constructor_facts: value_class_constructors::ValueClassConstructorFacts,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
@@ -3379,6 +3379,17 @@ impl IrFile {
                     .find(|class| class.is_value && class.fq_name == internal)
                     .and_then(|class| class.fields.first().map(|field| field.ty))
             })
+    }
+
+    /// Follow the exact source/external value-class facts already assembled in this IR to their
+    /// terminal semantic underlying type.
+    ///
+    /// This is the narrow consumer contract for common passes and plugins. It does not select a
+    /// target carrier, boxing policy, descriptor, or storage layout; those remain backend-owned.
+    pub(crate) fn terminal_value_class_underlying(&self, ty: Ty) -> Option<Ty> {
+        crate::value_classes::terminal_underlying(ty, &|classifier| {
+            self.value_class_underlying_name(classifier)
+        })
     }
 
     /// Preserve the source meaning of a value-class construction after the JVM pass replaces its

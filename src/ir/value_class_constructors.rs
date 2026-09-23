@@ -4,7 +4,7 @@ use crate::types::{Ty, TypeName};
 
 use super::{ExprId, IrFile};
 
-/// JVM realization facts captured before value-class erasure removes declaration identities.
+/// Target-neutral semantic facts captured before a backend erases value-class identities.
 #[derive(Default)]
 pub(super) struct ValueClassConstructorFacts {
     /// Classes whose primary constructor has a value-class-typed parameter.

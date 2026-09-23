@@ -30,6 +30,7 @@ mod call_operands;
 mod constructor_defaults;
 mod coroutine_machine;
 mod data_class_pool_seed;
+mod data_class_value_classes;
 mod debug_lines;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -16300,21 +16301,7 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::DataClassFieldEquals { ty } => {
                         let left = args[0];
                         let right = args[1];
-                        if let Some((owner, underlying)) =
-                            ty.non_null().obj_internal().and_then(|owner| {
-                                self.ir
-                                    .value_class_underlying_name(owner)
-                                    .map(|underlying| (owner, underlying))
-                            })
-                        {
-                            self.emit_value(left, code);
-                            self.emit_value(right, code);
-                            let physical = jvm_declared_ty(&underlying);
-                            let descriptor = method_descriptor(&[physical, physical], Ty::Boolean);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "equals-impl0", &descriptor);
-                            code.invokestatic(method, slot_words(physical) as i32 * 2, 1);
+                        if self.emit_data_class_value_equals(*ty, left, right, code) {
                             return;
                         }
                         self.emit_value(left, code);
@@ -16330,28 +16317,10 @@ impl<'a> Emitter<'a> {
                     }
                     crate::ir::IrIntrinsic::DataClassFieldHash { ty } => {
                         let value = args[0];
-                        if let Some((owner, carrier)) = native_unsigned_impl_target(*ty) {
-                            self.emit_value(value, code);
-                            let descriptor = method_descriptor(&[carrier], Ty::Int);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "hashCode-impl", &descriptor);
-                            code.invokestatic(method, slot_words(carrier) as i32, 1);
-                        } else if let Some((owner, underlying)) =
-                            ty.non_null().obj_internal().and_then(|owner| {
-                                self.ir
-                                    .value_class_underlying_name(owner)
-                                    .map(|underlying| (owner, underlying))
-                            })
-                        {
-                            self.emit_value(value, code);
-                            let physical = jvm_declared_ty(&underlying);
-                            let descriptor = method_descriptor(&[physical], Ty::Int);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "hashCode-impl", &descriptor);
-                            code.invokestatic(method, slot_words(physical) as i32, 1);
-                        } else if ty.is_array() {
+                        if self.emit_data_class_value_hash(*ty, value, code) {
+                            return;
+                        }
+                        if ty.is_array() {
                             self.emit_value(value, code);
                             let descriptor = format!("({})I", type_descriptor(*ty));
                             let method =
