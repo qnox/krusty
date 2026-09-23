@@ -5403,10 +5403,11 @@ pub(crate) fn finalized_streamed_signature_index(
             // The class arguments of those annotations, resolved with them. Grouped by annotation
             // ordinal so the index key matches the string arguments beside it.
             if stub.kind == DeclarationKind::Classifier {
-                let class_arguments = table
+                let class = table
                     .classes
                     .values()
-                    .find(|class| class.stable_declaration == Some(stub.id))
+                    .find(|class| class.stable_declaration == Some(stub.id));
+                let class_arguments = class
                     .map(|class| class.annotation_class_arguments.clone())
                     .unwrap_or_default();
                 for ordinal in class_arguments
@@ -5421,6 +5422,12 @@ pub(crate) fn finalized_streamed_signature_index(
                             .iter()
                             .filter(|(at, _)| *at == ordinal)
                             .map(|(_, classifier)| *classifier),
+                    );
+                }
+                if let Some(class) = class {
+                    index.publish_generated_classifiers(
+                        stub.id,
+                        class.generated_nested_classifiers.iter().cloned(),
                     );
                 }
             }

@@ -2060,6 +2060,30 @@ pub struct ResolvedAnnotation {
     pub arguments: Vec<(String, AnnotationValue)>,
 }
 
+/// A plugin-generated classifier published with the source header that owns it. The common
+/// frontend records semantic declaration facts; a representation backend maps them to its own
+/// class flags without recognizing generated JVM spellings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedClassifierFact {
+    pub classifier: TypeName,
+    pub lexical_owner: TypeName,
+    pub source_name: Box<str>,
+    pub visibility: Visibility,
+    pub kind: GeneratedClassifierKind,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub captures_outer: bool,
+    pub compiler_generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratedClassifierKind {
+    Class,
+    Interface,
+    Annotation,
+    Enum,
+}
+
 /// Provider-neutral resolved annotations for a classifier. Consumers receive stable identities and
 /// typed values without gaining name lookup, callable selection, or backend access.
 pub trait ClassifierAnnotationSource {

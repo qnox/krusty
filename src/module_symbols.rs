@@ -1516,6 +1516,7 @@ mod tests {
             visibility: Visibility::Public,
             annotations: vec![],
             annotation_class_arguments: vec![],
+            generated_nested_classifiers: vec![],
             props: vec![],
             declared_props: HashMap::new(),
             contextual_props: HashMap::new(),
