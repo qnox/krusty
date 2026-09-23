@@ -5976,8 +5976,11 @@ fn emit_class(
                 _ => None,
             })
             .flatten();
+        // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
+        let synthetic = ir.is_synthetic_static(static_index);
+        let acc = if synthetic { acc | 0x1000 } else { acc };
         // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
+        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
             if s.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
             } else {
@@ -6644,14 +6647,16 @@ fn emit_class(
     // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
     // also matches its constant-pool interning sequence): a `public static final INSTANCE` built in `<clinit>`.
     if static_storage(ir, c) {
-        let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+        let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
             .statics
             .iter()
-            .filter(|property| {
+            .enumerate()
+            .filter(|(_, property)| {
                 property.owner_matches(&fq_name)
                     && !(property.is_const
                         && static_fields::const_value_idx_peek(ir, property.init))
             })
+            .map(|(index, property)| (index as u32, property))
             .collect();
         // An INTERFACE's companion self-hosts its singleton: a package-private `static final
         // $$INSTANCE` on the companion (the interface's `Companion` field aliases it in the
@@ -6715,7 +6720,7 @@ fn emit_class(
             Ty::Unit,
             clinit_statics
                 .iter()
-                .map(|property| property.init)
+                .map(|(_, property)| property.init)
                 .chain(init_body),
         );
         e.generated_initializer = !c.is_source_declared;
@@ -6728,7 +6733,13 @@ fn emit_class(
         // example its KProperty reference) as well as the instance-shaped delegate field in the
         // common IR class. A named object has one JVM class initializer: realize those statics
         // after INSTANCE exists and before the property initializer that consumes them.
-        for property in &clinit_statics {
+        // A static a compiler plugin GENERATED for the object (a `@Serializable object`'s
+        // cached-serializer delegate) is a declaration kotlinc appends after the source ones, so it
+        // is initialized after them, below.
+        let (generated_statics, support_statics): (Vec<_>, Vec<_>) = clinit_statics
+            .iter()
+            .partition(|(static_index, _)| ir.is_synthetic_static(*static_index));
+        for (_, property) in &support_statics {
             e.emit_static_initializer_store(&fq_name, property, &mut clinit);
         }
         // A static-storage object runs its property initializers + `init {}` blocks HERE, after the
@@ -6793,13 +6804,34 @@ fn emit_class(
                 clinit_line_entries = vec![(body_start, start)];
             }
         }
+        // Each generated static's store maps to the line it carries (the declaration it was
+        // generated for), and the trailing `return` then maps back to the declaration's closing
+        // line, as it does for a generated class.
+        for (_, property) in &generated_statics {
+            if property.line != 0
+                && clinit_line_entries.last().map(|&(_, l)| l) != Some(property.line)
+            {
+                clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
+            }
+            e.emit_static_initializer_store(&fq_name, property, &mut clinit);
+        }
         let clinit_max = e.next_slot;
         let clinit_return = clinit.bytes.len() as u16;
         clinit.ret_void();
         clinit.ensure_locals(clinit_max);
         clinit.link();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-        if !c.is_source_declared && c.decl_end_line != 0 && !clinit_line_entries.is_empty() {
+        // A source object whose declaration is one line (`@Serializable object A`) has already
+        // mapped its generated store to that line, and kotlinc does not repeat it.
+        let returns_to_closing_line = if c.is_source_declared {
+            !generated_statics.is_empty()
+                && clinit_line_entries
+                    .last()
+                    .is_some_and(|&(_, line)| line != c.decl_end_line)
+        } else {
+            !clinit_line_entries.is_empty()
+        };
+        if returns_to_closing_line && c.decl_end_line != 0 {
             clinit_line_entries.push((clinit_return, c.decl_end_line));
         }
         if !clinit_line_entries.is_empty() {

@@ -6342,6 +6342,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm::java_stub::tests::type_variables_erase_to_their_leftmost_bound` (javac's descriptors) and
   `tests/java_source_interop_e2e.rs::java_source_headers_erase_type_variables_to_their_bounds`
   (Kotlin first, then javac against krusty's output, then a run).
+- **A `@Serializable object` is serialized by an `ObjectSerializer`; it has no `$serializer`.**
+  kotlinc gives the object a member `serializer()` returning
+  `ObjectSerializer(serialName, INSTANCE, annotations)`, cached in a synthetic static
+  `$cachedSerializer$delegate` (`LazyKt.lazy(PUBLICATION, ::_init_$_anonymous_)`) and read through a
+  private synthetic `get$cachedSerializer()`. Wherever the object is an element (a property of the
+  object type, including in the `$childSerializers` cache, and a sealed hierarchy's `object` case),
+  kotlinc constructs the `ObjectSerializer` in place instead of calling `serializer()`. krusty
+  treated the object like a class: it recorded a `$serializer` for it, referenced that class from
+  every element site, and never emitted it (`NoClassDefFoundError` on first use). The object path
+  now shares the enum's cached-serializer delegate. Generated members come after the declared ones,
+  the delegate is initialized after the object's own properties in `<clinit>`, its store maps to the
+  annotated declaration line, and the return maps to the closing line. The `@SerialInfo` annotation
+  array is always empty, the same gap the enum factory has with its `null`.
+  Tests: `tests/serialization_object_serializer_e2e.rs` (the runtime result under both compilers,
+  whole-class parity for a bodiless object, an object with properties, a sealed `object` case and a
+  holder's `$serializer`, plus the in-place element construction in a holder's child-serializer
+  cache and in a sealed serializer).
 
 ## 8. Success criteria for the PoC
 

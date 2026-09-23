@@ -11,6 +11,7 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod cached_serializer;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
@@ -996,18 +997,6 @@ impl SerializationPlugin {
         // kotlinc maps every generated member, and the delegate's `<clinit>` store, to where the
         // declaration begins, annotations included.
         let owner_line = ir.classes[class_id as usize].decl_start_line;
-        // The delegate's DECLARED type carries its arguments so the field gets kotlinc's generic
-        // `Signature` (`Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`);
-        // the descriptor still erases to `Lkotlin/Lazy;`.
-        let lazy_ty = Ty::obj_args(
-            "kotlin/Lazy",
-            &[Ty::obj_args(
-                "kotlinx/serialization/KSerializer",
-                // `kotlin/Any`, not `java/lang/Object`: the checked-symbol validation only knows
-                // Kotlin classifiers, and the signature formatter maps this to `Ljava/lang/Object;`.
-                &[class_ty("kotlin/Any")],
-            )],
-        );
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
         let name = ir.add_expr(IrExpr::Const(IrConst::String(
@@ -1031,76 +1020,7 @@ impl SerializationPlugin {
             type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
         });
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
-        // kotlinc does not build the delegate eagerly with `lazyOf`. It compiles the initializer to
-        // a private static `_init_$_anonymous_()` holding `EnumSerializer(name, values())`, binds it
-        // with an `invokedynamic` `Function0`, and passes that to
-        // `LazyKt.lazy(LazyThreadSafetyMode.PUBLICATION, …)` — so the serializer is constructed on
-        // first use, and the class carries a `BootstrapMethods` attribute.
-        let anon_ret = ir.add_expr(IrExpr::Return(Some(enum_ser)));
-        let anon_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![anon_ret],
-            value: None,
-        });
-        let anonymous = ir.add_fun(IrFunction {
-            name: "_init_$_anonymous_".to_string(),
-            params: vec![],
-            ret: Ty::obj("kotlinx/serialization/KSerializer"),
-            body: Some(anon_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        // kotlinc emits every standalone lambda impl `private static final` — reachable only through
-        // the same-class `invokedynamic`, never part of the public ABI.
-        ir.private_methods.insert(anonymous);
-        // Compiler-invented, like the companion's cached-serializer helper: ACC_SYNTHETIC, and
-        // therefore absent from `@Metadata`.
-        ir.synthetic_methods.insert(anonymous);
-        ir.classes[class_id as usize].methods.push(anonymous);
-        // Generated in the BACKEND, past the frontend's declaration-line transfer, so the emitter
-        // would attach no debug tables without a line of its own. kotlinc maps it to the annotated
-        // owner's declaration line, which the class already carries by now.
-        if owner_line != 0 {
-            ir.fn_decl_lines.insert(anonymous, owner_line);
-            ir.fn_sig_lines.insert(anonymous, owner_line);
-        }
-        let block = ir.add_expr(IrExpr::Lambda {
-            impl_fn: anonymous,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: None,
-        });
-        let mode = ir.add_expr(IrExpr::EnumEntry {
-            classifier: type_name("kotlin/LazyThreadSafetyMode"),
-            name: "PUBLICATION".into(),
-        });
-        let lazy = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: type_name("kotlin/LazyKt"),
-                name: "lazy".to_string(),
-                descriptor:
-                    "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
-                        .to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![mode, block],
-        });
-        ir.statics.push(crate::ir::IrStatic {
-            name: "$cachedSerializer$delegate".to_string(),
-            ty: lazy_ty,
-            init: lazy,
-            is_var: false,
-            is_const: false,
-            owner: Some(type_name(class_fq)),
-            visibility: crate::types::Visibility::Private,
-            setter_jvm_name: None,
-            erased_declared_ty: None,
-            custom_accessor: true,
-            line: owner_line,
-            source_order: u32::MAX,
-        });
+        cached_serializer::add_cached_serializer_delegate(ir, class_id, class_fq, enum_ser);
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
         let read =
             ir.external_static_field(class_fq, "$cachedSerializer$delegate", "Lkotlin/Lazy;");
@@ -1273,6 +1193,16 @@ impl SerializationPlugin {
             .iter()
             .map(|&cid| {
                 let s = ir.classes[cid as usize].fq_name();
+                // An `object` case is serialized by an `ObjectSerializer` kotlinc constructs in
+                // place, as it does for any element of an object type.
+                if let Some(object) =
+                    cached_serializer::local_serializable_object(ir, ctx, type_name(&s))
+                {
+                    let name = ir.add_expr(IrExpr::Const(IrConst::String(self::serial_name(
+                        ir, object,
+                    ))));
+                    return cached_serializer::object_serializer(ir, type_name(&s), name);
+                }
                 serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
             })
             .collect();
@@ -1550,6 +1480,12 @@ impl IrPlugin for SerializationPlugin {
             // `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a `Lazy`.
             if !ir.classes[class_id as usize].enum_entries.is_empty() {
                 Self::add_enum_serializer_companion(ir, class_id, &class_fq);
+                continue;
+            }
+            // A `@Serializable object`: no generated `$serializer` — `serializer()` is a member of
+            // the object returning a cached `ObjectSerializer` over its `INSTANCE`.
+            if ir.classes[class_id as usize].is_object {
+                cached_serializer::add_object_serializer(ir, class_id, &class_fq);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —

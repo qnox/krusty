@@ -166,6 +166,17 @@ impl IrFile {
             .flat_map(|publication| publication.functions.iter())
             .find(|member| member.function == function)
     }
+
+    /// Record that static `index` is generated storage with no Kotlin declaration of its own, such
+    /// as an object's `$cachedSerializer$delegate`: kotlinc emits it `ACC_SYNTHETIC` and without a
+    /// nullability annotation.
+    pub fn mark_synthetic_static(&mut self, index: u32) {
+        self.synthetic_statics.insert(index);
+    }
+
+    pub fn is_synthetic_static(&self, index: u32) -> bool {
+        self.synthetic_statics.contains(&index)
+    }
 }
 
 #[cfg(test)]
