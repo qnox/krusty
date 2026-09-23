@@ -308,6 +308,8 @@ mod classpath_relocated_facade_typealias_e2e;
 mod classpath_runblocking_e2e;
 #[path = "classpath_serializable_round_trip_e2e.rs"]
 mod classpath_serializable_round_trip_e2e;
+#[path = "classpath_star_projection_bound_e2e.rs"]
+mod classpath_star_projection_bound_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]

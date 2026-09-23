@@ -3686,9 +3686,10 @@ fn compact_classifier_parents(
 /// Reapply a compact header's star-projection syntax to a provisionally resolved legacy type.
 ///
 /// The legacy collector has no classifier-shape input while resolving a `TypeRef`, so it represents
-/// every `*` as `out Any?`. The compact header still owns the exact star bit and the completed symbol
-/// table owns the target parameter bound. Combine those stable Pass-1 facts at publication time;
-/// an explicitly written `out Any?` has no star bit and is therefore never rewritten.
+/// every `*` as `out Any?`. The compact header still owns the exact star bit and the
+/// provider-normalized classifier (module or classpath) owns the target parameter bound. Combine
+/// those stable Pass-1 facts at publication time; an explicitly written `out Any?` has no star bit
+/// and is therefore never rewritten.
 fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: Ty) -> Ty {
     match resolved {
         Ty::Nullable(inner) => Ty::nullable(compact_header_star_bounds(table, syntax, *inner)),
@@ -3702,7 +3703,14 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
             Ty::out_projection(compact_header_star_bounds(table, syntax, *inner))
         }
         Ty::Obj(owner, resolved_arguments) if !syntax.targs.is_empty() => {
-            let classifier = table.class_by_type_name(owner);
+            // Read the formal bounds from the provider-normalized declaration, so a classpath
+            // classifier's `*` gets its declared bound exactly as a module classifier's does.
+            let module = crate::module_symbols::ModuleSymbols::new(table);
+            let source = crate::symbol_source::CompositeSource::new(vec![
+                &module as &dyn crate::symbol_source::SymbolSource,
+                &*table.libraries as &dyn crate::symbol_source::SymbolSource,
+            ]);
+            let classifier = crate::symbol_source::SymbolSource::classifier(&source, owner);
             let mut arguments = resolved_arguments.to_vec();
             for index in 0..syntax.targs.len().min(arguments.len()) {
                 let argument_syntax = &syntax.targs[index];
@@ -3712,8 +3720,8 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
                     continue;
                 }
                 let bindings = classifier
-                    .into_iter()
-                    .flat_map(|classifier| classifier.type_params.iter())
+                    .iter()
+                    .flat_map(|classifier| classifier.type_params().iter())
                     .zip(arguments.iter())
                     .enumerate()
                     .filter_map(|(ordinal, (formal, actual))| {
@@ -3721,7 +3729,9 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
                     })
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 let upper_bound = classifier
-                    .and_then(|classifier| classifier.type_param_bounds.get(index))
+                    .as_ref()
+                    .and_then(|classifier| classifier.type_param_bounds().get(index))
+                    .and_then(|bounds| bounds.first())
                     .copied()
                     .map(|bound| crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings))
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));

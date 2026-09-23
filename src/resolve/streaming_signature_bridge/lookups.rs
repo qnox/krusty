@@ -236,13 +236,15 @@ impl ProductionSignatureSemantics<'_> {
                     );
                 }
             }
-            let type_param_variances = self
-                .with_resolver(scope, |resolver| {
-                    resolver
-                        .classifier(internal)
-                        .map(|classifier| classifier.type_param_variances.clone())
-                })
-                .ok()
+            // The provider-normalized declaration, whichever module or classpath entry supplies it:
+            // its variances check the written projections and its formal bounds give each `*` its
+            // readable upper bound, exactly as the body checker reads the same classifier.
+            let declaration = self
+                .with_resolver(scope, |resolver| resolver.classifier(internal))
+                .ok();
+            let type_param_variances = declaration
+                .as_ref()
+                .map(|classifier| classifier.type_param_variances.clone())
                 .unwrap_or_default();
             if let Some(argument) =
                 reference
@@ -315,19 +317,23 @@ impl ProductionSignatureSemantics<'_> {
                     ))
                 });
             }
-            let bindings =
-                classifier.map_or_else(crate::symbol_resolver::GSigBinds::new, |classifier| {
+            let bindings = declaration.as_ref().map_or_else(
+                crate::symbol_resolver::GSigBinds::new,
+                |declaration| {
                     super::super::projected_classifier_argument_bindings(
-                        &classifier.type_params,
+                        declaration.type_params(),
                         &parsed,
                     )
-                });
+                },
+            );
             for (index, (syntax, resolved)) in reference.targs.iter().zip(parsed).enumerate() {
                 arguments.push(match resolved {
                     Some(resolved) => resolved,
                     None => {
-                        let upper_bound = classifier
-                            .and_then(|classifier| classifier.type_param_bounds.get(index))
+                        let upper_bound = declaration
+                            .as_ref()
+                            .and_then(|declaration| declaration.type_param_bounds().get(index))
+                            .and_then(|bounds| bounds.first())
                             .copied()
                             .map(|bound| {
                                 crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
