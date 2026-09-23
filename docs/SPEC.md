@@ -1354,6 +1354,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     surrogate too. Names and descriptors still require scalar text; an invalid name fails soft rather
     than leaking a replacement value into resolution. Likewise `@JvmName("…")` falls back to the
     declared name if given an unpaired surrogate — a JVM method name has no such spelling.
+  - The **native runtime** (`src/native/runtime/krusty_rt.c`) stores text as UTF-8 and answers in
+    UTF-16 units. Its whitespace table is the JVM set above (no `U+0085`). A lone surrogate — what a
+    single surrogate `Char` renders to — is stored as the three bytes its unit encodes to, and
+    concatenation joins a high half followed by a low half into the four-byte character they spell,
+    so `"" + '\uD83D' + '\uDE00' == "😀"` as on the JVM. What stays apart from the JVM: text holding a
+    pair whole does not `contain` either half, and slicing between the halves aborts, since UTF-8 has
+    no form for half a character. Tests: `string_whitespace`, `string_plus_surrogates` under
+    `tests/native_runtime/`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
