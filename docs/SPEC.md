@@ -7378,6 +7378,18 @@ and behavior is checked by RUNNING the emitted program.
   Kotlin's documented one.
   Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
 
+- **`super<B>.p` names B's REALIZATION of the property, not a declaration on B.** An `open val` on
+  an interface B merely inherits is what `super<B>.p` reads, and `super<C2>.p` reads the `p` that
+  C2's own superclass declares. The search therefore walks up from the named class — its superclass
+  chain and the interfaces met on the way, breadth-first, which is the order a realization is
+  inherited in — and answers the first declaration it meets. Searching the named class alone found
+  nothing and declined. A PROPERTY is what makes this show: `super.f()` on a method finds a method
+  to call, but a class whose accessors are the default ones declares no method for its property.
+  Tests: `tests/native_super_property_e2e.rs`; the corpus cases are
+  `codegen/box/super/kt3492TraitProperty.kt`, `codegen/box/basics/superSetterCall.kt`,
+  `codegen/box/super/{kt14243_prop,unqualifiedSuperWithDeeperHierarchies}.kt` and
+  `codegen/box/traits/kt5393_property.kt`.
+
 - **A SPECIAL BRIDGE stands in front of a collection member a file implements itself.**
   `Collection<E>.contains(x as E)` erases to a call taking anything and `EmptyMap.get(null)`
   reaches a `get(key: Any)`; Kotlin answers such a call WITHOUT running the override, testing the

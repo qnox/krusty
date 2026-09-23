@@ -3736,18 +3736,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // name is derived here and compared forwards. Parsing `getB` back into `b` would be the
         // same inversion that named `getGetValue` on the JVM side, and it cannot be right for a
         // property whose accessor carries a `@JvmName` the spelling does not encode.
-        let index = self.file.ir.classes[class as usize]
-            .properties
-            .iter()
-            .position(|property| match kind {
-                crate::ir::IrSuperCallKind::Function => property.name == name,
-                crate::ir::IrSuperCallKind::PropertyGetter => {
-                    crate::names::property_getter_name(&property.name) == name
-                }
-                crate::ir::IrSuperCallKind::PropertySetter => {
-                    crate::names::property_setter_name(&property.name) == name
-                }
-            })?;
+        // Not the named class ALONE. `super<B>.foo` names B's realization of `foo`, and B may not
+        // declare it: an `open val` on an interface that B merely inherits is still what B
+        // realizes, and `super<C2>.p2` reads the `p2` that `C2`'s own superclass declares. So the
+        // search walks up from the named class and answers the first declaration it meets, which
+        // is the one B's realization reaches.
+        let (class, index) = self.property_in_hierarchy(class, name, kind)?;
         Some(match args {
             [] => self.direct_property_read(class, index, receiver),
             [value] => self
@@ -3758,6 +3752,47 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 args.len()
             )),
         })
+    }
+
+    /// The class in `class`'s own hierarchy that DECLARES the property this accessor names, and
+    /// its position there.
+    ///
+    /// Breadth-first from the named class: its superclass chain and the interfaces met on the way,
+    /// which is the order a realization is inherited in. The `seen` set is not for cycles a
+    /// hierarchy could have — it could not — but for the diamond an interface reached twice makes.
+    fn property_in_hierarchy(
+        &self,
+        class: ClassId,
+        name: &str,
+        kind: crate::ir::IrSuperCallKind,
+    ) -> Option<(ClassId, usize)> {
+        let ir = self.file.ir;
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = std::collections::VecDeque::from([class]);
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let declared = &ir.classes[current as usize];
+            let found = declared.properties.iter().position(|property| match kind {
+                crate::ir::IrSuperCallKind::Function => property.name == name,
+                crate::ir::IrSuperCallKind::PropertyGetter => {
+                    crate::names::property_getter_name(&property.name) == name
+                }
+                crate::ir::IrSuperCallKind::PropertySetter => {
+                    crate::names::property_setter_name(&property.name) == name
+                }
+            });
+            if let Some(index) = found {
+                return Some((current, index));
+            }
+            pending.extend(
+                std::iter::once(declared.superclass)
+                    .chain(declared.interfaces.iter())
+                    .filter_map(|named| ir.class_id_by_name(named)),
+            );
+        }
+        None
     }
 
     fn direct_property_read(
