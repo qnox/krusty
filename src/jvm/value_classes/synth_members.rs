@@ -32,9 +32,9 @@ pub(super) fn synth_value_members(
     // static `-impl` members, which the instance methods delegate to (matching kotlinc's value-class shape).
     let udesc = type_descriptor(ir_ty_to_jvm(&eu));
     let x_ir = Ty::obj(&internal);
-    let bool_ir = Ty::obj("kotlin/Boolean");
-    let int_ir = Ty::obj("kotlin/Int");
-    let str_ir = Ty::obj("kotlin/String");
+    let bool_ir = Ty::Boolean;
+    let int_ir = Ty::Int;
+    let str_ir = Ty::String;
     let any_ir = Ty::obj("kotlin/Any");
 
     // A value class's declared accessors are static implementations over its carrier. The source IR
@@ -67,7 +67,7 @@ pub(super) fn synth_value_members(
                 function.is_static = true;
                 function.ret
             };
-            crate::jvm::method_parameters::prepend_compiler_generated(ir, getter, "arg0");
+            crate::jvm::method_parameters::prepend_value_class_receiver(ir, getter, "arg0");
             ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
                 Some(jvm_name.clone());
             // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
@@ -121,7 +121,7 @@ pub(super) fn synth_value_members(
                 function.params.insert(0, u_ir);
                 function.is_static = true;
             }
-            crate::jvm::method_parameters::prepend_compiler_generated(ir, setter, "arg0");
+            crate::jvm::method_parameters::prepend_value_class_receiver(ir, setter, "arg0");
             ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
                 Some(jvm_name);
         }
@@ -162,7 +162,7 @@ pub(super) fn synth_value_members(
         }
     }
     for function in custom_carrier_functions {
-        crate::jvm::method_parameters::prepend_compiler_generated(ir, function, "arg0");
+        crate::jvm::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
 
     let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
@@ -311,20 +311,10 @@ pub(super) fn synth_value_members(
     // primitive of a nested chain: `ZN(val z: Z1?)` erases to a BOXED `Z1` (`LZ1;`), so it hashes/compares
     // as a reference (`Objects.hashCode`/`areEqual` → `Z1`'s own members), not as the final `Int`.
     let is_ref_under = is_ref(&eu);
-    // The internal name that drives `hashCode`/`equals` over the field. A NULLABLE-primitive underlying
-    // (`InlineNullablePrimitive(val x: Int?)`) is stored BOXED (`Integer`, null-capable) — it is a
-    // reference (`is_ref_under`), so route it to the null-safe `Objects.hashCode`/`areEqual` path (empty
-    // name → the `_` arm) rather than the `non_null()` primitive name (`kotlin/Int`), which would emit an
-    // `int`-identity `hashCode` returning the boxed `Integer` (a VerifyError). A NON-null primitive keeps
-    // its name via `kotlin_class_internal` (NOT `obj_internal`: it arrives as a bare `Ty::Int` variant).
-    let final_fq = if is_ref_under {
-        String::new()
-    } else {
-        eu.non_null()
-            .kotlin_class_internal()
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    };
+    // Keep the exact terminal semantic type through synthesis. A nullable primitive underlying is
+    // represented as a reference and therefore takes the null-safe reference branch below; no
+    // spelling conversion is needed to distinguish it from the primitive carrier.
+    let terminal_underlying = eu.non_null();
     // equals-impl0(U, U): Boolean
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
@@ -351,12 +341,13 @@ pub(super) fn synth_value_members(
                 args: vec![a, boxed],
             })
         } else {
-            vc_underlying_eq(ir, a, b, is_ref_under, &final_fq)
+            vc_underlying_eq(ir, a, b, is_ref_under, terminal_underlying)
         };
         let body = ret_block(ir, cmp);
         let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
         crate::jvm::method_parameters::record_function(ir, function, &["p1", "p2"], &[]);
         ir.jvm_value_class_representation_order.insert(function, 3);
+        ir.jvm_nullability_unannotated_methods.insert(function);
     }
     // kotlinc emits the logic in a static `<name>-impl(U)` operating on the unboxed value, and the
     // instance method delegates to it (`toString()` → `toString-impl(this.field)`). The instance methods
@@ -379,6 +370,7 @@ pub(super) fn synth_value_members(
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
@@ -394,6 +386,9 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         if let Some(fid) = add_inst(ir, "toString", vec![], str_ir, ibody) {
             ir.open_methods.insert(fid);
+            if !custom_to_string {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
@@ -406,17 +401,18 @@ pub(super) fn synth_value_members(
             // Only a real non-null reference CLASS underlying: an ARRAY has no such class (`kotlin/IntArray`
             // is not a JVM type — a virtual call on it is a `NoClassDefFoundError`), and a nullable or
             // boxed-primitive underlying must keep the null-safe `Objects.hashCode`.
-            let nonnull_ref_owner: Option<String> = (is_ref_under
+            let nonnull_ref_owner: Option<TypeName> = (is_ref_under
                 && !eu.is_nullable()
                 && !eu.non_null().is_array()
                 && matches!(eu.non_null(), Ty::String | Ty::Obj(..)))
-            .then(|| eu.non_null().kotlin_class_internal().map(|s| s.to_string()))
+            .then(|| eu.non_null().kotlin_class_internal())
             .flatten();
-            let h = field_hash_ir(ir, v, &final_fq, nonnull_ref_owner.as_deref());
+            let h = field_hash_ir(ir, v, terminal_underlying, nonnull_ref_owner);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
@@ -432,6 +428,9 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         if let Some(fid) = add_inst(ir, "hashCode", vec![], int_ir, ibody) {
             ir.open_methods.insert(fid);
+            if !custom_hash_code {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
@@ -464,16 +463,34 @@ pub(super) fn synth_value_members(
                 dispatch_receiver: Some(ocast),
                 args: vec![],
             });
-            // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`), with the
-            // OTHER operand first, then guards: `if (!eq) return false; return true`.
-            let v = ir.add_expr(IrExpr::GetValue(0));
-            let eq = vc_underlying_eq(ir, ounbox, v, is_ref_under, &final_fq);
-            let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-            let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Eq,
-                lhs: eq,
-                rhs: zero,
-            });
+            // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`): the
+            // other value is unboxed into a temporary and compared as `arg0 == tmp`, then guarded
+            // `if (!eq) return false; return true`. A primitive temporary stays in a local and the
+            // guard branches on the negated comparison itself.
+            let (tmp, not_eq) = if is_ref_under {
+                let v = ir.add_expr(IrExpr::GetValue(0));
+                let eq = vc_underlying_eq(ir, v, ounbox, true, terminal_underlying);
+                let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+                let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: crate::ir::IrBinOp::Eq,
+                    lhs: eq,
+                    rhs: zero,
+                });
+                (None, not_eq)
+            } else {
+                const TMP: u32 = 2;
+                let declare = ir.add_expr(IrExpr::Variable {
+                    index: TMP,
+                    ty: u_ir,
+                    init: Some(ounbox),
+                    named: false,
+                });
+                let v = ir.add_expr(IrExpr::GetValue(0));
+                let tmp = ir.add_expr(IrExpr::GetValue(TMP));
+                let not_eq = vc_underlying_ne(ir, v, tmp, terminal_underlying);
+                (Some(declare), not_eq)
+            };
+            stmts.extend(tmp);
             stmts.push(guard_false(ir, not_eq));
             let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
@@ -481,6 +498,7 @@ pub(super) fn synth_value_members(
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0", "other"], &[0]);
             ir.open_methods.insert(impl_fid);
+            ir.jvm_nullability_unannotated_methods.insert(impl_fid);
         }
         // instance equals(other) → return equals-impl(this.field, other)
         let fv = this_field(ir);
@@ -499,6 +517,9 @@ pub(super) fn synth_value_members(
         if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
             crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
             ir.open_methods.insert(fid);
+            if !custom_equals {
+                ir.jvm_nullability_unannotated_methods.insert(fid);
+            }
         }
     }
 
@@ -665,7 +686,7 @@ fn vc_underlying_eq(
     a: ExprId,
     b: ExprId,
     is_ref_under: bool,
-    final_fq: &str,
+    underlying: Ty,
 ) -> ExprId {
     if is_ref_under {
         return ir.add_expr(IrExpr::Call {
@@ -679,8 +700,8 @@ fn vc_underlying_eq(
             args: vec![a, b],
         });
     }
-    if existing_type_name(final_fq).is_some_and(is_ieee_fp) {
-        let (owner, desc) = if final_fq == "kotlin/Float" {
+    if matches!(underlying, Ty::Float | Ty::Double) {
+        let (owner, desc) = if underlying == Ty::Float {
             ("java/lang/Float", "(FF)I")
         } else {
             ("java/lang/Double", "(DD)I")
@@ -710,6 +731,39 @@ fn vc_underlying_eq(
 }
 
 /// `if (cond) return false`.
+/// `a != b` over a primitive underlying, as kotlinc's value-class `equals-impl` negates it: the
+/// floating-point types through their wrapper's `compare`, everything else by value.
+fn vc_underlying_ne(ir: &mut IrFile, a: ExprId, b: ExprId, underlying: Ty) -> ExprId {
+    if matches!(underlying, Ty::Float | Ty::Double) {
+        let (owner, desc) = if underlying == Ty::Float {
+            ("java/lang/Float", "(FF)I")
+        } else {
+            ("java/lang/Double", "(DD)I")
+        };
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name(owner),
+                name: "compare".into(),
+                descriptor: desc.into(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![a, b],
+        });
+        let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        return ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Ne,
+            lhs: call,
+            rhs: zero,
+        });
+    }
+    ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: crate::ir::IrBinOp::Ne,
+        lhs: a,
+        rhs: b,
+    })
+}
+
 fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
     let f = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
     let r = ir.add_expr(IrExpr::Return(Some(f)));
@@ -722,8 +776,14 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
     })
 }
 
-/// `field.hashCode()` for an underlying fq name (primitive → native, reference → `Objects.hashCode`).
-fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str, nonnull_ref_owner: Option<&str>) -> ExprId {
+/// `field.hashCode()` for an underlying type (primitive → its wrapper's static `hashCode`, unsigned
+/// → its own `hashCode-impl`, reference → `hashCode()` or the null-safe `Objects.hashCode`).
+fn field_hash_ir(
+    ir: &mut IrFile,
+    v: ExprId,
+    underlying: Ty,
+    nonnull_ref_owner: Option<TypeName>,
+) -> ExprId {
     let call = |ir: &mut IrFile, owner: &str, desc: &str, v: ExprId| {
         ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -736,20 +796,42 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str, nonnull_ref_owner: Option
             args: vec![v],
         })
     };
-    match fq {
-        // Unsigned underlyings are unboxed to the signed primitive; their `hashCode` is that primitive's
-        // (`UInt.hashCode()` = the `Int` value itself; `ULong.hashCode()` = `Long.hashCode(long)`).
-        "kotlin/Int" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Char" | "kotlin/UByte"
-        | "kotlin/UShort" | "kotlin/UInt" => v,
-        "kotlin/Boolean" => call(ir, "java/lang/Boolean", "(Z)I", v),
-        "kotlin/Long" | "kotlin/ULong" => call(ir, "java/lang/Long", "(J)I", v),
-        "kotlin/Double" => call(ir, "java/lang/Double", "(D)I", v),
-        "kotlin/Float" => call(ir, "java/lang/Float", "(F)I", v),
+    match underlying {
+        // kotlinc hashes every primitive through its wrapper's static `hashCode`, and an unsigned
+        // underlying through that unsigned class's own `hashCode-impl` over its carrier.
+        Ty::Int => call(ir, "java/lang/Integer", "(I)I", v),
+        Ty::Short => call(ir, "java/lang/Short", "(S)I", v),
+        Ty::Byte => call(ir, "java/lang/Byte", "(B)I", v),
+        Ty::Char => call(ir, "java/lang/Character", "(C)I", v),
+        Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong => {
+            let carrier = match underlying {
+                Ty::UByte => "B",
+                Ty::UShort => "S",
+                Ty::UInt => "I",
+                _ => "J",
+            };
+            ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: underlying
+                        .obj_internal()
+                        .expect("an unsigned builtin has a classifier identity"),
+                    name: "hashCode-impl".into(),
+                    descriptor: format!("({carrier})I"),
+                    inline: InlineKind::None,
+                },
+                dispatch_receiver: None,
+                args: vec![v],
+            })
+        }
+        Ty::Boolean => call(ir, "java/lang/Boolean", "(Z)I", v),
+        Ty::Long => call(ir, "java/lang/Long", "(J)I", v),
+        Ty::Double => call(ir, "java/lang/Double", "(D)I", v),
+        Ty::Float => call(ir, "java/lang/Float", "(F)I", v),
         _ => match nonnull_ref_owner {
             // `v.hashCode()` on the underlying's own class.
             Some(owner) => ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
-                    owner: owner.into(),
+                    owner,
                     name: "hashCode".into(),
                     descriptor: "()I".into(),
                     params: None,
