@@ -56,10 +56,9 @@ fn host_can_run() -> bool {
     false
 }
 
-/// Link `driver` with every runtime source and run it; the process must exit 0 and its stdout must
-/// end in `OK`. Returns the output for a driver whose test checks more than that. `None` when the
-/// host cannot run drivers at all.
-fn run_driver(driver: &str) -> Option<Output> {
+/// Link `driver` with every runtime source, returning the executable. `None` when the host cannot
+/// run drivers at all.
+fn build_driver(driver: &str) -> Option<PathBuf> {
     if !host_can_run() {
         return None;
     }
@@ -99,6 +98,14 @@ fn run_driver(driver: &str) -> Option<Output> {
         "{driver}: the driver and runtime did not build:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
+    Some(executable)
+}
+
+/// Link `driver` with every runtime source and run it; the process must exit 0 and its stdout must
+/// end in `OK`. Returns the output for a driver whose test checks more than that. `None` when the
+/// host cannot run drivers at all.
+fn run_driver(driver: &str) -> Option<Output> {
+    let executable = build_driver(driver)?;
     let output = Command::new(&executable).output().expect("run the driver");
     let stdout = &output.stdout;
     assert!(
@@ -130,4 +137,54 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
             .all(|(index, &byte)| byte == b'a' + (index % 26) as u8),
         "the payload arrives in order"
     );
+}
+
+/// Link and run a driver whose runtime call must END the program: it must exit non-zero, never
+/// reach its `OK`, and say `message` on stderr. A crash says nothing, so it fails this too.
+fn run_driver_expecting_failure(driver: &str, message: &str) {
+    let Some(executable) = build_driver(driver) else {
+        return;
+    };
+    let output = Command::new(&executable).output().expect("run the driver");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && !output.stdout.ends_with(b"OK\n") && stderr.contains(message),
+        "{driver}: expected a failure saying {message:?}, got {}\nstderr: {stderr}",
+        output.status
+    );
+}
+
+#[test]
+fn unboxing_null_raises_and_comes_back() {
+    run_driver("unbox_null_raises");
+}
+
+#[test]
+fn a_number_conversion_of_null_raises_and_comes_back() {
+    run_driver("number_conversion_null_raises");
+}
+
+#[test]
+fn a_builder_joins_a_surrogate_pair_appended_unit_by_unit() {
+    run_driver("builder_joins_surrogate_pair");
+}
+
+#[test]
+fn a_lazy_whose_initializer_throws_stays_uninitialized() {
+    run_driver("lazy_initializer_throws");
+}
+
+#[test]
+fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_throwing_to_string");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
+    run_driver("builder_from_program_char_sequence");
+}
+
+#[test]
+fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
+    run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory");
 }

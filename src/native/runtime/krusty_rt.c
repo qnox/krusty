@@ -964,6 +964,13 @@ const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
                                       1};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
+    /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
+       answers to its own `length` and `get`. Read as a string, its fields would name arbitrary
+       memory, so a caller that can meet one walks it (see `kt_string_builder_with_text`) and any
+       other arriving here is a loud failure rather than a copy of whatever those fields name. */
+    if (self->header.type->walk_length != NULL) {
+        KT_FAIL("krusty: the bytes of a CharSequence the program implements\n");
+    }
     if (self->header.type == &kt_type_string_builder) {
         const KStringBuilder *builder = (const KStringBuilder *)self;
         *byte_length = builder->byte_length;
@@ -987,9 +994,27 @@ KRef kt_string_builder_with_capacity(kt_int capacity) {
 
 KRef kt_string_builder_new(void) { return kt_string_builder_with_capacity(0); }
 
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length);
+
 /* `StringBuilder(text)`: a builder that starts out holding it. A COPY, for the reason `toString`
-   copies -- the text is a value and the builder is about to be written through. */
+   copies -- the text is a value and the builder is about to be written through.
+
+   A `CharSequence` the PROGRAM implements is read the way Kotlin's own builder reads one, unit by
+   unit through its `length` and `get`, since it has no bytes to copy. Its `toString` is not the
+   text: nothing obliges a class to render itself as its characters. */
 KRef kt_string_builder_with_text(KRef text) {
+    if (text->header.type->walk_length != NULL) {
+        kt_int units = text->header.type->walk_length(text);
+        /* `text` stays live in this parameter, and the builder in this local, across every
+           allocation the appends make. */
+        KRef builder = kt_string_builder_with_capacity(units);
+        for (kt_int index = 0; index < units; index++) {
+            char encoded[3];
+            kt_int width = kt_render_char(text->header.type->walk_char_at(text, index), encoded);
+            kt_string_builder_append_bytes(builder, encoded, width);
+        }
+        return builder;
+    }
     kt_int length = 0;
     (void)kt_text_of(text, &length);
     /* `text` stays live in this parameter across the allocation. */
@@ -1004,13 +1029,21 @@ KRef kt_string_builder_with_text(KRef text) {
 static void kt_string_builder_reserve(KRef self, kt_int additional) {
     KStringBuilder *builder = (KStringBuilder *)self;
     kt_int capacity = kt_length_of(builder->storage);
+    /* A text longer than an `Int` counts is out of memory, as it is for Kotlin's own builder. Asked
+       before the sum is formed: a sum that overflowed would come out negative, pass as "fits", and
+       send the append's copy past the end of the storage. */
+    if (additional > 0x7fffffff - builder->byte_length) {
+        kt_fail_oom();
+    }
     kt_int needed = builder->byte_length + additional;
     if (needed <= capacity) {
         return;
     }
     kt_int grown = capacity == 0 ? 16 : capacity;
     while (grown < needed) {
-        grown *= 2;
+        /* Doubling past the largest `Int` would overflow too; the size needed is the most there is
+           to ask for then. */
+        grown = grown > 0x7fffffff / 2 ? needed : grown * 2;
     }
     /* `self` is a root in the caller's frame, so the OLD array stays reachable through it until the
        new one is stored. */
@@ -1049,21 +1082,63 @@ void kt_string_builder_set_length(KRef self, kt_int length) {
     builder->byte_length += padding;
 }
 
+/* Whether `bytes` is the three-byte encoding of a surrogate code unit, and which half: `ED A0..AF`
+   starts a HIGH (leading) one, `ED B0..BF` a LOW (trailing) one. */
+static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char second_high_bits) {
+    return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
+}
+
+/* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail.
+
+   A `Char` is a UTF-16 unit, and a lone surrogate unit can only be written as its own three-byte
+   sequence. So a supplementary character a program assembles unit by unit -- `for (c in s)
+   sb.append(c)` over any text holding an emoji -- arrives as a high half, then a low one. Stored
+   side by side they are six bytes of CESU-8, which no literal of the same character equals and no
+   terminal prints; the rule is that a low half arriving right after a stored high half becomes one
+   four-byte character with it. Nothing else is rewritten: a lone half with no partner stays the
+   lone unit it is. */
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length) {
+    kt_string_builder_reserve(self, length);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *storage = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int at = builder->byte_length;
+    if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
+        kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
+        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
+        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
+                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
+        /* Each half's low ten bits are its share of the code point above U+FFFF. */
+        uint32_t code_point = 0x10000u + (high << 10 | low);
+        at -= 3;
+        storage[at++] = (char)(0xF0u | (code_point >> 18));
+        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        bytes += 3;
+        length -= 3;
+    }
+    memcpy(storage + at, bytes, (size_t)length);
+    builder->byte_length = at + length;
+}
+
 KRef kt_string_builder_append(KRef self, KRef value) {
     /* The rendering goes through `kt_to_string` rather than `kt_render`, because a value whose type
        overrides `toString` must answer with ITS text and only the vtable knows that. It allocates,
        and the result is held in a local across the reserve below so the collector sees the root. */
     KRef text = kt_to_string(value);
+    /* An override that THREW came back with the exception pending and no string: the append stops
+       there, leaving the builder as it was, and the caller finds the exception. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
     kt_int length = 0;
     const char *bytes = kt_text_of(text, &length);
     kt_string_builder_reserve(self, length);
-    KStringBuilder *builder = (KStringBuilder *)self;
     /* `bytes` is re-read after the reserve: it may point into storage the reserve replaced, when a
        builder is appended to itself. */
     bytes = kt_text_of(text, &length);
-    memcpy(kt_bytes_of((KByteArray *)builder->storage) + builder->byte_length, bytes,
-           (size_t)length);
-    builder->byte_length += length;
+    kt_string_builder_append_bytes(self, bytes, length);
     return self;
 }
 
@@ -1158,11 +1233,14 @@ KRef kt_box_double(kt_double value) {
 }
 
 /* Unboxing a `null` is Kotlin's `NullPointerException` — the one `!!` raises, so with no message.
-   The zero returned afterwards is never read: the caller checks the pending slot first. */
+   `kt_throw` records it and COMES BACK, so the raise is followed by a return of its own: falling
+   through would read the field of the very null just rejected, and crash before the caller could
+   find the exception. The zero returned is never read: the caller checks the pending slot first. */
 #define KT_UNBOX(suffix, field, type)                                                              \
     type kt_unbox_##suffix(KRef value) {                                                           \
         if (value == NULL) {                                                                       \
             kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));                     \
+            return 0;                                                                              \
         }                                                                                          \
         return value->as.field;                                                                    \
     }
@@ -1188,11 +1266,14 @@ typedef struct KNumber {
 } KNumber;
 
 static KNumber kt_number_of(KRef value) {
+    KNumber number = {0, 0, 0.0};
     if (value == NULL) {
+        /* A RETURN after the raise, for the reason the unboxes above have one: `kt_throw` comes
+           back, and the descriptor read below is a read through the null. The zero is never read. */
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return number;
     }
     const KType *type = value->header.type;
-    KNumber number = {0, 0, 0.0};
     if (type == &kt_type_byte) {
         number.integer = value->as.byte_value;
     } else if (type == &kt_type_short) {
@@ -1476,6 +1557,12 @@ KRef kt_lazy_value(KRef lazy) {
     }
     KRef value =
         ((KRef(*)(KRef))initializer->header.type->vtable[KT_SLOT_INVOKE])(initializer);
+    /* An initializer that THREW produced no value. The lazy stays uncomputed and keeps its
+       initializer, so the exception propagates and the next read runs it again, as Kotlin's does;
+       caching what the aborted call returned would hand that back from every later read. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     /* Re-read through `lazy`: the call above can collect, and `self` is a root only because it is
        this local. The collector never moves an object, so the pointer is still good. */
     self->value = value;
