@@ -12,9 +12,12 @@
 //! classes may hold collections of each other — so the cache cannot be built while the loop that
 //! creates those classes is still running.
 use super::{
-    class_ty, collection_serializer_builder, field_serializer_of, kserializer_of,
-    property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr,
-    IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
+    class_ty,
+    element_serializer::{
+        element_serializer_plan, emit_cached_element_serializer, ElementSerializerPlan,
+    },
+    field_serializer_of, kserializer_of, property_is_contextual, type_name, Callee, ClassId,
+    ExprId, InlineKind, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
 };
 
 /// One slot of the `Lazy[]` cache: a `Lazy<KSerializer<Any>>`, nullable because a property whose
@@ -180,12 +183,6 @@ impl ChildSerializerCachePlan {
 /// becomes characters is the classfile writer.
 pub(super) type PendingChildSerializerCache = (ClassId, TypeName, Vec<(String, Ty)>);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CachedSerializerKind {
-    Collection,
-    Enum,
-}
-
 /// The `$childSerializers` cache for one `@Serializable` class, built once every OTHER class's
 /// `$serializer` exists.
 ///
@@ -224,73 +221,41 @@ pub(super) fn add_child_serializer_cache(
     // now REFUSES the file rather than quietly dropping the cache. The classification has to be
     // right, not merely recoverable — and computing it up front is also what lets the build loop
     // below take `ir` mutably.
-    let cached_kinds: Vec<Option<CachedSerializerKind>> = foo_fields
+    let cached_plans: Vec<Option<ElementSerializerPlan>> = foo_fields
         .iter()
         .map(|(name, ty)| {
-            if super::property_is_contextual(ctx, ir, class_id, name)
+            if property_is_contextual(ctx, ir, class_id, name)
                 || field_serializer_of(ctx, ir, class_id, name).is_some()
             {
                 return None;
             }
-            let classifier = ty.kotlin_class_internal()?;
-            if collection_serializer_builder(classifier).is_some() {
-                Some(CachedSerializerKind::Collection)
-            } else if enum_internals.contains(&classifier) {
-                Some(CachedSerializerKind::Enum)
-            } else {
-                None
+            let plan = element_serializer_plan(ir, ctx, ty)?;
+            match &plan {
+                ElementSerializerPlan::Collection { .. } => Some(plan),
+                ElementSerializerPlan::Generated { classifier, .. }
+                    if enum_internals.contains(classifier) =>
+                {
+                    Some(plan)
+                }
+                _ => None,
             }
         })
         .collect();
 
-    if cached_kinds.iter().all(Option::is_none) {
+    if cached_plans.iter().all(Option::is_none) {
         return None;
     }
     {
         let lazy_arr_ty = lazy_cache_ty();
-        // A slot is `null` ONLY where the property needs no cache — its serializer is a singleton
-        // read at each use. A property that DOES need one and whose serializer cannot be
-        // constructed publishes an unsupported residual: a `null` in a slot a reader will
-        // dereference is the defect this pass exists to remove, and silently omitting the cache
-        // would merely select the legacy inline lowering after the cache plan had failed.
+        // A slot is `null` ONLY where the selected serializer plan needs no cache. The same plan
+        // that made this decision is consumed below, so classification and emission cannot drift
+        // into a legacy second derivation.
         let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
         let mut factories = 0usize;
-        for (index, (_, ty)) in foo_fields.iter().enumerate() {
-            let Some(kind) = cached_kinds[index] else {
+        for (index, _) in foo_fields.iter().enumerate() {
+            let Some(plan) = cached_plans[index].clone() else {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
-            };
-            let Some(es) = super::element_serializer_expr(ir, ctx, ty) else {
-                // A property classified as NEEDING a cached serializer whose serializer cannot be
-                // built is an invalid intermediate state, not a shape to recover from. Dropping
-                // the cache and letting every use build its own is a second lowering for the same
-                // declaration, which is exactly what must not decide compilation.
-                //
-                // The plugin publishes an unsupported residual instead, so `jvm_can_emit` declines
-                // the file with the standard diagnostic rather than emitting a class whose cache
-                // silently disagrees with the classification that produced it.
-                let unsupported = ir.add_expr(IrExpr::PluginPlaceholder {
-                    plugin: "serialization",
-                    kind: "child-serializer-cache",
-                    exprs: Vec::new(),
-                    data: vec![serialized],
-                    types: Vec::new(),
-                });
-                ir.statics.push(crate::ir::IrStatic {
-                    name: "$childSerializers".to_string(),
-                    ty: lazy_arr_ty,
-                    init: unsupported,
-                    is_var: false,
-                    is_const: false,
-                    owner: Some(serialized),
-                    visibility: crate::types::Visibility::Private,
-                    setter_jvm_name: None,
-                    erased_declared_ty: None,
-                    custom_accessor: true,
-                    line: 0,
-                    source_order: u32::MAX,
-                });
-                return None;
             };
             // The point of the cache is that a serializer is built on FIRST USE, so a slot holds a
             // `Lazy` over a FACTORY rather than an already-built serializer. kotlinc emits that
@@ -306,37 +271,10 @@ pub(super) fn add_child_serializer_cache(
                 n => format!("_childSerializers$_anonymous_${}", n - 1),
             };
             factories += 1;
-            // kotlinc narrows every constructor operand AND the constructed serializer to
-            // `KSerializer` before returning, though both already conform. The casts are three
-            // bytes each and they move the `areturn` the factory's line entry hangs on.
-            let kserializer = class_ty(super::KSERIALIZER_FQ);
-            if kind == CachedSerializerKind::Collection {
-                let IrExpr::New { args, .. } = ir.exprs[es as usize].clone() else {
-                    unreachable!("a cached collection serializer plan lowers to a construction")
-                };
-                let narrowed = args
-                    .iter()
-                    .map(|&argument| {
-                        ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: argument,
-                            type_operand: kserializer,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let IrExpr::New { args, .. } = &mut ir.exprs[es as usize] {
-                    *args = narrowed;
-                } else {
-                    unreachable!(
-                        "the collection construction remains stable while its operands narrow"
-                    )
-                }
-            }
-            let es = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: es,
-                type_operand: kserializer,
-            });
+            // Cache factories have a distinct JVM representation: direct collection operands and
+            // the result are narrowed to `KSerializer`. Emit that representation from the selected
+            // plan instead of reopening and rewriting generic IR by expression shape.
+            let es = emit_cached_element_serializer(ir, plan);
             let returned = ir.add_expr(IrExpr::Return(Some(es)));
             let factory_body = ir.add_expr(IrExpr::Block {
                 stmts: vec![returned],
@@ -428,7 +366,7 @@ pub(super) fn add_child_serializer_cache(
         Some(ChildSerializerCachePlan {
             static_index,
             accessor: acc,
-            cached: cached_kinds.iter().map(Option::is_some).collect(),
+            cached: cached_plans.iter().map(Option::is_some).collect(),
         })
     }
 }
