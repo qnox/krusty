@@ -224,18 +224,20 @@ impl BodyFirChecker<'_> {
 
     fn explicit_receiver(&mut self, expression: ExprId) -> Result<FirReceiver, BodyCheckFailure> {
         let value = self.expression(expression)?;
+        // Only a smart cast of the receiver's OWN value. `narrowed_this_member` is not one: it is
+        // keyed by a BARE member access and says that the implicit `this` INSIDE that access needs
+        // narrowing before the field is read (see its declaration in `resolve`). Where such an
+        // access is itself a call's receiver — `node.tag()` for an implicit `this.node` — the
+        // access has already been lowered by `self.expression` above, which narrows the `this` it
+        // loads through `implicit_receiver_with_narrowing`. Reading the map again here cast the
+        // PROPERTY's value to the narrowed receiver type instead, which for `node.tag()` meant a
+        // `Node` checked against `Light`: a `ClassCastException` on the JVM and a verifier-rejected
+        // method before that.
         let conversion = self
             .info
             .selected_value_smartcasts
             .get(&expression)
             .copied()
-            .or_else(|| {
-                self.info
-                    .narrowed_this_member
-                    .get(&expression)
-                    .copied()
-                    .map(Ty::obj_name)
-            })
             .map(|target| {
                 let to = ResolvedTy::new(target).map_err(|error| {
                     self.failure(

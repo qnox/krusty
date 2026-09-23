@@ -9,10 +9,9 @@
 //! with the distribution, never rebuilt by the user.
 //!
 //! The one consequence is that building *krusty* needs a C cross-compiler. `clang` targets every
-//! architecture from one host with no sysroot, because the runtime is freestanding (see
-//! `docs/BUILD_AND_NATIVE_PLAN.md`, *Requirement: every target buildable from any host*). When no
-//! clang is available, krusty still builds — with no prebuilt runtime, the native backend reports
-//! that plainly instead of failing somewhere inside a link.
+//! architecture from one host with no sysroot, because the runtime is freestanding, so every target
+//! is buildable from any host. When no clang is available, krusty still builds — with no prebuilt
+//! runtime, the native backend reports that plainly instead of failing somewhere inside a link.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,11 +20,33 @@ use std::process::Command;
 ///
 /// `-fno-pic` and a small code model keep the objects free of GOT/PLT machinery: the output is a
 /// static executable at a fixed address, so absolute 32-bit relocations are fine and simplest.
-/// RISC-V's clang does not take `-mcmodel=small` (its equivalent is the default `medlow`).
+/// RISC-V's clang does not take `-mcmodel=small` (its equivalent is the default `medlow`), and
+/// `-mno-relax` keeps linker-relaxation relocations out of its objects: krusty's own linker applies
+/// relocations and relaxes nothing.
 const TARGETS: &[(&str, &str, &[&str])] = &[
-    ("X86_64", "x86_64-unknown-linux-gnu", &["-mcmodel=small"]),
+    (
+        "X86_64",
+        "x86_64-unknown-linux-gnu",
+        &["-mcmodel=small", "-fcf-protection=none"],
+    ),
     ("Aarch64", "aarch64-unknown-linux-gnu", &["-mcmodel=small"]),
-    ("Riscv64", "riscv64-unknown-linux-gnu", &[]),
+    ("Riscv64", "riscv64-unknown-linux-gnu", &["-mno-relax"]),
+];
+
+/// Flags every target compiles with. The objects are embedded in krusty and linked into a user's
+/// program, so their bytes must not depend on how the HOST's clang was configured: a distribution
+/// that turns the stack protector on by default would otherwise leave `__stack_chk_fail` undefined
+/// in a runtime nothing links a libc into, and unwind tables are data nothing reads.
+const COMMON_FLAGS: &[&str] = &[
+    "-std=c11",
+    "-ffreestanding",
+    "-nostdlib",
+    "-fno-pic",
+    "-fno-stack-protector",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-unwind-tables",
+    "-O2",
+    "-c",
 ];
 
 const SOURCES: &[&str] = &["krusty_gc.c", "krusty_start.c"];
@@ -50,23 +71,17 @@ fn main() {
     generated.push_str("pub const PREBUILT: &[(crate::native::Arch, &[(&str, &[u8])])] = &[\n");
 
     let mut built_any = false;
+    let mut compiler_missing = false;
     for (arch, triple, extra) in TARGETS {
         let target_dir = out_dir.join("runtime").join(arch);
         std::fs::create_dir_all(&target_dir).expect("create runtime output directory");
         let mut objects = Vec::new();
         let mut ok = true;
         for source in SOURCES {
-            let object = target_dir.join(source.replace(".c", ".o"));
+            let object = target_dir.join(Path::new(source).with_extension("o"));
             let status = Command::new(&compiler)
                 .arg(format!("--target={triple}"))
-                .args([
-                    "-std=c11",
-                    "-ffreestanding",
-                    "-nostdlib",
-                    "-fno-pic",
-                    "-O2",
-                    "-c",
-                ])
+                .args(COMMON_FLAGS)
                 .args(*extra)
                 .arg("-I")
                 .arg(runtime_dir)
@@ -89,10 +104,15 @@ fn main() {
                         "cargo:warning=native runtime: cannot run `{compiler}` ({error}); no native target \
                          will be available. Install clang, or set KRUSTY_RUNTIME_CC."
                     );
+                    compiler_missing = true;
                     ok = false;
                     break;
                 }
             }
+        }
+        // A compiler that cannot be started fails the same way for every target: one warning.
+        if compiler_missing {
+            break;
         }
         if !ok {
             continue;
@@ -115,4 +135,10 @@ fn main() {
     ));
     std::fs::write(out_dir.join("prebuilt_runtime.rs"), generated)
         .expect("write prebuilt_runtime.rs");
+    // With no compiler found, installing one is what should bring the runtime back, and that is a
+    // change to `PATH`. Watched only then: a build that has its runtime must not rebuild the compiler
+    // every time a shell with a different `PATH` runs cargo.
+    if compiler_missing {
+        println!("cargo:rerun-if-env-changed=PATH");
+    }
 }

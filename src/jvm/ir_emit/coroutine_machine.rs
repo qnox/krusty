@@ -342,8 +342,15 @@ fn expand_slots(locals: &[VerifType]) -> Vec<VerifType> {
     slots
 }
 
-/// The continuation class a machine keeps its state in: `<facade>$<function>$1`.
-pub(super) fn continuation_internal(owner: &str, function: &str, ordinal: usize) -> String {
+/// The continuation class a machine keeps its state in: `<facade>$<function>$1`, or the next
+/// ordinal its sequence leaves free.
+pub(super) fn continuation_internal(
+    ir: &crate::ir::IrFile,
+    fid: u32,
+    owner: &str,
+    function: &str,
+) -> String {
+    let ordinal = crate::jvm::suspend::continuation_ordinal(ir, fid);
     crate::jvm::suspend::continuation_class_name(owner, function, ordinal)
 }
 

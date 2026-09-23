@@ -219,12 +219,27 @@ impl BodyFirChecker<'_> {
         }
         for (parameter, slot) in slots.iter().enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {
+                let ordinal =
+                    self.call_parameter_ordinal(expression, parameter, parameter_offset)?;
+                // A dependency default the provider states as a CONSTANT is passed as an ordinary
+                // argument rather than left for a default-call ABI to fill. It is the same value
+                // either way — a constant has no side effects and depends on no other argument —
+                // and this form needs no `$default` symbol, which is what a klib cannot name.
+                if let Some(value) = self.library_default_literal(
+                    expression,
+                    parameter,
+                    parameters,
+                    parameter_offset,
+                )? {
+                    checked.push(FirCallArgument::Expression {
+                        parameter: ordinal,
+                        value,
+                        conversion: None,
+                    });
+                    continue;
+                }
                 checked.push(FirCallArgument::Default {
-                    parameter: self.call_parameter_ordinal(
-                        expression,
-                        parameter,
-                        parameter_offset,
-                    )?,
+                    parameter: ordinal,
                     origin: self
                         .origins
                         .synthetic(cause, SyntheticOriginKind::DefaultArgument),
@@ -232,6 +247,82 @@ impl BodyFirChecker<'_> {
             }
         }
         Ok(checked.into_boxed_slice())
+    }
+
+    /// The checked constant a dependency default resolves to at this call site, when the provider
+    /// stated one.
+    ///
+    /// Its type is the PARAMETER's, not the literal's own: `message: String? = null` passes a
+    /// `null` typed `String?`, and an `Int` default filling a `Long` parameter is already ruled out
+    /// by the fit check resolution made before recording it.
+    fn library_default_literal(
+        &mut self,
+        expression: ExprId,
+        parameter: usize,
+        parameters: &[Ty],
+        parameter_offset: usize,
+    ) -> Result<Option<FirExprId>, BodyCheckFailure> {
+        let Some(value) = self
+            .info
+            .resolved_library_default_literals
+            .get(&expression)
+            .and_then(|literals| {
+                literals
+                    .iter()
+                    .find(|(ordinal, _)| *ordinal == parameter)
+                    .map(|(_, value)| value.clone())
+            })
+        else {
+            return Ok(None);
+        };
+        // Provider defaults are parallel to VALUE parameters. `parameters` is the physical FIR
+        // signature and may begin with context/receiver parameters, so translate the value ordinal
+        // at this one boundary. The call argument ordinal uses the same offset independently.
+        let physical = parameter.checked_add(parameter_offset).ok_or_else(|| {
+            self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            )
+        })?;
+        let ty = parameters.get(physical).copied().ok_or_else(|| {
+            self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            )
+        })?;
+        let constant = match value {
+            crate::libraries::DefaultValue::Null => FirConstant::Null,
+            crate::libraries::DefaultValue::Bool(value) => FirConstant::Boolean(value),
+            crate::libraries::DefaultValue::Char(value) => FirConstant::Char(value),
+            crate::libraries::DefaultValue::Int(value) => FirConstant::Int(value),
+            crate::libraries::DefaultValue::Long(value) => FirConstant::Long(value),
+            crate::libraries::DefaultValue::Float(value) => FirConstant::Float(value),
+            crate::libraries::DefaultValue::Double(value) => FirConstant::Double(value),
+            crate::libraries::DefaultValue::Str(value) => FirConstant::String(value),
+            // Resolution never records an `Object` as a literal. Seeing one here means the checked
+            // call facts disagree; do not silently switch realization strategies in FIR.
+            crate::libraries::DefaultValue::Object(_) => {
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                ));
+            }
+        };
+        let cause = self.expression_origin(expression)?;
+        let origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::DefaultArgument);
+        let ty = ResolvedTy::new(ty).map_err(|error| {
+            self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnpublishableType(error),
+            )
+        })?;
+        Ok(Some(self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::Constant(constant),
+        })))
     }
 
     fn checked_source_call_argument(
@@ -854,8 +945,19 @@ impl BodyFirChecker<'_> {
         }
         for (parameter, slot) in slots.iter().take(ordinary_count).enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {
+                let ordinal = self.call_parameter_ordinal(expression, parameter, context.len())?;
+                if let Some(value) =
+                    self.library_default_literal(expression, parameter, parameters, context.len())?
+                {
+                    checked.push(FirCallArgument::Expression {
+                        parameter: ordinal,
+                        value,
+                        conversion: None,
+                    });
+                    continue;
+                }
                 checked.push(FirCallArgument::Default {
-                    parameter: self.call_parameter_ordinal(expression, parameter, context.len())?,
+                    parameter: ordinal,
                     origin: self
                         .origins
                         .synthetic(cause, SyntheticOriginKind::DefaultArgument),

@@ -163,6 +163,17 @@ fun branchy(): Int {\n    if (cond()) {\n        return 1\n    } else {\n       
 }
 
 #[test]
+fn a_comparison_after_a_nested_value_returns_to_the_enclosing_statement_line() {
+    assert_code_and_lnt_identical(
+        "lntNestedValue",
+        "fun choose(): Boolean {\n    return false\n}\n\
+fun act() {\n}\n\
+fun nested(): Boolean {\n    return (if (choose()) {\n        act()\n        1\n    } else {\n        2\n    }) != 0\n}\n",
+        "LntNestedValueKt",
+    );
+}
+
+#[test]
 fn while_loop_fn() {
     // NOT byte-identical yet: krusty emits one extra `same` StackMapTable frame at the loop head
     // (a pre-existing loop-shape divergence, tracked separately). The instructions AND the

@@ -372,6 +372,15 @@ pub struct MethodCode {
     /// The defining class's `SourceFile` — the simple name a source map has to name the inlined
     /// lines against. `None` when the class declares none.
     pub source_file: Option<String>,
+    /// The internal name of the class the body was READ from. For a multifile facade's function
+    /// that is the part class (`CollectionsKt___CollectionsKt`), not the facade a call names, and
+    /// it is the path the reference compiler records for these lines.
+    pub defining_class: String,
+    /// The defining class's parsed `SourceDebugExtension`, when it has one: its body already
+    /// contains code inlined from elsewhere, and a line above its own source length only means
+    /// something read back through this map. A present attribute that is not exact UTF-8 or a
+    /// readable Kotlin SMAP makes the method body unavailable rather than becoming an absent map.
+    pub dependency_source_map: Option<crate::jvm::source_map::DependencyMap>,
     /// The DEFINING class's `BootstrapMethods` entries, as `(method handle cp index, static argument
     /// cp indices)`. An `invokedynamic` names one by index into this table rather than into the
     /// constant pool, so relocating the instruction into another class means re-interning the entry
@@ -417,7 +426,14 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
         }
     };
     r.u2().ok()?; // access_flags
-    r.u2().ok()?; // this_class
+    let this_class = r.u2().ok()?;
+    let defining_class = match cp.get(this_class as usize) {
+        Some(C::Class(name)) => match cp.get(*name as usize) {
+            Some(C::Utf8(name)) if !name.is_empty() => name.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
     r.u2().ok()?; // super_class
     let ifaces = r.u2().ok()?;
     for _ in 0..ifaces {
@@ -522,7 +538,17 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     // in it names an entry by index, and an index into a table this reader could not parse is not
     // something to guess at. Declining the body costs a real call at the call site; guessing costs
     // a relocated entry naming the wrong handle.
-    let (bootstrap_methods, source_file) = read_class_attributes(&mut r, &cp)?;
+    let ClassAttributes {
+        bootstrap_methods,
+        source_file,
+        dependency_source_map,
+    } = read_class_attributes(&mut r, &cp)?;
+    if dependency_source_map
+        .as_ref()
+        .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
+    {
+        return None;
+    }
     Some(MethodCode {
         max_stack,
         max_locals,
@@ -533,6 +559,8 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
         locals,
         lines,
         source_file,
+        defining_class,
+        dependency_source_map,
         bootstrap_methods,
     })
 }
@@ -564,8 +592,13 @@ type ScannedCode = (
 ///
 /// Exact consumption is checked rather than assumed. JVMS 4.7.23 fixes the attribute's length from
 /// What [`read_class_attributes`] recovers: the `BootstrapMethods` entries (each a method handle
-/// index and its static arguments) and the `SourceFile` name, absent when the class declares none.
-type ClassAttributes = (Vec<(u16, Vec<u16>)>, Option<String>);
+/// index and its static arguments), the `SourceFile` name, and the parsed `SourceDebugExtension` —
+/// each absent when the class declares none.
+struct ClassAttributes {
+    bootstrap_methods: Vec<(u16, Vec<u16>)>,
+    source_file: Option<String>,
+    dependency_source_map: Option<crate::jvm::source_map::DependencyMap>,
+}
 
 /// its own contents, so a body with bytes left over — or one that wanted more than it declared —
 /// is not a `BootstrapMethods` attribute this reader understands, and guessing at the remainder is
@@ -575,6 +608,7 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
     let nattr = r.u2().ok()?;
     let mut bootstrap_methods = Vec::new();
     let mut source_file = None;
+    let mut dependency_source_map = None;
     for _ in 0..nattr {
         let name_index = r.u2().ok()?;
         let len = r.u4().ok()? as usize;
@@ -585,6 +619,14 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
             if let Some(C::Utf8(name)) = cp.get(index as usize) {
                 source_file = Some(name.clone());
             }
+            continue;
+        }
+        if named(name_index, "SourceDebugExtension") {
+            // JVMS 4.7.11: the attribute body IS the string, with no length prefix of its own. A
+            // present but unreadable map is different from no map: accepting it would attribute
+            // nested-inline output lines to the defining file. Decline the whole method body.
+            let text = std::str::from_utf8(body).ok()?;
+            dependency_source_map = Some(crate::jvm::source_map::DependencyMap::parse(text)?);
             continue;
         }
         if !named(name_index, "BootstrapMethods") {
@@ -607,7 +649,11 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
         }
         bootstrap_methods = out;
     }
-    Some((bootstrap_methods, source_file))
+    Some(ClassAttributes {
+        bootstrap_methods,
+        source_file,
+        dependency_source_map,
+    })
 }
 
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
@@ -1426,6 +1472,43 @@ fn decode_modified_utf8(bytes: &[u8]) -> KtString {
 mod tests {
     use super::*;
     use crate::jvm::classfile::*;
+
+    fn class_attributes(name_index: u16, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&name_index.to_be_bytes());
+        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn absent_and_invalid_source_maps_are_different_class_attribute_results() {
+        let cp = vec![C::Other, C::Utf8("SourceDebugExtension".to_string())];
+        let absent = read_class_attributes(&mut Reader { b: &[0, 0], i: 0 }, &cp)
+            .expect("an absent attribute is valid");
+        assert_eq!(absent.dependency_source_map, None);
+
+        let invalid_utf8 = class_attributes(1, &[0xff]);
+        assert!(read_class_attributes(
+            &mut Reader {
+                b: &invalid_utf8,
+                i: 0
+            },
+            &cp
+        )
+        .is_none());
+
+        let invalid_map = class_attributes(1, b"not a source map");
+        assert!(read_class_attributes(
+            &mut Reader {
+                b: &invalid_map,
+                i: 0
+            },
+            &cp
+        )
+        .is_none());
+    }
 
     /// The ASCII fast path must agree with the general decoder byte for byte. `C0 80` (NUL) and every
     /// multi-byte form are non-ASCII, so they never reach it — this pins the boundary.

@@ -85,6 +85,7 @@ pub(super) fn emit_enum_entry_subclass(
             defaults,
             None,
             false,
+            false,
             0x1000,
             &mut cw,
             env,

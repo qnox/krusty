@@ -52,6 +52,50 @@ boundary.
   independently decides how its own arguments select that home. There is no command-layer “common”
   crate until both executable packages share a stable command abstraction rather than a few flags.
 
+## Build-layer boundary
+
+`crates/krusty-build` owns process-independent build orchestration. It models compilation units and
+their dependency DAG, constructs content-addressed cache keys, stores complete artifact sets, and
+drives a compiler through an explicit environment boundary. The crate is a consumer of the compiler
+library; neither the compiler nor a target backend may depend on it.
+
+The build model is wider than an analysis-only project model. A build unit records resources, Java
+sources, module name, processor inputs, per-module JDK selection, friend paths, and output shape
+because silently ignoring any of those can cache a short or semantically different artifact. An
+environment that cannot honor a recorded input must refuse the unit before computing a cache key.
+
+Build correctness rests on these contracts:
+
+- A dependency graph edge is a relation. Providers may repeat an edge, but the graph canonicalizes
+  it once, preserving first-seen order. A duplicate must never become an extra indegree and a false
+  cycle.
+- A module base directory is absolute, and every relative module path is resolved against it when
+  the module enters the graph. Output roots have unique, non-overlapping owners, may not be a
+  filesystem root, and may not overlap declared source, resource, classpath, processor, or JDK
+  inputs. A friend path owned by another module requires that owner as a dependency, so the friend
+  output is materialized before compilation.
+- A cache key covers the compiler binary, target and scalar flags, ordered source paths and bytes,
+  every explicit and implicit classpath/toolchain input, friend inputs, plugins, and direct
+  dependency ABI identities. Environment values are keyed as raw OS bytes with presence preserved.
+  Opaque argument files or path-bearing flags are rejected until their referenced bytes have an
+  owned representation.
+- A cached module is the complete ordered artifact set plus the identity published to dependents.
+  Materialization replaces old output trees, including every declared output; it never overlays a
+  subset or silently chooses the first output. A concrete environment that emits only one artifact
+  tree refuses a module declaring multiple independent outputs rather than copying that tree.
+- A store manifest is complete only with an exact record count, terminal marker, and integrity
+  digest covering the published ABI and every artifact record. A valid prefix or ABI-only mutation
+  is a miss, never a hit.
+- A reduced ABI identity may be published only when it includes every fact a dependent can observe:
+  Kotlin metadata, non-source annotations, constants, contracts, sealed and enum structure,
+  `.kotlin_module`, and inline bodies and their reachable synthetics. Until that proof exists for an
+  environment, it publishes a whole-output identity. Rebuilding too much is acceptable; a stale
+  dependent cache hit is not.
+- Backend-specific adapters own representation inputs. The JVM adapter, for example, records the
+  exact JDK image and any companion metadata input discovered from its classpath, and passes friend
+  paths through the compiler's friend-path contract rather than treating friendship as ordinary
+  visibility.
+
 ## Language-server memory model
 
 - `serde`, `serde_json`, JSON-RPC transport, and session state belong to the separate
