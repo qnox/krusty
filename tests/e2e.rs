@@ -432,12 +432,16 @@ mod cross_file_operator_e2e;
 mod cross_file_serializer_inner_classes_e2e;
 #[path = "cross_file_typealias_e2e.rs"]
 mod cross_file_typealias_e2e;
+#[path = "cross_file_value_param_constructor_e2e.rs"]
+mod cross_file_value_param_constructor_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
 mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
+#[path = "data_class_nullable_value_class_e2e.rs"]
+mod data_class_nullable_value_class_e2e;
 #[path = "data_class_param_check_e2e.rs"]
 mod data_class_param_check_e2e;
 #[path = "data_copy_e2e.rs"]
@@ -1134,6 +1138,8 @@ mod nullable_receiver_operator_ext_e2e;
 mod nullable_ref_arg_to_erased_param_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
+#[path = "nullable_value_class_nullability_e2e.rs"]
+mod nullable_value_class_nullability_e2e;
 #[path = "nullable_vc_default_stub_e2e.rs"]
 mod nullable_vc_default_stub_e2e;
 #[path = "number_and_ctor_coverage_e2e.rs"]
@@ -1701,10 +1707,14 @@ mod value_class_map_key_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_property_argument_e2e.rs"]
+mod value_class_property_argument_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
 mod value_class_template_lambda_e2e;
+#[path = "value_param_constructor_accessor_e2e.rs"]
+mod value_param_constructor_accessor_e2e;
 #[path = "var_extension_property_e2e.rs"]
 mod var_extension_property_e2e;
 #[path = "var_smartcast_after_assign_e2e.rs"]

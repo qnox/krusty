@@ -36,6 +36,7 @@ mod bridges;
 mod constants;
 mod constructors;
 mod references;
+mod value_class_constructors;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
@@ -1640,6 +1641,9 @@ pub struct IrClass {
     /// Checker-selected semantic parameter types parallel to `super_args`. A backend couples these to
     /// its physical superclass-constructor ABI without resolving the constructor again.
     pub super_ctor_params: Vec<Ty>,
+    /// Whether the checker-selected superclass constructor is the primary declaration. Backends
+    /// consume this identity fact instead of comparing erased descriptors with the primary shape.
+    pub super_ctor_is_primary: bool,
     /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
     /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
@@ -1884,6 +1888,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
+            super_ctor_is_primary: true,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -1994,6 +1999,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
+            super_ctor_is_primary: true,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -2091,6 +2097,8 @@ pub enum CtorDelegateTarget {
     Super {
         owner: TypeName,
         target_params: Vec<Ty>,
+        /// Exact selected declaration kind retained from checked constructor resolution.
+        to_primary: bool,
         default_masks: Vec<i32>,
     },
     /// An enum secondary constructor with no written `this(…)` delegation. Kotlin implicitly
@@ -2267,6 +2275,12 @@ pub struct IrFile {
     /// the holder representation from this exact coordinate without inferring it from a field name,
     /// constructor position, or expression shape.
     pub shared_class_capture_fields: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// A superclass-constructor parameter that forwards a mutable capture's shared holder, keyed by
+    /// `(subclass, selected-super-parameter)`. `Ty` is the logical captured element type. This exact
+    /// edge survives independently of the argument expression and of the selected constructor's
+    /// semantic parameter type, so a backend can realize its holder ABI without reselecting a
+    /// constructor or inferring capture storage from an erased descriptor.
+    pub shared_super_capture_parameters: std::collections::HashMap<(ClassId, u32), Ty>,
     /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:
@@ -2527,17 +2541,8 @@ pub struct IrFile {
     /// Internal names of classes carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
     /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
     deprecated_classes: std::collections::HashSet<TypeName>,
-    /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
-    /// `data class Rec(val id: ItemId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
-    /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI
-    /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
-    /// parameter types (which lose the value-class identity).
-    value_param_ctors: std::collections::HashSet<TypeName>,
-    /// For a class in `value_param_ctors`: its primary-ctor parameter types AS DECLARED (recorded
-    /// before the value-class pass erased them), positionally parallel to `IrClass::ctor_args`. The
-    /// class `@Metadata` constructor record names these (`id: ItemId`), while the physical
-    /// descriptor spells the erased marker form.
-    vc_ctor_declared_params: std::collections::HashMap<TypeName, Vec<Ty>>,
+    /// Target-neutral declaration and selected-call facts for constructors that mention value classes.
+    value_class_constructor_facts: value_class_constructors::ValueClassConstructorFacts,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
@@ -3265,29 +3270,6 @@ impl IrFile {
         self.deprecated_classes.contains(&internal)
     }
 
-    pub fn mark_value_param_ctor(&mut self, internal: &str) {
-        self.mark_value_param_ctor_name(crate::types::type_name(internal));
-    }
-
-    pub fn mark_value_param_ctor_name(&mut self, internal: TypeName) {
-        self.value_param_ctors.insert(internal);
-    }
-
-    pub fn has_value_param_ctor(&self, internal: &str) -> bool {
-        self.value_param_ctors
-            .contains(&crate::types::type_name(internal))
-    }
-
-    pub fn record_vc_ctor_declared_params(&mut self, internal: TypeName, declared: Vec<Ty>) {
-        self.vc_ctor_declared_params.insert(internal, declared);
-    }
-
-    pub fn vc_ctor_declared_params(&self, internal: TypeName) -> Option<&[Ty]> {
-        self.vc_ctor_declared_params
-            .get(&internal)
-            .map(Vec::as_slice)
-    }
-
     pub fn insert_class_ctor_defaults(&mut self, internal: &str, defaults: Vec<Option<u32>>) {
         self.insert_class_ctor_defaults_name(crate::types::type_name(internal), defaults);
     }
@@ -3397,6 +3379,17 @@ impl IrFile {
                     .find(|class| class.is_value && class.fq_name == internal)
                     .and_then(|class| class.fields.first().map(|field| field.ty))
             })
+    }
+
+    /// Follow the exact source/external value-class facts already assembled in this IR to their
+    /// terminal semantic underlying type.
+    ///
+    /// This is the narrow consumer contract for common passes and plugins. It does not select a
+    /// target carrier, boxing policy, descriptor, or storage layout; those remain backend-owned.
+    pub(crate) fn terminal_value_class_underlying(&self, ty: Ty) -> Option<Ty> {
+        crate::value_classes::terminal_underlying(ty, &|classifier| {
+            self.value_class_underlying_name(classifier)
+        })
     }
 
     /// Preserve the source meaning of a value-class construction after the JVM pass replaces its
