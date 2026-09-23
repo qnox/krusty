@@ -6133,6 +6133,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
+  records the exception and comes back, so each runtime raise returns at once and each walk checks
+  for a pending exception after every `next` and every lambda it calls. That covers the lambda's own
+  exception and a `ConcurrentModificationException` from the list it walks. An out-of-bounds
+  `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
+  was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
+  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
+  `xs.addAll(list)` appends the argument's elements as they were when the call began, so
+  `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
+  more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
+  of memory. `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the
+  string's length.
+  Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
   flag for which it is, because the two classes differ observably and the step cannot tell them
