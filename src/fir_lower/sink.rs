@@ -101,6 +101,7 @@ fn lower_function_override_plans(
                 .iter()
                 .map(|ty| ty.get())
                 .collect(),
+            implementation_parameter_identities: edge.implementation_parameter_identities.to_vec(),
             implementation_result: edge.implementation_result.get(),
             suspend: edge.suspend,
             depth: edge.depth,

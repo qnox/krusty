@@ -303,6 +303,10 @@ fn materialize_delegation(
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect(),
+                        implementation_parameter_identities: member
+                            .overridden
+                            .parameter_identities
+                            .to_vec(),
                         implementation_result: member.call.result.get(),
                         suspend: member.call.suspend,
                         depth: 0,
