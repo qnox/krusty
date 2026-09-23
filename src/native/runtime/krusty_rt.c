@@ -3991,6 +3991,12 @@ KRef kt_map_put(KRef self, KRef key, KRef value) {
     if (at >= 0) {
         return kt_mutable_list_set(map->values, at, value);
     }
+    /* A key's `equals` that THREW ended the search without an answer, and the put ends with it:
+       Kotlin's leaves the map as it was, and inserting here would add a key the program never saw
+       go in. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     kt_mutable_list_add(map->keys, key);
     kt_mutable_list_add(map->values, value);
     return NULL;
@@ -4023,7 +4029,8 @@ void kt_map_clear(KRef self) {
 kt_boolean kt_set_contains(KRef self, KRef value) { return kt_map_contains_key(self, value); }
 
 kt_boolean kt_set_add(KRef self, KRef value) {
-    if (kt_map_contains_key(self, value)) {
+    /* A search that threw is no answer, so nothing is added, as `kt_map_put` explains. */
+    if (kt_map_contains_key(self, value) || kt_pending_exception() != NULL) {
         return false;
     }
     kt_mutable_list_add(((KMap *)self)->keys, value);
@@ -4041,13 +4048,19 @@ kt_boolean kt_set_remove(KRef self, KRef value) {
 
 /* `mapOf(a to b, …)` and `setOf(a, …)`, from the array a vararg call already packed. The array
    belongs to the CALLER, so its contents are copied in rather than shared: a map can be written
-   through, and writing to one must not reach back into the caller's array. */
+   through, and writing to one must not reach back into the caller's array.
+
+   An element whose `equals` throws ends the build there, as the throw ends Kotlin's: the caller
+   takes the exception and never sees the collection, and the elements after it are not asked. */
 KRef kt_map_of(KRef pairs) {
     KRef map = kt_map_new();
     kt_int length = kt_length_of(pairs);
     for (kt_int at = 0; at < length; at++) {
         KRef pair = kt_elements_of(pairs)[at];
         (void)kt_map_put(map, kt_pair_first(pair), kt_pair_second(pair));
+        if (kt_pending_exception() != NULL) {
+            return map;
+        }
     }
     return map;
 }
@@ -4064,6 +4077,9 @@ KRef kt_set_of(KRef elements) {
     kt_int length = kt_length_of(elements);
     for (kt_int at = 0; at < length; at++) {
         (void)kt_set_add(set, kt_elements_of(elements)[at]);
+        if (kt_pending_exception() != NULL) {
+            return set;
+        }
     }
     return set;
 }
@@ -4071,13 +4087,18 @@ KRef kt_set_of(KRef elements) {
 /* `m.keys`, `m.values` and `m.entries`. Kotlin's are VIEWS onto the map; these are snapshots, and
    the difference shows only where a program keeps one across a write to the map. Answering a
    snapshot is the same trade `toList()` on an array makes, and it is what lets each of them be an
-   object this runtime already has. */
+   object this runtime already has.
+
+   `keys` and `entries` APPEND rather than `add`: a map's keys are distinct already, and so are the
+   entries that carry them, so there is nothing for `add` to find. Its search compares against
+   everything inserted before, which made each view quadratic in the map's size -- and iterating a
+   map builds its entries afresh every time a loop starts. */
 KRef kt_map_keys(KRef self) {
     KRef keys = kt_set_new();
     KRef source = ((const KMap *)self)->keys;
     kt_int size = kt_list_size(source);
     for (kt_int at = 0; at < size; at++) {
-        (void)kt_set_add(keys, kt_list_get(source, at));
+        kt_mutable_list_add(((KMap *)keys)->keys, kt_list_get(source, at));
     }
     return keys;
 }
@@ -4108,7 +4129,7 @@ KRef kt_map_entries(KRef self) {
     for (kt_int at = 0; at < size; at++) {
         KRef key = kt_list_get(map->keys, at);
         KRef value = map->values == NULL ? key : kt_list_get(map->values, at);
-        (void)kt_set_add(entries, kt_map_entry_new(key, value));
+        kt_mutable_list_add(((KMap *)entries)->keys, kt_map_entry_new(key, value));
     }
     return entries;
 }
@@ -4127,16 +4148,25 @@ static kt_boolean kt_map_entry_equals(KRef self, KRef other) {
     return kt_equals(a->key, b->key) && kt_equals(a->value, b->value);
 }
 
+/* A half whose `hashCode` or `toString` throws ends the call there and the other half is not
+   asked, as Kotlin's `k.hashCode() xor v.hashCode()` never reaches its right side either. */
 static kt_int kt_map_entry_hash_code(KRef self) {
     const KMapEntry *entry = (const KMapEntry *)self;
     kt_int key = entry->key == NULL ? 0 : kt_hash_code(entry->key);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
     kt_int value = entry->value == NULL ? 0 : kt_hash_code(entry->value);
     return key ^ value;
 }
 
 static KRef kt_map_entry_to_string(KRef self) {
     const KMapEntry *entry = (const KMapEntry *)self;
-    KRef text = kt_string_plus(kt_to_string(entry->key), kt_string_utf8("=", 1));
+    KRef key = kt_to_string(entry->key);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(key, kt_string_utf8("=", 1));
     return kt_string_plus(text, kt_to_string(entry->value));
 }
 
@@ -4172,14 +4202,41 @@ static kt_int kt_map_hash_code(KRef self) {
     for (kt_int at = 0; at < size; at++) {
         KRef key = kt_list_get(map->keys, at);
         KRef value = kt_list_get(map->values, at);
+        /* A `hashCode` that threw ends the sum there: neither the other half nor the entries
+           after it are asked, as in `kt_map_entry_hash_code`. */
         uint32_t left = key == NULL ? 0u : (uint32_t)kt_hash_code(key);
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
         uint32_t right = value == NULL ? 0u : (uint32_t)kt_hash_code(value);
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
         total += left ^ right;
     }
     return (kt_int)total;
 }
 
-/* `{a=1, b=2}`, in insertion order, each half rendered through its own `toString`. */
+/* One key, value or element of a collection as its `toString` shows it. A collection that holds
+   ITSELF shows Kotlin's marker in its place -- `(this Map)` or `(this Collection)`, as
+   `AbstractMap` and `AbstractCollection` write -- because rendering it through its own `toString`
+   would render the collection again, without end. Only the collection itself is replaced: another
+   collection inside it renders as it always does. A rendering that throws answers NULL with the
+   exception pending, which the caller stops at. */
+static KRef kt_collection_part_to_string(KRef self, KRef part, const char *marker,
+                                         kt_int marker_length) {
+    if (part == self) {
+        return kt_string_utf8(marker, marker_length);
+    }
+    KRef text = kt_to_string(part);
+    return kt_pending_exception() != NULL ? NULL : text;
+}
+
+#define KT_THIS_MAP "(this Map)", (kt_int)(sizeof("(this Map)") - 1)
+#define KT_THIS_COLLECTION "(this Collection)", (kt_int)(sizeof("(this Collection)") - 1)
+
+/* `{a=1, b=2}`, in insertion order, each half rendered through its own `toString`. A half whose
+   `toString` throws ends the rendering there; the entries after it are not asked. */
 static KRef kt_map_to_string(KRef self) {
     const KMap *map = (const KMap *)self;
     KRef text = kt_string_utf8("{", 1);
@@ -4188,9 +4245,18 @@ static KRef kt_map_to_string(KRef self) {
         if (at != 0) {
             text = kt_string_plus(text, kt_string_utf8(", ", 2));
         }
-        text = kt_string_plus(text, kt_to_string(kt_list_get(map->keys, at)));
+        KRef key = kt_collection_part_to_string(self, kt_list_get(map->keys, at), KT_THIS_MAP);
+        if (key == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, key);
         text = kt_string_plus(text, kt_string_utf8("=", 1));
-        text = kt_string_plus(text, kt_to_string(kt_list_get(map->values, at)));
+        KRef value =
+            kt_collection_part_to_string(self, kt_list_get(map->values, at), KT_THIS_MAP);
+        if (value == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, value);
     }
     return kt_string_plus(text, kt_string_utf8("}", 1));
 }
@@ -4221,12 +4287,38 @@ static kt_int kt_set_hash_code(KRef self) {
     for (kt_int at = 0; at < size; at++) {
         KRef element = kt_list_get(keys, at);
         total += element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        /* A `hashCode` that threw ends the sum there, as `kt_map_hash_code`'s does. */
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
     }
     return (kt_int)total;
 }
 
-/* `[a, b]` — a set renders as a collection does, which is what Kotlin's own answers. */
-static KRef kt_set_to_string(KRef self) { return kt_list_to_string(((const KMap *)self)->keys); }
+/* `[a, b]` — a set renders as a collection does, which is what Kotlin's own answers. It renders
+   its elements itself rather than handing its keys list to the list's `toString`, because the
+   marker for a set that holds itself compares each element with the SET, which the list never
+   sees. */
+static KRef kt_set_to_string(KRef self) {
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    KRef text = kt_string_utf8("[", 1);
+    for (kt_int at = 0; at < size; at++) {
+        if (at != 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        KRef element =
+            kt_collection_part_to_string(self, kt_list_get(keys, at), KT_THIS_COLLECTION);
+        if (element == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, element);
+    }
+    return kt_string_plus(text, kt_string_utf8("]", 1));
+}
+
+#undef KT_THIS_COLLECTION
+#undef KT_THIS_MAP
 
 /* The companion object of a BUILT-IN type.
    
@@ -4655,14 +4747,26 @@ void kt_not_implemented(void) {
     KT_THROW(kt_type_not_implemented_error, KT_MESSAGE("An operation is not implemented."));
 }
 
+/* A message whose `toString` THROWS raises that exception instead of the thrower's own, as
+   Kotlin's does: the message is built before the exception that carries it, so what the rendering
+   raised is what propagates. `kt_throw` would overwrite it, so the thrower returns first. */
 void kt_not_implemented_reason(KRef reason) {
+    KRef text = kt_to_string(reason);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
     KT_THROW(kt_type_not_implemented_error,
-             kt_string_plus(KT_MESSAGE("An operation is not implemented: "), kt_to_string(reason)));
+             kt_string_plus(KT_MESSAGE("An operation is not implemented: "), text));
 }
 
-/* `error(message)` takes an `Any`, and the exception carries its `toString`. */
+/* `error(message)` takes an `Any`, and the exception carries its `toString` -- or, when that
+   throws, the exception is the one it threw, as above. */
 void kt_illegal_state(KRef message) {
-    KT_THROW(kt_type_illegal_state_exception, kt_to_string(message));
+    KRef text = kt_to_string(message);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KT_THROW(kt_type_illegal_state_exception, text);
 }
 
 void kt_require(kt_boolean value) {
@@ -4701,9 +4805,20 @@ void kt_assertion_failed(KRef lazy_message) {
         lazy_message->header.type->vtable_length <= KT_SLOT_INVOKE) {
         KT_FAIL("krusty: an assertion message is not a function value\n");
     }
+    /* A message lambda that THROWS -- `assert(false) { error("boom") }` -- propagates what it
+       threw, and so does a message whose `toString` throws: Kotlin computes the message before it
+       constructs the `AssertionError`, so it never gets that far. `kt_throw` overwrites the pending
+       slot, so each step returns rather than raising over it. */
     KRef message =
         ((KRef(*)(KRef))lazy_message->header.type->vtable[KT_SLOT_INVOKE])(lazy_message);
-    KT_THROW(kt_type_assertion_error, kt_to_string(message));
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KRef text = kt_to_string(message);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KT_THROW(kt_type_assertion_error, text);
 }
 
 void kt_check(kt_boolean value) {

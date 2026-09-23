@@ -131,3 +131,23 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
         "the payload arrives in order"
     );
 }
+
+#[test]
+fn a_map_or_set_that_holds_itself_renders_the_marker() {
+    run_driver("collection_to_string_self_reference");
+}
+
+#[test]
+fn a_stdlib_thrower_whose_message_throws_propagates_that_exception() {
+    run_driver("stdlib_thrower_keeps_first_exception");
+}
+
+#[test]
+fn map_keys_and_entries_copy_without_comparing() {
+    run_driver("map_views_do_not_compare_keys");
+}
+
+#[test]
+fn a_map_or_set_stops_where_an_element_member_threw() {
+    run_driver("map_stops_at_a_raise");
+}
