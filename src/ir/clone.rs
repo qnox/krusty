@@ -364,6 +364,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.inline_regions.contains(&source) {
         ir.inline_regions.insert(target);
     }
+    if ir.rereadable_cast_operands.contains(&source) {
+        ir.rereadable_cast_operands.insert(target);
+    }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);
     }

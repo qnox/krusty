@@ -565,11 +565,24 @@ impl BodyLowering<'_> {
                         operand,
                         target.get(),
                     ),
-                    FirTypeOperation::Cast => self.ir.add_expr(IrExpr::TypeOp {
-                        op: lower_type_operation(*operation, target.get()),
-                        arg: operand,
-                        type_operand: target.get(),
-                    }),
+                    FirTypeOperation::Cast => {
+                        let op = lower_type_operation(*operation, target.get());
+                        let cast = self.ir.add_expr(IrExpr::TypeOp {
+                            op,
+                            arg: operand,
+                            type_operand: target.get(),
+                        });
+                        let rereadable = matches!(
+                            self.body.expr(operand_id).map(|operand| &operand.kind),
+                            Some(FirExprKind::ValueRead(value))
+                                if self.immutable_values.contains(value)
+                                    && self.shared_local_type(*value).is_none()
+                        );
+                        if op == IrTypeOp::CastNonNull && rereadable {
+                            self.ir.rereadable_cast_operands.insert(cast);
+                        }
+                        cast
+                    }
                 }
             }
             FirExprKind::ImplicitConversion { value, conversion } => {

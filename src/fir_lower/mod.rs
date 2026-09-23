@@ -244,6 +244,8 @@ struct BodyLowering<'a> {
     capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
+    /// Values that are never reassigned: the parameters, and each `val` local once declared.
+    immutable_values: std::collections::HashSet<crate::fir::LocalValueId>,
     local_class_captures: HashMap<crate::types::TypeName, Vec<(ExprId, crate::types::Ty)>>,
     local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
     published_local_callables:
@@ -341,6 +343,11 @@ impl<'a> BodyLowering<'a> {
             capture_slots,
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
+            immutable_values: body
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.value)
+                .collect(),
             local_class_captures: HashMap::new(),
             local_callable_scopes,
             published_local_callables,

@@ -2406,6 +2406,10 @@ pub struct IrFile {
     /// The value is their final semantic result type. Backends use this to preserve value flow and
     /// emit the mandatory no-match failure path without re-running exhaustiveness analysis.
     pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
+    /// Non-null casts (`x as T`) whose operand reads an immutable value — a parameter or a `val`
+    /// local — keyed by the cast. Reading it again yields the same value, so a backend may read it
+    /// once for the null check and again for the cast, as kotlinc does, instead of duplicating it.
+    pub rereadable_cast_operands: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.

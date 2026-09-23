@@ -17035,7 +17035,14 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => "kotlin.Any".to_string(),
                             };
-                            code.dup();
+                            // An immutable operand is read again for the cast rather than
+                            // duplicated for the check, as kotlinc's cast lowering does.
+                            let reread = !physical_arg.is_jvm_scalar()
+                                && self.ir.rereadable_cast_operands.contains(&e)
+                                && matches!(self.ir.expr(*arg), IrExpr::GetValue(_));
+                            if !reread {
+                                code.dup();
+                            }
                             code.push_string(
                                 &format!("null cannot be cast to non-null type {kotlin_name}"),
                                 self.cw,
@@ -17046,6 +17053,9 @@ impl<'a> Emitter<'a> {
                                 "(Ljava/lang/Object;Ljava/lang/String;)V",
                             );
                             code.invokestatic(m, 2, 0);
+                            if reread {
+                                self.emit_type_op_operand(*arg, code);
+                            }
                             // Erased bound `java/lang/Object` (an `<T : Any>` cast) needs no `checkcast`.
                             if internal != "java/lang/Object" {
                                 let ci = self.cw.class_ref(&internal);
