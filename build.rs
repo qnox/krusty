@@ -159,7 +159,9 @@ fn main() {
          pub const AVAILABLE: bool = {built_any};\n"
     ));
     generated.push_str(&format!(
-        "/// The runtime sources every target's objects were compiled from, in the table's order.\n\
+        "/// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
+         /// the test that checks the table against them reads it.\n\
+         #[cfg(test)]\n\
          pub const SOURCES: &[&str] = &{SOURCES:?};\n"
     ));
     std::fs::write(out_dir.join("prebuilt_runtime.rs"), generated)
