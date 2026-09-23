@@ -2398,6 +2398,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/is_nullable_and_notnull_smartcast_e2e.rs`.
 - **A `finally { return … }` / `finally { throw … }`** that itself transfers control suppresses the
   catch-all's exception re-raise (emitting the dead `athrow` left an unframed instruction → verify error).
+- **A narrowing recorded for a bare member access belongs to the implicit `this` inside it, not to
+  the value the access produces.** `resolve` records `narrowed_this_member` against the *access*
+  (`node` for an implicit `this.node`) so the lowerer narrows the `this` it loads before reading the
+  field. When such an access is itself a CALL's receiver — `node.tag()` — the checked call path must
+  not read that map again: the access has already applied the narrowing, and casting a second time
+  checks the PROPERTY's value against the receiver's narrowed type. `node.tag()` inside
+  `if (this is Light)` emitted `checkcast Light` twice, the second on the `Node` that `getNode`
+  answered, which the verifier rejects outright (`Type 'Light' is not assignable to 'Node'`). Only
+  `selected_value_smartcasts` — a cast of the receiver's OWN value — belongs at a call's receiver.
+  `tests/narrowed_this_member_call_e2e.rs`; the corpus case is
+  `codegen/box/smartCasts/kt44814.kt`.
 - **`is`/`as`/`as?` to `IntArray`/`CharArray`/…** resolves to the primitive array type before the
   classpath-class fallback (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`). `is UInt`/
   `is ULong` and smart-casting a reference to an unsigned value type are rejected (value-type boxing).

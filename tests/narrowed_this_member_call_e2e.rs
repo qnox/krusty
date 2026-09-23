@@ -39,3 +39,62 @@ class B : A() {\n\
 fun box(): String = if (B().pick() == 42) \"OK\" else \"FAIL\"\n";
     assert_eq!(run(SRC).expect("narrowed this call with args"), "OK");
 }
+
+/// A bare member READ against the narrowed `this`, used as the RECEIVER of a call.
+///
+/// The narrowing belongs to the implicit `this` inside `node`, not to the `Node` that `node`
+/// answers — and the read has already applied it by the time the call site sees it. Casting again
+/// there checked a `Node` against `Light`: the JVM rejected the method outright
+/// (`VerifyError: Type 'Light' is not assignable to 'Node'`) and the native backend raised a
+/// `ClassCastException`. `codegen/box/smartCasts/kt44814.kt` is the corpus case.
+#[test]
+fn a_member_read_on_narrowed_this_may_be_a_calls_receiver() {
+    const SRC: &str = "\
+class Node { fun tag(): Int = 7 }\n\
+sealed class Base\n\
+class Light(val node: Node) : Base()\n\
+fun Base?.viaWhen(): Int = when (this) {\n\
+    null -> 0\n\
+    is Light -> node.tag()\n\
+}\n\
+fun Base?.viaIf(): Int { if (this is Light) return node.tag(); return 0 }\n\
+fun Base.viaSubject(): Int = when (this) { is Light -> node.tag(); else -> 0 }\n\
+fun box(): String {\n\
+    val light: Base? = Light(Node())\n\
+    if (light.viaWhen() != 7) return \"f1\"\n\
+    if (light.viaIf() != 7) return \"f2\"\n\
+    if (Light(Node()).viaSubject() != 7) return \"f3\"\n\
+    if (null.viaWhen() != 0) return \"f4\"\n\
+    if (null.viaIf() != 0) return \"f5\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("narrowed this member read as a receiver"),
+        "OK"
+    );
+}
+
+/// The same read, still narrowed when the call takes the narrowed `this`'s OTHER members as
+/// arguments — the shape the corpus case is written in.
+#[test]
+fn a_narrowed_read_carries_its_siblings_as_arguments() {
+    const SRC: &str = "\
+class Tree\n\
+class Node { fun children(t: Tree): Int = 3 }\n\
+sealed class Base\n\
+class Light(val node: Node, val tree: Tree) : Base()\n\
+fun Base?.count(): Int = when (this) {\n\
+    null -> -1\n\
+    is Light -> node.children(tree)\n\
+}\n\
+fun box(): String {\n\
+    val light: Base? = Light(Node(), Tree())\n\
+    if (light.count() != 3) return \"f1\"\n\
+    if (null.count() != -1) return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("narrowed read with sibling arguments"),
+        "OK"
+    );
+}
