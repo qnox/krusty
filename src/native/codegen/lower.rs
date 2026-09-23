@@ -2857,9 +2857,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 // made. Asked by MEMBER, not by the receiver's shape: a shape
                                 // says nothing about which member the call is, and
                                 // `CharSequence` is walkable where `value[0]` is no walk.
-                                if let Some(realized) =
-                                    self.walking_member(&name, receiver, args, *ret)
-                                {
+                                if let Some(realized) = self.walking_member(
+                                    &name,
+                                    receiver,
+                                    args,
+                                    *ret,
+                                    &realization.callable.physical_params,
+                                ) {
                                     return realized;
                                 }
                                 // A `ReadOnlyProperty` delegate. The runtime builds none, so the

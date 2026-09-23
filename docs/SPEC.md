@@ -7378,6 +7378,21 @@ and behavior is checked by RUNNING the emitted program.
   Kotlin's documented one.
   Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
 
+- **A TERMINAL member may be asked of a sequence; a lazy one may not.** Every walk this runtime
+  has is eager, and what makes an eager `map` over a sequence wrong is the ANSWER it hands on — the
+  transform would run for elements a later `first()` never asks for. `forEach` and `joinToString`
+  consume every element the sequence has and hand on no lazy answer, so the eager walk reaches
+  exactly the elements Kotlin's own would, in the same order.
+  Tests: `tests/native_iterable_walk_members_e2e.rs` (`a_sequence_answers_its_terminal_members`).
+
+- **`xs + x` and `xs + ys` are told apart by the DECLARATION, over a walk as over a list.** After
+  substitution an element of type `List<T>` and a collection of them look exactly alike, so the
+  argument's own type cannot decide; the physical parameter can. The reading is shared with
+  `plusAssign` rather than written twice, which is also what keeps it reading the LAST physical
+  parameter — reading the first told it the receiver was a collection, which is always true, and
+  made `xs += 1` walk the integer.
+  Tests: `tests/native_iterable_walk_members_e2e.rs` (`a_walk_adds_an_element_or_another_walk`).
+
 - **`super<B>.p` names B's REALIZATION of the property, not a declaration on B.** An `open val` on
   an interface B merely inherits is what `super<B>.p` reads, and `super<C2>.p` reads the `p` that
   C2's own superclass declares. The search therefore walks up from the named class — its superclass

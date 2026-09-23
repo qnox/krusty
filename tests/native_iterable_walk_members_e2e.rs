@@ -431,3 +431,54 @@ fun box(): String {
 "#;
     every_backend_agrees_with_kotlinc("native_collection_size", source);
 }
+
+/// `xs + x` and `xs + ys` over an iterable the runtime cannot INDEX — a progression, say.
+///
+/// Which of the two a call means is the DECLARATION's answer, read from its physical parameter:
+/// after substitution an element of type `List<T>` and a collection of them look exactly alike,
+/// and the argument's own type cannot tell them apart.
+///
+/// Not asserted here, because it is the FRONTEND's and fails on both of krusty's backends:
+/// `listOf(listOf(1)) + listOf(2)` selects the collection overload and answers `[[1], 2]` where
+/// Kotlin selects the element one and answers `[[1], [2]]`. Confirmed pre-existing by removing
+/// every `src/native/` change and re-running.
+#[test]
+fn a_walk_adds_an_element_or_another_walk() {
+    let source = r#"
+fun box(): String {
+    val range = 0..3
+    if (range + 4 != listOf(0, 1, 2, 3, 4)) return "fail element " + (range + 4)
+    if (range + listOf(9) != listOf(0, 1, 2, 3, 9)) return "fail collection"
+    if (range + emptyList<Int>() != listOf(0, 1, 2, 3)) return "fail empty collection"
+    if (listOf(1) + 2 != listOf(1, 2)) return "fail list element"
+    if (listOf(1) + listOf(2) != listOf(1, 2)) return "fail list collection"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_plus", source);
+}
+
+/// A TERMINAL operation over a sequence consumes every element, so an eager walk is Kotlin's own.
+///
+/// What makes an eager `map` wrong over a sequence is the ANSWER it hands on — the transform would
+/// run for elements a later `first()` never asks for — and a terminal operation has no such answer.
+#[test]
+fn a_sequence_answers_its_terminal_members() {
+    let source = r#"
+fun box(): String {
+    val seq = listOf(1, 2, 3).asSequence()
+    var sum = 0
+    seq.forEach { sum += it }
+    if (sum != 6) return "fail forEach " + sum
+    if (seq.joinToString() != "1, 2, 3") return "fail joinToString " + seq.joinToString()
+    if (sequenceOf("a", "b").joinToString() != "a, b") return "fail sequenceOf"
+    if (sequenceOf<Int>().joinToString() != "") return "fail empty sequenceOf"
+    if (emptySequence<Int>().joinToString() != "") return "fail emptySequence"
+    var single = 0
+    sequenceOf(7).forEach { single = it }
+    if (single != 7) return "fail single"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_sequence_terminal", source);
+}

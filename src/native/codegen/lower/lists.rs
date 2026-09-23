@@ -183,9 +183,32 @@ fn is_sequence(ty: Ty) -> bool {
         .is_some_and(super::super::super::intrinsics::is_sequence_type)
 }
 
+/// Whether a `plus`/`plusAssign` operand is a thing to WALK rather than a single element.
+///
+/// Read from the declaration's PHYSICAL parameter, never from the argument. After substitution an
+/// element of type `List<T>` and a collection of them look exactly alike, and only the declaration
+/// tells them apart — reading the first physical parameter instead of the last told us the
+/// RECEIVER was a collection, which is always true and made `xs += 1` walk the integer.
+fn walks_its_operand(physical: &[Ty]) -> bool {
+    physical.last().map(|ty| ty.non_null()).is_some_and(|ty| {
+        ty.is_array()
+            || ty.obj_internal().is_some_and(|internal| {
+                super::super::super::intrinsics::is_list_type(internal)
+                    || super::super::super::intrinsics::iteration_role(internal).is_some()
+            })
+    })
+}
+
 /// Whether a member may be asked of a SEQUENCE receiver; see [`is_sequence`].
+///
+/// Two kinds qualify. One is the members that are LAZY either way — the iterator, and `withIndex`,
+/// which answers another lazy thing. The other is the TERMINAL ones: `forEach` and `joinToString`
+/// consume every element the sequence has, so running the walk eagerly reaches exactly the
+/// elements Kotlin's own would and in the same order. What makes an eager `map` wrong is not the
+/// walk but the answer — it would run the transform for elements a later `first()` never asks for
+/// — and a terminal operation has no such answer to hand on.
 fn lazy_over_a_sequence(name: &str) -> bool {
-    matches!(name, "iterator" | "withIndex")
+    matches!(name, "iterator" | "withIndex" | "forEach" | "joinToString")
 }
 
 /// The runtime entry point an implementor dispatch falls through to when the receiver is none of
@@ -215,6 +238,7 @@ fn walk_symbol(
     arity: usize,
     ret: Ty,
     over_list: bool,
+    physical: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     if role != IterationRole::Iterable {
         return None;
@@ -240,6 +264,12 @@ fn walk_symbol(
         // The same sort ordered by the elements themselves, or by what a selector answers for
         // them. `sortedBy` asks the selector once per COMPARISON, which is what Kotlin's own does.
         ("sorted", 0) => ("kt_iterable_sorted", vec![any()], any()),
+        // `xs + x` and `xs + ys` over an iterable the runtime cannot index — a progression, say.
+        // Which of the two a call means is the DECLARATION's answer; see `walks_its_operand`.
+        ("plus", 1) if walks_its_operand(physical) => {
+            ("kt_iterable_plus_all", vec![any(), any()], any())
+        }
+        ("plus", 1) => ("kt_iterable_plus_element", vec![any(), any()], any()),
         ("zip", 1) => ("kt_iterable_zip", vec![any(), any()], any()),
         ("toMutableSet", 0) => ("kt_iterable_to_mutable_set", vec![any()], any()),
         ("toMap", 0) => ("kt_iterable_to_map", vec![any()], any()),
@@ -366,13 +396,7 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
     let operand = physical.last().map(|ty| ty.non_null());
     let by_index = matches!(operand, Some(Ty::Int));
     // Whether the operand is a thing to WALK rather than a single element; see `plusAssign`.
-    let walkable = operand.is_some_and(|ty| {
-        ty.is_array()
-            || ty.obj_internal().is_some_and(|internal| {
-                super::super::super::intrinsics::is_list_type(internal)
-                    || super::super::super::intrinsics::iteration_role(internal).is_some()
-            })
-    });
+    let walkable = walks_its_operand(physical);
     Some(match (name, arity) {
         // `List.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
@@ -447,6 +471,24 @@ impl BodyLowering<'_, '_, '_> {
         packs_a_vararg: bool,
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        // `sequenceOf` is the SEQUENCES facade's, and is `elements.asSequence()` — the runtime
+        // wraps a walk without copying it, so the list the vararg already packed is the source.
+        if super::super::super::intrinsics::is_sequences_facade(owner) {
+            return match (name, args) {
+                ("emptySequence", []) | ("sequenceOf", []) => Some(
+                    self.sequence_over(|body| body.runtime_call("kt_list_empty", &[], any(), &[])),
+                ),
+                ("sequenceOf", [argument]) if packs_a_vararg => {
+                    let elements = *argument;
+                    Some(self.sequence_over(move |body| body.list_of(elements)))
+                }
+                ("sequenceOf", [element]) => {
+                    let only = *element;
+                    Some(self.sequence_over(move |body| body.list_single(only)))
+                }
+                _ => None,
+            };
+        }
         if !super::super::super::intrinsics::is_collections_facade(owner) {
             return None;
         }
@@ -795,6 +837,21 @@ impl BodyLowering<'_, '_, '_> {
         Some(property.name.clone())
     }
 
+    /// A sequence over whatever `source` builds: the runtime keeps the source and walks it when
+    /// something asks for an iterator, so nothing is copied and nothing is consumed early.
+    fn sequence_over(
+        &mut self,
+        source: impl FnOnce(&mut Self) -> Result<Option<Value>, Unsupported>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(over) = source(self)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_sequence_of", &[any()], any(), &[over])
+    }
+
     fn list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
         let array = self.reference(elements)?;
         if self.terminated {
@@ -908,7 +965,7 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, carried, answer) = indexed_value_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
-        if let Some(realized) = self.walking_member(name, receiver, args, ret) {
+        if let Some(realized) = self.walking_member(name, receiver, args, ret, physical) {
             return Some(realized);
         }
         // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
@@ -942,6 +999,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         args: &[u32],
         ret: Ty,
+        physical: &[Ty],
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.type_of(receiver)?;
         if self.file.implements_unwalkable_collection_of(ty) {
@@ -983,7 +1041,7 @@ impl BodyLowering<'_, '_, '_> {
         let over_list = is_list(ty) && !self.file.implements_collection_of(ty);
         let (symbol, carried, answer) = interface_symbol(role, name, written).or_else(|| {
             (!over_text)
-                .then(|| walk_symbol(role, name, written, ret, over_list))
+                .then(|| walk_symbol(role, name, written, ret, over_list, physical))
                 .flatten()
         })?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
@@ -1049,7 +1107,7 @@ impl BodyLowering<'_, '_, '_> {
             // declines the list path outright, so there is nothing for the list gate to hold back.
             .or_else(|| {
                 super::super::super::intrinsics::iteration_role_of(ty)
-                    .and_then(|role| walk_symbol(role, name, args.len(), ret, false))
+                    .and_then(|role| walk_symbol(role, name, args.len(), ret, false, params))
             })
             .or_else(|| super::super::super::intrinsics::scalar_member(&owner, name, params))
             .or_else(|| super::maps::runtime_symbol(&owner, name, args.len()))

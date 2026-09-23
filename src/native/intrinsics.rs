@@ -739,6 +739,11 @@ pub(super) fn is_collections_facade(owner: &str) -> bool {
     declaration_package(kotlin_owner(owner)) == "kotlin/collections"
 }
 
+/// Whether `owner` names the `kotlin.sequences` facade a top-level sequence declaration arrives as.
+pub(super) fn is_sequences_facade(owner: &str) -> bool {
+    declaration_package(kotlin_owner(owner)) == "kotlin/sequences"
+}
+
 /// How a program iterates a receiver it could only type by an INTERFACE.
 ///
 /// `Iterable` and `Iterator` both have a Kotlin spelling and a `java.util` one — the provider
