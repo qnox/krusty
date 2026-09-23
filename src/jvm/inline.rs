@@ -1800,8 +1800,9 @@ fn drop_slot_entries(collapsed: &[VType], removed: &[u16]) -> Vec<VType> {
     kept
 }
 
-/// Instruction indices consumed by an entry null-check triplet (`aload`/`ldc`/`invokestatic
-/// Intrinsics.checkNotNull*`), which the splice deletes. A lambda's `aload` inside one is not a use.
+/// Instruction indices consumed by a parameter null-check triplet (`aload`/`ldc`/`invokestatic
+/// Intrinsics.checkNotNullParameter`), which the splice deletes. A lambda's `aload` inside one is not a
+/// use.
 pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::HashSet<usize> {
     let mut deleted = std::collections::HashSet::new();
     for (index, insn) in insns.iter().enumerate() {
@@ -1813,7 +1814,7 @@ pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::H
         }
         let pool = (operands[0] as u16) << 8 | operands[1] as u16;
         if let Some(("kotlin/jvm/internal/Intrinsics", name)) = methodref_target(src_cp, pool) {
-            if name == "checkNotNullParameter" || name == "checkNotNullExpressionValue" {
+            if name == "checkNotNullParameter" {
                 deleted.extend(index - 2..=index);
             }
         }
@@ -2115,7 +2116,7 @@ pub(super) fn splice_unified(
 
     // Collect edits over the host instruction list (resolved against the SOURCE pool, BEFORE relocation
     // rewrites the indices), sorted by start index, non-overlapping:
-    //  • delete each entry `checkNotNullParameter`/`…ExpressionValue` triplet (aload/ldc/invokestatic);
+    //  • delete each entry `checkNotNullParameter` triplet (aload/ldc/invokestatic);
     //  • replace each lambda's `aload <slot>; invokeinterface Function0.invoke` with its body.
     struct Edit {
         at: usize,
@@ -2130,9 +2131,10 @@ pub(super) fn splice_unified(
                 if let Some(("kotlin/jvm/internal/Intrinsics", n)) =
                     methodref_target(&body.source_cp, idx)
                 {
-                    if (n == "checkNotNullParameter" || n == "checkNotNullExpressionValue")
-                        && i >= 2
-                    {
+                    // kotlinc's inliner drops only the inlined function's own parameter checks: a
+                    // `checkNotNullExpressionValue` guards a platform value the body itself reads, and
+                    // stays.
+                    if n == "checkNotNullParameter" && i >= 2 {
                         edits.push(Edit {
                             at: i - 2,
                             len: 3,
