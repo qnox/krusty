@@ -399,6 +399,7 @@ pub(super) fn realize(
         publish_reified_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
         let member_realization = callable.member_realization;
+        let semantic_role = callable.semantic_role;
         let descriptor = if callable.descriptor.is_empty() {
             crate::jvm::names::method_descriptor(&callable.physical_params, callable.physical_ret)
         } else {
@@ -859,7 +860,10 @@ pub(super) fn realize(
             false,
             declared_params,
         );
-        bridge_external_result(ir, index, physical_result, semantic_ret);
+        let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
+        if let Some(role) = semantic_role {
+            ir.semantic_call_roles.insert(realized_call, role);
+        }
     }
     for (owner, target) in &mut ir.external_super_constructors {
         let uses_defaults = ir
