@@ -178,11 +178,29 @@ pub(super) fn finalize_local_superclass_captures(
         }
         // Slot 0 of a constructor body is `this`, so a prefix parameter is one past its index —
         // the same address `constructor_capture_parameter` reads one by.
+        let shared_parameters = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, &slot)| {
+                ir.shared_class_capture_fields
+                    .get(&(class as u32, slot))
+                    .copied()
+                    .map(|element| (parameter as u32, element))
+            })
+            .collect::<Vec<_>>();
         let arguments: Vec<crate::ir::ExprId> = slots
             .into_iter()
             .map(|slot| ir.add_expr(IrExpr::GetValue(slot + 1)))
             .collect();
         let parameters: Vec<crate::types::Ty> = wanted.into_iter().map(|(_, ty)| ty).collect();
+        for (parameter, element) in shared_parameters {
+            assert!(
+                ir.shared_super_capture_parameters
+                    .insert((class as u32, parameter), element)
+                    .is_none(),
+                "one shared capture owns one selected superclass parameter"
+            );
+        }
         let declaration = &mut ir.classes[class];
         declaration.super_args.splice(0..0, arguments);
         declaration.super_ctor_params.splice(0..0, parameters);

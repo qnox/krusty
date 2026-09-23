@@ -2275,6 +2275,12 @@ pub struct IrFile {
     /// the holder representation from this exact coordinate without inferring it from a field name,
     /// constructor position, or expression shape.
     pub shared_class_capture_fields: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// A superclass-constructor parameter that forwards a mutable capture's shared holder, keyed by
+    /// `(subclass, selected-super-parameter)`. `Ty` is the logical captured element type. This exact
+    /// edge survives independently of the argument expression and of the selected constructor's
+    /// semantic parameter type, so a backend can realize its holder ABI without reselecting a
+    /// constructor or inferring capture storage from an erased descriptor.
+    pub shared_super_capture_parameters: std::collections::HashMap<(ClassId, u32), Ty>,
     /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:

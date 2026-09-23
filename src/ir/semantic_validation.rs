@@ -506,6 +506,10 @@ impl IrFile {
             "shared class capture field",
             self.shared_class_capture_fields.values().copied(),
         )?;
+        reject_all(
+            "shared superclass-constructor capture parameter",
+            self.shared_super_capture_parameters.values().copied(),
+        )?;
         for class in &self.classes {
             validate_class(class)?;
         }
