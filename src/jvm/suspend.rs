@@ -5622,7 +5622,10 @@ fn build_continuation_class(
         superclass: crate::types::type_name(CONTINUATION_IMPL),
         super_arg_prelude: Vec::new(),
         super_args: vec![super_arg],
-        super_ctor_params: vec![Ty::Int],
+        // The generated class delegates to `ContinuationImpl(Continuation)`. This field is now the
+        // backend's exact selected-constructor contract, so it must describe the target parameter,
+        // not the continuation class's `label: Int` storage field.
+        super_ctor_params: vec![continuation_ty()],
         super_ctor_is_primary: true,
         enum_entries: vec![],
         enum_entry_of: None,
