@@ -15,8 +15,8 @@ const SOURCE: &str = "class Link(val name: String?, val next: Link?) {\n\
     \x20   fun touch() {}\n\
     \x20   fun grow(): Link = Link(name, this)\n\
     }\n\
-    fun size(s: String?): Int? = s?.length\n\
-    fun sizeOr(s: String?): Int = s?.length ?: 0\n\
+    fun nullableLength(s: String?): Int? = s?.length\n\
+    fun lengthOrZero(s: String?): Int = s?.length ?: 0\n\
     fun nextName(link: Link?): String? = link?.next?.name\n\
     fun thirdName(link: Link?): String? = link?.next?.next?.name\n\
     fun touchIt(link: Link?) {\n\
@@ -78,8 +78,8 @@ fn safe_calls_are_laid_out_like_kotlincs() {
         return;
     };
     for member in [
-        "java.lang.Integer size(java.lang.String)",
-        "int sizeOr(java.lang.String)",
+        "java.lang.Integer nullableLength(java.lang.String)",
+        "int lengthOrZero(java.lang.String)",
         "java.lang.String nextName(Link)",
         "java.lang.String thirdName(Link)",
         "void touchIt(Link)",
@@ -123,8 +123,8 @@ fn safe_calls_laid_out_like_kotlincs_still_run() {
             "{SOURCE}\
              fun box(): String {{\n\
              \x20   val chain = Link(\"a\", Link(\"b\", Link(\"c\", null)))\n\
-             \x20   if (size(null) != null || size(\"ab\") != 2) return \"size\"\n\
-             \x20   if (sizeOr(null) != 0 || sizeOr(\"abc\") != 3) return \"sizeOr\"\n\
+             \x20   if (nullableLength(null) != null || nullableLength(\"ab\") != 2) return \"nullableLength\"\n\
+             \x20   if (lengthOrZero(null) != 0 || lengthOrZero(\"abc\") != 3) return \"lengthOrZero\"\n\
              \x20   if (nextName(null) != null || nextName(Link(\"a\", null)) != null) return \"next\"\n\
              \x20   if (nextName(chain) != \"b\") return \"next2\"\n\
              \x20   if (thirdName(chain) != \"c\" || thirdName(Link(\"a\", Link(\"b\", null))) != null) return \"third\"\n\
