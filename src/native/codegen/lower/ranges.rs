@@ -176,7 +176,8 @@ fn comparable_range_element(ty: Ty) -> Option<Ty> {
         return None;
     }
     let argument = arguments.first()?.non_null();
-    (matches!(argument, Ty::Obj(..)) && carrier(argument) == Carrier::Ref).then_some(argument)
+    (matches!(argument, Ty::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
+        .then_some(argument)
 }
 
 /// The runtime function answering one member of a comparable range, and what it answers with.
@@ -650,7 +651,7 @@ impl BodyLowering<'_, '_, '_> {
             end,
         } = range;
         let counter = counter.non_null();
-        if carrier(counter).clif().is_none() {
+        if self.carrier(counter).clif().is_none() {
             return Err(format!("a counted loop over `{counter:?}`"));
         }
         // Both ends are evaluated ONCE, in source order, before the loop runs: `a..b` builds a
@@ -767,7 +768,7 @@ impl BodyLowering<'_, '_, '_> {
         counter: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let counter = counter.non_null();
-        if carrier(counter).clif().is_none() {
+        if self.carrier(counter).clif().is_none() {
             return Err(format!("a range membership test over `{counter:?}`"));
         }
         // Any of the three may TRANSFER CONTROL rather than answer — `x in 1u..break`, and the
@@ -1019,7 +1020,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         // `IntRange.first` is an `Int` and `CharRange.first` is a `Char`: the runtime answered at
         // its own width and the value narrows to the one the program asked for.
-        let Some(clif) = carrier(ret).clif() else {
+        let Some(clif) = self.carrier(ret).clif() else {
             return Ok(Some(answer));
         };
         Ok(Some(self.builder.ins().ireduce(clif, answer)))

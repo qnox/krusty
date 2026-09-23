@@ -244,7 +244,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return Ok(Some(self.file.classes[class as usize].descriptor));
         }
-        if carrier(target) != Carrier::Ref {
+        if self.carrier(target) != Carrier::Ref {
             return Ok(None);
         }
         self.file.type_descriptor(target)
@@ -299,6 +299,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             answer = self.builder.ins().bxor(answer, one);
         }
         Ok(Some(answer))
+    }
+
+    /// The object a runtime cast let through, as the site's `target` carries it.
+    fn checked_object(
+        &mut self,
+        checked: Option<Value>,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        match checked {
+            Some(object) if !self.terminated => {
+                self.convert(object, Some(Ty::nullable(any())), target)
+            }
+            other => Ok(other),
+        }
     }
 
     /// `is`, `as`, `as?` and the coercions the frontend inserts.
@@ -378,9 +392,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 //
                 // Unboxing first and converting would answer `1` to a program Kotlin refuses with
                 // a ClassCastException, so the descriptor is asked before anything is read out.
-                let source_carrier = self.type_of(arg).map(carrier);
-                if carrier(target) != Carrier::Ref
-                    && source_carrier.is_none_or(|source| source != carrier(target))
+                let source_carrier = self.type_of(arg).map(|ty| self.carrier(ty));
+                if self.carrier(target) != Carrier::Ref
+                    && source_carrier.is_none_or(|source| source != self.carrier(target))
                 {
                     let Some(descriptor) = self.file.type_descriptor(target)? else {
                         return self.coerce(arg, type_operand);
@@ -428,7 +442,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     };
                     if op != IrTypeOp::CastNonNull
                         || type_operand.is_nullable()
-                        || carrier(type_operand) != Carrier::Ref
+                        || self.carrier(type_operand) != Carrier::Ref
                     {
                         return Ok(Some(value));
                     }
@@ -443,7 +457,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 };
                 let descriptor = self.data_address(descriptor);
-                self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])
+                let checked =
+                    self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])?;
+                // What passed the check is an OBJECT; where the target is a value class carried
+                // as its value, the value is read out of it.
+                self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
                 let Some(descriptor) = self.checked_cast_target(type_operand)? else {
@@ -453,12 +471,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 };
                 let descriptor = self.data_address(descriptor);
-                self.runtime_call(
+                let checked = self.runtime_call(
                     "kt_safe_cast",
                     &[any(), any()],
                     any(),
                     &[object, descriptor],
-                )
+                )?;
+                self.checked_object(checked, Ty::nullable(type_operand))
             }
             IrTypeOp::ImplicitCoercion => self.coerce(arg, type_operand),
         }

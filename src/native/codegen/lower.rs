@@ -27,6 +27,7 @@ mod maps;
 mod objects;
 mod ranges;
 mod references;
+mod results;
 mod scope;
 mod statics;
 mod strings;
@@ -51,7 +52,7 @@ use crate::ir::{
     IrLocalPropertyLayout, IrStatic, IrTypeOp,
 };
 use crate::libraries::SemanticPlatform;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
@@ -104,9 +105,10 @@ impl Carrier {
     }
 }
 
-/// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
+/// How a type ALREADY PROJECTED is carried — see [`FileLowering::carrier`] for a semantic one. A
+/// nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
 /// does on the JVM and as the C runtime already expects.
-fn carrier(ty: Ty) -> Carrier {
+fn machine_carrier(ty: Ty) -> Carrier {
     match ty {
         Ty::Unit => Carrier::Void,
         Ty::Boolean => Carrier::Scalar(types::I8, false),
@@ -174,6 +176,9 @@ pub struct FileInput<'a> {
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
         &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Which classifiers are value classes, and how this target carries each occurrence of one;
+    /// see [`crate::native::value_classes`].
+    pub value_classes: &'a super::super::value_classes::NativeValueClasses,
 }
 
 pub fn lower_file(
@@ -187,8 +192,9 @@ pub fn lower_file(
         ir,
         dependency_properties,
         runtime_symbols,
+        value_classes,
     } = input;
-    let class_model = model::build(ir)?;
+    let class_model = model::build(ir, value_classes)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(
@@ -201,6 +207,7 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
+        values: value_classes,
         provider,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
@@ -262,7 +269,9 @@ pub fn lower_file(
             && function.dispatch_receiver.is_none()
             && match entry {
                 Entry::Main => function.name == "main",
-                Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
+                Entry::Box => {
+                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
+                }
             };
         if is_entry {
             lowering.define_program_entry(index, statics_init)?;
@@ -424,6 +433,8 @@ fn declares_its_own_comparable(ir: &IrFile) -> bool {
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    /// Which classifiers are value classes, and which occurrences travel unboxed.
+    values: &'a super::super::value_classes::NativeValueClasses,
     provider: &'a Rc<dyn SemanticPlatform>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
@@ -512,6 +523,12 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
+    /// How a SEMANTIC type is carried: a value class projected to its underlying value wherever
+    /// this target's representation policy says so, then the machine rule for what that is.
+    fn carrier(&self, ty: Ty) -> Carrier {
+        machine_carrier(self.values.project(ty))
+    }
+
     /// Every class of THIS FILE that could stand behind the dependency type `internal`.
     ///
     /// A member asked of such a type is the runtime's answer, and the runtime answers only for the
@@ -657,12 +674,12 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match carrier(*param).abi_param() {
+            match self.carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".to_string()),
             }
         }
-        if let Some(abi) = carrier(ret).abi_param() {
+        if let Some(abi) = self.carrier(ret).abi_param() {
             signature.returns.push(abi);
         }
         Ok(signature)
@@ -679,7 +696,13 @@ impl<'a> FileLowering<'a> {
                     owner.render()
                 ));
             }
-            params.push(any());
+            // A value class's member takes the VALUE as `this`; its box reaches it through a
+            // bridge. Every other member takes the object, as a reference.
+            params.push(if self.values.is_value_class(owner) {
+                Ty::Obj(owner, &[])
+            } else {
+                any()
+            });
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -805,7 +828,7 @@ impl<'a> FileLowering<'a> {
         // Both facts about the result travel into the body: the carrier decides the shape of the
         // `return`, and the TYPE decides how a value that arrives in another representation is
         // converted into it — a carrier cannot, because `Boolean` and `UByte` share one.
-        let carried = carrier(result);
+        let carried = self.carrier(result);
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -963,7 +986,7 @@ impl<'a> FileLowering<'a> {
         let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
         let uncaught = self.import("kt_check_uncaught", &[], Ty::Unit)?;
-        let prints_result = carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
+        let prints_result = self.carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
         let println = if prints_result {
             Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
         } else {
@@ -1093,8 +1116,13 @@ pub(super) struct PendingFinally {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// How a semantic type is carried in this file; see [`FileLowering::carrier`].
+    fn carrier(&self, ty: Ty) -> Carrier {
+        self.file.carrier(ty)
+    }
+
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
-        let Some(clif) = carrier(ty).clif() else {
+        let Some(clif) = self.carrier(ty).clif() else {
             return Err("a `Unit`-typed local".to_string());
         };
         let variable = self.builder.declare_var(clif);
@@ -1241,8 +1269,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // A function whose result is a reference can still be handed `Unit` — a
                         // `Unit`-returning lambda's body returns the `Unit` OBJECT, because
                         // `FunctionN.invoke` answers with a reference whatever the lambda does.
-                        // `reference` materializes the runtime's singleton for exactly that.
-                        let value = self.reference(value)?;
+                        // `coerce` materializes the runtime's singleton for exactly that. It coerces
+                        // to the DECLARED result, not to `Any`: a value class carried as its value
+                        // is returned as that value, never boxed on the way out.
+                        let declared = self.result_type;
+                        let value = match self.coerce(value, declared)? {
+                            Some(value) => value,
+                            None => self.builder.ins().iconst(types::I64, 0),
+                        };
                         if self.terminated {
                             return Ok(());
                         }
@@ -1306,7 +1340,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Some(IrExpr::RefNew { .. }) => any(),
                     _ => ty,
                 };
-                if carrier(ty) == Carrier::Void {
+                if self.carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
                     }
@@ -1575,9 +1609,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         result: Option<Ty>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = result.filter(|ty| carrier(*ty) != Carrier::Void);
+        let result = result.filter(|ty| self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
-            let clif = carrier(ty).clif().expect("non-void carrier");
+            let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
         }
 
@@ -1618,7 +1652,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // costs a few unreachable instructions and never a wrong answer.
                 Some(ty) => {
                     self.runtime_call("kt_no_when_branch_matched", &[], Ty::Unit, &[])?;
-                    let clif = carrier(ty).clif().expect("non-void carrier");
+                    let clif = self.carrier(ty).clif().expect("non-void carrier");
                     let unreachable = match clif {
                         types::F32 => self.builder.ins().f32const(0.0),
                         types::F64 => self.builder.ins().f64const(0.0),
@@ -1678,7 +1712,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn zero_of(&mut self, ty: Ty) -> Value {
-        match carrier(ty) {
+        match self.carrier(ty) {
             Carrier::Scalar(t, _) if t == types::F32 => self.builder.ins().f32const(0.0),
             Carrier::Scalar(t, _) if t == types::F64 => self.builder.ins().f64const(0.0),
             Carrier::Scalar(t, _) => self.builder.ins().iconst(t, 0),
@@ -1709,7 +1743,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !logical.is_unsigned() || !self.carried_as_scalar(id) {
             return Ok(Some(value));
         }
-        let Some(narrow) = carrier(logical).clif() else {
+        let Some(narrow) = self.carrier(logical).clif() else {
             return Ok(Some(value));
         };
         let actual = self.builder.func.dfg.value_type(value);
@@ -1722,7 +1756,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Does this expression's machine shape hold the value itself rather than a pointer to it?
     fn carried_as_scalar(&self, id: u32) -> bool {
         self.physical_type_of(id)
-            .is_some_and(|ty| matches!(carrier(ty), Carrier::Scalar(..)))
+            .is_some_and(|ty| matches!(self.carrier(ty), Carrier::Scalar(..)))
     }
 
     fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
@@ -1786,12 +1820,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let checked = self
                     .runtime_call("kt_not_null", &[any()], any(), &[value])?
                     .expect("`kt_not_null` returns its argument");
-                // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
+                // What passed is the operand as a REFERENCE; the node answers it at the operand's
+                // own type made non-null. On a nullable primitive that is the unboxing Kotlin
+                // means by `x!!`, and on a value class carried as its value it is the value.
                 match ty.map(|ty| ty.non_null()) {
-                    Some(ty) if carrier(ty) != Carrier::Ref => {
-                        self.convert(checked, Some(any()), ty)
-                    }
-                    _ => Ok(Some(checked)),
+                    Some(ty) => self.convert(checked, Some(Ty::nullable(any())), ty),
+                    None => Ok(Some(checked)),
                 }
             }
             IrExpr::New {
@@ -1898,6 +1932,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .class_name_accessor(target)
                     .expect("checked by the guard");
                 self.class_name(symbol, receiver)
+            }
+            // `r.isSuccess` / `r.isFailure`: whether the one reference a `Result` is, is the
+            // failure marker.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.result_property(target).is_some() => {
+                let symbol = self.result_property(target).expect("checked by the guard");
+                let result = Ty::Obj(crate::types::type_name("kotlin/Result"), &[]);
+                let Some(value) = self.coerce(receiver, result)? else {
+                    return Ok(None);
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call(symbol, &[any()], Ty::Boolean, &[value])
             }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -2283,11 +2334,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
         // to it, so the two agree. Wider would be a claim about bits that are not there, and a
         // pointer is not the value at all — `val any: Any = 7u` is still checked as `UInt`.
-        let bits = |ty: Ty| carrier(ty).clif().map(|clif| clif.bits());
+        let bits = |ty: Ty| self.carrier(ty).clif().map(|clif| clif.bits());
         match logical {
             Some(logical)
                 if logical.is_unsigned()
-                    && matches!(carrier(physical), Carrier::Scalar(..))
+                    && matches!(self.carrier(physical), Carrier::Scalar(..))
                     && bits(logical) <= bits(physical) =>
             {
                 Some(logical)
@@ -2376,7 +2427,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     };
                     result = Some(match result {
                         None => ty,
-                        Some(previous) if carrier(previous) == carrier(ty) => previous,
+                        Some(previous) if self.carrier(previous) == self.carrier(ty) => previous,
                         Some(_) => any(),
                     });
                 }
@@ -2585,7 +2636,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // `Unit` is a value in Kotlin, and a position that wants a reference wants that value:
             // `val u: Any = Unit`, an argument of type `Any?`, a `Unit`-returning lambda's result.
             // The runtime owns the singleton, so there is one of it program-wide.
-            if !self.terminated && carrier(target) == Carrier::Ref {
+            if !self.terminated && self.carrier(target) == Carrier::Ref {
                 return self.runtime_call("kt_unit", &[], any(), &[]);
             }
             return Ok(None);
@@ -2607,17 +2658,110 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
-    /// A representation change between carriers: boxing a scalar into a reference, unboxing one
-    /// out, or widening/narrowing between scalars. An undetermined source leaves the value alone.
+    /// A representation change between two SEMANTIC types.
+    ///
+    /// A value class travels as its value wherever the representation policy projects it and as
+    /// a box of its own type everywhere else, so crossing between the two is a boxing or an
+    /// unboxing of THAT class — never of the value inside, whose box would answer `is`,
+    /// `toString` and `equals` as the wrong type. Everything else is a change between the
+    /// projected types' carriers.
     fn convert(
         &mut self,
         value: Value,
         source: Option<Ty>,
         target: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let values = self.file.values;
+        let unboxed_source = source.and_then(|source| values.unboxed(source));
+        let unboxed_target = values.unboxed(target);
+        match (unboxed_source, unboxed_target) {
+            // One class on both sides, unboxed on both — `V` into `V?` where `V?` is carried as
+            // the value: the change, if any, is between the values' own carriers.
+            (Some(from), Some(to)) if from == to => self.convert_carriers(
+                value,
+                source.map(|source| values.project(source)),
+                values.project(target),
+            ),
+            (Some(from), _) => {
+                let source = source.expect("an unboxed source has a type");
+                let boxed = self.box_nullable(value, from, source)?;
+                self.convert_carriers(boxed, Some(any()), values.project(target))
+            }
+            (None, Some(to)) => self.unbox_nullable(value, to, target),
+            (None, None) => self.convert_carriers(
+                value,
+                source.map(|source| values.project(source)),
+                values.project(target),
+            ),
+        }
+    }
+
+    /// Box a value of value class `class` carried unboxed at `ty`. A `V?` carried as its value
+    /// uses the value's own `null` for the outer one, and that `null` stays `null`.
+    fn box_nullable(
+        &mut self,
+        value: Value,
+        class: TypeName,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.is_nullable() {
+            return self.box_value(value, class);
+        }
+        let is_null = self.is_null(value);
+        let present = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        self.builder
+            .ins()
+            .brif(is_null, merge, &[BlockArg::Value(value)], present, &[]);
+        self.continue_in(present);
+        self.builder.seal_block(present);
+        let boxed = self.box_value(value, class)?;
+        self.builder.ins().jump(merge, &[BlockArg::Value(boxed)]);
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        Ok(self.builder.block_params(merge)[0])
+    }
+
+    /// The value in a box of value class `class`, where `target` carries it unboxed. A `null`
+    /// reaching a `V?` carried as the value is that value's own `null`.
+    fn unbox_nullable(
+        &mut self,
+        object: Value,
+        class: TypeName,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if !target.is_nullable() {
+            return self.unbox_value(object, class).map(Some);
+        }
+        let is_null = self.is_null(object);
+        let present = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        self.builder
+            .ins()
+            .brif(is_null, merge, &[BlockArg::Value(object)], present, &[]);
+        self.continue_in(present);
+        self.builder.seal_block(present);
+        let value = self.unbox_value(object, class)?;
+        self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        Ok(Some(self.builder.block_params(merge)[0]))
+    }
+
+    /// A representation change between carriers of types already PROJECTED: boxing a scalar into
+    /// a reference, unboxing one out, or widening/narrowing between scalars. An undetermined
+    /// source leaves the value alone.
+    fn convert_carriers(
+        &mut self,
+        value: Value,
+        source: Option<Ty>,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         let target_ty = target;
-        let target = carrier(target);
-        match (source.map(carrier), target) {
+        let target = self.carrier(target);
+        match (source.map(|ty| self.carrier(ty)), target) {
             (None, target) => {
                 // The lowering could not type the expression. Its machine type is still known,
                 // and when that already is the target's carrier nothing needs doing; otherwise a
@@ -2874,6 +3018,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) =
                             self.scope_function(&owner, &name, receiver, args, *ret)
                         {
+                            return realized;
+                        }
+                        // `kotlin.Result`, carried as the value it is declared to wrap; see
+                        // `lower/results.rs`.
+                        if let Some(realized) = self.result_member(
+                            realization.callable.owner,
+                            &name,
+                            params,
+                            receiver,
+                            *ret,
+                        ) {
+                            return realized;
+                        }
+                        if let Some(realized) = self.result_companion_member(
+                            realization.callable.owner,
+                            &name,
+                            args,
+                            *ret,
+                        ) {
                             return realized;
                         }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
@@ -3564,7 +3727,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// not lost in the truncation to `Int`, and `Double` does the same to its bits. A `Float` is
     /// its bits. The smaller integers are themselves, widened.
     fn field_hash(&mut self, value: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        if self.carrier(ty) == Carrier::Ref {
             // Including a nullable primitive, which is a box and hashes through its own type.
             let value = self.reference(value)?;
             if self.terminated {
@@ -3583,7 +3746,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// The hash of a value already in hand, by the same rules.
     pub(super) fn value_hash(&mut self, operand: Value, ty: Ty) -> Result<Value, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        // A value class hashes as the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) == Carrier::Ref {
             return Ok(self
                 .runtime_call("kt_hash_code", &[any()], Ty::Int, &[operand])?
                 .expect("`kt_hash_code` returns an Int"));
@@ -3656,7 +3821,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: u32,
         ty: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        if self.carrier(ty) != Carrier::Ref {
             let left = self.coerce(left, ty)?;
             let right = self.coerce(right, ty)?;
             if self.terminated {
@@ -3689,7 +3854,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: Value,
         ty: Ty,
     ) -> Result<Value, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        // A value class compares by the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) != Carrier::Ref {
             // `Double.equals` is not `==`: it reads the bits, so `NaN` equals itself and the two
             // zeroes are distinct. Comparing the reinterpreted integers is exactly that rule, and
             // it is the rule Kotlin's own `equals` states — `==` on the machine answers the other
@@ -3841,14 +4008,14 @@ mod tests {
 
     #[test]
     fn a_nullable_primitive_is_carried_as_a_reference() {
-        assert_eq!(carrier(Ty::Int), Carrier::Scalar(types::I32, true));
+        assert_eq!(machine_carrier(Ty::Int), Carrier::Scalar(types::I32, true));
         assert_eq!(
-            carrier(Ty::nullable(Ty::Int)),
+            machine_carrier(Ty::nullable(Ty::Int)),
             Carrier::Ref,
             "`Int?` must represent `null`, so it boxes exactly as it does on the JVM"
         );
-        assert_eq!(carrier(Ty::Unit), Carrier::Void);
-        assert_eq!(carrier(Ty::String), Carrier::Ref);
+        assert_eq!(machine_carrier(Ty::Unit), Carrier::Void);
+        assert_eq!(machine_carrier(Ty::String), Carrier::Ref);
     }
 
     #[test]
@@ -3856,9 +4023,15 @@ mod tests {
         // `Byte` is signed and `Char` is not; passing either to the runtime in a 32-bit register
         // must extend it the way the C prototype's type does, or `kt_println_char('é')` prints a
         // negative code point.
-        assert!(carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext);
-        assert!(carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+        assert!(
+            machine_carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext
+        );
+        assert!(
+            machine_carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(
+            machine_carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(machine_carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
     }
 }

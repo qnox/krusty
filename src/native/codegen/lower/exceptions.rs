@@ -495,9 +495,9 @@ impl BodyLowering<'_, '_, '_> {
         result: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = Some(result).filter(|ty| carrier(*ty) != Carrier::Void);
+        let result = Some(result).filter(|ty| self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
-            let clif = carrier(ty).clif().expect("non-void carrier");
+            let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
         }
         let dispatch = self.builder.create_block();
@@ -690,7 +690,9 @@ impl BodyLowering<'_, '_, '_> {
         // `requireNotNull` ANSWERS the value it checked, at the type the call site asked for: the
         // declaration is generic, so a site expecting an `Int` gets the box read back as one.
         match held {
-            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            Some(value) if self.carrier(ret) != Carrier::Void => {
+                self.convert(value, Some(any()), ret)
+            }
             _ => Ok(None),
         }
     }

@@ -229,7 +229,7 @@ impl<'a> FileLowering<'a> {
                 }
             };
             match returned {
-                Some(value) if carrier(result) != Carrier::Void => {
+                Some(value) if body.carrier(result) != Carrier::Void => {
                     body.builder.ins().return_(&[value]);
                 }
                 _ => {
@@ -696,6 +696,6 @@ impl BodyLowering<'_, '_, '_> {
         arguments.insert(0, object);
         let func_ref = self.func_ref(id);
         self.emit_call(func_ref, &arguments)?;
-        Ok(Some(object))
+        self.constructed(object, class)
     }
 }

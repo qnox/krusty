@@ -108,11 +108,27 @@ impl Backend for CraneliftBackend {
             }
         }
         let runtime_symbols = state.runtime_symbols.as_ref().expect("read just above");
+        // Which classifiers are value classes, read from the checked declarations: a file's own
+        // and its dependencies' alike. See `native::value_classes`.
+        let value_classes = match super::value_classes::NativeValueClasses::inventory(
+            &file.ir,
+            &file.classifiers,
+        ) {
+            Ok(inventory) => inventory,
+            Err(unsupported) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("krusty: the native backend does not support {unsupported} yet"),
+                );
+                return Vec::new();
+            }
+        };
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
                 runtime_symbols,
                 dependency_properties: &properties,
+                value_classes: &value_classes,
             },
             &self.provider,
             self.target,

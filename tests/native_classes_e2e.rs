@@ -885,18 +885,3 @@ fn a_default_on_an_abstract_member_reads_the_receiver_it_was_declared_on() {
         "A->a\nB->b\n"
     );
 }
-
-/// A `value class` declines until the backend reads what the frontend checked about it.
-///
-/// It is not a one-field class: Kotlin answers its `equals`, `hashCode` and `toString` by the
-/// value it wraps, and where it is boxed is the representation policy's to decide. Emitting it as
-/// an ordinary class would answer `W(1) == W(1)` by identity, so it is refused rather than guessed.
-#[test]
-fn a_value_class_declines_until_its_declarations_are_read() {
-    common::expect_native_decline(
-        "@JvmInline value class W(val v: Int)\n\
-         fun box(): String = if (W(1) == W(1)) \"OK\" else \"fail\"\n",
-        "ValueClassDeclines",
-        "a value class",
-    );
-}

@@ -1222,6 +1222,8 @@ mod native_try_catch_e2e;
 mod native_type_checks_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
+#[path = "native_value_classes_e2e.rs"]
+mod native_value_classes_e2e;
 #[path = "native_vararg_constructor_e2e.rs"]
 mod native_vararg_constructor_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]

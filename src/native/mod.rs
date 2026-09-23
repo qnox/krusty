@@ -28,6 +28,7 @@ mod prebuilt;
 pub mod runtime;
 mod symbols;
 mod target;
+mod value_classes;
 
 pub use codegen::{CraneliftBackend, Entry};
 pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};

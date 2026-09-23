@@ -76,7 +76,7 @@ impl<'a> FileLowering<'a> {
                     ));
                 }
             }
-            if carrier(declaration.ty) == Carrier::Void {
+            if self.carrier(declaration.ty) == Carrier::Void {
                 return Err(format!(
                     "a `Unit`-typed top-level property (`{}`)",
                     declaration.name
@@ -117,7 +117,7 @@ impl<'a> FileLowering<'a> {
 
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
             for (slot, ty, _) in &declarations {
-                if carrier(*ty) != Carrier::Ref {
+                if body.carrier(*ty) != Carrier::Ref {
                     continue;
                 }
                 let address = body.data_address(*slot);
@@ -269,7 +269,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];
-        let clif = carrier(ty).clif().expect("declined at declaration");
+        let clif = self.carrier(ty).clif().expect("declined at declaration");
         let address = self.data_address(slot);
         Ok(Some(self.builder.ins().load(clif, trusted(), address, 0)))
     }

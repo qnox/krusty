@@ -109,3 +109,23 @@ fn a_unit_answering_delegate_reads_as_the_unit_object() {
          fun box(): String = if (x.toString() == \"kotlin.Unit\") \"OK\" else \"fail: $x\"\n";
     every_backend_agrees_with_kotlinc("UnitDelegate", source);
 }
+
+/// A VALUE class delegate, whose object carries its one field rather than being one of its own.
+#[test]
+fn a_value_class_read_only_delegate_answers_the_read() {
+    let source = "import kotlin.properties.ReadOnlyProperty\n\
+         import kotlin.reflect.KProperty\n\
+         class Foo {\n\
+         \x20   val a: Int = 42\n\
+         \x20   val b by Delegate(0)\n\
+         }\n\
+         @JvmInline\n\
+         value class Delegate(val ignored: Int) : ReadOnlyProperty<Foo, Int> {\n\
+         \x20   override fun getValue(thisRef: Foo, property: KProperty<*>): Int = thisRef.a\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = Foo().b\n\
+         \x20   return if (answer == 42) \"OK\" else \"fail \" + answer\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassReadOnlyDelegate", source);
+}

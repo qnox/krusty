@@ -35,6 +35,7 @@ mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod referenced_classifiers;
 mod references;
 mod value_class_constructors;
 pub(crate) use bottom_values::complete_bottom_value;
@@ -43,6 +44,7 @@ pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use referenced_classifiers::collect_classifiers;
 pub use references::{FuncRef, PropRef};
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
