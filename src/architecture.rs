@@ -255,6 +255,9 @@ mod tests {
             "trace",
             "trace_compiler",
             "types",
+            // Exact value-class declaration chains and target-parameterized traversal are common
+            // semantics. Each backend still owns its carrier, boxing, storage, and emitted ABI.
+            "value_classes",
             "wide_stack",
         ];
         for path in rust_files_under("src/jvm") {

@@ -449,18 +449,24 @@ fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
 /// walk serves both erased class reachability and generic argument comparison, so no caller can
 /// observe the class relationship while silently discarding the supertype template.
 pub(crate) fn applied_supertype(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> Option<Ty> {
-    let (Some(start), Some(target)) = (sub.kotlin_class_internal(), sup.kotlin_class_internal())
-    else {
+    let Some(target) = sup.kotlin_class_internal() else {
         return None;
     };
     let mut seen = std::collections::HashSet::new();
-    seen.insert(start);
+    // A FUNCTION TYPE has no class identity of its own — `(P) -> R` names no classifier — but it
+    // has supertypes: the oracle answers `kotlin.Function<R>` for it, which is Kotlin's own
+    // hierarchy. So the walk starts from `sub` whether or not `sub` can name itself, and only the
+    // match test needs a name. Requiring one up front made this return `None` for every function
+    // type, so a lambda was not assignable to a `Function<R>` parameter at all.
+    if let Some(start) = sub.kotlin_class_internal() {
+        seen.insert(start);
+    }
     let mut stack = vec![sub];
     while let Some(cur) = stack.pop() {
-        let Some(owner) = cur.kotlin_class_internal() else {
-            continue;
-        };
-        if oracle.same_class_name(owner, target) {
+        if cur
+            .kotlin_class_internal()
+            .is_some_and(|owner| oracle.same_class_name(owner, target))
+        {
             return Some(cur);
         }
         let direct = oracle.direct_supertypes(cur);
@@ -635,6 +641,29 @@ mod tests {
         assert!(!ok(s("app/Animal"), s("app/Dog")));
         assert!(ok(Ty::String, s("kotlin/CharSequence")));
         assert!(ok(Ty::Int, s("kotlin/Number")));
+    }
+
+    #[test]
+    fn function_type_reaches_its_provider_neutral_function_supertype() {
+        struct FunctionOracle;
+
+        impl TypeOracle for FunctionOracle {
+            fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+                match ty.non_null() {
+                    Ty::Fun(signature) => {
+                        vec![Ty::obj_args("kotlin/Function", &[signature.ret])]
+                    }
+                    _ => Vec::new(),
+                }
+            }
+        }
+
+        let function = Ty::fun(vec![Ty::Int], Ty::String);
+        let semantic_supertype = Ty::obj_args("kotlin/Function", &[Ty::String]);
+        assert_eq!(
+            applied_supertype(&FunctionOracle, function, semantic_supertype),
+            Some(semantic_supertype),
+        );
     }
 
     #[test]

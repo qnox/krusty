@@ -1,9 +1,138 @@
 use super::test_support::{
     checked_function_body, checked_function_body_with_features,
-    checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
+    checked_function_body_with_platform, checked_function_body_with_platform_and_features,
+    jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
 use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
+
+struct DependencyDefaultSource {
+    name: &'static str,
+    callable: crate::libraries::FunctionInfo,
+}
+
+impl crate::symbol_source::SymbolSource for DependencyDefaultSource {
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let matches = namespace
+            == crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
+            && name == self.name;
+        std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            classifier_name: None,
+            classifier: None,
+            callables: if matches {
+                crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+                    overloads: vec![self.callable.clone()],
+                })
+            } else {
+                crate::libraries::Callables::None
+            },
+            importable_declaration: matches,
+        })
+    }
+}
+
+impl crate::libraries::SemanticPlatform for DependencyDefaultSource {}
+
+fn dependency_default_source(
+    name: &'static str,
+    context: Option<Ty>,
+) -> Box<dyn crate::libraries::SemanticPlatform> {
+    let context_count = usize::from(context.is_some());
+    let mut parameters = context.into_iter().collect::<Vec<_>>();
+    parameters.push(Ty::Int);
+    let mut callable = crate::libraries::LibraryCallable::library(
+        "dependency/DefaultsKt",
+        name,
+        parameters,
+        Ty::Int,
+        Ty::Int,
+        "",
+    );
+    callable.external_identity = Some(crate::fir::ExternalCallableId::from_raw(701));
+    callable.context_count = context_count;
+    let mut info =
+        crate::libraries::FunctionInfo::plain(crate::libraries::FnKind::TopLevel, None, callable);
+    info.context_count = context_count;
+    info.call_sig.param_names = if context_count == 0 {
+        vec!["value".to_string()]
+    } else {
+        vec!["context".to_string(), "value".to_string()]
+    };
+    info.call_sig.param_defaults = if context_count == 0 {
+        vec![true]
+    } else {
+        vec![false, true]
+    };
+    info.call_sig.required = context_count;
+    // Provider defaults are deliberately value-only: the context prefix is not padding in this
+    // declaration-owned table.
+    info.default_values = vec![Some(crate::libraries::DefaultValue::Int(7))];
+    Box::new(DependencyDefaultSource {
+        name,
+        callable: info,
+    })
+}
+
+#[test]
+fn dependency_default_uses_value_ordinal_before_context_offset() {
+    let source = "// LANGUAGE: +ContextReceivers\n\
+                  class Token\n\
+                  context(Token)\n\
+                  fun box(): Int = dependencyDefault()\n";
+    let features = crate::features::LangFeatures::from_source(source);
+    let (body, _) = checked_function_body_with_platform_and_features(
+        source,
+        "box",
+        dependency_default_source("dependencyDefault", Some(Ty::obj("Token"))),
+        &features,
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("dependency call")
+        .kind
+    else {
+        panic!("dependency default must remain a checked call")
+    };
+    assert!(matches!(call.target, FirCallTarget::External { .. }));
+    assert_eq!(call.arguments.len(), 2);
+    assert!(matches!(
+        call.arguments[0],
+        FirCallArgument::Expression { parameter: 0, .. }
+    ));
+    let FirCallArgument::Expression {
+        parameter: 1,
+        value,
+        conversion: None,
+    } = call.arguments[1]
+    else {
+        panic!("the provider literal must occupy physical parameter 1")
+    };
+    assert_eq!(
+        body.expr(value)
+            .map(|expression| (&expression.kind, expression.ty.get())),
+        Some((&FirExprKind::Constant(FirConstant::Int(7)), Ty::Int)),
+    );
+}
+
+#[test]
+fn same_named_source_declaration_wins_over_provider_default() {
+    let (body, index) = checked_function_body_with_platform(
+        "fun sameName(): Int = 11\nfun box(): Int = sameName()\n",
+        "box",
+        dependency_default_source("sameName", None),
+    );
+    let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("source call").kind
+    else {
+        panic!("same-named source declaration must remain a checked call")
+    };
+    let target = call.target.module().expect("source declaration identity");
+    assert_eq!(index.callable_name(target), Some("sameName"));
+    assert!(call.arguments.is_empty());
+}
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {

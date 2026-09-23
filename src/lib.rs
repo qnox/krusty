@@ -54,6 +54,7 @@ pub mod toolchain;
 pub mod trace;
 pub mod type_engine;
 pub mod types;
+pub(crate) mod value_classes;
 mod wide_stack;
 
 #[cfg(test)]

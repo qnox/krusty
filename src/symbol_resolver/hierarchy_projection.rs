@@ -57,6 +57,15 @@ pub(crate) fn inherited_classifier_shape(
 /// Direct applied supertypes derived from one classifier record. Providers publish symbolic templates;
 /// core owns substitution and every transitive traversal.
 pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
+    // A function type's supertype is the arity-independent `kotlin.Function<R>`. That is Kotlin's
+    // own hierarchy — `(P) -> R` is a `FunctionN<P, R>`, and every `FunctionN` extends `Function`
+    // — and the MEMBER walk beside this one already takes it: `members_in_hierarchy` looks a
+    // function type's members up on `Function<R>`. Stating it here is what keeps the two from
+    // disagreeing; without it a lambda was not assignable to a `Function<R>` parameter at all, so
+    // `ContractBuilder.callsInPlace(lambda: Function<R>, …)` rejected every lambda written for it.
+    if let Ty::Fun(signature) = ty.non_null() {
+        return vec![Ty::obj_args("kotlin/Function", &[signature.ret])];
+    }
     let Some(internal) = ty.kotlin_class_internal() else {
         return Vec::new();
     };
