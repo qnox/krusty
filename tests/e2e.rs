@@ -1415,6 +1415,8 @@ mod shadowed_method_tparam_e2e;
 mod short_circuit_e2e;
 #[path = "sibling_generic_custom_serializer_e2e.rs"]
 mod sibling_generic_custom_serializer_e2e;
+#[path = "sibling_value_class_serialization_e2e.rs"]
+mod sibling_value_class_serialization_e2e;
 #[path = "smart_cast_member_extension_e2e.rs"]
 mod smart_cast_member_extension_e2e;
 #[path = "smartcast_and_e2e.rs"]
