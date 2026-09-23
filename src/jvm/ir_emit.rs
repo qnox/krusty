@@ -12910,7 +12910,6 @@ impl<'a> Emitter<'a> {
     fn try_inline_unified(
         &mut self,
         call_expression: u32,
-        owner: &str,
         callee: &str,
         inline_only: bool,
         descriptor: &str,
@@ -13278,14 +13277,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_lines(
-                &probe.lines,
-                owner,
-                body.source_file.as_deref(),
-                inline_only,
-                splice_start,
-                code,
-            );
+            self.record_spliced_lines(&probe.lines, body, inline_only, splice_start, code);
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
@@ -13364,14 +13356,7 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
-        self.record_spliced_lines(
-            &bs.lines,
-            owner,
-            body.source_file.as_deref(),
-            inline_only,
-            0,
-            code,
-        );
+        self.record_spliced_lines(&bs.lines, body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         if bs.join_required {
             let join = code.new_label();
@@ -13416,8 +13401,7 @@ impl<'a> Emitter<'a> {
     fn record_spliced_lines(
         &mut self,
         lines: &[(u16, u16, bool)],
-        owner: &str,
-        source_file: Option<&str>,
+        body: &crate::jvm::classreader::MethodCode,
         inline_only: bool,
         shift: usize,
         code: &mut CodeBuilder,
@@ -13427,10 +13411,12 @@ impl<'a> Emitter<'a> {
         }
         // An `@InlineOnly` body is meant to be invisible: the reference compiler gives it no line
         // entries and no source map, so a stack trace never names it.
-        let source_file = (!inline_only).then_some(source_file).flatten();
-        let dependency = lines.iter().filter(|(_, _, inlined)| *inlined);
-        let first = dependency.clone().map(|&(_, line, _)| line).min();
-        let last = dependency.map(|&(_, line, _)| line).max();
+        let source_file = (!inline_only)
+            .then_some(body.source_file.as_deref())
+            .flatten();
+        // The path a line is recorded under is the class the code was READ from — for a multifile
+        // facade's function, the part class that holds its body, not the facade the call names.
+        let path = body.defining_class.as_str();
         let call_line = code.current_line().unwrap_or(1);
         // The highest line the class's own code can claim. `source_line_count` already counts the
         // position past the last line, where a synthesized mark (a closing brace's implicit return)
@@ -13438,15 +13424,6 @@ impl<'a> Emitter<'a> {
         let claimable = u16::try_from(self.ir.source_line_count)
             .unwrap_or(u16::MAX)
             .max(1);
-        let offset = match (source_file, first, last) {
-            (Some(source_file), Some(first), Some(last)) => self
-                .cw
-                .source_map_for_inlining(claimable)
-                .and_then(|map| map.inline_region(source_file, owner, first, last, call_line)),
-            // Without the dependency's file name there is nothing to map its lines against, so its
-            // marks are dropped rather than written as lines of the caller's own file.
-            _ => None,
-        };
         for &(at, line, inlined) in lines {
             let Ok(at) = u16::try_from(at as usize + shift) else {
                 continue;
@@ -13455,13 +13432,27 @@ impl<'a> Emitter<'a> {
                 code.add_line_mark_at(at, line);
                 continue;
             }
-            let Some(offset) = offset else {
+            // Without the dependency's file name there is nothing to map its lines against, so its
+            // marks are dropped rather than written as lines of the caller's own file.
+            let Some(source_file) = source_file else {
                 continue;
             };
-            let Ok(output) = u16::try_from(i32::from(line) + offset) else {
-                continue;
+            let (name, path, source) = match body.dependency_source_map.as_ref() {
+                Some(map) => {
+                    let Some(mapped) = map.resolve(line) else {
+                        continue;
+                    };
+                    mapped
+                }
+                None => (source_file, path, line),
             };
-            code.add_line_mark_at(at, output);
+            let output = self
+                .cw
+                .source_map_for_inlining(claimable)
+                .and_then(|map| map.map_line(name, path, source, call_line));
+            if let Some(output) = output {
+                code.add_line_mark_at(at, output);
+            }
         }
     }
 
@@ -13951,7 +13942,6 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(
                     call_expression,
-                    owner,
                     name,
                     inline_only,
                     splice_desc,
@@ -14015,14 +14005,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_lines(
-                &probe.lines,
-                owner,
-                body.source_file.as_deref(),
-                inline_only,
-                splice_start,
-                code,
-            );
+            self.record_spliced_lines(&probe.lines, &body, inline_only, splice_start, code);
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
@@ -14072,14 +14055,7 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
-        self.record_spliced_lines(
-            &bs.lines,
-            owner,
-            body.source_file.as_deref(),
-            inline_only,
-            0,
-            code,
-        );
+        self.record_spliced_lines(&bs.lines, &body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();

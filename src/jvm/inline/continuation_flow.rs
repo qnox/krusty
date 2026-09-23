@@ -80,6 +80,8 @@ mod tests {
             locals: vec![],
             lines: Vec::new(),
             source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
@@ -106,6 +108,8 @@ mod tests {
             locals: vec![],
             lines: Vec::new(),
             source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");

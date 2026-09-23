@@ -2953,6 +2953,33 @@ pub fn javac_run_proc(
     }
 }
 
+/// The `SourceDebugExtension` (SMAP) payload of a compiled class, one entry per line, or an empty
+/// vector when the class carries none. javap renders the attribute as an indented block after a
+/// `SourceDebugExtension:` header; the same text also sits in the constant pool for the
+/// `@SourceDebugExtension` annotation kotlinc attaches, and reading the block compares the attribute
+/// itself rather than that pool entry.
+#[allow(dead_code)]
+pub fn source_debug_extension(class_file: &Path) -> Vec<String> {
+    let dump =
+        javap(&["-v", "-p", &class_file.to_string_lossy()]).expect("pooled JavaRunner unavailable");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in dump.lines() {
+        if line.trim() == "SourceDebugExtension:" {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if !line.starts_with("  ") || line.trim().is_empty() {
+            break;
+        }
+        out.push(line.trim().to_string());
+    }
+    out
+}
+
 /// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
 /// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
 /// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns

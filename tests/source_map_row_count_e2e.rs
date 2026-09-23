@@ -55,31 +55,9 @@ fn source_maps() -> Option<(String, String)> {
         .expect("krusty did not emit MainKt");
     fs::write(krusty_dir.join("MainKt.class"), bytes).unwrap();
 
-    // javap renders the attribute as an indented block after a `SourceDebugExtension:` header.
-    let read = |directory: &std::path::Path| -> Vec<String> {
-        let path = directory.join("MainKt.class");
-        let dump = common::javap(&["-v", "-p", &path.to_string_lossy()])
-            .expect("pooled JavaRunner unavailable");
-        let mut out = Vec::new();
-        let mut inside = false;
-        for line in dump.lines() {
-            if line.trim() == "SourceDebugExtension:" {
-                inside = true;
-                continue;
-            }
-            if !inside {
-                continue;
-            }
-            if !line.starts_with("  ") || line.trim().is_empty() {
-                break;
-            }
-            out.push(line.trim().to_string());
-        }
-        out
-    };
     let both = (
-        read(&reference_dir).join("\n"),
-        read(&krusty_dir).join("\n"),
+        common::source_debug_extension(&reference_dir.join("MainKt.class")).join("\n"),
+        common::source_debug_extension(&krusty_dir.join("MainKt.class")).join("\n"),
     );
     let _ = fs::remove_dir_all(&dir);
     Some(both)
