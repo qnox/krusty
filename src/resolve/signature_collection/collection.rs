@@ -291,6 +291,31 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // inference is independent of declaration order. These are the exact flags later moved onto
     // each canonical `ClassSig`, not a parallel simple-name object index.
     if let Some(headers) = compact_headers {
+        for (source_index, file) in files.iter().enumerate() {
+            let source = crate::fir::SourceFileId::from_raw(
+                u32::try_from(source_index).expect("too many source files"),
+            );
+            for (position, stable) in headers.source_declarations(source).iter().enumerate() {
+                let Some(&parser) = file.decls.get(position) else {
+                    continue;
+                };
+                let Some(stub) = headers.stub(*stable) else {
+                    continue;
+                };
+                if stub.kind != crate::fir::DeclarationKind::Classifier {
+                    continue;
+                }
+                let (_, identity) = compact_classifier_identity(headers, stub)
+                    .expect("a compact classifier must retain its stable identity");
+                assert!(
+                    table
+                        .stable_parser_classifier_identities
+                        .insert((source.raw(), parser), identity)
+                        .is_none(),
+                    "one parser classifier coordinate binds one stable semantic identity"
+                );
+            }
+        }
         for stub in headers
             .stubs
             .iter()

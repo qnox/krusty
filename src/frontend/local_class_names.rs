@@ -1,16 +1,13 @@
-//! kotlinc's names for the classes a file generates locally.
+//! Backend-neutral naming provenance for classes a file declares locally.
 //!
 //! kotlinc names every local class, anonymous object, lambda, callable reference and suspend
 //! continuation in ONE walk over the file (`InventNamesForLocalClasses`), before any of them is
 //! lowered: a lambda compiled through `invokedynamic` still takes its position in the sequence even
 //! though no class is ever written for it. This module is that walk, over the source tree.
 //!
-//! A name is the chain of enclosing names joined by `$` — the file facade or classifier, then each
-//! named declaration the node sits in (function, property, local variable, local function, local
-//! class) — and, for a node without a name of its own, the next ordinal of the sequence the chain
-//! numbers. Ordinals are counted per chain, case-insensitively (kotlinc keys them by the upper-cased
-//! chain so two classes never differ only in case), and the count is shared by every node the chain
-//! numbers: an anonymous object after two lambdas in `box` is `box$3`.
+//! This pass records exact source ownership, named lexical segments, and generated-artifact
+//! ordinals. It deliberately does not know a file facade or a target separator. A backend combines
+//! this contract with its physical owner and naming rules.
 //!
 //! What the walk visits mirrors kotlinc's tree at that phase rather than the source spelling alone:
 //! - A suspend function reserves the first position of its own chain for its continuation, ahead of
@@ -30,15 +27,16 @@ use std::collections::HashMap;
 
 use crate::ast::{
     AnonymousEnclosingFunction, ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId,
-    File, FunBody, FunDecl, PropDecl, Stmt, StmtId,
+    File, FunBody, FunDecl, LocalClassNameProvenance, PropDecl, Stmt, StmtId,
 };
 
 /// The names one walk invents for a file's local nodes.
 #[derive(Default)]
 pub(super) struct InventedLocalNames {
-    /// Anonymous-object construction → its class declaration, invented name, and the source
-    /// function that lexically encloses it.
-    pub anonymous_objects: Vec<(ExprId, DeclId, String, Option<AnonymousEnclosingFunction>)>,
+    /// Local/anonymous declaration → its target-neutral lexical provenance.
+    pub classes: HashMap<DeclId, LocalClassNameProvenance>,
+    /// Anonymous-object class → the source function that lexically encloses it.
+    pub anonymous_enclosing_functions: HashMap<DeclId, AnonymousEnclosingFunction>,
     /// Suspend function → the ordinal its continuation takes in its own chain.
     pub continuations: HashMap<AnonymousEnclosingFunction, u32>,
 }
@@ -46,6 +44,10 @@ pub(super) struct InventedLocalNames {
 /// One chain of enclosing names, and the source function it lies in.
 #[derive(Clone)]
 struct Chain {
+    /// Exact source classifier at the target-independent ownership boundary. `None` means file.
+    owner: Option<DeclId>,
+    /// Stable source identity used only to continue a sequence across bounded reparses.
+    counter_owner: String,
     segments: Vec<String>,
     enclosing_function: Option<AnonymousEnclosingFunction>,
 }
@@ -55,6 +57,8 @@ impl Chain {
         let mut segments = self.segments.clone();
         segments.push(name.to_string());
         Self {
+            owner: self.owner,
+            counter_owner: self.counter_owner.clone(),
             segments,
             enclosing_function: self.enclosing_function,
         }
@@ -65,8 +69,23 @@ impl Chain {
         self
     }
 
-    fn spelling(&self) -> String {
-        self.segments.join("$")
+    fn counter_key(&self) -> Vec<String> {
+        let mut key = Vec::with_capacity(self.segments.len() + 1);
+        key.push(self.counter_owner.to_ascii_uppercase());
+        key.extend(
+            self.segments
+                .iter()
+                .map(|segment| segment.to_ascii_uppercase()),
+        );
+        key
+    }
+
+    fn provenance(&self, ordinal: Option<u32>) -> LocalClassNameProvenance {
+        LocalClassNameProvenance {
+            lexical_owner: self.owner,
+            segments: self.segments.clone(),
+            ordinal,
+        }
     }
 }
 
@@ -77,24 +96,22 @@ enum Child {
 
 struct Inventor<'a> {
     file: &'a File,
-    counters: &'a mut HashMap<String, u32>,
+    counters: &'a mut HashMap<Vec<String>, u32>,
     names: InventedLocalNames,
 }
 
-/// Invent the names of every local node `file` declares. `facade` is the simple name of the file
-/// facade; `counters` carries the per-chain sequences across the declaration units of one file.
-pub(super) fn invent(
-    file: &File,
-    facade: &str,
-    counters: &mut HashMap<String, u32>,
-) -> InventedLocalNames {
+/// Record the provenance of every local node `file` declares. `counters` carries the per-chain
+/// sequences across the declaration units of one file.
+pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> InventedLocalNames {
     let mut inventor = Inventor {
         file,
         counters,
         names: InventedLocalNames::default(),
     };
-    let facade_chain = Chain {
-        segments: vec![facade.to_string()],
+    let file_chain = Chain {
+        owner: None,
+        counter_owner: "file".to_string(),
+        segments: Vec::new(),
         enclosing_function: None,
     };
     let anonymous = file
@@ -102,13 +119,6 @@ pub(super) fn invent(
         .values()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    let anonymous_names = anonymous
-        .iter()
-        .filter_map(|declaration| match file.decl(*declaration) {
-            Decl::Class(class) => Some(format!("{}.", class.name)),
-            Decl::Fun(_) | Decl::Property(_) => None,
-        })
-        .collect::<Vec<_>>();
     for &declaration in &file.decls {
         if anonymous.contains(&declaration) || file.is_local_declaration(declaration) {
             continue;
@@ -116,21 +126,15 @@ pub(super) fn invent(
         match file.decl(declaration) {
             Decl::Fun(function) => inventor.function(
                 function,
-                &facade_chain,
+                &file_chain,
                 Some(AnonymousEnclosingFunction::TopLevel(declaration)),
             ),
-            Decl::Property(property) => inventor.property(property, &facade_chain),
+            Decl::Property(property) => inventor.property(property, &file_chain),
             Decl::Class(class) => {
-                // A classifier nested in an anonymous object is walked with the object that
-                // declares it, where its chain is known.
-                if anonymous_names
-                    .iter()
-                    .any(|prefix| class.name.starts_with(prefix.as_str()))
-                {
-                    continue;
-                }
                 let chain = Chain {
-                    segments: vec![class.name.replace('.', "$")],
+                    owner: Some(declaration),
+                    counter_owner: format!("class:{}", class.name),
+                    segments: Vec::new(),
                     enclosing_function: None,
                 };
                 inventor.class_body(declaration, class, &chain, false);
@@ -143,10 +147,7 @@ pub(super) fn invent(
 impl Inventor<'_> {
     /// The next position of `chain`'s sequence, as a chain one segment longer.
     fn next(&mut self, chain: &Chain) -> Chain {
-        let counter = self
-            .counters
-            .entry(chain.spelling().to_ascii_uppercase())
-            .or_insert(0);
+        let counter = self.counters.entry(chain.counter_key()).or_insert(0);
         *counter += 1;
         let ordinal = *counter;
         chain.named(&ordinal.to_string())
@@ -330,7 +331,9 @@ impl Inventor<'_> {
                 self.expr(*body, &own);
             }
             // A bound receiver is walked inside the reference, like the lambda body it becomes.
-            Expr::CallableRef { receiver, name } if name != "class" => {
+            Expr::CallableRef { receiver, .. }
+                if !file.class_literal_references.contains(&expression.0) =>
+            {
                 let own = self.next(chain);
                 if let Some(receiver) = receiver {
                     self.expr(*receiver, &own);
@@ -342,21 +345,29 @@ impl Inventor<'_> {
                 let Decl::Class(class) = file.decl(declaration) else {
                     return;
                 };
-                self.names.anonymous_objects.push((
-                    expression,
-                    declaration,
-                    own.spelling(),
-                    chain.enclosing_function,
-                ));
+                let ordinal = own
+                    .segments
+                    .last()
+                    .and_then(|ordinal| ordinal.parse().ok())
+                    .expect("an anonymous-object position is an ordinal");
+                self.names
+                    .classes
+                    .insert(declaration, chain.provenance(Some(ordinal)));
+                if let Some(function) = chain.enclosing_function {
+                    self.names
+                        .anonymous_enclosing_functions
+                        .insert(declaration, function);
+                }
                 for argument in &class.base_args {
                     self.expr(*argument, chain);
                 }
                 let own = Chain {
-                    segments: own.segments,
+                    owner: Some(declaration),
+                    counter_owner: format!("anonymous:{}", declaration.0),
+                    segments: Vec::new(),
                     enclosing_function: chain.enclosing_function,
                 };
                 self.class_body(declaration, class, &own, true);
-                self.nested_classifiers(&class.name, &own);
             }
             _ => {
                 // Children in evaluation order; a block interleaves statements with none.
@@ -382,27 +393,6 @@ impl Inventor<'_> {
         }
     }
 
-    /// Walk the classifiers the parser hoisted out of a local class or anonymous object, which it
-    /// named by the path from that class (`<class>.Inner`).
-    fn nested_classifiers(&mut self, owner: &str, chain: &Chain) {
-        let file = self.file;
-        let prefix = format!("{owner}.");
-        for &declaration in &file.decls {
-            let Decl::Class(class) = file.decl(declaration) else {
-                continue;
-            };
-            let Some(rest) = class.name.strip_prefix(prefix.as_str()) else {
-                continue;
-            };
-            if rest.contains('.') {
-                continue;
-            }
-            let nested = chain.named(rest);
-            self.class_body(declaration, class, &nested, false);
-            self.nested_classifiers(&class.name, &nested);
-        }
-    }
-
     fn stmt(&mut self, statement: StmtId, chain: &Chain) {
         let file = self.file;
         match file.stmt(statement) {
@@ -423,17 +413,19 @@ impl Inventor<'_> {
                 }
             }
             Stmt::LocalFun(function) => self.function(function, chain, None),
-            Stmt::LocalClass(_) => {
-                // The local class keeps the runtime name the parser hoisted it under; what it
-                // declares is numbered in that name's chain.
+            Stmt::LocalClass(source) => {
                 if let Some(&declaration) = file.local_class_decls.get(&statement) {
                     if let Decl::Class(hoisted) = file.decl(declaration) {
+                        self.names
+                            .classes
+                            .insert(declaration, chain.named(&source.name).provenance(None));
                         let own = Chain {
-                            segments: vec![hoisted.name.replace('.', "$")],
+                            owner: Some(declaration),
+                            counter_owner: format!("local:{}", declaration.0),
+                            segments: Vec::new(),
                             enclosing_function: chain.enclosing_function,
                         };
                         self.class_body(declaration, hoisted, &own, false);
-                        self.nested_classifiers(&hoisted.name, &own);
                     }
                 }
             }

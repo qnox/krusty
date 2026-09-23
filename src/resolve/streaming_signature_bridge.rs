@@ -5398,6 +5398,9 @@ pub(crate) fn finalized_streamed_signature_index(
         if let Some(&ordinal) = headers.continuation_ordinals.get(&stub.id) {
             index.publish_continuation_ordinal(stub.id, ordinal);
         }
+        if let Some(provenance) = headers.local_class_name_provenance.get(&stub.id) {
+            index.publish_local_class_name_provenance(stub.id, provenance.clone());
+        }
         let annotations = match stub.kind {
             DeclarationKind::Function => {
                 stable_function(table, headers, &classifier_types, stub.id)

@@ -4345,14 +4345,15 @@ expression, callable reference, anonymous object, delegated property and suspend
 single sequence per enclosing name. On master cb2dded, krusty's internal names reach the output in
 1,207 box files.
 
-- ✅ 1a. `frontend::local_class_names` ports that walk over the source tree. Anonymous-object names
-  and continuation ordinals come from it, replacing the span heuristic that counted only objects and
-  continuations. The facade prefix is the real facade name (`a.kt` gives `AKt`).
+- ✅ 1a. `frontend::local_class_names` records source ownership segments and shared sequence
+  ordinals without formatting a target name. Stable declaration identities carry that provenance
+  through FIR/common IR; `jvm::local_class_names` combines it with the physical facade/class owner.
 - ☐ 1b. Suspend lambdas as `SuspendLambda` classes named from the walk (today a static method plus a
   `…$fir_…$1` continuation).
 - ☐ 1c. Function and property reference classes named from the walk (today `Facade$fir$function$N`
   and `Facade$fir$property$N`), with kotlinc's direct `invoke` in place of the adapter.
 - ☐ 1d. Local functions and lambda bodies named as `InventNamesForLocalFunctions` does
   (`box$local`, `box$lambda$0`), replacing `name$fir_A_B_C`.
-- ☐ Local classes with the facade prefix (`AKt$box$Local`). Today the parser hoists them as
-  `box$Local`.
+- ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
+  realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
+  same provenance with their own separators and container rules.

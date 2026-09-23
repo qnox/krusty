@@ -3858,6 +3858,11 @@ pub struct SymbolTable {
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
     source_class_headers: HashMap<TypeName, SourceClassHeader>,
+    /// Parser classifier coordinates retained only while Pass 1 inspection/capture analysis is
+    /// active, bound once to the compact header's stable semantic identity. This prevents that
+    /// legacy retained-AST lane from rebuilding an anonymous/local classifier from its parser
+    /// placeholder spelling after compact signature collection has assigned the real identity.
+    stable_parser_classifier_identities: HashMap<(u32, DeclId), TypeName>,
     /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
@@ -4039,6 +4044,7 @@ impl Default for SymbolTable {
             classes: HashMap::new(),
             source_packages: std::collections::HashSet::new(),
             source_class_headers: HashMap::new(),
+            stable_parser_classifier_identities: HashMap::new(),
             source_class_aliases: HashMap::new(),
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
@@ -14724,7 +14730,19 @@ impl<'a> Checker<'a> {
                     .canonical_classifier_declaration(parser, index)
                     .and_then(|declaration| index.classifier_identity(declaration))
             })
-            .or_else(|| self.same_package_classifier_name(&class.name))
+            .or_else(|| {
+                self.module.legacy_symbols().and_then(|symbols| {
+                    symbols
+                        .stable_parser_classifier_identities
+                        .get(&(self.file_index, parser))
+                        .copied()
+                })
+            })
+            .or_else(|| {
+                (!self.file.local_class_name_provenance.contains_key(&parser))
+                    .then(|| self.same_package_classifier_name(&class.name))
+                    .flatten()
+            })
     }
 
     fn direct_superclass_name(&self, owner: TypeName) -> Option<TypeName> {

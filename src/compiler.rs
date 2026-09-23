@@ -3253,12 +3253,17 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        assert!(outputs
-            .iter()
-            .any(|(path, _)| path == "AnonymousAccessorCaptureKt.class"));
-        assert!(outputs
-            .iter()
-            .any(|(path, _)| path.contains("build$holder$1")));
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "AnonymousAccessorCaptureKt.class",
+                "AnonymousAccessorCaptureKt$build$holder$1.class",
+                "META-INF/main.kotlin_module",
+            ])
+        );
     }
 
     #[test]

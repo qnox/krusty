@@ -18,7 +18,7 @@ mod flags;
 mod nested_classifiers;
 
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
-use nested_classifiers::nested_classifier_owners;
+use nested_classifiers::{classifier_identity, companion_declarations, nested_classifier_owners};
 
 mod actualization;
 
@@ -31,61 +31,6 @@ pub use super::declaration_stub::*;
 pub use super::identities::*;
 pub use super::lookup_scope::*;
 use super::signature::InferredSignatureKind;
-
-fn companion_declarations(file: &File) -> std::collections::HashSet<DeclId> {
-    file.decls
-        .iter()
-        .filter_map(|declaration| match file.decl(*declaration) {
-            Decl::Class(class) => class.companion,
-            Decl::Fun(_) | Decl::Property(_) => None,
-        })
-        .collect()
-}
-
-fn classifier_identity(
-    file: &File,
-    source: SourceFileId,
-    ids: &mut DeclarationIds,
-    declaration: DeclId,
-) -> Option<DeclarationId> {
-    let Decl::Class(class) = file.decl(declaration) else {
-        return None;
-    };
-    let owner = file
-        .decls
-        .iter()
-        .copied()
-        .filter(|candidate| *candidate != declaration && !file.is_local_declaration(*candidate))
-        .filter_map(|candidate| match file.decl(candidate) {
-            Decl::Class(candidate_class)
-                if candidate_class.span.lo < class.span.lo
-                    && class.span.hi < candidate_class.span.hi =>
-            {
-                Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-            }
-            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-        })
-        .min_by_key(|(length, _)| *length)
-        .and_then(|(_, owner)| classifier_identity(file, source, ids, owner));
-    let companions = companion_declarations(file);
-    let sibling = if companions.contains(&declaration) {
-        0
-    } else {
-        u32::try_from(
-            file.decls
-                .iter()
-                .position(|candidate| *candidate == declaration)?,
-        )
-        .ok()?
-    };
-    Some(ids.intern(DeclarationAnchor {
-        source,
-        range: class.span,
-        owner,
-        kind: DeclarationKind::Classifier,
-        sibling,
-    }))
-}
 
 fn anonymous_property_owner(
     file: &File,
@@ -1162,6 +1107,7 @@ struct ExtractedFileStubs {
     /// function's stable identity. The parser pass that numbers the sequence is the only one that
     /// can say which positions are free; this carries its answer past the AST.
     continuation_ordinals: Vec<(DeclarationId, u32)>,
+    local_class_name_provenance: Vec<(DeclarationId, super::LocalClassNameProvenance)>,
 }
 
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
@@ -2068,6 +2014,12 @@ fn extract_file_stub_inventory(
         .collect::<Vec<_>>();
     // A map iterates in no order; the stubs this travels beside are a sequence.
     continuation_ordinals.sort_unstable();
+    let local_class_name_provenance = super::local_class_names::stabilize_local_class_names(
+        file,
+        source,
+        &source_declarations,
+        &nested_owners,
+    );
     ExtractedFileStubs {
         stubs,
         source_declarations: source_declarations
@@ -2078,6 +2030,7 @@ fn extract_file_stub_inventory(
             .collect(),
         expect_keywords,
         continuation_ordinals,
+        local_class_name_provenance,
     }
 }
 
@@ -2911,6 +2864,8 @@ pub struct StreamedHeaderModule {
     /// sequence, 1-based in declaration order. Only the parser pass that numbers that sequence can
     /// answer it, so it is carried rather than recomputed. A backend builds the spelling.
     pub continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
+    pub local_class_name_provenance:
+        std::collections::HashMap<DeclarationId, super::LocalClassNameProvenance>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3587,12 +3542,7 @@ pub fn stream_file_stub_inventory(
             continue;
         }
         if source.kind == SourceKind::Kotlin {
-            if let Some(stem) = source.file_stem {
-                crate::frontend::name_anonymous_classes(
-                    &mut file,
-                    &crate::frontend::file_facade_simple_name(stem),
-                );
-            }
+            crate::frontend::record_local_class_name_provenance(&mut file);
         }
         let (source_id, stubs) = builder
             .add_source(index, source, Some(&file))
@@ -3620,6 +3570,8 @@ pub struct HeaderInventoryBuilder {
     inventory: Vec<DeclarationId>,
     expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
     continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
+    local_class_name_provenance:
+        std::collections::HashMap<DeclarationId, super::LocalClassNameProvenance>,
     source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
@@ -3690,6 +3642,8 @@ impl HeaderInventoryBuilder {
         self.expect_keywords.extend(extracted.expect_keywords);
         self.continuation_ordinals
             .extend(extracted.continuation_ordinals);
+        self.local_class_name_provenance
+            .extend(extracted.local_class_name_provenance);
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3805,6 +3759,7 @@ impl HeaderInventoryBuilder {
             stubs: self.stubs,
             expect_keywords: self.expect_keywords,
             continuation_ordinals: self.continuation_ordinals,
+            local_class_name_provenance: self.local_class_name_provenance,
             inventory: self.inventory,
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,

@@ -913,6 +913,7 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
+        crate::jvm::local_class_names::realize(&mut file.ir, &facade);
         if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
             diags.error(
                 crate::diag::Span::new(0, 0),

@@ -1862,22 +1862,22 @@ fn dump_class_sets(
     src: &str,
     krusty: &[(String, Vec<u8>)],
     reference: &std::collections::BTreeMap<String, Vec<u8>>,
-) {
+) -> std::io::Result<()> {
     let root = dir.join(format!("{stem}-{:016x}", fnv64(src.as_bytes())));
     let write = |side: &str, name: &str, bytes: &[u8]| {
         let p = root.join(side).join(format!("{name}.class"));
         if let Some(parent) = p.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        let _ = fs::write(p, bytes);
+        fs::write(p, bytes)
     };
     for (name, bytes) in krusty {
-        write("krusty", name, bytes);
+        write("krusty", name, bytes)?;
     }
     for (name, bytes) in reference {
-        write("kotlinc", name, bytes);
+        write("kotlinc", name, bytes)?;
     }
-    let _ = fs::write(root.join("source.kt"), src);
+    fs::write(root.join("source.kt"), src)
 }
 
 /// The full per-file byte-diff decision: gate un-mirrored shapes, reference-compile, compare.
@@ -1899,7 +1899,13 @@ fn byte_diff_file(
             Ok(()) => ByteDiff::Identical,
             Err(why) => {
                 if let Some(dump) = env("KRUSTY_BYTE_DIFF_DUMP") {
-                    dump_class_sets(Path::new(&dump), stem, src, classes, &ref_classes);
+                    if let Err(error) =
+                        dump_class_sets(Path::new(&dump), stem, src, classes, &ref_classes)
+                    {
+                        return ByteDiff::Divergent(format!(
+                            "{why}; failed to dump divergent class sets: {error}"
+                        ));
+                    }
                 }
                 ByteDiff::Divergent(why)
             }
@@ -1930,6 +1936,96 @@ fn compare_class_sets_identical_and_divergent() {
     assert!(compare_class_sets(&k, &r3)
         .unwrap_err()
         .contains("extra class A"));
+}
+
+#[test]
+fn local_classifier_class_set_and_declaration_mapping_match_kotlinc_exactly() {
+    let source = r#"
+interface Probe {
+    fun read(): Int
+    fun `class`(): Int = read()
+}
+fun consume(value: Any?) {}
+fun calculate(): Probe {
+    consume { 41 }
+    val value = object : Probe { override fun read() = 42 }
+    class Marker {
+        fun make(): Probe = object : Probe { override fun read() = 43 }
+    }
+    consume(Marker().make())
+    return value
+}
+fun classLiteral(): Any {
+    consume(Probe::class)
+    return object : Probe { override fun read() = 44 }
+}
+fun callableNamedClass(): Any {
+    consume(Probe::`class`)
+    return object : Probe { override fun read() = 45 }
+}
+"#;
+    let stem = "NamingContract";
+    let classpath = vec![common::stdlib_jar()];
+    let jdk = krusty::jvm::classpath::platform_jdk_modules(None);
+    let features = krusty::features::LangFeatures::from_source(source);
+    let krusty = compile_blocks(
+        &[(stem.to_string(), source.to_string())],
+        &classpath,
+        &[],
+        jdk.as_deref(),
+        &features,
+        None,
+        &[],
+    )
+    .expect("the production JVM path must compile the local-class naming fixture");
+    let reference = match reference_compile(source, stem, &classpath) {
+        Ok(reference) => reference,
+        Err(error) if error == "kotlinc unavailable" => return,
+        Err(error) => panic!("reference compiler rejected local-class naming fixture: {error}"),
+    };
+
+    let shared_expected = std::collections::BTreeSet::from([
+        "NamingContractKt".to_string(),
+        "NamingContractKt$calculate$Marker".to_string(),
+        "NamingContractKt$calculate$Marker$make$1".to_string(),
+        "NamingContractKt$calculate$value$1".to_string(),
+        "NamingContractKt$callableNamedClass$2".to_string(),
+        "NamingContractKt$classLiteral$1".to_string(),
+        "Probe".to_string(),
+        "Probe$DefaultImpls".to_string(),
+    ]);
+    let intentional_kotlinc_only =
+        std::collections::BTreeSet::from(["NamingContractKt$callableNamedClass$1".to_string()]);
+    let kotlinc_expected = shared_expected
+        .union(&intentional_kotlinc_only)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let krusty_names = krusty
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let reference_names = reference
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        reference_names, kotlinc_expected,
+        "unexpected kotlinc declaration mapping"
+    );
+    assert_eq!(
+        krusty_names, shared_expected,
+        "shared source declarations must map to the exact same class set; kotlinc's additional \
+         callable-reference class is intentionally absent because krusty realizes that reference \
+         with invokedynamic"
+    );
+    assert_eq!(
+        reference_names
+            .difference(&krusty_names)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        intentional_kotlinc_only,
+        "the only representation-specific class is kotlinc's callable-reference carrier"
+    );
 }
 
 #[test]

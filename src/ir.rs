@@ -47,6 +47,7 @@ mod bridges;
 mod constants;
 mod constructors;
 mod intrinsic;
+mod local_class_names;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
@@ -57,6 +58,7 @@ pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use intrinsic::IrIntrinsic;
+pub(crate) use local_class_names::IrLocalClassNameProvenance;
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -2189,6 +2191,10 @@ pub struct IrFile {
     /// Stable checked-FIR classifier declaration to its common-IR class realization. Member bodies
     /// attach through this edge; neither the sink nor a backend searches by rendered class name.
     pub checked_classifier_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Backend-neutral lexical naming context for source classifiers declared in executable code.
+    /// A target consumes this exact class-id ownership graph and chooses physical spellings.
+    pub(crate) local_class_name_provenance:
+        std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from

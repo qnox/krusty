@@ -581,6 +581,7 @@ impl<'a> CommonIrBodySink<'a> {
         allow_deferred_body_local: bool,
     ) -> Result<(), FirFileLoweringFailure> {
         let mut newly_declared = std::collections::HashSet::new();
+        let mut pending_local_names = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -736,6 +737,9 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a stable classifier has one common-IR realization per file"
             );
+            if let Some(provenance) = index.local_class_name_provenance(declaration) {
+                pending_local_names.push((class, provenance.clone()));
+            }
             newly_declared.insert(declaration);
             let mut type_aliases = Vec::new();
             for alias_raw in 0..index.declaration_count() {
@@ -867,6 +871,32 @@ impl<'a> CommonIrBodySink<'a> {
                     );
                 }
             }
+        }
+        for (class, provenance) in pending_local_names {
+            let lexical_owner = provenance
+                .lexical_owner
+                .map(|owner| {
+                    self.ir
+                        .checked_classifier_classes
+                        .get(&owner)
+                        .copied()
+                        .ok_or(FirFileLoweringFailure::MissingClassifier(owner))
+                })
+                .transpose()?;
+            assert!(
+                self.ir
+                    .local_class_name_provenance
+                    .insert(
+                        class,
+                        crate::ir::IrLocalClassNameProvenance {
+                            lexical_owner,
+                            segments: provenance.segments,
+                            ordinal: provenance.ordinal,
+                        },
+                    )
+                    .is_none(),
+                "a source classifier may publish one target-neutral naming plan"
+            );
         }
         for raw in 0..index.declaration_count() {
             let declaration = DeclarationId::from_raw(

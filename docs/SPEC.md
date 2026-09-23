@@ -3900,11 +3900,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names are exact roots; `$` characters in them are not parsed as evidence of source nesting. Tests:
   `tests/nested_class_ctor_scope_e2e.rs` and
   `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
-- **Anonymous objects and suspend continuations are named by one walk that numbers every local
-  node, as kotlinc's `InventNamesForLocalClasses` does.** A name is the chain of enclosing names
-  joined by `$`: the file facade (`file_facade_simple_name`, kotlinc's `PackagePartClassUtils`
-  rule: `a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`) or classifier, then each function, property, local variable or local function the node sits in
-  (`val o = object {}` in `box` is `AKt$box$o$1`). A node without a name takes the next ordinal of its chain. Lambdas,
+- **Local-class naming provenance is recorded by one walk that numbers every local node, as
+  kotlinc's `InventNamesForLocalClasses` does.** The common contract is an exact source classifier
+  owner, source declaration segments, and an optional ordinal. It contains no facade, `$`
+  separator, or physical class spelling. A node without a name takes the next ordinal of its chain. Lambdas,
   function expressions and callable references take a position even when they compile to
   `invokedynamic` and write no class, so an object after one lambda in `box` is `AKt$box$2`.
   Ordinals are counted per upper-cased chain (`foo` overloads and `Foo` share one sequence) and run
@@ -3922,14 +3921,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     object. A bodied enum entry's arguments are numbered in the entry's class (`E$B$1`).
   - Temporaries add no name: destructuring containers, `for` iterators and local delegate storage.
 
-  Local classes keep the name the parser hoists them under, and what they declare is numbered in
-  that chain. Lambda and reference classes are still named downstream (plan item 1, later slices).
-  Tests: `frontend::tests::anonymous_objects_share_the_sequence_lambdas_references_and_delegates_number`,
-  `…::anonymous_objects_in_classifiers_follow_kotlinc_member_chains`,
-  `…::anonymous_objects_in_local_scopes_follow_kotlinc_chains`,
-  `…::suspend_continuations_hold_their_place_in_the_shared_sequence`, and
-  `…::file_facade_names_follow_kotlinc_package_part_rules`. Their expected names are the
-  class files kotlinc 2.4.10 writes for the same sources.
+  Local and anonymous classifiers use opaque, stable declaration-derived identities in semantic
+  phases. A target backend owns physical spelling: the JVM pass combines the provenance with its
+  facade/class owner and `$` convention; its facade follows kotlinc's `PackagePartClassUtils`
+  rule (`a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`). JS/native may format the
+  same provenance differently.
+  Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
+  complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

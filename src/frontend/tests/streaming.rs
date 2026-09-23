@@ -43,7 +43,7 @@ fn stable_declaration_at(
 }
 
 #[test]
-fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
+fn source_set_records_anonymous_source_provenance_without_a_backend_name() {
     let source = "fun build(): Any = object {}";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
     let mut diagnostics = DiagSink::new();
@@ -60,10 +60,17 @@ fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
         .values()
         .next()
         .expect("anonymous declaration");
-    let crate::ast::Decl::Class(class) = analysis.files[0].decl(declaration) else {
+    let crate::ast::Decl::Class(_) = analysis.files[0].decl(declaration) else {
         panic!("anonymous declaration was not a class");
     };
-    assert_eq!(class.name, "WidgetKt$build$1");
+    assert_eq!(
+        analysis.files[0].local_class_name_provenance[&declaration],
+        crate::ast::LocalClassNameProvenance {
+            lexical_owner: None,
+            segments: vec!["build".to_string()],
+            ordinal: Some(1),
+        }
+    );
     let enclosing = analysis.files[0]
         .anonymous_object_enclosing_functions
         .get(&declaration)
@@ -79,7 +86,7 @@ fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
 }
 
 #[test]
-fn anonymous_renaming_keeps_nested_classifier_ownership_coherent() {
+fn stable_nested_classifier_provenance_keeps_exact_anonymous_ownership() {
     let source = "fun build(): Any = object { inner class Nested }";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
     let mut diagnostics = DiagSink::new();
@@ -91,29 +98,14 @@ fn anonymous_renaming_keeps_nested_classifier_ownership_coherent() {
     );
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let classes = analysis.files[0]
-        .decls
+    let nested_ast = analysis.files[0]
+        .hoisted_classifier_source_names
         .iter()
-        .filter_map(|declaration| match analysis.files[0].decl(*declaration) {
-            crate::ast::Decl::Class(class) => Some(class),
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let nested = classes
-        .iter()
-        .copied()
-        .find(|class| class.name.ends_with(".Nested"))
-        .unwrap_or_else(|| {
-            panic!(
-                "nested anonymous member classifier: {:?}",
-                classes
-                    .iter()
-                    .map(|class| (&class.name, &class.inner_of))
-                    .collect::<Vec<_>>()
-            )
-        });
-    assert_eq!(nested.name, "WidgetKt$build$1.Nested");
-    assert_eq!(nested.inner_of.as_deref(), Some("WidgetKt$build$1"));
+        .find_map(|(declaration, source_name)| (source_name == "Nested").then_some(*declaration))
+        .expect("nested anonymous member classifier");
+    let crate::ast::Decl::Class(nested) = analysis.files[0].decl(nested_ast) else {
+        panic!("nested declaration was not a classifier")
+    };
     let index = analysis
         .streamed
         .as_ref()
@@ -131,6 +123,29 @@ fn anonymous_renaming_keeps_nested_classifier_ownership_coherent() {
         .expect("nested classifier header")
         .flags
         .has(crate::fir::DeclarationFlags::LOCAL_CLASS));
+    let anonymous_ast = *analysis.files[0]
+        .anonymous_object_classes
+        .values()
+        .next()
+        .expect("anonymous declaration");
+    let crate::ast::Decl::Class(anonymous_class) = analysis.files[0].decl(anonymous_ast) else {
+        panic!("anonymous declaration was not a classifier")
+    };
+    let anonymous = stable_declaration_at(
+        &analysis,
+        0,
+        anonymous_class.span,
+        crate::fir::DeclarationKind::Classifier,
+    );
+    assert_eq!(
+        index.local_class_name_provenance(declaration),
+        Some(&crate::fir::LocalClassNameProvenance {
+            source: crate::fir::SourceFileId::from_raw(0),
+            lexical_owner: Some(anonymous),
+            segments: vec!["Nested".to_string()].into_boxed_slice(),
+            ordinal: None,
+        })
+    );
 }
 
 #[test]

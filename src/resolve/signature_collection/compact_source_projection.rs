@@ -39,7 +39,32 @@ pub(in crate::resolve) fn compact_classifier_identity(
 ) -> Option<(String, TypeName)> {
     let source_name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
     let package = headers.sources.get(stub.source)?.package;
-    let runtime_name = source_name.replace('.', "$");
+    // A local classifier's source path is lookup input, not a target class name. Give it an opaque
+    // module-stable semantic identity; a backend consumes its declaration-keyed lexical provenance
+    // and chooses the physical spelling later.
+    let runtime_name = if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
+        let nested = headers
+            .local_class_name_provenance
+            .get(&stub.id)
+            .and_then(|provenance| provenance.lexical_owner)
+            .and_then(|owner| headers.stub(owner))
+            .filter(|owner| owner.kind == crate::fir::DeclarationKind::Classifier)
+            .and_then(|owner| compact_classifier_identity(headers, owner))
+            .and_then(|(_, owner)| {
+                headers
+                    .local_class_name_provenance
+                    .get(&stub.id)?
+                    .segments
+                    .last()
+                    .map(|segment| crate::types::type_name_nested_child(owner, segment))
+            });
+        if let Some(nested) = nested {
+            return Some((source_name, nested));
+        }
+        format!("__krusty_local_{}", stub.id.raw())
+    } else {
+        source_name.replace('.', "$")
+    };
     Some((
         source_name,
         crate::types::type_name_child(package, &runtime_name),

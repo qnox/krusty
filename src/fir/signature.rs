@@ -1583,6 +1583,7 @@ pub struct ResolvedModuleIndex {
     /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
     /// sequence; every consumer reads it rather than deriving a second answer.
     continuation_ordinals: HashMap<DeclarationId, u32>,
+    local_class_name_provenance: HashMap<DeclarationId, super::LocalClassNameProvenance>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
@@ -2212,6 +2213,26 @@ impl ResolvedModuleIndex {
                 .insert(declaration, ordinal)
                 .is_none_or(|existing| existing == ordinal),
             "a suspend declaration holds exactly one continuation ordinal"
+        );
+    }
+
+    pub fn local_class_name_provenance(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&super::LocalClassNameProvenance> {
+        self.local_class_name_provenance.get(&declaration)
+    }
+
+    pub fn publish_local_class_name_provenance(
+        &mut self,
+        declaration: DeclarationId,
+        provenance: super::LocalClassNameProvenance,
+    ) {
+        assert!(
+            self.local_class_name_provenance
+                .insert(declaration, provenance.clone())
+                .is_none_or(|existing| existing == provenance),
+            "a local classifier has exactly one lexical naming provenance"
         );
     }
 
@@ -3079,6 +3100,7 @@ impl ResolvedModuleIndex {
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
+            && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()

@@ -84,7 +84,6 @@ pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
     text: Box<str>,
-    file_stem: Option<Box<str>>,
     features: LangFeatures,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
@@ -114,13 +113,10 @@ impl ReparseSource {
             &self.features,
             |mut file, diags| {
                 file.is_common = self.is_common;
-                if let Some(stem) = self.file_stem.as_deref() {
-                    name_anonymous_classes_with_counters(
-                        &mut file,
-                        &file_facade_simple_name(stem),
-                        &mut anonymous_counters,
-                    );
-                }
+                record_local_class_name_provenance_with_counters(
+                    &mut file,
+                    &mut anonymous_counters,
+                );
                 visit(file, diags);
             },
         );
@@ -878,7 +874,6 @@ where
             kind: source.kind,
             is_common: source.is_common,
             text: source.text.into(),
-            file_stem: source.file_stem.map(Into::into),
             features: features.clone(),
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
@@ -889,9 +884,7 @@ where
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
         file.is_common = source.is_common;
         if source.kind == SourceKind::Kotlin {
-            if let Some(stem) = source.file_stem {
-                name_anonymous_classes(&mut file, &file_facade_simple_name(stem));
-            }
+            record_local_class_name_provenance(&mut file);
             header_validation::validate(&file, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
@@ -999,8 +992,8 @@ where
         .map(
             |(source, input)| crate::libraries::PlatformSourceHeaderInput {
                 source,
-                file_stem: input.file_stem,
                 text: input.text,
+                file_stem: input.file_stem,
             },
         )
         .collect::<Vec<_>>();
@@ -1481,116 +1474,20 @@ pub fn analyze_source_standalone(
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
-/// The simple name of a source file's facade class: `foo.kt` → `FooKt`. Local classes are named
-/// under it, so the frontend fixes it before signature collection.
-pub fn file_facade_simple_name(file_stem: &str) -> String {
-    // kotlinc's `PackagePartClassUtils`: every character that is not a letter or digit becomes `_`
-    // (`foo.1.0.kt` → `Foo_1_0Kt`, `a-b.kt` → `A_bKt`), and a name that cannot start a Java
-    // identifier is prefixed with `_` rather than capitalized (`1.kt` → `_1Kt`).
-    let sanitized: String = file_stem
-        .chars()
-        .map(|c| {
-            if c.is_alphabetic() || c.is_numeric() {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let mut base = String::new();
-    let mut chars = sanitized.chars();
-    match chars.next() {
-        Some(c) if c.is_numeric() => {
-            base.push('_');
-            base.push_str(&sanitized);
-        }
-        Some(c) => {
-            base.extend(c.to_uppercase());
-            base.push_str(chars.as_str());
-        }
-        None => {}
-    }
-    base.push_str("Kt");
-    base
-}
-
-/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to the
-/// name kotlinc invents for them (`P2$Companion$build$1`), and record the ordinal each suspend
-/// function's continuation takes. Both come from one walk over the file ([`local_class_names`]),
-/// the one that numbers lambdas, callable references and delegated properties too, because
-/// kotlinc numbers them all in a single sequence per enclosing name. Must run BEFORE checking: the
-/// checker records these internals in every type it hands the backend. No parse-time placeholder
-/// may survive as semantic identity: offsets repeat across files and would make unrelated
-/// anonymous classifiers overwrite one another.
-pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
+/// Record local-class source ownership and ordering without choosing a target spelling.
+pub fn record_local_class_name_provenance(file: &mut crate::ast::File) {
     let mut counters = std::collections::HashMap::new();
-    name_anonymous_classes_with_counters(file, facade_simple, &mut counters);
+    record_local_class_name_provenance_with_counters(file, &mut counters);
 }
 
-fn name_anonymous_classes_with_counters(
+fn record_local_class_name_provenance_with_counters(
     file: &mut crate::ast::File,
-    facade_simple: &str,
-    counters: &mut std::collections::HashMap<String, u32>,
+    counters: &mut std::collections::HashMap<Vec<String>, u32>,
 ) {
-    use crate::ast::{Decl, Expr};
-    let invented = local_class_names::invent(file, facade_simple, counters);
-    for (construction, decl, fresh, enclosing) in invented.anonymous_objects {
-        if let Some(enclosing) = enclosing {
-            file.anonymous_object_enclosing_functions
-                .insert(decl, enclosing);
-        }
-        let Expr::Call { callee, .. } = file.expr(construction) else {
-            continue;
-        };
-        let callee = *callee;
-        let old = match file.decl(decl) {
-            Decl::Class(class) => class.name.clone(),
-            Decl::Fun(_) | Decl::Property(_) => continue,
-        };
-        let declarations = file.decls.clone();
-        let class_ownership = declarations
-            .iter()
-            .filter_map(|declaration| match file.decl(*declaration) {
-                Decl::Class(class) => Some((class.name.clone(), class.inner_of.clone())),
-                Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let mut renamed = std::collections::HashMap::from([(old.clone(), fresh.clone())]);
-        for _ in 0..class_ownership.len() {
-            let mut changed = false;
-            for (name, owner) in &class_ownership {
-                if renamed.contains_key(name) {
-                    continue;
-                }
-                let Some(owner) = owner else { continue };
-                let Some(new_owner) = renamed.get(owner) else {
-                    continue;
-                };
-                let simple = name.rsplit('.').next().unwrap_or(name);
-                renamed.insert(name.clone(), format!("{new_owner}.{simple}"));
-                changed = true;
-            }
-            if !changed {
-                break;
-            }
-        }
-        for declaration in declarations {
-            let Decl::Class(class) = file.decl_mut(declaration) else {
-                continue;
-            };
-            if let Some(name) = renamed.get(&class.name) {
-                class.name = name.clone();
-            }
-            if let Some(owner) = class.inner_of.as_mut() {
-                if let Some(name) = renamed.get(owner) {
-                    *owner = name.clone();
-                }
-            }
-        }
-        if let Expr::Name(name) = &mut file.expr_arena[callee.0 as usize] {
-            *name = fresh;
-        }
-    }
+    let invented = local_class_names::invent(file, counters);
+    file.local_class_name_provenance.extend(invented.classes);
+    file.anonymous_object_enclosing_functions
+        .extend(invented.anonymous_enclosing_functions);
     file.suspend_continuation_ordinals
         .extend(invented.continuations);
 }
