@@ -29,6 +29,7 @@ use crate::types::{
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod actualization_names;
+mod alias_constructor_application;
 mod annotation_applications;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -18698,6 +18699,7 @@ impl<'a> Checker<'a> {
             args,
             arg_tys,
         } = call_args;
+        let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let primary = matches!(
             &selected.target,
             ResolvedCtorDelegationTarget::ThisPrimary { .. }
@@ -18924,7 +18926,7 @@ impl<'a> Checker<'a> {
             class.internal_name(),
             inferred,
             bound_outer,
-            applied_classifier.or(expected),
+            Self::alias_constructor_result_constraint(applied_classifier, expected),
         )
     }
 
@@ -54804,78 +54806,6 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(expansion, &bindings)
     }
 
-    fn scoped_source_alias_call_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        name: &str,
-        expected: Option<Ty>,
-    ) -> Option<Ty> {
-        let (formals, expansion) = if let Some(alias) = scope.type_alias(name) {
-            (alias.formals, alias.expansion)
-        } else if let Some(alias) = self.qualified_body_local_type_alias(scope, name) {
-            (alias.formals, alias.expansion)
-        } else {
-            let identity = self.scoped_source_alias_identity(scope, name)?;
-            self.source_alias_expansion(identity)?
-        };
-        let arguments = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default();
-        // Constructor syntax may omit a generic alias's arguments and infer them from value
-        // arguments (`AliasedCell(MyClass())`). This early probe exists only to recognize aliases
-        // of compiler-defined arrays; diagnosing the empty argument list here rejects an ordinary
-        // alias before constructor inference sees it. Preserve the declaration-owned expansion with
-        // its open alias formals. If it is not an array, the caller falls through to normal
-        // constructor selection; if it is, the array constructor consumes the same semantic shape.
-        if arguments.is_empty() {
-            if !formals.is_empty() {
-                let signature = GenericSig {
-                    formals: formals.clone(),
-                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]; formals.len()],
-                    receiver: None,
-                    params: Vec::new(),
-                    ret: expansion,
-                    return_policy: GenericReturnPolicy::Exact,
-                };
-                self.contextual_constructor_signatures
-                    .insert(call, signature.clone());
-                // Omitted alias arguments participate in the constructor call's expected-type
-                // inference. Keep the alias declaration's own variables as the shape side of
-                // unification: `Alias()`, where `Alias<Y> = Pair<Y, Concrete>`, under an expected
-                // `Pair<X, T>` becomes `Pair<X, Concrete>`. Treating the bare expansion as already
-                // applied leaves the unrelated declaration name `Y` in the checked expression and
-                // later compares it nominally with `X` instead of sharing the call constraint.
-                let bindings = expected
-                    .filter(|expected| *expected != Ty::Error)
-                    .and_then(|expected| {
-                        let source = self.fed_source();
-                        crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-                            &source,
-                            &signature,
-                            expected.non_null(),
-                            |actual, bound| self.receiver_is_assignable(actual, bound),
-                        )
-                    })
-                    .unwrap_or_default();
-                return Some(crate::symbol_resolver::ty_subst_keep_unbound(
-                    expansion, &bindings,
-                ));
-            }
-        }
-        Some(self.alias_application_ty(
-            scope,
-            formals,
-            expansion,
-            name,
-            &arguments,
-            self.call_callee_name_span(call),
-        ))
-    }
-
     /// The erased signature key of a function, using the type parameters visible in `scope` plus the
     /// function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
     /// formatting belongs in the backend.
@@ -66000,7 +65930,11 @@ impl<'a> Checker<'a> {
                 (Ty::TyParam(formal, bound), actual)
                     if formals.iter().any(|declared| declared == formal) =>
                 {
+                    // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
+                    // bounded by `Any?`; the Java target completes the same position from its own
+                    // flexible bound `Any!`. Both are the declaration fallback.
                     actual == *bound
+                        || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
                 }
                 (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
                     symbolic_name == actual_name
@@ -76504,6 +76438,7 @@ impl<'a> Checker<'a> {
             names,
             trailing_lambda,
         };
+        let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let explicit_type_arguments = applied_classifier
             .filter(|applied| {
                 applied.kotlin_class_internal() == Some(internal)
@@ -76511,7 +76446,8 @@ impl<'a> Checker<'a> {
             })
             .map(|applied| applied.type_args().to_vec())
             .unwrap_or_else(|| self.resolved_explicit_type_args(scope, call));
-        let expected_classifier = applied_classifier.or(expected);
+        let expected_classifier =
+            Self::alias_constructor_result_constraint(applied_classifier, expected);
         let mut members = Vec::new();
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
@@ -77256,8 +77192,10 @@ impl<'a> Checker<'a> {
         applied_classifier: Option<Ty>,
     ) -> Ty {
         self.reject_abstract_construction(internal, self.span(call));
+        let fixed = self.alias_constructor_fixed_application(call, applied_classifier);
         if let Some(applied) = applied_classifier.filter(|applied| {
-            applied.kotlin_class_internal() == Some(internal)
+            fixed == Some(*applied)
+                && applied.kotlin_class_internal() == Some(internal)
                 && self.resolved_type_name(internal).is_some_and(|classifier| {
                     applied.type_args().len() == classifier.type_params().len()
                 })
