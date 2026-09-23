@@ -253,7 +253,8 @@ last-registered label's frame already equalled the merge, so no spill plan chang
 pinned by `the_machine_reads_the_frame_the_stackmap_writes_where_two_labels_share_an_offset`
 (`src/jvm/classfile.rs`), which compares the merged frames against the `StackMapTable` the writer
 actually emits, and by
-`two_frames_at_one_index_are_declined_rather_than_picked_between` (`src/jvm/suspend/cps/frame_types.rs`).
+`two_frames_at_one_index_are_declined_rather_than_picked_between`
+(`src/jvm/classfile/bytecode_analysis/frame_types.rs`).
 
 ### 5.4 Non-JVM backends
 
@@ -380,8 +381,9 @@ inline function is spliced, and both the suspension walk and the impl-suppressio
 rule.
 
 **A spill's type is the verifier's, computed.** The discovery pass runs a forward verification-type
-analysis over the spliced body (`src/jvm/suspend/cps/frame_types.rs`): seeded by the method's entry
-locals, every instruction's effect applied in order, joins meeting the way the verifier's do
+analysis over the spliced body (`src/jvm/classfile/bytecode_analysis/frame_types.rs`): seeded by the
+method's entry locals, every instruction's effect applied in order, joins meeting the way the
+verifier's do
 (references at `Object`, `null` at the other reference, differing primitives unusable), and a
 recorded frame REPLACING the computed state at its position — which is what the verifier holds
 there whatever arrives. The state at a suspension marker is exactly what the spill has to describe:
@@ -747,5 +749,6 @@ means the liveness analysis has to agree with the reference compiler's own exami
 rematerialization of constant locals (the `$i$f$…` inline-depth markers are re-established with
 `iconst_0; istore` on resume rather than spilled, §3 and §7), the reverse restore order, and which
 spilled references get `nullOutSpilledVariable`. That agreement is the part most likely to need
-iteration against the corpus; it is also the part the analysis in `src/jvm/suspend/cps/` exists to
-make measurable rather than guessed.
+iteration against the corpus; it is also the part the shared analysis in
+`src/jvm/classfile/bytecode_analysis/` and `src/jvm/suspend/cps/liveness.rs` exists to make measurable
+rather than guessed.
