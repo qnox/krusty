@@ -18,7 +18,6 @@
 //! prebuilt runtime that target's link draws on, and the LINKER that draws on it. The code
 //! generator whose objects it links follows.
 
-pub mod gc;
 // The tables the CODE GENERATOR reads: which runtime symbol answers a Kotlin member, which names
 // are built-in types, which members Kotlin gives a special bridge. It lands next, and the allow
 // goes with it; until then nothing in the crate calls these, and their own tests are what

@@ -1,62 +1,43 @@
 //! The runtime every native program links against: freestanding C under `runtime/`, compiled once
-//! per target when krusty itself is built (`build.rs`) and carried inside the compiler
-//! ([`super::prebuilt`]). The sources are exposed here so tests can exercise the runtime from C
-//! directly, and so the design is documented next to what it documents.
+//! per target when krusty itself is built (`build.rs`) and carried inside the compiler (the
+//! prebuilt table the linker draws on). Its two headers are exposed here, so a test can compile a C
+//! program against the runtime's own declarations and link it through krusty's linker.
 //!
 //! **It is freestanding: it does not use a C library.** That is not minimalism for its own sake —
-//! it is what makes `docs/BUILD_AND_NATIVE_PLAN.md`'s cross-compilation requirement achievable. Go's
-//! defining build property is that `GOOS=linux GOARCH=arm64 go build` works on any machine with
-//! nothing installed, because nothing in a Go binary needs a target C toolchain. A runtime that
-//! called `printf` would need a target libc, its headers and a target linker for every architecture
-//! — the per-target toolchain problem Go exists to avoid. Talking to the kernel directly removes it:
+//! it is what makes cross-compilation a property rather than a feature. Go's defining build
+//! property is that `GOOS=linux GOARCH=arm64 go build` works on any machine with nothing installed,
+//! because nothing in a Go binary needs a target C toolchain. A runtime that called `printf` would
+//! need a target libc, its headers and a target linker for every architecture — the per-target
+//! toolchain problem Go exists to avoid. Talking to the kernel directly removes it:
 //! `clang --target=<triple>` compiles any registered architecture with no sysroot at krusty's build
-//! time, and krusty's own linker ([`super::linker`]) joins the result with a program's objects, so
-//! one host produces binaries for all of them and a user's build touches no C toolchain at all.
+//! time, and krusty's own linker joins the result with a program's objects, so one host produces
+//! binaries for all of them and a user's build touches no C toolchain at all.
 //!
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is three translation units, and the split is deliberate:
+//! The runtime is four translation units over two headers:
 //!
 //! * [`SYS_HEADER`] (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
-//!   and the page-mapping primitives over it. It is the whole of the target-specific surface, and
-//!   it is a header of `static inline` functions so that both C files below reach the kernel the
-//!   same way without either exporting the other's plumbing.
-//! * [`SOURCE`] (`krusty_rt.c`) is the *values*: the built-in types, boxing, strings, rendering and
+//!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
+//!   header of `static inline` functions so every file reaches the kernel the same way.
+//! * [`HEADER`] (`krusty_rt.h`) is the contract generated code is written against.
+//! * `krusty_rt.c` is the values: the built-in types, boxing, strings, collections, exceptions and
 //!   `kotlin.io`. It allocates only through the collector.
-//! * `krusty_gc.c` (see [`super::gc`]) is the heap: allocator and collector. It knows nothing about
-//!   any particular type; every object tells it, through its [`KType`](self) descriptor, which of
-//!   its fields are references.
-//!
-//! **Every heap object starts with a type descriptor, and memory is reclaimed.** Allocation goes
-//! through `kt_gc_allocate`, and a mark-sweep collector with conservative roots and precise heap
-//! tracing frees what is unreachable (`src/native/gc.rs` states the properties and their cost).
-//! A `String`'s text is itself a heap object — a byte array — that the string's type lists as a
-//! reference, so the collector keeps text alive exactly as long as a string that uses it; a literal
-//! keeps pointing into static storage and owns no heap text at all.
+//! * `krusty_fp.c` renders a floating-point value as Kotlin does — the shortest decimal that reads
+//!   back as the same value — and computes the floating remainder.
+//! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a
+//!   precisely traced heap. It knows nothing about any particular type; every object tells it,
+//!   through its `KType` descriptor, which of its fields are references.
+//! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.
 //!
 //! **The descriptor is also the class.** `KType` names its superclass and carries the vtable, so
 //! `is` walks the `super` chain and a method call is `obj->type->vtable[slot]` — the header stays
-//! one word and the collector's contract stays `header->type`. `kotlin.Any` is defined here as the
-//! root of every chain, with the three slots every table begins with: `equals` (identity),
-//! `hashCode` (from the address, which the collector never changes) and `toString`
-//! (`<name>@<hex>`). The built-in value types hang off the same root with value equality, so
-//! `kt_equals` and `kt_hash_code` answer for a boxed `Int` as Kotlin does. A failed cast and an
-//! abstract method exit loudly: there are no exceptions yet, and a wrong answer must not be quiet.
+//! one word and the collector's contract stays `header->type`.
 //!
-//! Two limits are deliberate and must not be mistaken for oversights:
-//!
-//! * **`String` is UTF-8 bytes.** Kotlin's `String.length` counts UTF-16 code units, which is not
-//!   the byte count for any non-ASCII text. The runtime therefore exposes no `length` at all rather
-//!   than exposing a wrong one.
-//! * **Floating-point values cannot be rendered.** Kotlin's `Double.toString` is Java's
-//!   shortest-round-trip algorithm — `1.0` prints as `1.0` and `1e20` as `1.0E20` — which `printf`'s
-//!   `%g` is not, so the libc version was already producing strings Kotlin never would. There is
-//!   consequently no `kt_box_double`, which means a `Double` cannot reach a reference position at
-//!   all: the backend declines `println(1.0)` at COMPILE time instead of printing something wrong.
-//!   Arithmetic and comparison on floating-point values are unaffected.
+//! `tests/native_runtime_e2e.rs` links C drivers against the runtime and runs them.
 
-/// The kernel interface, shared by the value runtime and the collector.
+/// The kernel interface, shared by every translation unit of the runtime.
 ///
 /// One syscall shim per supported architecture. Everything above it is portable C, which is why
 /// adding an architecture is a matter of adding a register convention and four numbers rather
@@ -66,13 +47,69 @@ pub const SYS_HEADER: &str = include_str!("runtime/krusty_sys.h");
 /// The header a C program that links against the runtime includes.
 pub const HEADER: &str = include_str!("runtime/krusty_rt.h");
 
-/// The value runtime: built-in types, boxing, strings, rendering and `kotlin.io`.
-pub const SOURCE: &str = include_str!("runtime/krusty_rt.c");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
 
-/// The process entry point, per architecture.
-///
-/// With no C library there is no `crt1.o` to set up a stack frame and call `main`, so the runtime
-/// supplies `_start` itself. It has to be assembly: at `_start` the stack pointer is aligned to 16
-/// and points at `argc`, whereas a compiled C function's prologue assumes it was CALLED — off by
-/// the width of a return address — and the mismatch shows up later as a misaligned vector spill.
-pub const START: &str = include_str!("runtime/krusty_start.c");
+    /// The two headers are complete on their own: a C program that includes nothing but them
+    /// compiles for every target the runtime supports. A test elsewhere writes exactly these
+    /// strings to disk and compiles against them, so a header that leaned on a file not exposed
+    /// here would fail there, far from its cause.
+    #[test]
+    fn the_exposed_headers_compile_for_every_target() {
+        let clang = Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !clang {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must compile the runtime headers, but it has no clang"
+            );
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-runtime-headers-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create a scratch directory");
+        std::fs::write(directory.join("krusty_sys.h"), SYS_HEADER).expect("write krusty_sys.h");
+        std::fs::write(directory.join("krusty_rt.h"), HEADER).expect("write krusty_rt.h");
+        let program = directory.join("program.c");
+        std::fs::write(
+            &program,
+            "#include \"krusty_rt.h\"\n#include \"krusty_sys.h\"\n\
+             void kt_program_entry(void) { kt_sys_write(1, \"OK\\n\", 3); }\n",
+        )
+        .expect("write the program");
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "riscv64-unknown-linux-gnu",
+        ] {
+            let output = Command::new("clang")
+                .arg(format!("--target={triple}"))
+                .args([
+                    "-std=c11",
+                    "-ffreestanding",
+                    "-nostdlib",
+                    "-fsyntax-only",
+                    "-Wall",
+                    "-Werror",
+                ])
+                .arg("-I")
+                .arg(&directory)
+                .arg(&program)
+                .output()
+                .expect("run clang");
+            assert!(
+                output.status.success(),
+                "{triple}: a program including only the exposed headers must compile:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}

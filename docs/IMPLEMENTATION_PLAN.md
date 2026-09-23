@@ -4320,6 +4320,16 @@ toolchain. Without clang krusty still builds; the native target then reports tha
   `-fno-asynchronous-unwind-tables` and `-fno-unwind-tables`; x86_64 adds `-fcf-protection=none` and
   riscv64 adds `-mno-relax`, since krusty's own linker relaxes nothing.
 - `_start` calls `kt_program_entry`; a program that returns from it exits with status 0.
+- The collector (`krusty_gc.c`) finds roots conservatively and traces the heap precisely. Precise
+  roots would need stack maps at every call site, which the code generator does not emit yet; the
+  heap has no such limit, because every object carries its `KType` and the type names exactly which
+  fields are references, so a `Long` field that looks like a pointer retains nothing. Nothing needs
+  the compiler's cooperation — no stack maps, safepoints or write barriers — and when stack maps
+  arrive only root-finding changes. The cost, chosen rather than discovered: conservative roots
+  forbid moving objects, so there is no compaction or copying nursery. Objects are segregated by size
+  into chunks, so a candidate address resolves to its object by arithmetic, and collection is
+  triggered by the bytes allocated since the last one, with a threshold that rises with the
+  surviving heap.
 - `kt_sys_write` retries an interrupted write and a full non-blocking pipe, and stops silently on any
   other error, as the JVM's `PrintStream` does.
 - Tests: `tests/native_runtime_e2e.rs` links each driver under `tests/native_runtime/` with every
