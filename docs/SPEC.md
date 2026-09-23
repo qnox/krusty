@@ -6133,6 +6133,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
+  extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
+  `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for
+  a `Function<Int>`. The hierarchy walk reaches `Function<R>` from a function type (that is what
+  lets a lambda reach `callsInPlace(lambda: Function<R>, …)`), but the `Fun`-versus-`Obj` pair fell
+  to the reachability-only comparison, so the type argument it reached was never checked and every
+  function type was accepted for every `Function<X>`. The pair now takes the same class-type
+  comparison as two classes: reach the target, then check each argument under its declared
+  variance. That only rejects what the reachability test accepted, never the reverse.
+  Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
+  `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
+  `a_function_type_is_not_a_function_of_an_unrelated_result`).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
   flag for which it is, because the two classes differ observably and the step cannot tell them
