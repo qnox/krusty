@@ -467,6 +467,44 @@ impl<'a> FileLowering<'a> {
     /// the table must be as long as every class's — the interface region included — with that one
     /// member filled. The rest is the abstract trap, and unreachable for the same reason it is in
     /// a class: nothing can name a member through a type this object does not have.
+    /// The class in `interface`'s own hierarchy that DECLARES the single member a SAM conversion
+    /// converts, and that member.
+    ///
+    /// Breadth-first from the named interface, which is the order a member is inherited in. The
+    /// `seen` set is for the diamond an interface reached twice makes, not for a cycle.
+    fn sam_member(&self, interface: ClassId, name: &str) -> Option<(ClassId, u32)> {
+        let ir = self.ir;
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = std::collections::VecDeque::from([interface]);
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let declared = &ir.classes[current as usize];
+            let found = declared
+                .methods
+                .iter()
+                .copied()
+                .find(|&fid| ir.functions[fid as usize].name == name);
+            if let Some(method) = found {
+                return Some((current, method));
+            }
+            pending.extend(
+                std::iter::once(declared.superclass)
+                    .chain(declared.interfaces.iter())
+                    .chain(
+                        declared
+                            .supertypes
+                            .iter()
+                            .copied()
+                            .filter_map(crate::types::Ty::obj_internal),
+                    )
+                    .filter_map(|named| ir.class_id_by_name(named)),
+            );
+        }
+        None
+    }
+
     fn sam_table(
         &mut self,
         target: &crate::ir::IrSamTarget,
@@ -483,20 +521,22 @@ impl<'a> FileLowering<'a> {
                 target.classifier.render()
             ));
         };
-        let declaration = &self.ir.classes[interface as usize];
-        let method = declaration
-            .methods
-            .iter()
-            .copied()
-            .find(|&fid| self.ir.functions[fid as usize].name == target.method)
-            .ok_or_else(|| {
-                format!(
-                    "a functional interface without its own `{}` (`{}`)",
-                    target.method,
-                    target.classifier.render()
-                )
-            })?;
-        let key = model::function_key(self.ir, interface, method);
+        // Not the interface ALONE. `fun interface I : Base` declares nothing of its own, and the
+        // single member it converts is still `Base`'s — a `fun interface` is allowed to inherit
+        // its one abstract member rather than write it. So the search walks up from the named
+        // interface, exactly as a `super` property access does, and answers the first declaration
+        // it meets.
+        let Some((declaring, method)) = self.sam_member(interface, &target.method) else {
+            return Err(format!(
+                "a functional interface with no `{}` in its hierarchy (`{}`)",
+                target.method,
+                target.classifier.render()
+            ));
+        };
+        // Keyed by the class that DECLARES it, which is what the layout keyed it by; a slot
+        // assigned at the declaring class is valid for every subclass, so the lookup is still made
+        // against the interface the object will wear.
+        let key = model::function_key(self.ir, declaring, method);
         let slot = self.model.slot(interface, &key).ok_or_else(|| {
             format!(
                 "a functional interface member with no slot (`{}.{}`)",
@@ -547,7 +587,11 @@ impl<'a> FileLowering<'a> {
             .chain(self.model.interfaces[interface as usize].iter().copied())
             .map(|id| self.classes[id as usize].descriptor)
             .collect();
-        let kotlin_name = declaration.fq_name().replace(['/', '$'], ".");
+        // The interface the object WEARS, which is what a class literal or a failed cast reports —
+        // not the class that happens to declare the member, which may be a supertype.
+        let kotlin_name = self.ir.classes[interface as usize]
+            .fq_name()
+            .replace(['/', '$'], ".");
         Ok((vtable, interfaces, kotlin_name))
     }
 

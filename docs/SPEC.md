@@ -7418,6 +7418,17 @@ and behavior is checked by RUNNING the emitted program.
   made `xs += 1` walk the integer.
   Tests: `tests/native_iterable_walk_members_e2e.rs` (`a_walk_adds_an_element_or_another_walk`).
 
+- **A `fun interface` may INHERIT the single member it converts.** `fun interface I : Base`
+  declares nothing of its own, and the member a lambda supplies is still `Base`'s, so the search
+  walks up from the named interface and answers the first declaration it meets — the same walk a
+  `super` property access makes. The slot is keyed by the class that DECLARES the member, which is
+  how the layout keyed it, and a slot assigned there is valid for every subclass; the object still
+  wears the interface the conversion NAMED, which is what its rendered name and its `is` checks
+  report. An interface extending a FUNCTION TYPE is not this case — its `invoke` comes from the
+  type rather than from any declared class — and keeps declining.
+  Tests: `tests/native_sam_e2e.rs` (`a_fun_interface_may_inherit_the_member_it_converts`,
+  `an_inherited_sam_member_keeps_the_named_interfaces_identity`).
+
 - **`super<B>.p` names B's REALIZATION of the property, not a declaration on B.** An `open val` on
   an interface B merely inherits is what `super<B>.p` reads, and `super<C2>.p` reads the `p` that
   C2's own superclass declares. The search therefore walks up from the named class — its superclass
