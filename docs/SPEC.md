@@ -6133,6 +6133,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
+  runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
+  flag for which it is, because the two classes differ observably and the step cannot tell them
+  apart (`1..3 step 1` is a progression). A range (`..`, `until`) renders `"$first..$last"`, hashes
+  `31 * first + last`, and equals only a range of the same element type; a progression (`step`,
+  `downTo`, `reversed()`) renders `"$first..$last step $step"` or `"$first downTo $last step
+  ${-step}"`, hashes `31 * (31 * first + last) + step`, and equals a range or a progression with
+  the same first, last and step — the asymmetry of `IntRange` subclassing `IntProgression`, so
+  `(1..3 step 1) == (1..3)` but not the reverse. Two empty ones are equal and hash to `-1`.
+  `last` is the last element reached. `UIntRange`/`ULongRange` read their bounds unsigned in
+  every comparison, membership residue and walk step, so a `ULong` walk across 2^63 neither
+  misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
+  (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
+  Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,

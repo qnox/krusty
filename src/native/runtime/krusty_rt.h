@@ -501,6 +501,12 @@ typedef struct KRange {
     /* Never zero. `1` for a plain range, so one struct serves a range and a progression and every
        reader below serves both; `a downTo b` and `reversed()` make it negative. */
     kt_long step;
+    /* Whether this is a PROGRESSION — what `step`, `downTo` and `reversed()` answer — rather than
+       the RANGE `..` and `until` answer. The step cannot say so: `1..3 step 1` steps by one and is
+       still a progression, which Kotlin renders `1..3 step 1`. The two classes answer `equals`,
+       `hashCode` and `toString` differently (a progression's include its step; a range's do not),
+       and a range equals only a range, while a progression equals either. */
+    kt_boolean progression;
 } KRange;
 
 extern const KType kt_type_int_range;
@@ -532,7 +538,8 @@ KRef kt_uint_range_until(kt_int first, kt_int last);
 KRef kt_ulong_range_until(kt_long first, kt_long last);
 
 /* `value in range`. The caller widens its own element to 64 bits — signed for `Int` and `Long`,
-   unsigned for `Char` — which is the same widening the bounds were stored with. */
+   unsigned for `Char`, `UInt` and `ULong` — which is the same widening the bounds were stored
+   with. */
 kt_boolean kt_range_contains(KRef range, kt_long value);
 /* `range.first` / `range.last` / `range.start` / `range.endInclusive`, at the range's own width. */
 kt_long kt_range_first(KRef range);
@@ -597,8 +604,9 @@ KRef kt_range_iterator(KRef range);
 
 /* ---- progressions ---------------------------------------------------------------------------
 
-   `step`, `downTo` and `reversed` answer a PROGRESSION, which here is a range with a step: the
-   same object, so `first`, `last`, `isEmpty` and iteration are the ones above. A step of zero is
+   `step`, `downTo` and `reversed` answer a PROGRESSION, which here is a range with a step and its
+   `progression` flag set: the same object, so `first`, `last`, `isEmpty` and iteration are the
+   ones above, and only the three `kotlin.Any` members read the flag. A step of zero is
    Kotlin's `IllegalArgumentException`, and the step given to `step` is its magnitude — `a downTo b
    step 2` descends by two, because the receiver's direction is what decides. */
 KRef kt_range_step(KRef range, kt_long step);
