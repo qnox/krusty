@@ -12796,7 +12796,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -13151,7 +13151,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack + lam_max_stack,
+                body.max_stack + lam_max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -13230,7 +13230,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack + lam_max_stack,
+            body.max_stack + lam_max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -13748,7 +13748,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let InlineStaticTarget {
             owner,
@@ -13902,7 +13902,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack,
+                body.max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -13952,7 +13952,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack,
+            body.max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -15972,6 +15972,14 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::Assert { mode } => {
                         self.emit_assertion(*mode, args, code)
                     }
+                    crate::ir::IrIntrinsic::TypeOf { ty } => {
+                        let parameters = super::type_of::TypeParameters::new(self.ir, &self.facade);
+                        let mut instructions = Vec::new();
+                        match super::type_of::generate(*ty, &parameters, &mut instructions) {
+                            Ok(()) => super::type_of::encode(&instructions, code, self.cw),
+                            Err(error) => self.run.set_emit_error(error.to_string()),
+                        }
+                    }
                     crate::ir::IrIntrinsic::ArrayGet => {
                         self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
                     }
@@ -16269,7 +16277,8 @@ impl<'a> Emitter<'a> {
                         "resolve",
                         "emit static {owner}.{name}{descriptor} inline={inline:?}"
                     );
-                    let reified = crate::jvm::reified_operations::splice_type_map(self.ir, e);
+                    let reified =
+                        crate::jvm::reified_operations::splice_arguments(self.ir, e, &self.facade);
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
@@ -19952,7 +19961,7 @@ fn local_variable_desc(t: Ty) -> String {
     })
 }
 
-fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
+pub(super) fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
     method_descriptor(&jvm_tys(params), jvm_declared_ty(ret))
 }
 

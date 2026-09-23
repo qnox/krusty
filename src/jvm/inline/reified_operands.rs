@@ -3,7 +3,7 @@
 use super::{methodref_target, set_pool_operand, utf8, Insn};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
-use std::collections::HashMap;
+use crate::jvm::type_of::TYPE_OF_MARKER;
 
 /// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
 /// `instanceof`, `multianewarray`.
@@ -88,6 +88,8 @@ pub(super) enum ReifiedRepoint {
     Class(usize, String),
     /// Point the marker's type-parameter `ldc` at this forwarded name.
     Marker(usize, String),
+    /// Replace a `typeOf` placeholder with this marker argument's realization.
+    TypeOf(usize, String),
 }
 
 impl ReifiedRepoint {
@@ -115,7 +117,21 @@ impl ReifiedRepoint {
                 };
                 true
             }
+            Self::TypeOf(..) => false,
         }
+    }
+}
+
+/// The marker's operation kind, pushed by the instruction two before the call.
+fn marker_operation(insn: &Insn) -> Option<i32> {
+    match insn {
+        Insn::Plain { op, operands } if (0x02..=0x08).contains(op) && operands.is_empty() => {
+            Some(i32::from(*op) - 0x03)
+        }
+        Insn::Plain { op: 0x10, operands } if operands.len() == 1 => {
+            Some(i32::from(operands[0] as i8))
+        }
+        _ => None,
     }
 }
 
@@ -123,8 +139,8 @@ impl ReifiedRepoint {
 /// for the call's `reified` arguments. A concrete argument NOPs the triplet in place — the marker is
 /// a compile-time directive that THROWS at runtime, so it must never reach the spliced bytecode —
 /// and repoints the following type-bearing instruction (`anewarray`/`checkcast`/…/`ldc class`). A
-/// forwarded argument keeps the triplet and renames its type parameter, as kotlinc does when one
-/// reified inline function calls another with its own parameter. Both rewrites are returned for the
+/// forwarded argument keeps the triplet and renames its type parameter. A `typeOf` marker (mode 6)
+/// NOPs the triplet and leaves its `aconst_null` placeholder for the caller to replace. Rewrites are returned for the
 /// caller to apply AFTER relocation, so the fresh pool refs survive `relocate_insns`. `None` (⇒ the
 /// caller SKIPS the whole splice, never miscompiles) if any marker is malformed — the preceding
 /// `ldc "<T>"` name is unreadable, or no type-bearing op follows — or names a parameter `reified`
@@ -132,7 +148,7 @@ impl ReifiedRepoint {
 pub(super) fn reify_markers(
     insns: &mut [Insn],
     src_cp: &[C],
-    reified: &HashMap<String, ReifiedArgument>,
+    reified: &super::ReifiedArguments,
 ) -> Option<Vec<ReifiedRepoint>> {
     // Plan every marker FIRST, bailing on any malformed one, so a partial NOP is never left behind
     // when we decide to skip.
@@ -162,8 +178,15 @@ pub(super) fn reify_markers(
             Some(C::String(u)) => utf8(src_cp, *u),
             _ => None,
         })?;
+        if marker_operation(&insns[i - 2]) == Some(TYPE_OF_MARKER) {
+            if !matches!(insns.get(i + 1), Some(Insn::Plain { op: 0x01, .. })) {
+                return None;
+            }
+            plan.push((i, ReifiedRepoint::TypeOf(i + 1, marker.to_owned())));
+            continue;
+        }
         let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
-        let repoint = match reified.get(marker.trim_end_matches('?'))? {
+        let repoint = match reified.classes.get(marker.trim_end_matches('?'))? {
             ReifiedArgument::Class(class) => ReifiedRepoint::Class(j, class.clone()),
             ReifiedArgument::Forwarded { name, nullable } => {
                 let nullable = *nullable || marker.ends_with('?');
@@ -178,7 +201,10 @@ pub(super) fn reify_markers(
     };
     let mut repoints = Vec::with_capacity(plan.len());
     for (i, repoint) in plan {
-        if matches!(repoint, ReifiedRepoint::Class(..)) {
+        if matches!(
+            repoint,
+            ReifiedRepoint::Class(..) | ReifiedRepoint::TypeOf(..)
+        ) {
             insns[i] = nop.clone();
             insns[i - 1] = nop.clone();
             insns[i - 2] = nop.clone();

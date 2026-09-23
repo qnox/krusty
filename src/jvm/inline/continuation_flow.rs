@@ -65,7 +65,6 @@ mod tests {
     use super::*;
     use crate::jvm::classfile::ClassWriter;
     use crate::jvm::classreader::{MethodCode, C};
-    use std::collections::HashMap;
 
     #[test]
     fn splice_unified_branchless_drops_return_and_stores_args() {
@@ -92,7 +91,7 @@ mod tests {
             super::super::ParameterBinding::Stored(&[]),
             0,
             &mut cw,
-            &HashMap::new(),
+            &super::super::ReifiedArguments::default(),
         )
         .expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
@@ -128,7 +127,7 @@ mod tests {
             super::super::ParameterBinding::Stored(&[]),
             0,
             &mut cw,
-            &HashMap::new(),
+            &super::super::ReifiedArguments::default(),
         )
         .expect("terminal branchless splice");
 

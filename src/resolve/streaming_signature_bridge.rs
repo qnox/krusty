@@ -4185,6 +4185,49 @@ fn stable_function_signature<'a>(
         })
 }
 
+/// The type parameters visible from `declaration`'s enclosing declarations, innermost first, by
+/// source name. Only owners whose parameters are already published contribute. A classifier
+/// nested in another classifier without `inner` sees none of its owner's parameters.
+fn enclosing_type_parameters(
+    index: &crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> HashMap<String, Ty> {
+    let mut visible = HashMap::new();
+    let mut scope = declaration;
+    while let Some(header) = index.declaration_header(scope) {
+        let Some(current) = header.owner else {
+            break;
+        };
+        let static_nested = header.kind == crate::fir::DeclarationKind::Classifier
+            && !header.flags.has(crate::fir::DeclarationFlags::INNER)
+            && index.classifier_header(current).is_some();
+        if static_nested {
+            break;
+        }
+        for ordinal in 0.. {
+            let Some(parameter) = index.type_parameter(current, ordinal) else {
+                break;
+            };
+            let (Some(name), Some(semantic), Some(header)) = (
+                index.type_parameter_name(parameter),
+                index.type_parameter_semantic_name(parameter),
+                index.type_parameter_header(parameter),
+            ) else {
+                continue;
+            };
+            let bound = header.bounds.first().map_or_else(
+                || Ty::nullable(Ty::obj("kotlin/Any")),
+                |bound| bound.ty.get(),
+            );
+            visible
+                .entry(name.to_owned())
+                .or_insert_with(|| Ty::ty_param(semantic, bound));
+        }
+        scope = current;
+    }
+    visible
+}
+
 pub(crate) fn finalized_streamed_signature_index(
     headers: &crate::fir::StreamedHeaderModule,
     table: &mut SymbolTable,
@@ -5770,16 +5813,29 @@ pub(crate) fn finalized_streamed_signature_index(
         .then(|| stable_function(table, headers, &classifier_types, stub.id))
         .flatten()
         .and_then(|(signature, _)| signature.generic_sig.as_ref());
-        let symbolic =
-            super::TParams::symbolic_from_decl_with(&declared_names, &declared_bounds, &|name| {
-                table.class_names.get(name)
-            })
-            .alpha_renamed_declaration(
-                &declared_names,
-                table.compilation_id,
-                stub.source.raw(),
-                declaration_start,
-            );
+        // A classifier or property bound may name a type parameter of an enclosing declaration
+        // (`inner class D<Y : X>`, `val <Y> B<Y>.y where Y : X`). Those owners were published
+        // earlier in this pass, so their stable identities resolve such a bound; without them the
+        // bound erases to `Any`.
+        let enclosing = enclosing_type_parameters(&index, stub.id);
+        let symbolic = super::TParams::symbolic_from_decl_enclosing(
+            &declared_names,
+            &declared_bounds,
+            &|name| table.class_names.get(name),
+            &|name| {
+                // The declaration's own parameters shadow any enclosing one of the same name.
+                if declared_names.iter().any(|declared| declared == name) {
+                    return None;
+                }
+                enclosing.get(name).copied()
+            },
+        )
+        .alpha_renamed_declaration(
+            &declared_names,
+            table.compilation_id,
+            stub.source.raw(),
+            declaration_start,
+        );
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = type_parameter_publication::semantic_name(

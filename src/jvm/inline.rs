@@ -27,6 +27,24 @@ use local_compaction::LocalCompaction;
 pub(super) use reified_operands::ReifiedArgument;
 use reified_operands::{reify_markers, ReifiedRepoint};
 
+/// A call site's reified type arguments, in the two forms a dependency's markers consume.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ReifiedArguments {
+    /// Type-parameter name to its argument for a class-bearing marker: a concrete class, or a
+    /// reified parameter of the host that the marker is forwarded to.
+    pub(super) classes: HashMap<String, ReifiedArgument>,
+    /// Marker argument (`T`, or `T?` for a nullable use) to the `typeOf` realization that replaces
+    /// its `aconst_null` placeholder. A realization the host cannot build is absent, so a body
+    /// that needs it declines to splice.
+    pub(super) type_of: HashMap<String, Vec<super::type_of::TypeOfInsn>>,
+}
+
+impl ReifiedArguments {
+    pub(super) fn is_empty(&self) -> bool {
+        self.classes.is_empty() && self.type_of.is_empty()
+    }
+}
+
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
         C::Utf8(s) => Some(s),
@@ -969,6 +987,9 @@ pub struct BranchySplice {
     /// occurrence has its own byte position and host verifier state while referring back to the one
     /// pre-built lambda body by `lambda_index`.
     pub lambda_sites: Vec<RelocatedLambdaSite>,
+    /// Operand-stack height the body needs beyond its own `max_stack`: an expanded `typeOf`
+    /// realization replaces a one-word placeholder with a deeper sequence.
+    pub stack_growth: u16,
     /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
     /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
     /// catch-all/`finally`). The handler frames themselves are already in `frames` (a handler is a
@@ -1950,7 +1971,7 @@ pub(super) fn splice_unified(
     binding: ParameterBinding<'_>,
     start_offset: usize,
     cw: &mut ClassWriter,
-    reified: &HashMap<String, ReifiedArgument>,
+    reified: &ReifiedArguments,
 ) -> Option<BranchySplice> {
     let (lambdas, in_place): (&[LambdaSplice], Option<&InPlacePlan>) = match binding {
         ParameterBinding::Stored(lambdas) => (lambdas, None),
@@ -1964,7 +1985,7 @@ pub(super) fn splice_unified(
         "splice",
         "splice_unified reified_inline={} reified_map_len={}",
         is_reified_inline(body),
-        reified.len()
+        reified.classes.len()
     );
     if is_reified_inline(body) && reified.is_empty() {
         return None;
@@ -2232,11 +2253,19 @@ pub(super) fn splice_unified(
     relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
     // Repoint each reified site (post-relocation, so the fresh pool ref survives). A malformed
     // type-bearing instruction skips the whole splice rather than emitting the erased placeholder.
-    if !reified_targets
-        .iter()
-        .all(|repoint| repoint.apply(&mut insns, cw))
-    {
-        return None;
+    // A `typeOf` placeholder is kotlinc's `processTypeOf`: its `aconst_null` becomes the
+    // substituted type's realization, built against this host (its own reified parameters become
+    // markers again, its ordinary ones `KTypeParameter`s).
+    let mut type_of_edits = Vec::new();
+    let mut stack_growth = 0u16;
+    for repoint in &reified_targets {
+        if let ReifiedRepoint::TypeOf(at, argument) = repoint {
+            let realization = reified.type_of.get(argument)?;
+            stack_growth = stack_growth.max(super::type_of::max_stack(realization));
+            type_of_edits.push((*at, super::type_of::encode_insns(realization, cw)));
+        } else if !repoint.apply(&mut insns, cw) {
+            return None;
+        }
     }
     // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
@@ -2279,6 +2308,11 @@ pub(super) fn splice_unified(
         }); // drop the trailing return → fall through
     }
     let join_required = host_has_branches || made_goto || !host_frames.is_empty();
+    edits.extend(
+        type_of_edits
+            .into_iter()
+            .map(|(at, repl)| Edit { at, len: 1, repl }),
+    );
     edits.sort_by_key(|e| e.at);
     // Reject overlapping edits (shouldn't happen for the shapes above).
     for w in edits.windows(2) {
@@ -2761,6 +2795,7 @@ pub(super) fn splice_unified(
         external_branches,
         locals: relocated_locals,
         lines: relocated_lines,
+        stack_growth,
     })
 }
 
@@ -3061,7 +3096,7 @@ mod tests {
             ParameterBinding::Stored(&[]),
             0,
             &mut cw,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("splice");
         assert!(out.join_required);

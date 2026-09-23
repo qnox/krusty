@@ -169,6 +169,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     if let Some(stems) = stems {
+        crate::jvm::module_calls::resolve_foreign_template_facades(ir, stems);
         crate::jvm::module_calls::realize_default_calls(
             ir,
             stems,

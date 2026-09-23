@@ -6361,6 +6361,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   holder's `$serializer`, plus the in-place element construction in a holder's child-serializer
   cache and in a sealed serializer), and
   `plugins::serialization::cached_serializer::tests::serial_info_never_silently_becomes_an_empty_annotation_array`.
+- **`typeOf<T>()` is a compiler intrinsic, realized as kotlinc 2.4 realizes it.** The stdlib
+  body only throws, so a call is never emitted. The type argument becomes a `KType` built from
+  `kotlin.jvm.internal.Reflection` factory calls (`typeOf`/`nullableTypeOf` over a class instance
+  and `KTypeProjection`s, wrapped by `mutableCollectionType`, `nothingType` or `platformType` where
+  the type calls for it). No kotlin-reflect is needed: without it the stdlib's `TypeReference`
+  answers `equals`, `hashCode`, `toString`, `classifier` and `arguments`. The details that decide
+  the bytes and the runtime answers:
+  - A non-null primitive passes `Wrapper.TYPE`; a nullable one, an unsigned type or a value class
+    passes its class. Fewer than three arguments go as separate parameters, three or more as a
+    `KTypeProjection[]`. An inner class lists its own arguments before its outer's.
+  - A **reified** parameter inside an inline body is kotlinc's placeholder,
+    `reifiedOperationMarker(6, "T")` then `aconst_null` (`"T?"` for a nullable use). Expanding the
+    body replaces the placeholder with the realization of the call-site argument, whether the body
+    is inlined from IR or spliced from a class file.
+  - A **non-reified** parameter is described, not substituted, even inside an inline body (kotlinc
+    substitutes only reified parameters): `Reflection.typeParameter(container, name, variance,
+    reified)`, then its upper bounds (`Any?` when none is written), then `typeOf(KClassifier)`. The
+    container is the declaring class's `KClass`, a `FunctionReferenceImpl` for a function, or a
+    `PropertyReferenceNImpl` signed by the getter for a property. A top-level function's owner is
+    the facade of the file that declares it, which for an inline function from another file is not
+    the file being compiled. A recursive bound or a `suspend` function type is an error, as in
+    kotlinc.
+  - A type parameter's bound may name a parameter of an enclosing declaration (`inner class
+    D<Y : X>`, `val <Y> B<Y>.p where Y : X`), and keeps it as a type parameter; it used to erase to
+    `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
+  Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
+  and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  A generic top-level extension property's accessors are generic methods and carry a `Signature`
+  (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
+  Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
+  reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
+  argument inferred as an intersection type, and a use-site projection written in a typealias
+  (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
 
 ## 8. Success criteria for the PoC
 

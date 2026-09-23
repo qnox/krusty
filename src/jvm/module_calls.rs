@@ -803,6 +803,16 @@ fn realize_property(
     }
 }
 
+/// Resolve each top-level foreign inline template's declaring source unit to its JVM file facade.
+pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, stems: &[String]) {
+    let facades = ir
+        .foreign_template_sources
+        .iter()
+        .filter_map(|(function, source)| Some((*function, facade_for(*source, stems)?)))
+        .collect::<Vec<_>>();
+    ir.foreign_template_facades.extend(facades);
+}
+
 pub(super) fn facade_for(
     source: IrModuleSource,
     stems: &[String],

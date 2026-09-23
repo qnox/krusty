@@ -79,6 +79,13 @@ pub enum IrIntrinsic {
     EnumValueOf {
         classifier: Ty,
     },
+    /// Kotlin's compiler-supplied `typeOf<T>()`. `ty` is the complete selected type argument,
+    /// including nullability, arguments, and projections. It may name a declaration-owned reified
+    /// type parameter in an emitted inline template, which the target realizes as its reified
+    /// marker; any other type parameter it names is described to the runtime as a classifier.
+    TypeOf {
+        ty: Ty,
+    },
     /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
     /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
     /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
@@ -1470,6 +1477,17 @@ pub struct MemberExtProp {
     pub type_params: Vec<IrTypeParameter>,
 }
 
+/// A top-level generic extension property ([`IrFile::top_level_generic_properties`]): the
+/// declaration that owns the type parameters its accessor bodies see.
+#[derive(Clone, Debug)]
+pub struct IrGenericTopLevelProperty {
+    pub name: String,
+    pub is_var: bool,
+    pub getter: u32,
+    pub setter: Option<u32>,
+    pub type_params: Vec<IrTypeParameter>,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
@@ -2486,6 +2504,9 @@ pub struct IrFile {
     /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
+    /// Top-level extension properties declaring type parameters. A reflective description of such a
+    /// type parameter (`typeOf`) names the property as its container.
+    pub top_level_generic_properties: Vec<IrGenericTopLevelProperty>,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
@@ -2599,6 +2620,13 @@ pub struct IrFile {
     /// cloning templates in the active common-IR arena. They are never emitted as declarations in
     /// this file, and a non-inlined fallback keeps its stable module callable edge.
     pub foreign_inline_templates: std::collections::HashSet<u32>,
+    /// The JVM file facade declaring each top-level foreign inline template, resolved by the
+    /// JVM backend from the template's source unit. Reflective descriptions of the template (a
+    /// `typeOf` type parameter's container) name the declaring facade, not the host file's.
+    pub foreign_template_facades: std::collections::HashMap<u32, TypeName>,
+    /// The source unit declaring each top-level foreign inline template, kept until a backend
+    /// resolves it to its own naming (see [`Self::foreign_template_facades`]).
+    pub foreign_template_sources: std::collections::HashMap<u32, IrModuleSource>,
     /// Top-level functions declared `inline`. This is a source-semantic fact; each backend decides
     /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
     /// `$i$f$<name>` local marker to emitted non-suspend bodies).
@@ -3363,6 +3391,14 @@ impl IrFile {
 
     pub fn class_signature_name(&self, internal: crate::types::TypeName) -> Option<&IrGenericSig> {
         self.class_signatures.get(&internal)
+    }
+
+    pub fn class_signatures(
+        &self,
+    ) -> impl Iterator<Item = (crate::types::TypeName, &IrGenericSig)> + '_ {
+        self.class_signatures
+            .iter()
+            .map(|(classifier, signature)| (*classifier, signature))
     }
 
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {

@@ -429,6 +429,9 @@ pub enum CompilerIntrinsic {
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
+    /// `kotlin.reflect.typeOf<T>()`. The stdlib body only throws: the selected type argument is
+    /// the whole operand, and each target builds its runtime `KType` from that semantic type.
+    TypeOf,
     IsEmpty,
     IsNotEmpty,
     Count,

@@ -18,7 +18,7 @@ use crate::types::TypeName;
 
 use super::FirFileLoweringFailure;
 
-fn source(
+pub(super) fn source(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
 ) -> Result<IrModuleSource, FirFileLoweringFailure> {
