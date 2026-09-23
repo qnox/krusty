@@ -48,25 +48,37 @@ static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_c
 
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
-const KType kt_type_any = {"kotlin.Any", 10,   sizeof(KObjectHeader), 0, 0, NULL, NULL,
-                           kt_any_vtable, 3, 0};
+const KType kt_type_any = {.name = "kotlin.Any",
+                           .name_length = 10,
+                           .instance_size = sizeof(KObjectHeader),
+                           .vtable = kt_any_vtable,
+                           .vtable_length = 3};
+
+/* A type with no instances of its own: the root's three slots, `kotlin.Any` as its super, and
+   nothing else. Every descriptor names its fields, because a positional initializer silently
+   shifts when `KType` gains a field and leaves every field after the last one written to a
+   default nobody chose. */
+#define KT_MARKER_TYPE(identifier, kotlin_name)                                                    \
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = sizeof(KObjectHeader),                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3};
 
 /* `kotlin.Number` and `kotlin.Comparable` have no instances of their OWN — every value that is one
    is a boxed primitive or a string. They exist as descriptors for those to point at, so that an `is`
    against them has something to compare. Kotlin's own hierarchy decides which points at which, and
    it is asymmetric: `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer
    is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
-const KType kt_type_number = {"kotlin.Number", 13,  sizeof(KObjectHeader), 0, 0, NULL, &kt_type_any,
-                              kt_any_vtable,   3,   0};
-const KType kt_type_comparable = {"kotlin.Comparable", 17, sizeof(KObjectHeader), 0, 0, NULL,
-                                  &kt_type_any,        kt_any_vtable, 3, 0};
+KT_MARKER_TYPE(kt_type_number, "kotlin.Number")
+KT_MARKER_TYPE(kt_type_comparable, "kotlin.Comparable")
 
 /* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
    it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
-const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHeader), 0, 0, NULL,
-                                     &kt_type_any,         kt_any_vtable, 3, 0};
+KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.CharSequence")
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -75,20 +87,9 @@ const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHe
 
    None of them has instances, exactly like `Number` and `Comparable` above. 22 is Kotlin's largest
    function arity, so the set is complete rather than open-ended. */
-const KType kt_type_function = {"kotlin.Function", 15,            sizeof(KObjectHeader), 0, 0, NULL,
-                                &kt_type_any,      kt_any_vtable, 3,                     0};
+KT_MARKER_TYPE(kt_type_function, "kotlin.Function")
 
-#define KT_FUNCTION_TYPE(arity)                                                                    \
-    const KType kt_type_function##arity = {"kotlin.Function" #arity,                               \
-                                           sizeof("kotlin.Function" #arity) - 1,                   \
-                                           sizeof(KObjectHeader),                                  \
-                                           0,                                                      \
-                                           0,                                                      \
-                                           NULL,                                                   \
-                                           &kt_type_any,                                           \
-                                           kt_any_vtable,                                          \
-                                           3,                                                      \
-                                           0};
+#define KT_FUNCTION_TYPE(arity) KT_MARKER_TYPE(kt_type_function##arity, "kotlin.Function" #arity)
 
 KT_FUNCTION_TYPE(0)
 KT_FUNCTION_TYPE(1)
@@ -117,12 +118,7 @@ KT_FUNCTION_TYPE(22)
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
    its own — a reference object's type is one the generator emits per property — so these are what
    an `is` against `KProperty0` or `KMutableProperty` compares with. */
-#define KT_REFLECT_TYPE(identifier, kotlin_name)                                                   \
-    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
-                              sizeof(KObjectHeader), 0,                                            \
-                              0,                 NULL,                                             \
-                              &kt_type_any,      kt_any_vtable,                                    \
-                              3,                 0};
+#define KT_REFLECT_TYPE(identifier, kotlin_name) KT_MARKER_TYPE(identifier, kotlin_name)
 
 KT_REFLECT_TYPE(kt_type_kcallable, "kotlin.reflect.KCallable")
 KT_REFLECT_TYPE(kt_type_kproperty, "kotlin.reflect.KProperty")
@@ -142,24 +138,38 @@ static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_
 static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
 
 #define KT_TYPE_WITH(identifier, kotlin_name, size, count, offsets, ifaces)                        \
-    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
-                              size,              count,                                            \
-                              0,                 offsets,                                          \
-                              &kt_type_any,      kt_builtin_vtable,                                \
-                              3,                 0,                                                \
-                              ifaces,            (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = size,                                               \
+                              .reference_count = count,                                            \
+                              .reference_offsets = offsets,                                        \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_builtin_vtable,                                         \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = ifaces,                                                \
+                              .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
 
 #define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
-    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size,  count,                  \
-                              0,           offsets,                 &kt_type_any,                  \
-                              kt_builtin_vtable, 3, 0};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = size,                                               \
+                              .reference_count = count,                                            \
+                              .reference_offsets = offsets,                                        \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_builtin_vtable,                                         \
+                              .vtable_length = 3};
 
 /* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
    so it takes `kotlin.Any`'s vtable rather than the built-in value one. */
 #define KT_ARRAY_TYPE(identifier, kotlin_name, stride, references)                                 \
-    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, sizeof(KArray), 0,             \
-                              stride,      NULL,                    &kt_type_any,                  \
-                              kt_any_vtable, 3, references};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = sizeof(KArray),                                     \
+                              .element_size = stride,                                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .element_references = references};
 
 /* Every array, including the raw bytes behind a string's text. `KArray` says where the elements
    begin; the type says how wide they are and whether the collector looks inside. */
@@ -185,8 +195,14 @@ KRef kt_array_new(const KType *type, kt_int length) {
     if (length < 0) {
         KT_FAIL("krusty: negative array size\n");
     }
-    KArray *array = (KArray *)kt_gc_allocate(
-        type, (uint32_t)sizeof(KArray) + (uint32_t)length * type->element_size);
+    /* Sized in 64 bits: a length Kotlin allows can need more bytes than the allocator's 32-bit
+       request holds, and a size that wrapped would hand back an array far smaller than its length
+       says. Memory the request cannot express is memory the runtime cannot provide. */
+    uint64_t size = (uint64_t)sizeof(KArray) + (uint64_t)length * type->element_size;
+    if (size > UINT32_MAX) {
+        kt_fail_oom();
+    }
+    KArray *array = (KArray *)kt_gc_allocate(type, (uint32_t)size);
     array->length = length;
     return (KRef)array;
 }
@@ -345,6 +361,13 @@ kt_char kt_string_get(KRef self, kt_int index) {
     if (self != NULL && self->header.type->walk_char_at != NULL) {
         return self->header.type->walk_char_at(self, index);
     }
+    /* The walk below finds the character `index` falls BEFORE the end of, which a negative index
+       does on the first one; only the end of the walk raises, and that covers indices past the
+       end. */
+    if (index < 0) {
+        kt_index_out_of_bounds(index, kt_string_length(self));
+        return 0;
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
@@ -451,10 +474,17 @@ kt_int kt_string_compare_to(KRef a, KRef b) {
 }
 
 /* The BYTE offset at which UTF-16 unit `index` begins; `index` equal to the length answers the end
-   of the text. */
+   of the text. An index outside the text raises Kotlin's `IndexOutOfBoundsException` and answers
+   -1, which is the caller's signal to return rather than slice: `kt_throw` comes back. */
 static kt_int kt_string_offset(KRef self, kt_int index) {
     const char *bytes = self->as.string.bytes;
     kt_int byte_length = self->as.string.byte_length;
+    /* Before the walk, which would otherwise take a negative index for one that falls inside the
+       first character and report a surrogate pair the text does not have. */
+    if (index < 0) {
+        kt_index_out_of_bounds(index, kt_string_length(self));
+        return -1;
+    }
     kt_int unit = 0;
     kt_int at = 0;
     while (at < byte_length) {
@@ -477,15 +507,25 @@ static kt_int kt_string_offset(KRef self, kt_int index) {
         return at;
     }
     kt_index_out_of_bounds(index, unit);
-    return 0;
+    return -1;
 }
 
+/* After a raise these return the receiver rather than a slice, for the reason `kt_string_first`
+   gives: the call site tests for the exception before it reads the answer, and a slice cut from
+   bounds that were refused would be text of negative length. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
     if (start < 0 || end < start) {
         kt_index_out_of_bounds(start, end);
+        return self;
     }
     kt_int from = kt_string_offset(self, start);
+    if (from < 0) {
+        return self;
+    }
     kt_int to = kt_string_offset(self, end);
+    if (to < 0) {
+        return self;
+    }
     /* The storage is shared, not copied: the receiver's own text already holds these bytes, and
        the collector keeps it alive through the field the new string names. */
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, to - from);
@@ -493,6 +533,9 @@ KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
 
 KRef kt_string_substring_from(KRef self, kt_int start) {
     kt_int from = kt_string_offset(self, start);
+    if (from < 0) {
+        return self;
+    }
     kt_int length = self->as.string.byte_length;
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length - from);
 }
@@ -554,7 +597,9 @@ static kt_boolean kt_is_whitespace(uint32_t code) {
     if (code >= 0x2000u && code <= 0x200Au) {
         return 1;
     }
-    return code == 0x85u || code == 0xA0u || code == 0x1680u || code == 0x2028u
+    /* Not U+0085 (NEXT LINE): it is a control character outside Java's list of whitespace controls
+       and not a space character either, so the JVM answers false for it. */
+    return code == 0xA0u || code == 0x1680u || code == 0x2028u
            || code == 0x2029u || code == 0x202Fu || code == 0x205Fu || code == 0x3000u;
 }
 
@@ -715,11 +760,19 @@ KRef kt_string_repeat(KRef self, kt_int count) {
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
-    KByteArray *joined = kt_bytes_new(byte_length * count);
-    for (kt_int time = 0; time < count; time++) {
-        memcpy(kt_bytes_of(joined) + time * byte_length, bytes, (size_t)byte_length);
+    /* Multiplied out in 64 bits: the product of two lengths need not fit in one, and a length that
+       wrapped would either be negative or name a buffer smaller than the copies written into it.
+       Text longer than any array can hold is memory the runtime cannot provide. */
+    uint64_t total = (uint64_t)byte_length * (uint64_t)count;
+    if (total > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
     }
-    return kt_string_of((KRef)joined, kt_bytes_of(joined), byte_length * count);
+    KByteArray *joined = kt_bytes_new((kt_int)total);
+    for (kt_int time = 0; time < count; time++) {
+        memcpy(kt_bytes_of(joined) + (size_t)time * (size_t)byte_length, bytes,
+               (size_t)byte_length);
+    }
+    return kt_string_of((KRef)joined, kt_bytes_of(joined), (kt_int)total);
 }
 
 /* `s.reversed()`. Reversal is by CHARACTER, not by UTF-16 unit: Kotlin's own answer keeps a
@@ -794,7 +847,10 @@ static kt_int kt_render_long(kt_long value, char *buffer) {
     return length;
 }
 
-/* A `Char` is one UTF-16 code unit; the BMP subset encodes directly as UTF-8. */
+/* A `Char` is one UTF-16 code unit; the BMP subset encodes directly as UTF-8. A SURROGATE is half
+   of a character above U+FFFF and UTF-8 has no form for half a character, so one is written as the
+   three bytes its code unit would encode to — and `kt_string_plus` joins such a high half with the
+   low half that follows it into the character they spell. */
 static kt_int kt_render_char(kt_char unit, char *buffer) {
     if (unit < 0x80) {
         buffer[0] = (char)unit;
@@ -909,6 +965,15 @@ KRef kt_to_string(KRef value) {
     return kt_string_of(storage, bytes, length);
 }
 
+/* Whether the three bytes at `bytes` are a lone surrogate as `kt_render_char` writes one: a high
+   half (D800–DBFF) is `ED A0..AF xx` and a low half (DC00–DFFF) is `ED B0..BF xx`. `ED` is a lead
+   byte, so three bytes that begin with it are one whole encoding and never the tail of another. */
+static kt_boolean kt_is_surrogate_half(const char *bytes, kt_boolean high) {
+    unsigned char second = (unsigned char)bytes[1];
+    return (unsigned char)bytes[0] == 0xEDu && (high ? second >= 0xA0u && second <= 0xAFu
+                                                     : second >= 0xB0u && second <= 0xBFu);
+}
+
 KRef kt_string_plus(KRef a, KRef b) {
     kt_int left_length = 0;
     kt_int right_length = 0;
@@ -917,10 +982,33 @@ KRef kt_string_plus(KRef a, KRef b) {
     KRef right_storage = NULL;
     const char *left = kt_render(a, &left_length, &left_storage);
     const char *right = kt_render(b, &right_length, &right_storage);
-    KByteArray *joined = kt_bytes_new(left_length + right_length);
-    memcpy(kt_bytes_of(joined), left, (size_t)left_length);
-    memcpy(kt_bytes_of(joined) + left_length, right, (size_t)right_length);
-    return kt_string_of((KRef)joined, kt_bytes_of(joined), left_length + right_length);
+    /* A text ending in a high half followed by one beginning with a low half is a character above
+       U+FFFF assembled one `Char` at a time, as `"" + high + low` and `for (c in s) t += c` build
+       it. Kotlin's answer is that character, equal to the literal that spells it; the two halves
+       side by side are six bytes no literal holds, and not UTF-8 on output. The pair's six bytes
+       become the character's four. */
+    kt_boolean pair = left_length >= 3 && right_length >= 3
+                      && kt_is_surrogate_half(left + left_length - 3, 1)
+                      && kt_is_surrogate_half(right, 0);
+    kt_int kept_left = pair ? left_length - 3 : left_length;
+    kt_int skipped_right = pair ? 3 : 0;
+    kt_int length = kept_left + (pair ? 4 : 0) + right_length - skipped_right;
+    KByteArray *joined = kt_bytes_new(length);
+    char *out = kt_bytes_of(joined);
+    memcpy(out, left, (size_t)kept_left);
+    if (pair) {
+        kt_int width = 0;
+        uint32_t high = kt_code_point_at(left, kept_left, &width);
+        uint32_t low = kt_code_point_at(right, 0, &width);
+        uint32_t code = 0x10000u + ((high - 0xD800u) << 10) + (low - 0xDC00u);
+        out[kept_left] = (char)(0xF0u | (code >> 18));
+        out[kept_left + 1] = (char)(0x80u | ((code >> 12) & 0x3Fu));
+        out[kept_left + 2] = (char)(0x80u | ((code >> 6) & 0x3Fu));
+        out[kept_left + 3] = (char)(0x80u | (code & 0x3Fu));
+    }
+    memcpy(out + length - (right_length - skipped_right), right + skipped_right,
+           (size_t)(right_length - skipped_right));
+    return kt_string_of((KRef)joined, out, length);
 }
 
 /* ---- string builders ------------------------------------------------------------------------
@@ -964,6 +1052,13 @@ const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
                                       1};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
+    /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
+       answers to its own `length` and `get`. Read as a string, its fields would name arbitrary
+       memory, so a caller that can meet one walks it (see `kt_string_builder_with_text`) and any
+       other arriving here is a loud failure rather than a copy of whatever those fields name. */
+    if (self->header.type->walk_length != NULL) {
+        KT_FAIL("krusty: the bytes of a CharSequence the program implements\n");
+    }
     if (self->header.type == &kt_type_string_builder) {
         const KStringBuilder *builder = (const KStringBuilder *)self;
         *byte_length = builder->byte_length;
@@ -987,9 +1082,27 @@ KRef kt_string_builder_with_capacity(kt_int capacity) {
 
 KRef kt_string_builder_new(void) { return kt_string_builder_with_capacity(0); }
 
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length);
+
 /* `StringBuilder(text)`: a builder that starts out holding it. A COPY, for the reason `toString`
-   copies -- the text is a value and the builder is about to be written through. */
+   copies -- the text is a value and the builder is about to be written through.
+
+   A `CharSequence` the PROGRAM implements is read the way Kotlin's own builder reads one, unit by
+   unit through its `length` and `get`, since it has no bytes to copy. Its `toString` is not the
+   text: nothing obliges a class to render itself as its characters. */
 KRef kt_string_builder_with_text(KRef text) {
+    if (text->header.type->walk_length != NULL) {
+        kt_int units = text->header.type->walk_length(text);
+        /* `text` stays live in this parameter, and the builder in this local, across every
+           allocation the appends make. */
+        KRef builder = kt_string_builder_with_capacity(units);
+        for (kt_int index = 0; index < units; index++) {
+            char encoded[3];
+            kt_int width = kt_render_char(text->header.type->walk_char_at(text, index), encoded);
+            kt_string_builder_append_bytes(builder, encoded, width);
+        }
+        return builder;
+    }
     kt_int length = 0;
     (void)kt_text_of(text, &length);
     /* `text` stays live in this parameter across the allocation. */
@@ -1004,13 +1117,21 @@ KRef kt_string_builder_with_text(KRef text) {
 static void kt_string_builder_reserve(KRef self, kt_int additional) {
     KStringBuilder *builder = (KStringBuilder *)self;
     kt_int capacity = kt_length_of(builder->storage);
+    /* A text longer than an `Int` counts is out of memory, as it is for Kotlin's own builder. Asked
+       before the sum is formed: a sum that overflowed would come out negative, pass as "fits", and
+       send the append's copy past the end of the storage. */
+    if (additional > 0x7fffffff - builder->byte_length) {
+        kt_fail_oom();
+    }
     kt_int needed = builder->byte_length + additional;
     if (needed <= capacity) {
         return;
     }
     kt_int grown = capacity == 0 ? 16 : capacity;
     while (grown < needed) {
-        grown *= 2;
+        /* Doubling past the largest `Int` would overflow too; the size needed is the most there is
+           to ask for then. */
+        grown = grown > 0x7fffffff / 2 ? needed : grown * 2;
     }
     /* `self` is a root in the caller's frame, so the OLD array stays reachable through it until the
        new one is stored. */
@@ -1049,21 +1170,63 @@ void kt_string_builder_set_length(KRef self, kt_int length) {
     builder->byte_length += padding;
 }
 
+/* Whether `bytes` is the three-byte encoding of a surrogate code unit, and which half: `ED A0..AF`
+   starts a HIGH (leading) one, `ED B0..BF` a LOW (trailing) one. */
+static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char second_high_bits) {
+    return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
+}
+
+/* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail.
+
+   A `Char` is a UTF-16 unit, and a lone surrogate unit can only be written as its own three-byte
+   sequence. So a supplementary character a program assembles unit by unit -- `for (c in s)
+   sb.append(c)` over any text holding an emoji -- arrives as a high half, then a low one. Stored
+   side by side they are six bytes of CESU-8, which no literal of the same character equals and no
+   terminal prints; the rule is that a low half arriving right after a stored high half becomes one
+   four-byte character with it. Nothing else is rewritten: a lone half with no partner stays the
+   lone unit it is. */
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length) {
+    kt_string_builder_reserve(self, length);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *storage = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int at = builder->byte_length;
+    if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
+        kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
+        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
+        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
+                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
+        /* Each half's low ten bits are its share of the code point above U+FFFF. */
+        uint32_t code_point = 0x10000u + (high << 10 | low);
+        at -= 3;
+        storage[at++] = (char)(0xF0u | (code_point >> 18));
+        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        bytes += 3;
+        length -= 3;
+    }
+    memcpy(storage + at, bytes, (size_t)length);
+    builder->byte_length = at + length;
+}
+
 KRef kt_string_builder_append(KRef self, KRef value) {
     /* The rendering goes through `kt_to_string` rather than `kt_render`, because a value whose type
        overrides `toString` must answer with ITS text and only the vtable knows that. It allocates,
        and the result is held in a local across the reserve below so the collector sees the root. */
     KRef text = kt_to_string(value);
+    /* An override that THREW came back with the exception pending and no string: the append stops
+       there, leaving the builder as it was, and the caller finds the exception. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
     kt_int length = 0;
     const char *bytes = kt_text_of(text, &length);
     kt_string_builder_reserve(self, length);
-    KStringBuilder *builder = (KStringBuilder *)self;
     /* `bytes` is re-read after the reserve: it may point into storage the reserve replaced, when a
        builder is appended to itself. */
     bytes = kt_text_of(text, &length);
-    memcpy(kt_bytes_of((KByteArray *)builder->storage) + builder->byte_length, bytes,
-           (size_t)length);
-    builder->byte_length += length;
+    kt_string_builder_append_bytes(self, bytes, length);
     return self;
 }
 
@@ -1158,11 +1321,14 @@ KRef kt_box_double(kt_double value) {
 }
 
 /* Unboxing a `null` is Kotlin's `NullPointerException` — the one `!!` raises, so with no message.
-   The zero returned afterwards is never read: the caller checks the pending slot first. */
+   `kt_throw` records it and COMES BACK, so the raise is followed by a return of its own: falling
+   through would read the field of the very null just rejected, and crash before the caller could
+   find the exception. The zero returned is never read: the caller checks the pending slot first. */
 #define KT_UNBOX(suffix, field, type)                                                              \
     type kt_unbox_##suffix(KRef value) {                                                           \
         if (value == NULL) {                                                                       \
             kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));                     \
+            return 0;                                                                              \
         }                                                                                          \
         return value->as.field;                                                                    \
     }
@@ -1188,11 +1354,14 @@ typedef struct KNumber {
 } KNumber;
 
 static KNumber kt_number_of(KRef value) {
+    KNumber number = {0, 0, 0.0};
     if (value == NULL) {
+        /* A RETURN after the raise, for the reason the unboxes above have one: `kt_throw` comes
+           back, and the descriptor read below is a read through the null. The zero is never read. */
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return number;
     }
     const KType *type = value->header.type;
-    KNumber number = {0, 0, 0.0};
     if (type == &kt_type_byte) {
         number.integer = value->as.byte_value;
     } else if (type == &kt_type_short) {
@@ -1476,6 +1645,12 @@ KRef kt_lazy_value(KRef lazy) {
     }
     KRef value =
         ((KRef(*)(KRef))initializer->header.type->vtable[KT_SLOT_INVOKE])(initializer);
+    /* An initializer that THREW produced no value. The lazy stays uncomputed and keeps its
+       initializer, so the exception propagates and the next read runs it again, as Kotlin's does;
+       caching what the aborted call returned would hand that back from every later read. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     /* Re-read through `lazy`: the call above can collect, and `self` is a root only because it is
        this local. The collector never moves an object, so the pointer is still good. */
     self->value = value;
