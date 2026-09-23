@@ -103,6 +103,9 @@ fn interface_symbol(
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     Some(match (role, name, arity) {
         (IterationRole::Iterable, "iterator", 0) => ("kt_iterable_iterator", vec![any()], any()),
+        // `for (x in someIterator)`: Kotlin declares an extension on `Iterator` that answers the
+        // iterator itself, so a walk over one walks the very object it was given.
+        (IterationRole::Iterator, "iterator", 0) => ("kt_iterator_itself", vec![any()], any()),
         (IterationRole::Iterator, "hasNext", 0) => {
             ("kt_iterator_has_next", vec![any()], Ty::Boolean)
         }
@@ -228,6 +231,7 @@ fn walk_symbol(
         ("sorted", 0) => ("kt_iterable_sorted", vec![any()], any()),
         ("zip", 1) => ("kt_iterable_zip", vec![any(), any()], any()),
         ("toMutableSet", 0) => ("kt_iterable_to_mutable_set", vec![any()], any()),
+        ("toMap", 0) => ("kt_iterable_to_map", vec![any()], any()),
         ("sortedBy", 1) => ("kt_iterable_sorted_by", vec![any(), any()], any()),
         ("minOrNull", 0) => ("kt_iterable_min_or_null", vec![any()], any()),
         ("maxOrNull", 0) => ("kt_iterable_max_or_null", vec![any()], any()),
@@ -612,7 +616,7 @@ impl BodyLowering<'_, '_, '_> {
     /// which declaration the reference names. So is a read of a STATIC: a top-level delegated
     /// property's `KProperty` is built once in the file's initializer and the call site reads it
     /// from there, so the reference is the static's INITIALIZER rather than the operand itself.
-    fn property_reference_name(&self, property: u32) -> Option<String> {
+    pub(super) fn property_reference_name(&self, property: u32) -> Option<String> {
         let property = self.through_coercions(property);
         if let IrExpr::GetStatic(index) = self.file.ir.expr(property) {
             let init = self.file.ir.statics.get(*index as usize)?.init;

@@ -69,6 +69,11 @@ fn map_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
         ("isEmpty", 0) => ("kt_map_is_empty", vec![any()], Ty::Boolean),
         ("get", 1) => ("kt_map_get", vec![any(), any()], any()),
         ("getOrDefault", 2) => ("kt_map_get_or_default", vec![any(), any(), any()], any()),
+        // Kotlin writes `getValue` as "absent" and the other two as "null", and the difference
+        // shows for a map that HOLDS a null under the key. Each follows its own declaration.
+        ("getValue", 1) => ("kt_map_get_value", vec![any(), any()], any()),
+        ("getOrElse", 2) => ("kt_map_get_or_else", vec![any(), any(), any()], any()),
+        ("getOrPut", 2) => ("kt_map_get_or_put", vec![any(), any(), any()], any()),
         ("containsKey", 1) => ("kt_map_contains_key", vec![any(), any()], Ty::Boolean),
         ("containsValue", 1) => ("kt_map_contains_value", vec![any(), any()], Ty::Boolean),
         ("keys" | "getKeys", 0) => ("kt_map_keys", vec![any()], any()),
@@ -201,6 +206,19 @@ impl BodyLowering<'_, '_, '_> {
         if self.file.implements_collection_of(ty) {
             return None;
         }
+        // `val name: String by map`: the delegate operator, whose second operand is the PROPERTY
+        // and whose key is that property's NAME. `thisRef` is nothing the read uses, and the name
+        // is a literal taken from the reference's own declaration, exactly as the read-write
+        // delegates take theirs — the runtime cannot ask a `KProperty` object for it.
+        if is_map(ty) && name == "getValue" && args.len() == 2 {
+            let Some(text) = self.property_reference_name(args[1]) else {
+                return Some(Err(
+                    "a map-delegated property read through a `KProperty` this file did not build"
+                        .to_string(),
+                ));
+            };
+            return Some(self.map_delegate_read(receiver, &text, ret));
+        }
         let (symbol, carried, answer) = if is_map(ty) {
             map_symbol(name, args.len())?
         } else if is_set(ty) {
@@ -211,6 +229,30 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         };
         Some(self.map_call(symbol, &carried, answer, receiver, args, ret))
+    }
+
+    /// `val x: T by map`: the map read under the property's own name.
+    ///
+    /// Kotlin's delegate is `getValue`, which raises for a key the map does not hold rather than
+    /// answering null — a delegated property has no null to answer with when its type is not
+    /// nullable, and the message names the missing key.
+    fn map_delegate_read(
+        &mut self,
+        receiver: u32,
+        property: &str,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let key = self.string_literal(property.as_bytes())?;
+        let Some(value) =
+            self.runtime_call("kt_map_get_value", &[any(), any()], any(), &[object, key])?
+        else {
+            return Ok(None);
+        };
+        self.convert(value, Some(any()), ret)
     }
 
     /// A checked read of a map's or set's property the runtime answers — `m.size`, `m.keys` — by

@@ -7366,6 +7366,27 @@ and behavior is checked by RUNNING the emitted program.
   `Operand stack underflow` at the store after a `Unit`-valued expression — so those tests take
   kotlinc as the oracle and require only the native backend to match.
 
+- **A map's three lookups disagree about a stored NULL, on purpose.** `getValue` is written in
+  terms of "absent" and raises only then, so a key whose value is null answers that null.
+  `getOrElse` and `getOrPut` are written in terms of "null" and run their lambda for a stored null
+  as readily as for a missing key. Each follows its own declaration rather than being made to
+  agree with the others, because the difference is Kotlin's and a program can see it. Neither
+  lambda is told the key — unlike a LIST's `getOrElse`, which is handed the index.
+  Tests: `tests/native_map_members_e2e.rs` (`a_map_answers_a_key_it_holds_or_raises`,
+  `a_map_falls_back_and_optionally_keeps_the_fallback`).
+
+- **`val x by map` reads the map under the property's own NAME, through `getValue`.** So a missing
+  key raises rather than answering null: a delegated property whose type is not nullable has no
+  null to answer with. The name is a literal taken from the reference's own declaration — the
+  runtime cannot ask a `KProperty` object for it — which is the same rule the read-write delegates
+  already follow.
+  Tests: `tests/native_map_members_e2e.rs` (`a_property_delegates_to_a_map_under_its_own_name`).
+
+- **`for (x in someIterator)` walks the very object it was given.** Kotlin declares
+  `Iterator<T>.iterator()` answering `this`, so the walk shares the receiver's position: a second
+  walk of the same iterator finds only what the first left.
+  Tests: `tests/native_map_members_e2e.rs` (`an_iterator_is_its_own_iterable`).
+
 - **A receiver typed `Collection` proves nothing about its LAYOUT.** `Collection` is admitted as a
   list type, because the list entry points answer every question a list-shaped collection is asked.
   But a `Set` is a collection too and is not shaped like a list, so `kt_list_size` read its count

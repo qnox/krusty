@@ -503,6 +503,11 @@ KRef kt_mutable_list_remove_last_or_null(KRef list);
 KRef kt_iterable_zip(KRef iterable, KRef other);
 /* `xs.toMutableSet()`: the walk's elements, duplicates collapsed, still writable. */
 KRef kt_iterable_to_mutable_set(KRef iterable);
+/* `pairs.toMap()`: a map built from a walk of `Pair`s. */
+KRef kt_iterable_to_map(KRef iterable);
+/* `it.iterator()`: the iterator itself, so `for (x in someIterator)` walks the object it was
+   given. */
+KRef kt_iterator_itself(KRef self);
 
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
@@ -881,6 +886,11 @@ kt_boolean kt_map_is_empty(KRef self);
 /* `m[k]`, NULL for an absent key — which is why Kotlin declares `Map.get` nullable. */
 KRef kt_map_get(KRef self, KRef key);
 KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback);
+/* `m.getValue(k)` raises for an ABSENT key and hands back a null the map HOLDS; `getOrElse` and
+   `getOrPut` run their lambda for either, which is how Kotlin writes each of the three. */
+KRef kt_map_get_value(KRef self, KRef key);
+KRef kt_map_get_or_else(KRef self, KRef key, KRef fallback);
+KRef kt_map_get_or_put(KRef self, KRef key, KRef fallback);
 /* `put` answers the value that was there; `set` is `m[k] = v` and answers `Unit`. An existing key
    keeps its POSITION, which is what a `LinkedHashMap` promises. */
 KRef kt_map_put(KRef self, KRef key, KRef value);

@@ -1163,6 +1163,9 @@ mod native_text_members_e2e;
 
 #[path = "native_unit_value_e2e.rs"]
 mod native_unit_value_e2e;
+
+#[path = "native_map_members_e2e.rs"]
+mod native_map_members_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_vararg_constructor_e2e.rs"]

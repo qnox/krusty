@@ -3477,6 +3477,53 @@ static KRef kt_invoke_one(KRef function, KRef argument) {
     return ((KRef(*)(KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function, argument);
 }
 
+/* Call a NO-argument function value, through the same slot. A map's `getOrElse`/`getOrPut` take
+   one of these: unlike a list's, the lambda is not told the key it was asked about. */
+static KRef kt_invoke_zero(KRef function) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function);
+}
+
+/* `it.iterator()`. Kotlin declares an extension on `Iterator` that answers the iterator itself, so
+   `for (x in someIterator)` walks the very object it was given. There is nothing to do but hand it
+   back — and there IS something to hand back, which is why this exists rather than nothing. */
+KRef kt_iterator_itself(KRef self) { return self; }
+
+/* `m.getValue(k)`, `m.getOrElse(k) { … }` and `m.getOrPut(k) { … }`.
+
+   Kotlin writes the first as "absent" and the other two as "null", and the difference shows for a
+   map that HOLDS a null under the key: `getValue` hands that null back, while `getOrElse` runs its
+   lambda. So the first asks `containsKey` and the others do not — following each declaration
+   rather than making the three agree. */
+KRef kt_map_get_value(KRef self, KRef key) {
+    KRef value = kt_map_get(self, key);
+    if (value == NULL && !kt_map_contains_key(self, key)) {
+        KRef message = kt_string_plus(kt_string_utf8("Key ", 4), kt_to_string(key));
+        message = kt_string_plus(message, kt_string_utf8(" is missing in the map.", 23));
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, message));
+        return NULL;
+    }
+    return value;
+}
+
+KRef kt_map_get_or_else(KRef self, KRef key, KRef fallback) {
+    KRef value = kt_map_get(self, key);
+    return value != NULL ? value : kt_invoke_zero(fallback);
+}
+
+KRef kt_map_get_or_put(KRef self, KRef key, KRef fallback) {
+    KRef value = kt_map_get(self, key);
+    if (value != NULL) {
+        return value;
+    }
+    KRef made = kt_invoke_zero(fallback);
+    kt_map_set(self, key, made);
+    return made;
+}
+
 /* How many elements an iterable will yield. Only the two this runtime has are askable, and the
    descriptor says which — a range's count is its bounds, a list's is its array's length.
 
@@ -4189,6 +4236,18 @@ KRef kt_iterable_zip(KRef iterable, KRef other) {
 
 /* `xs.toMutableSet()`: the walk's elements with the duplicates collapsed, in a set that can still
    be written to. */
+/* `pairs.toMap()`: a map built from a walk of `Pair`s, later entries winning over earlier ones
+   under the same key — which is what filling a map in walk order does anyway. */
+KRef kt_iterable_to_map(KRef iterable) {
+    KRef map = kt_map_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef pair = kt_iterator_next(iterator);
+        kt_map_set(map, kt_pair_first(pair), kt_pair_second(pair));
+    }
+    return map;
+}
+
 KRef kt_iterable_to_mutable_set(KRef iterable) {
     KRef set = kt_set_new();
     KRef iterator = kt_iterable_iterator(iterable);
