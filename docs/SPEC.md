@@ -6188,6 +6188,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
   `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
   `a_function_type_is_not_a_function_of_an_unrelated_result`).
+- **An extension receiver constrains its declared formal through the receiver's supertypes.** In
+  `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
+  `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
+  The candidate's logical parameters used a structural-only match, so a `List<E>` receiver left
+  the `T` of `Collection<T>` open. The argument alone then fixed `plus(element: T)` at
+  `T := List<E>`. That parameter is a subtype of `Iterable<E>`, so the element overload won and
+  the call typed as `List<Any>`. Now the receiver is projected through its applied supertypes
+  first, as argument unification already was, so the element overload's `T` becomes the join of
+  `E` and `List<E>`, and `plus(elements: Iterable<T>)` is the most specific overload, as kotlinc
+  resolves it. Known gap: specificity still ranks instantiated parameters rather than the declared
+  generic shapes, so `List<List<E>> + List<E>` still picks the element overload (kotlinc chooses
+  `Iterable<T>` with `T := Any?`), and `List<List<X>> + List<List<X>>` is reported ambiguous.
+  Tests: `tests/ext_receiver_tparam_binding_e2e.rs`
+  (`a_subtype_receiver_over_a_caller_type_variable_binds_the_declared_receiver_formal`,
+  cross-checked against the reference compiler).
 
 ## 8. Success criteria for the PoC
 
