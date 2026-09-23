@@ -1,10 +1,10 @@
 //! Provider-boundary realization of normalized Kotlin builtin members.
 //!
 //! `.kotlin_builtins` supplies the declaration identity, full source signature, and modifiers.
-//! This module maps only an exact declaration to the compiler operation that implements it on the
-//! JVM. A coincidental member spelling is never enough: every operation below checks its semantic
-//! owner, complete parameter list, result, and the modifier that makes the spelling an operator or
-//! infix declaration where Kotlin requires one.
+//! This module maps only an exact declaration to the compiler operation it denotes. The selected
+//! backend decides how to implement that operation. A coincidental member spelling is never enough:
+//! every operation below checks its semantic owner, complete parameter list, result, and the
+//! modifier that makes the spelling an operator or infix declaration where Kotlin requires one.
 
 use crate::libraries::{
     builtin_declaration::BuiltinMemberDeclaration, CompilerIntrinsic, MemberRealization,
@@ -246,7 +246,7 @@ fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberReal
 }
 
 /// Attach a compiler realization only to an exact normalized builtin declaration.
-pub(super) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
+pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
     if facts.is_property {
         return MemberRealization::Dispatch;
     }
