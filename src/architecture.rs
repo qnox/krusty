@@ -377,14 +377,6 @@ mod tests {
 
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
-        // `fir` is on this list for the identities common IR carries by value: a checked property
-        // operation names a `PropertyId`, and an override edge names the `CallableId` it resolved.
-        // Both are part of the IR contract, not a way back into the frontend.
-        // `names` for the same reason `lower/statics.rs` has it: Kotlin's accessor-naming rule is
-        // what common lowering applied when it named an abstract property's accessor, and reading
-        // it from the same place is what lets the interface and its implementation agree on one
-        // key for the member.
-        assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "names", "types"]);
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
     }
 
@@ -404,23 +396,6 @@ mod tests {
         assert_allowed_crate_modules(
             "src/native/codegen/lower.rs",
             &["fir", "ir", "libraries", "types"],
-        );
-        // `fir` only for the checked property and callable ids the IR itself carries. `names` for
-        // the same reason `statics.rs` has it, below: a `super` access to a property arrives named
-        // by its ACCESSOR, and this file recovers which property that is by deriving each
-        // candidate's accessor name with Kotlin's own rule rather than by parsing the given one
-        // back — the direction `IrSuperCallKind` documents, and the only one a `@JvmName`-mangled
-        // accessor does not break.
-        assert_allowed_crate_modules(
-            "src/native/codegen/lower/objects.rs",
-            &["fir", "ir", "names", "types"],
-        );
-        // `names` is Kotlin's own accessor-naming rule, which common lowering already applied when
-        // it named a source-written accessor; reading it from the same place is what keeps the two
-        // from drifting.
-        assert_allowed_crate_modules(
-            "src/native/codegen/lower/statics.rs",
-            &["fir", "names", "types"],
         );
     }
 
