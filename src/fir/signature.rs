@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::name_tree::FxHashMap;
 use crate::types::{Ty, TypeName, Visibility};
@@ -12,6 +12,7 @@ use super::header::{
     OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
     StableDeclarationAnchor, TypeParameterId,
 };
+use super::ResolvedParameterIdentity;
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1664,10 +1665,12 @@ pub struct ResolvedModuleIndex {
     declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
     properties: HashMap<PropertyId, ResolvedPropertyHeader>,
     property_by_declaration: HashMap<DeclarationId, PropertyId>,
-    /// Source labels parallel to a property's resolved context-parameter prefix. These are compact
-    /// declaration metadata: `_` distinguishes a legacy unnamed context receiver from a named
-    /// context value when common IR serializes the stable header for downstream consumers.
-    property_context_parameter_names: HashMap<PropertyId, Box<[Box<str>]>>,
+    /// Source identities and typed roles parallel to a property's resolved context-parameter
+    /// prefix. The property owns these facts even when an implicit/bodyless accessor has no
+    /// independent stable declaration.
+    property_context_parameters: HashMap<PropertyId, Box<[ResolvedPropertyContextParameter]>>,
+    property_parameter_identities_published: HashSet<PropertyId>,
+    property_setter_parameter_identities: HashMap<PropertyId, ResolvedParameterIdentity>,
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
@@ -1690,7 +1693,7 @@ pub struct ResolvedClassifierContextParameter {
     /// Present only for a named context value. Anonymous parameters and legacy receivers remain
     /// distinct through `kind`; an absent name is never used to infer which syntax was written.
     pub name: Option<Box<str>>,
-    pub kind: crate::ast::ContextParameterKind,
+    pub kind: crate::types::ContextParameterKind,
     pub ty: ResolvedTy,
 }
 
@@ -1843,7 +1846,7 @@ pub struct ResolvedDelegatedProperty {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedContextParameter {
     pub name: Box<str>,
-    pub kind: crate::ast::ContextParameterKind,
+    pub kind: crate::types::ContextParameterKind,
     pub ty: ResolvedTy,
 }
 
@@ -1915,6 +1918,14 @@ pub struct ResolvedPropertyHeader {
     /// type. This is a finalized Pass-1 fact; Pass 2 must not infer it from an initializer.
     pub storage_type: Option<ResolvedTy>,
     pub mutable: bool,
+}
+
+/// Stable source identity and semantic role of one property context parameter. Properties own
+/// these facts even when an abstract/bodyless accessor has no independent declaration anchor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedPropertyContextParameter {
+    pub source_name: Box<str>,
+    pub kind: crate::types::ContextParameterKind,
 }
 
 impl ResolvedModuleIndex {
@@ -2805,7 +2816,7 @@ impl ResolvedModuleIndex {
         interfaces: impl IntoIterator<Item = Ty>,
         interface_delegations: impl IntoIterator<Item = ResolvedInterfaceDelegation>,
         context_parameters: impl IntoIterator<
-            Item = (Option<Box<str>>, crate::ast::ContextParameterKind, Ty),
+            Item = (Option<Box<str>>, crate::types::ContextParameterKind, Ty),
         >,
         sealed_subclasses: impl IntoIterator<Item = TypeName>,
     ) -> Result<(), UnpublishableType> {
@@ -3294,10 +3305,6 @@ impl ResolvedModuleIndex {
         self.property_by_declaration.get(&declaration).copied()
     }
 
-    pub fn publish_property(&mut self, id: PropertyId, declaration: DeclarationId) -> PropertyId {
-        self.publish_property_shape(id, declaration, 0, 0, None, false)
-    }
-
     pub fn publish_property_shape(
         &mut self,
         id: PropertyId,
@@ -3352,41 +3359,115 @@ impl ResolvedModuleIndex {
         );
     }
 
-    pub fn publish_property_context_parameter_names(
+    /// Publish the complete source identity contract for both accessors while the property syntax
+    /// is still live. An implicit setter has a typed generated role; it is never recovered later
+    /// from a missing name or a bodyless accessor declaration.
+    pub fn publish_property_parameter_identities<'a>(
         &mut self,
         id: PropertyId,
-        names: impl IntoIterator<Item = Box<str>>,
+        parameters: impl IntoIterator<Item = (&'a str, crate::types::ContextParameterKind)>,
+        setter_parameter_name: Option<&'a str>,
     ) {
-        let names = names.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        let parameters = parameters
+            .into_iter()
+            .map(|(source_name, kind)| ResolvedPropertyContextParameter {
+                source_name: source_name.into(),
+                kind,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let expected = self
             .property(id)
-            .expect("context parameter names require a published property")
+            .expect("context parameters require a published property")
             .context_parameter_count as usize;
         assert_eq!(
-            names.len(),
+            parameters.len(),
             expected,
-            "property context parameter names must match its resolved signature"
+            "property context parameters must match its resolved signature"
         );
-        if names.is_empty() {
-            return;
-        }
         assert!(
-            self.property_context_parameter_names
-                .insert(id, names)
-                .is_none(),
-            "property context parameter names may be published only once"
+            self.property_parameter_identities_published.insert(id),
+            "property parameter identities may be published only once"
         );
+        if !parameters.is_empty() {
+            assert!(
+                self.property_context_parameters
+                    .insert(id, parameters)
+                    .is_none(),
+                "property context parameters may be published only once"
+            );
+        }
+        let mutable = self
+            .property(id)
+            .expect("parameter identities require a published property")
+            .mutable;
+        assert!(
+            mutable || setter_parameter_name.is_none(),
+            "an immutable property cannot publish a setter parameter"
+        );
+        if mutable {
+            let identity = setter_parameter_name
+                .map_or(ResolvedParameterIdentity::PropertySetterValue, |name| {
+                    ResolvedParameterIdentity::Source(name.into())
+                });
+            assert!(
+                self.property_setter_parameter_identities
+                    .insert(id, identity)
+                    .is_none(),
+                "a property setter parameter identity may be published only once"
+            );
+        }
     }
 
-    pub fn property_context_parameter_name(
+    pub fn property_context_parameter(
         &self,
         property: PropertyId,
         ordinal: u32,
-    ) -> Option<&str> {
-        self.property_context_parameter_names
+    ) -> Option<&ResolvedPropertyContextParameter> {
+        self.property_context_parameters
             .get(&property)?
             .get(ordinal as usize)
-            .map(AsRef::as_ref)
+    }
+
+    pub fn property_context_parameter_identities(
+        &self,
+        property: PropertyId,
+    ) -> Option<Box<[ResolvedParameterIdentity]>> {
+        if !self
+            .property_parameter_identities_published
+            .contains(&property)
+        {
+            return None;
+        }
+        let count = self.property(property)?.context_parameter_count;
+        (0..count)
+            .map(|ordinal| {
+                let parameter = self.property_context_parameter(property, ordinal)?;
+                Some(match parameter.kind {
+                    crate::types::ContextParameterKind::Named => {
+                        ResolvedParameterIdentity::ContextValue {
+                            ordinal,
+                            source_name: parameter.source_name.clone(),
+                        }
+                    }
+                    crate::types::ContextParameterKind::Anonymous => {
+                        ResolvedParameterIdentity::AnonymousContextParameter { ordinal }
+                    }
+                    crate::types::ContextParameterKind::LegacyReceiver => {
+                        ResolvedParameterIdentity::LegacyContextReceiver { ordinal }
+                    }
+                    crate::types::ContextParameterKind::None => return None,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Vec::into_boxed_slice)
+    }
+
+    pub fn property_setter_parameter_identity(
+        &self,
+        property: PropertyId,
+    ) -> Option<&ResolvedParameterIdentity> {
+        self.property_setter_parameter_identities.get(&property)
     }
 
     /// Persistent signature payload only. Temporary graph nodes and source bodies cannot contribute
@@ -3580,14 +3661,30 @@ impl ResolvedModuleIndex {
                 * (std::mem::size_of::<PropertyId>() + std::mem::size_of::<DeclarationId>())
             + self.property_by_declaration.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<PropertyId>())
-            + self.property_context_parameter_names.len()
-                * (std::mem::size_of::<PropertyId>() + std::mem::size_of::<Box<[Box<str>]>>())
+            + self.property_context_parameters.len()
+                * (std::mem::size_of::<PropertyId>()
+                    + std::mem::size_of::<Box<[ResolvedPropertyContextParameter]>>())
             + self
-                .property_context_parameter_names
+                .property_context_parameters
                 .values()
-                .map(|names| {
-                    names.len() * std::mem::size_of::<Box<str>>()
-                        + names.iter().map(|name| name.len()).sum::<usize>()
+                .map(|parameters| {
+                    parameters.len() * std::mem::size_of::<ResolvedPropertyContextParameter>()
+                        + parameters
+                            .iter()
+                            .map(|parameter| parameter.source_name.len())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.property_parameter_identities_published.len() * std::mem::size_of::<PropertyId>()
+            + self.property_setter_parameter_identities.len()
+                * (std::mem::size_of::<PropertyId>()
+                    + std::mem::size_of::<ResolvedParameterIdentity>())
+            + self
+                .property_setter_parameter_identities
+                .values()
+                .map(|identity| match identity {
+                    ResolvedParameterIdentity::Source(name) => name.len(),
+                    _ => 0,
                 })
                 .sum::<usize>()
             + self.type_parameter_storage_payload_bytes()

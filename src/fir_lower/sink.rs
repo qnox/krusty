@@ -922,7 +922,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // parameter. Leaving it unnamed keeps it out of constructor metadata while the
                     // JVM descriptor and field store still retain the slot.
                     name: None,
-                    context_kind: crate::ast::ContextParameterKind::None,
+                    context_kind: crate::types::ContextParameterKind::None,
                     ty: outer_ty,
                     declared_ty: None,
                     is_field: true,

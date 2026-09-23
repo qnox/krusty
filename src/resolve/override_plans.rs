@@ -206,32 +206,9 @@ fn module_parameter_identities(
     callable: crate::fir::CallableId,
     count: usize,
 ) -> Box<[crate::fir::ResolvedParameterIdentity]> {
-    let shape = index
-        .callable(callable)
-        .expect("an override implementation has a published callable shape")
-        .shape;
-    let extension_receiver = shape.extension_receiver.is_some();
-    let logical_count = count - usize::from(extension_receiver);
-    assert_eq!(
-        index.callable_parameter_name_count(callable),
-        logical_count,
-        "an override implementation must publish every logical parameter identity"
-    );
-    let names = (0..logical_count)
-        .map(|ordinal| {
-            index
-                .callable_parameter_name(callable, ordinal as u32)
-                .expect("an override implementation parameter has a stable identity")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    // Resolved signatures keep the extension receiver in `shape`, not in `parameters`.
-    crate::fir::declaration_parameter_identities(
-        &names,
-        count,
-        shape.context_parameter_count as usize,
-        extension_receiver,
-    )
+    index
+        .callable_parameter_identities(callable, count)
+        .expect("an override implementation must publish every typed parameter identity")
 }
 
 fn declaration_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
@@ -253,12 +230,13 @@ fn function_parameter_identities(
     function: &crate::libraries::FunctionInfo,
     count: usize,
 ) -> Box<[crate::fir::ResolvedParameterIdentity]> {
-    crate::fir::declaration_parameter_identities(
-        &function.call_sig.param_names,
-        count,
-        function.context_count,
-        function.is_extension(),
-    )
+    let extension_position = (function.is_extension()
+        && count == function.call_sig.parameter_identities.len() + 1)
+        .then_some(function.context_count);
+    function
+        .call_sig
+        .physical_parameter_identities(count, function.context_count, extension_position)
+        .expect("a normalized override declaration publishes every typed parameter identity")
 }
 
 fn declaration_formals(

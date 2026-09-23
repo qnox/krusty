@@ -67,7 +67,7 @@ pub struct FnMeta {
     /// enclosing context instead of positionally.
     pub context_count: usize,
     /// Exact source role of each leading context entry in `params`.
-    pub context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// Index into `params` of a `vararg` parameter. Emits `ValueParameter.vararg_element_type`
     /// (field 4) carrying the ELEMENT type next to the declared array type — the only place
     /// vararg-ness survives (`ACC_VARARGS` is not part of `@Metadata`), so a reader admits
@@ -464,7 +464,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     );
     for (i, (pname, pty)) in f.params.iter().enumerate() {
         if f.context_parameter_kinds.get(i)
-            == Some(&crate::ast::ContextParameterKind::LegacyReceiver)
+            == Some(&crate::types::ContextParameterKind::LegacyReceiver)
         {
             let ty = type_pb_declared(st, *pty, f.spellings.param(i), &tps);
             p.repeated_message(10, &ty); // Function.context_receiver_type = 10
@@ -599,7 +599,7 @@ pub struct PropMeta {
     pub receiver: Option<Ty>,
     /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
     /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
-    pub context_params: Vec<(String, crate::ast::ContextParameterKind, Ty)>,
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
@@ -768,11 +768,16 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         p.field_message(6, &parameter); // Property.setter_value_parameter = 6
     }
     for (name, kind, ty) in &m.context_params {
-        if *kind == crate::ast::ContextParameterKind::LegacyReceiver {
+        if *kind == crate::types::ContextParameterKind::LegacyReceiver {
             let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
             p.repeated_message(12, &ty); // Property.context_receiver_type = 12
             continue;
         }
+        let name = if *kind == crate::types::ContextParameterKind::Anonymous {
+            "<unused var>"
+        } else {
+            name
+        };
         let mut parameter = Pb::new();
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
@@ -1080,7 +1085,7 @@ mod tests {
                 receiver: None,
                 context_params: vec![(
                     String::new(),
-                    crate::ast::ContextParameterKind::LegacyReceiver,
+                    crate::types::ContextParameterKind::LegacyReceiver,
                     Ty::Int,
                 )],
                 getter: ("getAnswer".into(), "(I)I".into()),

@@ -3601,6 +3601,8 @@ pub struct SourcePropertySig {
     pub context_params: Vec<Ty>,
     /// Source names parallel to `context_params`, retained for diagnostics after resolution.
     pub context_param_names: Vec<String>,
+    /// Typed identities parallel to `context_params`, captured while source syntax is live.
+    pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub package: String,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
@@ -6253,6 +6255,7 @@ fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
     CallSig {
         only_input_type_formals: sig.only_input_type_formals.clone(),
         param_names: selected(&sig.param_names, parameters),
+        parameter_identities: selected(&sig.parameter_identities, parameters),
         exact_params: selected(&sig.exact_params, parameters),
         no_infer_params: selected(&sig.no_infer_params, parameters),
         implicit_integer_coercion: selected(&sig.implicit_integer_coercion, parameters),
@@ -30979,6 +30982,7 @@ fun box(): String {
                             ty: Ty::String,
                             context_count: 0,
                             context_param_names: Vec::new(),
+                            context_parameter_identities: Vec::new(),
                             getter,
                             setter: None,
                             setter_visibility: Visibility::Private,

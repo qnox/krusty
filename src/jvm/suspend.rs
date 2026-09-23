@@ -5567,7 +5567,7 @@ fn build_continuation_class(
         pre_super_param_fields.push((0, receiver_field));
         ctor_args.push(IrCtorArg {
             name: None,
-            context_kind: crate::ast::ContextParameterKind::None,
+            context_kind: crate::types::ContextParameterKind::None,
             ty: recv_ty,
             declared_ty: None,
             is_field: false,
@@ -5581,7 +5581,7 @@ fn build_continuation_class(
     }
     ctor_args.push(IrCtorArg {
         name: None,
-        context_kind: crate::ast::ContextParameterKind::None,
+        context_kind: crate::types::ContextParameterKind::None,
         ty: continuation_ty(),
         declared_ty: None,
         is_field: false,

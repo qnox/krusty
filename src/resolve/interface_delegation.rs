@@ -443,12 +443,14 @@ fn delegated_function_declaration(
             .unwrap_or_else(|| function.ret.apply(function.callable.ret));
         (target, parameters, result)
     };
-    let parameter_identities = crate::fir::declaration_parameter_identities(
-        &function.call_sig.param_names,
+    let extension_position = (function.kind == FnKind::Extension
+        && parameters.len() == function.call_sig.parameter_identities.len() + 1)
+        .then_some(function.context_count);
+    let parameter_identities = function.call_sig.physical_parameter_identities(
         parameters.len(),
         function.context_count,
-        function.kind == FnKind::Extension,
-    );
+        extension_position,
+    )?;
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,
@@ -628,15 +630,11 @@ fn delegation_members(
         let (getter, setter) = effective_property(source, index, interface, property_candidates)?;
         let (context_parameters, property_type) =
             applied_property_signature(source, index, interface, getter)?;
-        if getter.context_param_names.len() != context_parameters.len() {
+        if getter.context_param_names.len() != context_parameters.len()
+            || getter.context_parameter_identities.len() != context_parameters.len()
+        {
             return None;
         }
-        let context_identities = crate::fir::declaration_parameter_identities(
-            &getter.context_param_names,
-            context_parameters.len(),
-            context_parameters.len(),
-            false,
-        );
         members.push(ResolvedDelegatedMember::Property(
             ResolvedDelegatedProperty {
                 name: getter.name.clone().into_boxed_str(),
@@ -644,19 +642,19 @@ fn delegation_members(
                 context_parameters: getter
                     .context_param_names
                     .iter()
-                    .zip(context_identities.iter())
+                    .zip(getter.context_parameter_identities.iter())
                     .zip(&context_parameters)
                     .map(|((name, identity), ty)| {
                         let kind = match identity {
                             crate::fir::ResolvedParameterIdentity::ContextValue { .. } => {
-                                crate::ast::ContextParameterKind::Named
+                                crate::types::ContextParameterKind::Named
                             }
                             crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
                                 ..
-                            } => crate::ast::ContextParameterKind::Anonymous,
+                            } => crate::types::ContextParameterKind::Anonymous,
                             crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
                                 ..
-                            } => crate::ast::ContextParameterKind::LegacyReceiver,
+                            } => crate::types::ContextParameterKind::LegacyReceiver,
                             _ => return None,
                         };
                         Some(ResolvedDelegatedContextParameter {

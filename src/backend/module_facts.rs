@@ -92,58 +92,6 @@ fn erase_backend_parameter(ty: Ty) -> Ty {
     ty.ty_param_bound().map_or(ty, Ty::non_null)
 }
 
-fn stable_parameter_identities(
-    index: &crate::fir::ResolvedModuleIndex,
-    callable: crate::fir::CallableId,
-    physical_count: usize,
-) -> Option<Box<[crate::fir::ResolvedParameterIdentity]>> {
-    let shape = index.callable(callable)?.shape;
-    let logical_count =
-        physical_count.checked_sub(usize::from(shape.extension_receiver.is_some()))?;
-    if index.callable_parameter_name_count(callable) != logical_count {
-        return None;
-    }
-    let mut identities = (0..logical_count)
-        .map(|ordinal| {
-            let parameter = index.callable_parameter(callable, ordinal as u32)?;
-            let name = index.callable_parameter_name(callable, ordinal as u32)?;
-            if ordinal < shape.context_parameter_count as usize {
-                return Some(match parameter.flags().context_kind() {
-                    crate::ast::ContextParameterKind::Named => {
-                        crate::fir::ResolvedParameterIdentity::ContextValue {
-                            source_name: name.into(),
-                            ordinal: ordinal as u32,
-                        }
-                    }
-                    crate::ast::ContextParameterKind::Anonymous => {
-                        crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                            ordinal: ordinal as u32,
-                        }
-                    }
-                    crate::ast::ContextParameterKind::LegacyReceiver => {
-                        crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                            ordinal: ordinal as u32,
-                        }
-                    }
-                    crate::ast::ContextParameterKind::None => return None,
-                });
-            }
-            Some(if parameter.flags().is_property_setter_value() {
-                crate::fir::ResolvedParameterIdentity::PropertySetterValue
-            } else {
-                crate::fir::ResolvedParameterIdentity::Source(name.into())
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    if shape.extension_receiver.is_some() {
-        identities.insert(
-            shape.context_parameter_count as usize,
-            crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
-        );
-    }
-    Some(identities.into_boxed_slice())
-}
-
 impl BackendClassifierFact {
     fn from_library(shape: &LibraryType) -> Self {
         let mut surface = Vec::new();
@@ -161,19 +109,17 @@ impl BackendClassifierFact {
                 surface.push(BackendMemberFact::from_callable_named(
                     &property.getter,
                     property.visibility,
-                    &property.context_param_names,
+                    &property.context_parameter_identities,
+                    None,
                     property.receiver.is_some(),
                     BackendMemberName::PropertyGetter(property.name.as_str().into()),
                 ));
                 if let Some(setter) = &property.setter {
-                    let mut setter_parameter_names = property.context_param_names.clone();
-                    if let Some(name) = &property.setter_parameter_name {
-                        setter_parameter_names.push(name.clone());
-                    }
                     surface.push(BackendMemberFact::from_callable_named(
                         setter,
                         property.setter_visibility,
-                        &setter_parameter_names,
+                        &property.context_parameter_identities,
+                        property.setter_parameter_name.as_deref(),
                         property.receiver.is_some(),
                         BackendMemberName::PropertySetter(property.name.as_str().into()),
                     ));
@@ -240,12 +186,17 @@ impl BackendMemberFact {
             suspend: function.flags.suspend,
             abstract_member: function.flags.is_abstract,
             visibility: function.visibility,
-            parameter_identities: crate::fir::declaration_parameter_identities(
-                &function.call_sig.param_names,
-                callable.params.len(),
-                function.context_count,
-                function.is_extension(),
-            ),
+            parameter_identities: function
+                .call_sig
+                .physical_parameter_identities(
+                    callable.params.len(),
+                    function.context_count,
+                    (function.is_extension()
+                        && callable.params.len()
+                            == function.call_sig.parameter_identities.len() + 1)
+                        .then_some(function.context_count),
+                )
+                .expect("a normalized function publishes every typed parameter identity"),
         }
     }
 
@@ -263,47 +214,51 @@ impl BackendMemberFact {
             suspend: member.suspend(),
             abstract_member: member.is_abstract(),
             visibility: member.visibility,
-            parameter_identities: crate::fir::declaration_parameter_identities(
-                &member.call_sig.param_names,
-                member.params.len(),
-                member.context_count,
-                member.is_member_extension(),
-            ),
+            parameter_identities: member
+                .call_sig
+                .physical_parameter_identities(
+                    member.params.len(),
+                    member.context_count,
+                    (member.is_member_extension()
+                        && member.params.len() == member.call_sig.parameter_identities.len() + 1)
+                        .then_some(member.context_count),
+                )
+                .expect("a normalized member publishes every typed parameter identity"),
         }
     }
 
     fn from_callable_named(
         callable: &LibraryCallable,
         visibility: Visibility,
-        param_names: &[String],
+        context_parameter_identities: &[crate::fir::ResolvedParameterIdentity],
+        setter_parameter_name: Option<&str>,
         extension_receiver: bool,
         name: BackendMemberName,
     ) -> Self {
         let setter = matches!(name, BackendMemberName::PropertySetter(_));
-        let named_setter_parameter = setter && param_names.len() > callable.context_count;
+        let mut logical_identities = context_parameter_identities.to_vec();
+        if setter {
+            logical_identities.push(setter_parameter_name.map_or(
+                crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
+            ));
+        }
         // An associated/companion extension participates in source lookup through a receiver but
         // its accessor has no physical receiver parameter. Preserve only receivers actually present
         // in this target-facing parameter list.
-        let extension_receiver = extension_receiver
-            && callable.params.len()
-                > param_names.len() + usize::from(setter && !named_setter_parameter);
-        let mut parameter_identities = crate::fir::declaration_parameter_identities(
-            param_names,
-            callable.params.len(),
-            callable.context_count,
-            extension_receiver,
-        );
-        if setter
-            && !matches!(
-                parameter_identities.last(),
-                Some(crate::fir::ResolvedParameterIdentity::Source(_))
-            )
-        {
-            *parameter_identities
-                .last_mut()
-                .expect("a property setter has its value parameter") =
-                crate::fir::ResolvedParameterIdentity::PropertySetterValue;
+        let extension_receiver =
+            extension_receiver && callable.params.len() == logical_identities.len() + 1;
+        if extension_receiver {
+            logical_identities.insert(
+                callable.context_count,
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+            );
         }
+        assert_eq!(
+            callable.params.len(),
+            logical_identities.len(),
+            "a normalized property accessor publishes every typed parameter identity"
+        );
         Self {
             name,
             physical_name: None,
@@ -317,7 +272,7 @@ impl BackendMemberFact {
             suspend: callable.suspend,
             abstract_member: callable.is_abstract,
             visibility,
-            parameter_identities,
+            parameter_identities: logical_identities.into_boxed_slice(),
         }
     }
 
@@ -476,11 +431,11 @@ impl BackendModuleFacts {
                                 receiver.get(),
                             );
                         }
-                        let parameter_identities =
-                            stable_parameter_identities(index, callable.id, parameters.len())
-                                .ok_or(BackendFactError::IncompleteClassifier(
-                                    classifier.classifier,
-                                ))?;
+                        let parameter_identities = index
+                            .callable_parameter_identities(callable.id, parameters.len())
+                            .ok_or(BackendFactError::IncompleteClassifier(
+                                classifier.classifier,
+                            ))?;
                         surface.push((
                             index.source_order(child).unwrap_or(u32::MAX),
                             BackendMemberFact {
@@ -544,26 +499,18 @@ impl BackendModuleFacts {
                         let abstract_member = child_header
                             .flags
                             .has(crate::fir::DeclarationFlags::ABSTRACT);
-                        let accessor_identities =
-                            |accessor_ordinal: u32, parameter_count: usize| {
-                                let accessor = index.owned_declaration(
-                                    child,
-                                    crate::fir::DeclarationKind::Accessor,
-                                    accessor_ordinal,
-                                )?;
-                                let callable = index.callable_for_declaration(accessor)?;
-                                stable_parameter_identities(index, callable.id, parameter_count)
-                            };
-                        // A receiverless, context-free implicit getter has no physical parameters
-                        // and therefore needs no accessor declaration to supply identities. Every
-                        // non-empty accessor surface must have been published explicitly.
-                        let getter_parameter_identities = if parameters.is_empty() {
-                            Box::default()
-                        } else {
-                            accessor_identities(0, parameters.len()).ok_or(
-                                BackendFactError::IncompleteClassifier(classifier.classifier),
-                            )?
-                        };
+                        let mut getter_parameter_identities = index
+                            .property_context_parameter_identities(property_id)
+                            .ok_or(BackendFactError::IncompleteClassifier(
+                                classifier.classifier,
+                            ))?
+                            .into_vec();
+                        if property.extension_receiver.is_some() {
+                            getter_parameter_identities
+                                .push(crate::fir::ResolvedParameterIdentity::ExtensionReceiver);
+                        }
+                        let getter_parameter_identities =
+                            getter_parameter_identities.into_boxed_slice();
                         surface.push((
                             index.source_order(child).unwrap_or(u32::MAX),
                             BackendMemberFact {
@@ -579,28 +526,23 @@ impl BackendModuleFacts {
                                 suspend: false,
                                 abstract_member,
                                 visibility: child_header.visibility,
-                                parameter_identities: getter_parameter_identities,
+                                parameter_identities: getter_parameter_identities.clone(),
                             },
                         ));
                         if property.mutable {
                             parameters.push(signature.result.get());
+                            let mut setter_parameter_identities =
+                                getter_parameter_identities.to_vec();
+                            setter_parameter_identities.push(
+                                index
+                                    .property_setter_parameter_identity(property_id)
+                                    .ok_or(BackendFactError::IncompleteClassifier(
+                                        classifier.classifier,
+                                    ))?
+                                    .clone(),
+                            );
                             let setter_parameter_identities =
-                                match accessor_identities(1, parameters.len()) {
-                                    Some(identities) => identities,
-                                    // A context-free, receiverless implicit setter is represented
-                                    // by the property's typed mutability fact rather than a source
-                                    // accessor declaration. Its sole physical parameter has a
-                                    // generated semantic role, never an invented source spelling.
-                                    None if parameters.len() == 1 => vec![
-                                        crate::fir::ResolvedParameterIdentity::PropertySetterValue,
-                                    ]
-                                    .into_boxed_slice(),
-                                    None => {
-                                        return Err(BackendFactError::IncompleteClassifier(
-                                            classifier.classifier,
-                                        ));
-                                    }
-                                };
+                                setter_parameter_identities.into_boxed_slice();
                             let setter_visibility = index
                                 .owned_declaration(child, crate::fir::DeclarationKind::Accessor, 1)
                                 .and_then(|setter| index.declaration_header(setter))

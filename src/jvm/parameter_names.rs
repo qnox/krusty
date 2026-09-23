@@ -73,13 +73,15 @@ pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
 
 pub(super) fn metadata_context_kind(
     identity: &IrParameterIdentity,
-) -> crate::ast::ContextParameterKind {
+) -> crate::types::ContextParameterKind {
     match identity.role {
-        IrParameterRole::ContextValue => crate::ast::ContextParameterKind::Named,
+        IrParameterRole::ContextValue => crate::types::ContextParameterKind::Named,
         IrParameterRole::AnonymousContextParameter { .. } => {
-            crate::ast::ContextParameterKind::Anonymous
+            crate::types::ContextParameterKind::Anonymous
         }
-        IrParameterRole::ContextReceiver { .. } => crate::ast::ContextParameterKind::LegacyReceiver,
+        IrParameterRole::ContextReceiver { .. } => {
+            crate::types::ContextParameterKind::LegacyReceiver
+        }
         _ => panic!("a metadata context prefix must retain its semantic role"),
     }
 }
@@ -190,19 +192,19 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
         .enumerate()
         .map(|(physical_ordinal, argument)| {
             let identity = match argument.context_kind {
-                crate::ast::ContextParameterKind::Named => IrParameterIdentity::context_value(
+                crate::types::ContextParameterKind::Named => IrParameterIdentity::context_value(
                     argument
                         .name
                         .as_deref()
                         .expect("a named classifier context parameter retains its source name"),
                 ),
-                crate::ast::ContextParameterKind::Anonymous => {
+                crate::types::ContextParameterKind::Anonymous => {
                     IrParameterIdentity::anonymous_context_parameter(context_ordinal)
                 }
-                crate::ast::ContextParameterKind::LegacyReceiver => {
+                crate::types::ContextParameterKind::LegacyReceiver => {
                     IrParameterIdentity::context_receiver(context_ordinal)
                 }
-                crate::ast::ContextParameterKind::None => match argument.name.as_deref() {
+                crate::types::ContextParameterKind::None => match argument.name.as_deref() {
                     Some(name) => IrParameterIdentity::source(name),
                     None => IrParameterIdentity::generated(
                         IrGeneratedParameterRole::Positional {
@@ -212,7 +214,7 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
                     ),
                 },
             };
-            if argument.context_kind != crate::ast::ContextParameterKind::None {
+            if argument.context_kind != crate::types::ContextParameterKind::None {
                 context_ordinal += 1;
             }
             identity

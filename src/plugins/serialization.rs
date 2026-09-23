@@ -1676,7 +1676,7 @@ impl IrPlugin for SerializationPlugin {
                 .copied()
                 .map(|parameter| IrCtorArg {
                     name: None,
-                    context_kind: crate::ast::ContextParameterKind::None,
+                    context_kind: crate::types::ContextParameterKind::None,
                     ty: kserializer_of(parameter),
                     declared_ty: None,
                     is_field: false,

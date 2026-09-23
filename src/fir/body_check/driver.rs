@@ -176,7 +176,7 @@ fn class_initialization_parameters<'a>(
                 name: parameter.name.as_str(),
                 ty,
                 span: parameter.span,
-                context_kind: crate::ast::ContextParameterKind::None,
+                context_kind: crate::types::ContextParameterKind::None,
             })
         })
         .collect()
@@ -670,7 +670,7 @@ fn check_and_dispatch_property_body(
             name,
             ty: signature.result,
             span: property.span,
-            context_kind: crate::ast::ContextParameterKind::None,
+            context_kind: crate::types::ContextParameterKind::None,
         });
     }
     let property_storage_type = property

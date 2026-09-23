@@ -72,6 +72,7 @@ pub(super) fn merge_top_level_const(
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect(),
+        context_parameter_identities: metadata.context_parameter_identities(),
         getter,
         setter: None,
         setter_visibility: metadata.visibility,

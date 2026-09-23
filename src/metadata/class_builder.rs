@@ -23,7 +23,7 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     /// Named context parameters, emitted as `Property.context_parameter` (field 17).
-    pub context_params: Vec<(String, crate::ast::ContextParameterKind, Ty)>,
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
     /// How SOURCE spelled the declared type and receiver — see [`FnMeta::spellings`].
     pub spellings: crate::spelling::DeclaredSpellings,
     pub is_var: bool,
@@ -95,7 +95,7 @@ pub struct FnMeta {
     /// positionally. `0` for an ordinary member.
     pub context_count: usize,
     /// Exact source role of each leading context entry in `params`.
-    pub context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     pub ret: Ty,
     /// Extension-receiver type (`Function.receiver_type` = f5) for a MEMBER EXTENSION
     /// (`class C { operator fun String.invoke(…) }`) — recorded separately from `params` (the
@@ -821,7 +821,7 @@ pub fn build_class(
             prop.field_message(6, &parameter); // Property.setter_value_parameter = 6
         }
         for (name, kind, ty) in &p.context_params {
-            if *kind == crate::ast::ContextParameterKind::LegacyReceiver {
+            if *kind == crate::types::ContextParameterKind::LegacyReceiver {
                 let ty = type_pb_declared(
                     st,
                     *ty,
@@ -831,6 +831,11 @@ pub fn build_class(
                 prop.repeated_message(12, &ty); // Property.context_receiver_type = 12
                 continue;
             }
+            let name = if *kind == crate::types::ContextParameterKind::Anonymous {
+                "<unused var>"
+            } else {
+                name
+            };
             let mut parameter = Pb::new();
             parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
             let ty = type_pb_declared(
@@ -1039,7 +1044,7 @@ pub fn build_class(
         );
         for (i, (pname, pty)) in m.params.iter().enumerate() {
             if m.context_parameter_kinds.get(i)
-                == Some(&crate::ast::ContextParameterKind::LegacyReceiver)
+                == Some(&crate::types::ContextParameterKind::LegacyReceiver)
             {
                 let ty =
                     type_pb_declared(st, *pty, m.spellings.param(i), &function_type_parameters);

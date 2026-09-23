@@ -1886,7 +1886,7 @@ pub struct FirBody {
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<FirStatementDebugLines>,
     context_receiver_types: Vec<ResolvedTy>,
-    context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
+    context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,

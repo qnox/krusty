@@ -870,6 +870,12 @@ impl JvmLibraries {
                 builtin.param_defaults,
                 builtin.vararg,
             );
+            for ordinal in 0..builtin.context_count {
+                function.call_sig.parameter_identities[ordinal] =
+                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                        ordinal: ordinal as u32,
+                    };
+            }
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
             function.context_count = builtin.context_count;
             function.callable.context_count = builtin.context_count;
@@ -1153,6 +1159,7 @@ impl JvmLibraries {
                 ty: property_ty,
                 context_count: 0,
                 context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 getter: accessor(
                     &getter_sig.name,
                     &getter_sig.desc,
@@ -3725,6 +3732,7 @@ impl JvmLibraries {
             ty: field.ty,
             context_count: 0,
             context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
             getter,
             setter,
             setter_visibility: field.visibility,
@@ -3998,6 +4006,7 @@ impl JvmLibraries {
                             .iter()
                             .map(|parameter| parameter.name.clone())
                             .collect(),
+                        context_parameter_identities: mp.context_parameter_identities(),
                         getter,
                         setter,
                         setter_visibility: mp.visibility,
@@ -4141,6 +4150,7 @@ impl JvmLibraries {
                         .iter()
                         .map(|parameter| parameter.name.clone())
                         .collect(),
+                    context_parameter_identities: mp.context_parameter_identities(),
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
@@ -4239,6 +4249,7 @@ impl JvmLibraries {
                     ty: field_ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter,
                     setter_visibility: visibility,
@@ -4294,6 +4305,7 @@ impl JvmLibraries {
                     ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter: None,
                     setter_visibility: function.visibility,
@@ -4371,6 +4383,7 @@ impl JvmLibraries {
                         ty,
                         context_count: 0,
                         context_param_names: Vec::new(),
+                        context_parameter_identities: Vec::new(),
                         getter,
                         setter,
                         setter_visibility,
@@ -4869,6 +4882,7 @@ impl JvmLibraries {
                 let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
+                let context_parameter_identities = mp.context_parameter_identities();
                 let Some(getter_sig) = mp.getter else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -5016,6 +5030,7 @@ impl JvmLibraries {
                         .iter()
                         .map(|parameter| parameter.name.clone())
                         .collect(),
+                    context_parameter_identities,
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
@@ -6134,6 +6149,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter,
                     setter_visibility,

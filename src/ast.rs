@@ -6,7 +6,7 @@ mod return_labels;
 mod traversal;
 use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::types::Visibility;
+use crate::types::{ContextParameterKind, Visibility};
 use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
 use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
@@ -582,15 +582,6 @@ pub struct AnnotatedTypeParameter {
     pub annotations: Vec<AnnotationRef>,
     /// Argument expressions parallel to [`Self::annotations`].
     pub annotation_args: Vec<Vec<ExprId>>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ContextParameterKind {
-    #[default]
-    None,
-    Named,
-    Anonymous,
-    LegacyReceiver,
 }
 
 #[derive(Clone, Debug)]

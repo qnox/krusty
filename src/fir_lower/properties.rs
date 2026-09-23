@@ -27,27 +27,25 @@ pub(super) fn named_context_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     types: &[Ty],
-) -> Result<Vec<(String, crate::ast::ContextParameterKind, Ty)>, FirFileLoweringFailure> {
-    let accessor = index.owned_declaration(declaration, DeclarationKind::Accessor, 0);
+) -> Result<Vec<(String, crate::types::ContextParameterKind, Ty)>, FirFileLoweringFailure> {
+    let property = index
+        .property_for_declaration(declaration)
+        .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
     types
         .iter()
         .enumerate()
         .map(|(ordinal, ty)| {
-            let callable = accessor
-                .and_then(|accessor| index.callable_for_declaration(accessor))
-                .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
             let parameter = index
-                .callable_parameter(callable.id, ordinal as u32)
+                .property_context_parameter(property, ordinal as u32)
                 .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
-            let kind = parameter.flags().context_kind();
+            let kind = parameter.kind;
             let name = match kind {
-                crate::ast::ContextParameterKind::Named => index
-                    .callable_parameter_name(callable.id, ordinal as u32)
-                    .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?
-                    .to_owned(),
-                crate::ast::ContextParameterKind::Anonymous => "<unused var>".to_owned(),
-                crate::ast::ContextParameterKind::LegacyReceiver => String::new(),
-                crate::ast::ContextParameterKind::None => {
+                crate::types::ContextParameterKind::Named
+                | crate::types::ContextParameterKind::Anonymous => {
+                    parameter.source_name.to_string()
+                }
+                crate::types::ContextParameterKind::LegacyReceiver => String::new(),
+                crate::types::ContextParameterKind::None => {
                     return Err(FirFileLoweringFailure::MissingProperty(declaration));
                 }
             };
@@ -63,53 +61,40 @@ pub(super) fn set_accessor_parameter_identities(
     function: FunId,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    let Some(accessor) =
-        index.owned_declaration(property, DeclarationKind::Accessor, u32::from(setter))
-    else {
-        let parameter_count = ir.functions[function as usize].params.len();
-        let identities = match (setter, parameter_count) {
-            (false, 0) => Vec::new(),
-            (true, 1) => vec![crate::ir::IrParameterIdentity {
-                source_name: None,
-                role: crate::ir::IrParameterRole::PropertySetterValue,
-                provenance: crate::ir::IrParameterProvenance::CompilerGenerated,
-            }],
-            _ => return Err(FirFileLoweringFailure::MissingCallable(property)),
-        };
-        ir.fn_params
-            .insert(function, crate::ir::FnParamInfo::identities(identities));
-        return Ok(());
-    };
-    let callable = index
-        .callable_for_declaration(accessor)
-        .ok_or(FirFileLoweringFailure::MissingCallable(accessor))?;
-    let mut identities = (0..index.callable_parameter_name_count(callable.id))
-        .map(|ordinal| {
-            super::callable_parameter_identity(
-                index,
-                callable.id,
-                ordinal as u32,
-                callable.shape.context_parameter_count,
-            )
-            .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if callable.shape.extension_receiver.is_some() {
+    let property_id = index
+        .property_for_declaration(property)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+    let property_header = index
+        .property(property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+    let mut identities = index
+        .property_context_parameter_identities(property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?
+        .iter()
+        .map(super::resolved_parameter_identity)
+        .collect::<Vec<_>>();
+    if property_header.extension_receiver.is_some() {
         let source_name = index
             .declaration_name(property)
             .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
         ir.fn_source_names.insert(function, source_name.to_owned());
-        let receiver_position = callable.shape.context_parameter_count as usize;
+        let receiver_position = property_header.context_parameter_count as usize;
         if receiver_position > identities.len() {
-            return Err(FirFileLoweringFailure::MissingCallable(accessor));
+            return Err(FirFileLoweringFailure::MissingProperty(property));
         }
         identities.insert(
             receiver_position,
             crate::ir::IrParameterIdentity::extension_receiver(),
         );
     }
+    if setter {
+        let identity = index
+            .property_setter_parameter_identity(property_id)
+            .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+        identities.push(super::resolved_parameter_identity(identity));
+    }
     if ir.functions[function as usize].params.len() != identities.len() {
-        return Err(FirFileLoweringFailure::MissingCallable(accessor));
+        return Err(FirFileLoweringFailure::MissingProperty(property));
     }
     ir.fn_params
         .insert(function, crate::ir::FnParamInfo::identities(identities));

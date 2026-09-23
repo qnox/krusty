@@ -1176,10 +1176,10 @@ fn local_function_parameter_identities(
     for ordinal in 0..body.context_receiver_types().len() {
         let semantic_ordinal = u32::try_from(ordinal).expect("too many context parameters");
         identities.push(match body.context_parameter_kinds()[ordinal] {
-            crate::ast::ContextParameterKind::Named => {
+            crate::types::ContextParameterKind::Named => {
                 let value_index = body.context_parameter_kinds()[..ordinal]
                     .iter()
-                    .filter(|kind| **kind == crate::ast::ContextParameterKind::Named)
+                    .filter(|kind| **kind == crate::types::ContextParameterKind::Named)
                     .count();
                 let name = body
                     .parameters()
@@ -1188,13 +1188,13 @@ fn local_function_parameter_identities(
                     .expect("a named context parameter carries its source identity");
                 crate::ir::IrParameterIdentity::context_value(name)
             }
-            crate::ast::ContextParameterKind::Anonymous => {
+            crate::types::ContextParameterKind::Anonymous => {
                 crate::ir::IrParameterIdentity::anonymous_context_parameter(semantic_ordinal)
             }
-            crate::ast::ContextParameterKind::LegacyReceiver => {
+            crate::types::ContextParameterKind::LegacyReceiver => {
                 crate::ir::IrParameterIdentity::context_receiver(semantic_ordinal)
             }
-            crate::ast::ContextParameterKind::None => {
+            crate::types::ContextParameterKind::None => {
                 panic!("a context parameter must have a semantic kind")
             }
         });

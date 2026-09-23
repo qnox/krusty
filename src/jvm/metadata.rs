@@ -1750,6 +1750,9 @@ pub struct MetaFn {
     /// Leading context parameters. Named context parameters retain the same metadata shape as ordinary
     /// value parameters; legacy unnamed context receivers have an empty name.
     pub context_params: Vec<MetaValueParam>,
+    /// Typed context roles decoded at the metadata boundary. Consumers never inspect the encoded
+    /// empty/`<unused var>` spellings to distinguish legacy, anonymous, and named contexts.
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// The metadata-primary generic signature (type parameters + parameter/return gsig nodes), decoded
     /// straight from `@Metadata` rather than the JVM `Signature` attribute — a JVM-agnostic, Kotlin-faithful
     /// source (nullability, variance, Kotlin type identities). `None` when the return type won't decode.
@@ -1826,6 +1829,11 @@ impl MetaFn {
     }
 
     pub fn member_call_sig(&self) -> CallSig {
+        assert_eq!(
+            self.context_params.len(),
+            self.context_parameter_kinds.len(),
+            "metadata functions must publish one typed role per context parameter"
+        );
         let parameters: Vec<_> = self.parameters().collect();
         let (lambda_receivers, lambda_receiver_params) = self.lambda_receiver_shape();
         let mut sig = CallSig::metadata_function(
@@ -1838,6 +1846,34 @@ impl MetaFn {
             self.vararg_index()
                 .map(|index| index + self.context_count()),
         );
+        for (ordinal, (parameter, kind)) in self
+            .context_params
+            .iter()
+            .zip(&self.context_parameter_kinds)
+            .enumerate()
+        {
+            sig.parameter_identities[ordinal] = match kind {
+                crate::types::ContextParameterKind::Named => {
+                    crate::fir::ResolvedParameterIdentity::ContextValue {
+                        ordinal: ordinal as u32,
+                        source_name: parameter.name.as_str().into(),
+                    }
+                }
+                crate::types::ContextParameterKind::Anonymous => {
+                    crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                        ordinal: ordinal as u32,
+                    }
+                }
+                crate::types::ContextParameterKind::LegacyReceiver => {
+                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                        ordinal: ordinal as u32,
+                    }
+                }
+                crate::types::ContextParameterKind::None => {
+                    panic!("a metadata context prefix must carry a context role")
+                }
+            };
+        }
         sig.platform_nullable_params = parameters.iter().map(|p| p.nullable()).collect();
         sig.only_input_type_formals = self.only_input_type_formals.clone();
         sig.no_infer_params = parameters
@@ -1909,6 +1945,7 @@ pub struct MetaProp {
     /// Context parameters declared by this property. Legacy unnamed context receivers use an empty
     /// source name and otherwise retain the same semantic type shape.
     pub context_params: Vec<MetaValueParam>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
     pub getter: Option<MetaJvmMethodSig>,
@@ -1931,6 +1968,42 @@ pub struct MetaProp {
     pub receiver_class: Option<TypeName>,
     /// Receiver presence, including a type-parameter receiver that has no class name.
     pub is_extension: bool,
+}
+
+impl MetaProp {
+    pub fn context_parameter_identities(&self) -> Vec<crate::fir::ResolvedParameterIdentity> {
+        assert_eq!(
+            self.context_params.len(),
+            self.context_parameter_kinds.len(),
+            "metadata properties must publish one typed role per context parameter"
+        );
+        self.context_params
+            .iter()
+            .zip(&self.context_parameter_kinds)
+            .enumerate()
+            .map(|(ordinal, (parameter, kind))| match kind {
+                crate::types::ContextParameterKind::Named => {
+                    crate::fir::ResolvedParameterIdentity::ContextValue {
+                        ordinal: ordinal as u32,
+                        source_name: parameter.name.as_str().into(),
+                    }
+                }
+                crate::types::ContextParameterKind::Anonymous => {
+                    crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                        ordinal: ordinal as u32,
+                    }
+                }
+                crate::types::ContextParameterKind::LegacyReceiver => {
+                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                        ordinal: ordinal as u32,
+                    }
+                }
+                crate::types::ContextParameterKind::None => {
+                    panic!("a metadata property context must carry a context role")
+                }
+            })
+            .collect()
+    }
 }
 
 /// The FULLY-decoded `@kotlin.Metadata` of one classfile — every projection the compiler consumes,
@@ -2663,6 +2736,23 @@ fn decode_functions(
                         );
                         continue;
                     };
+                    let context_parameter_kinds = if pf.context_params.is_empty() {
+                        vec![
+                            crate::types::ContextParameterKind::LegacyReceiver;
+                            context_params.len()
+                        ]
+                    } else {
+                        context_params
+                            .iter()
+                            .map(|parameter| {
+                                if parameter.name == "_" {
+                                    crate::types::ContextParameterKind::Anonymous
+                                } else {
+                                    crate::types::ContextParameterKind::Named
+                                }
+                            })
+                            .collect()
+                    };
                     if value_params.iter().any(|parameter| {
                         parameter
                             .ty
@@ -2798,6 +2888,7 @@ fn decode_functions(
                             })
                             .collect(),
                         context_params,
+                        context_parameter_kinds,
                         annotations: annotation_names(&pf.annotation_bodies, records, d2),
                     });
                 }
@@ -3619,6 +3710,20 @@ fn decode_properties(
                 })
                 .collect()
         };
+        let context_parameter_kinds = if context_params.is_empty() {
+            vec![crate::types::ContextParameterKind::LegacyReceiver; context_names.len()]
+        } else {
+            context_names
+                .iter()
+                .map(|name| {
+                    if name == "_" {
+                        crate::types::ContextParameterKind::Anonymous
+                    } else {
+                        crate::types::ContextParameterKind::Named
+                    }
+                })
+                .collect()
+        };
         let decoded_context_params = context_names
             .into_iter()
             .zip(
@@ -3689,6 +3794,7 @@ fn decode_properties(
             ret_nullable,
             generic_sig,
             context_params: decoded_context_params,
+            context_parameter_kinds,
             getter,
             setter,
             setter_parameter_name,

@@ -88,30 +88,11 @@ fn callable_parameter_identity(
     ordinal: u32,
     context_count: u32,
 ) -> Option<crate::ir::IrParameterIdentity> {
-    let parameter = index.callable_parameter(callable, ordinal)?;
-    let name = index.callable_parameter_name(callable, ordinal)?;
-    if ordinal < context_count {
-        return Some(match parameter.flags().context_kind() {
-            crate::ast::ContextParameterKind::Named => {
-                crate::ir::IrParameterIdentity::context_value(name)
-            }
-            crate::ast::ContextParameterKind::Anonymous => {
-                crate::ir::IrParameterIdentity::anonymous_context_parameter(ordinal)
-            }
-            crate::ast::ContextParameterKind::LegacyReceiver => {
-                crate::ir::IrParameterIdentity::context_receiver(ordinal)
-            }
-            crate::ast::ContextParameterKind::None => return None,
-        });
-    }
-    if parameter.flags().is_property_setter_value() {
-        return Some(crate::ir::IrParameterIdentity {
-            source_name: None,
-            role: crate::ir::IrParameterRole::PropertySetterValue,
-            provenance: crate::ir::IrParameterProvenance::CompilerGenerated,
-        });
-    }
-    Some(crate::ir::IrParameterIdentity::source(name))
+    let header = index.callable(callable)?;
+    (header.shape.context_parameter_count == context_count)
+        .then(|| index.callable_parameter_identity(callable, ordinal))
+        .flatten()
+        .map(|identity| resolved_parameter_identity(&identity))
 }
 
 fn resolved_parameter_identity(
@@ -374,7 +355,7 @@ impl<'a> BodyLowering<'a> {
             .context_parameter_kinds()
             .iter()
             .enumerate()
-            .filter(|(_, kind)| **kind == crate::ast::ContextParameterKind::Named)
+            .filter(|(_, kind)| **kind == crate::types::ContextParameterKind::Named)
             .map(|(ordinal, _)| u32::try_from(ordinal).expect("too many FIR context parameters"))
             .collect::<Vec<_>>();
         let unbound_context_count = context_parameter_count

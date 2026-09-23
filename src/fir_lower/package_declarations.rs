@@ -181,36 +181,23 @@ pub(super) fn publish(
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
-                let context_parameter_names = (0..context_count)
+                let context_parameters_facts = (0..context_count)
                     .map(|ordinal| {
                         index
-                            .property_context_parameter_name(property_id, ordinal as u32)
-                            .map(str::to_owned)
+                            .property_context_parameter(property_id, ordinal as u32)
                             .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
                                 declaration,
                             ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let context_parameter_kinds = if context_count == 0 {
-                    Vec::new()
-                } else {
-                    let getter = index
-                        .owned_declaration(declaration, DeclarationKind::Accessor, 0)
-                        .and_then(|getter| index.callable_for_declaration(getter))
-                        .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                            declaration,
-                        ))?;
-                    (0..context_count)
-                        .map(|ordinal| {
-                            index
-                                .callable_parameter(getter.id, ordinal as u32)
-                                .map(|parameter| parameter.flags().context_kind())
-                                .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                                    declaration,
-                                ))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
+                let context_parameter_names = context_parameters_facts
+                    .iter()
+                    .map(|parameter| parameter.source_name.to_string())
+                    .collect();
+                let context_parameter_kinds = context_parameters_facts
+                    .iter()
+                    .map(|parameter| parameter.kind)
+                    .collect();
                 let receiver = property_header
                     .extension_receiver
                     .map(crate::fir::ResolvedTy::get);

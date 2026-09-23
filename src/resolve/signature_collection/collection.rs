@@ -4231,6 +4231,32 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .iter()
                                 .map(|(name, _)| name.clone())
                                 .collect(),
+                            context_parameter_identities: p
+                                .context_params
+                                .iter()
+                                .enumerate()
+                                .map(|(ordinal, parameter)| match parameter.context_kind {
+                                    crate::types::ContextParameterKind::Named => {
+                                        crate::fir::ResolvedParameterIdentity::ContextValue {
+                                            ordinal: ordinal as u32,
+                                            source_name: parameter.name.as_str().into(),
+                                        }
+                                    }
+                                    crate::types::ContextParameterKind::Anonymous => {
+                                        crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                                            ordinal: ordinal as u32,
+                                        }
+                                    }
+                                    crate::types::ContextParameterKind::LegacyReceiver => {
+                                        crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                                            ordinal: ordinal as u32,
+                                        }
+                                    }
+                                    crate::types::ContextParameterKind::None => unreachable!(
+                                        "a property context prefix must carry a context role"
+                                    ),
+                                })
+                                .collect(),
                             package: source_packages[i].replace('.', "/"),
                             visibility: property_visibility,
                             setter_visibility: property_header.setter_visibility,

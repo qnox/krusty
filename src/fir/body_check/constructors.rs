@@ -906,7 +906,7 @@ fn checked_constructor_parameters<'a>(
             &'a str,
             Span,
             Option<ExprId>,
-            crate::ast::ContextParameterKind,
+            crate::types::ContextParameterKind,
         ),
     >,
     semantic_types: &[ResolvedTy],
@@ -990,7 +990,7 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
                         parameter.name.as_str(),
                         parameter.span,
                         parameter.default,
-                        crate::ast::ContextParameterKind::None,
+                        crate::types::ContextParameterKind::None,
                     )
                 })),
             &signature.parameters,
@@ -1004,7 +1004,7 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
                     parameter.name.as_str(),
                     parameter.ty.span,
                     parameter.default,
-                    crate::ast::ContextParameterKind::None,
+                    crate::types::ContextParameterKind::None,
                 )
             })),
             &signature.parameters,
@@ -1098,7 +1098,7 @@ pub(super) fn check_and_dispatch_constructor_body(
                         |parameter| parameter.ty.span,
                     ),
                     source.and_then(|parameter| parameter.default),
-                    context.map_or(crate::ast::ContextParameterKind::None, |parameter| {
+                    context.map_or(crate::types::ContextParameterKind::None, |parameter| {
                         parameter.context_kind
                     }),
                 )
@@ -1205,7 +1205,7 @@ pub(super) fn check_and_dispatch_constructor_body(
                     parameter.name.as_str(),
                     parameter.ty.span,
                     parameter.default,
-                    crate::ast::ContextParameterKind::None,
+                    crate::types::ContextParameterKind::None,
                 )
             })),
         &signature.parameters,

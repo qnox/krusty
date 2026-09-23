@@ -79,6 +79,7 @@ impl ExistingLibrary {
                             ty: Ty::Int,
                             context_count: 0,
                             context_param_names: Vec::new(),
+                            context_parameter_identities: Vec::new(),
                             getter: LibraryCallable::library(
                                 internal,
                                 "getMarker",
@@ -236,6 +237,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
                         ty: Ty::Int,
                         context_count: 0,
                         context_param_names: Vec::new(),
+                        context_parameter_identities: Vec::new(),
                         getter,
                         setter: None,
                         setter_visibility: Visibility::Public,
@@ -344,6 +346,7 @@ impl SemanticPlatform for ExistingLibrary {
                 ty,
                 context_count: 0,
                 context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 getter: crate::libraries::LibraryCallable::library(
                     internal,
                     name,

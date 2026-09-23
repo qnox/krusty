@@ -444,7 +444,7 @@ pub struct HeaderParameter {
     /// Lookup input only. Selected call arguments later use a stable callable and parameter ordinal.
     pub name: LookupNameId,
     pub ty: HeaderTypeId,
-    pub context_kind: crate::ast::ContextParameterKind,
+    pub context_kind: crate::types::ContextParameterKind,
     pub flags: HeaderParameterFlags,
     pub span: Span,
     /// Declaration annotations attached to the value parameter.
@@ -2295,7 +2295,7 @@ pub fn extract_file_header_syntax(
             packed.push(HeaderParameter {
                 name: names.intern(&parameter.name),
                 ty: headers.add_type(&parameter.ty, names),
-                context_kind: crate::ast::ContextParameterKind::None,
+                context_kind: crate::types::ContextParameterKind::None,
                 flags: HeaderParameterFlags::default()
                     .with(HeaderParameterFlags::VARARG, parameter.is_vararg)
                     .with(HeaderParameterFlags::DEFAULT, parameter.default.is_some())

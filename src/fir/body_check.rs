@@ -183,7 +183,7 @@ pub struct CheckedBodyParameter<'a> {
     pub name: &'a str,
     pub ty: ResolvedTy,
     pub span: Span,
-    pub context_kind: crate::ast::ContextParameterKind,
+    pub context_kind: crate::types::ContextParameterKind,
 }
 
 #[derive(Clone, Copy)]
@@ -439,7 +439,7 @@ fn bind_parameters_and_check_defaults(
             });
         }
         if ordinal < context_parameter_count
-            && parameter.context_kind != crate::ast::ContextParameterKind::Named
+            && parameter.context_kind != crate::types::ContextParameterKind::Named
         {
             continue;
         }
@@ -1007,7 +1007,7 @@ impl BodyFirChecker<'_> {
     fn configure_receivers(
         &mut self,
         context_receivers: &[ResolvedTy],
-        context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
+        context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
         extension_receiver: Option<ResolvedTy>,
     ) {
         self.body

@@ -205,7 +205,7 @@ impl BodyFirChecker<'_> {
                 });
             }
             if ordinal < context_count
-                && parameter.context_kind != crate::ast::ContextParameterKind::Named
+                && parameter.context_kind != crate::types::ContextParameterKind::Named
             {
                 continue;
             }

@@ -1415,7 +1415,7 @@ pub struct IrCtorArg {
     pub name: Option<String>,
     /// Exact source role for a classifier context parameter. `None` means an ordinary or
     /// compiler-generated constructor argument; targets must not infer this from `name`.
-    pub context_kind: crate::ast::ContextParameterKind,
+    pub context_kind: crate::types::ContextParameterKind,
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
@@ -1475,7 +1475,7 @@ pub struct IrProperty {
     pub name: String,
     /// Named context parameters in source order. Metadata records these separately from ordinary
     /// value parameters, and checked call sites supply their operands implicitly.
-    pub context_params: Vec<(String, crate::ast::ContextParameterKind, Ty)>,
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
     /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
     /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
     pub source_order: u32,
@@ -2990,7 +2990,7 @@ pub struct IrPackageProperty {
     pub receiver: Option<Ty>,
     pub context_parameters: Vec<Ty>,
     pub context_parameter_names: Vec<String>,
-    pub context_parameter_kinds: Vec<crate::ast::ContextParameterKind>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     pub is_const: bool,
     pub has_constant: bool,
     pub visibility: crate::types::Visibility,
