@@ -1167,6 +1167,8 @@ mod try_debug_lines_e2e;
 mod child_serializer_accessor_body_e2e;
 #[path = "child_serializer_cache_e2e.rs"]
 mod child_serializer_cache_e2e;
+#[path = "child_serializer_cache_member_order_e2e.rs"]
+mod child_serializer_cache_member_order_e2e;
 #[path = "class_static_signature_e2e.rs"]
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
