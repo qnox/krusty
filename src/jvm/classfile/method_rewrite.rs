@@ -18,6 +18,8 @@
 //! into a recorded frame agrees with that frame; otherwise the method is written exactly as
 //! emitted.
 
+use std::collections::BTreeSet;
+
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::redundant_gotos;
 use super::temporaries::{self, Body};
@@ -346,12 +348,42 @@ impl ClassWriter {
             variable_bounds[end] = true;
             named.push((start, end, slot));
         }
+        // Which label each branch jumps to, and the labels bound at each index in the order they
+        // stand: kotlinc's rules see labels, and several can share one offset.
+        let mut branch_labels: Vec<Option<u32>> = vec![None; n];
+        for &(operand, label) in &source.builder.fixups {
+            if label.builder != source.builder.id {
+                continue;
+            }
+            if let Some(at) = operand.checked_sub(1).and_then(index_of) {
+                branch_labels[at] = Some(label.index);
+            }
+        }
+        let mut labels_at: Vec<Vec<u32>> = vec![Vec::new(); n + 1];
+        {
+            let mut bound: Vec<(u32, usize, u32)> = Vec::new();
+            for (label, &pc) in source.builder.labels.iter().enumerate() {
+                let label = label as u32;
+                if pc == usize::MAX || source.builder.is_dead_bound(label) {
+                    continue;
+                }
+                if let Some(at) = index_of(pc) {
+                    bound.push((source.builder.bind_sequence(label as usize), at, label));
+                }
+            }
+            bound.sort_unstable();
+            for (_, at, label) in bound {
+                labels_at[at].push(label);
+            }
+        }
         let body = Body {
             insns: &insns,
             handlers: &handlers,
             arrivals: &arrivals,
             marks: &marks,
             named: &named,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
             one_word_static: &|field| {
                 self.fieldref_descriptor_at(field)
                     .is_some_and(|descriptor| !matches!(descriptor, "J" | "D"))
@@ -391,14 +423,23 @@ impl ClassWriter {
                 .collect(),
             eliminated: Vec::new(),
             stack_at_target: Vec::new(),
+            late_labels: std::collections::BTreeSet::new(),
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
+        let rewrite_late = rewrite.late_labels.clone();
         let gotos_changed = redundant_gotos::remove(
             &mut rewrite.nodes,
             &redundant_gotos::Tables {
                 lines: &lines,
                 variable_bounds: &variable_bounds,
                 protected_starts: &protected_starts,
+                late_branch: &|index| {
+                    branch_labels
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|label| rewrite_late.contains(&label))
+                },
             },
         );
         if !folded_any && !gotos_changed {
@@ -414,24 +455,56 @@ impl ClassWriter {
             }
             *slot = next;
         }
+        // A late label stands after the instructions a rule inserted in front of its index's group.
+        let mut late_index = vec![rewrite.nodes.len(); n + 1];
+        let mut next = 0;
+        for (k, slot) in late_index.iter_mut().enumerate().take(n) {
+            while next < rewrite.nodes.len()
+                && (rewrite.nodes[next].1.group() < k
+                    || rewrite.nodes[next].1 == temporaries::Placement::Before(k))
+            {
+                next += 1;
+            }
+            *slot = next;
+        }
+        let debug_after_insert: BTreeSet<usize> = rewrite
+            .stack_at_target
+            .iter()
+            .filter_map(|(target, _)| {
+                (new_index[*target] != late_index[*target]).then_some(*target)
+            })
+            .collect();
+        let is_late_label = |label: u32| rewrite.late_labels.contains(&label);
         let retarget = |to: usize| new_index[to];
+        let retarget_branch = |placement: temporaries::Placement, to: usize| match placement {
+            temporaries::Placement::Original(index)
+                if branch_labels
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(is_late_label) =>
+            {
+                late_index[to]
+            }
+            _ => new_index[to],
+        };
         let new_insns: Vec<Insn> = rewrite
             .nodes
             .iter()
-            .map(|(insn, _)| match insn {
+            .map(|(insn, placement)| match insn {
                 Insn::Branch {
                     op,
                     target: BranchTarget::Internal(to),
                 } => Insn::Branch {
                     op: *op,
-                    target: BranchTarget::Internal(retarget(*to)),
+                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
                 },
                 Insn::BranchW {
                     op,
                     target: BranchTarget::Internal(to),
                 } => Insn::BranchW {
                     op: *op,
-                    target: BranchTarget::Internal(retarget(*to)),
+                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
                 },
                 Insn::TableSwitch {
                     default,
@@ -461,6 +534,19 @@ impl ClassWriter {
             new_offsets[new_index[k.min(n)]]
         };
         let map16 = |pc: u16| map(usize::from(pc)) as u16;
+        // A debug boundary and the implicit return at an `ifnull` fold's target describe the
+        // original instruction/range boundary after its labels. They therefore belong after the
+        // `pop` inserted in front of that original instruction. Other `Before(k)` insertions (the
+        // `dup` beside a branch) do not move a table boundary at `k`.
+        let map_after_inserted = |pc: usize| -> usize {
+            let k = offsets.partition_point(|&at| at < pc).min(n);
+            if debug_after_insert.contains(&k) {
+                new_offsets[late_index[k]]
+            } else {
+                map(pc)
+            }
+        };
+        let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
@@ -523,7 +609,7 @@ impl ClassWriter {
                 continue;
             };
             for (n, (at, value)) in pushed.iter().enumerate() {
-                if *at == pc {
+                if *at == pc && !is_late_label(*label) {
                     stack.push(value.clone());
                     received[n] = true;
                 }
@@ -551,10 +637,16 @@ impl ClassWriter {
         frames.bytes = assemble(&new_insns);
         frames.fixups.clear();
         frames.switch_fixups.clear();
-        for label in &mut frames.labels {
-            if *label != usize::MAX {
-                *label = map(*label);
+        for (label, pc) in frames.labels.iter_mut().enumerate() {
+            if *pc == usize::MAX {
+                continue;
             }
+            *pc = if is_late_label(label as u32) {
+                let k = offsets.partition_point(|&at| at < *pc).min(n);
+                new_offsets[late_index[k]]
+            } else {
+                map(*pc)
+            };
         }
         // A removed reload can leave its jump target and the join after it at one offset, each with
         // its own frame: the target's carries the checked value's type, the join's whatever every
@@ -574,15 +666,16 @@ impl ClassWriter {
         let lnt: Vec<(u16, u16)> = method
             .lnt
             .iter()
-            .map(|&(pc, line)| (map16(pc), line))
+            .map(|&(pc, line)| (map_after_inserted16(pc), line))
             .collect();
         let lvt: Vec<LvtEntry> = method
             .lvt
             .iter()
             .map(|&(name, desc, slot, old_start, old_len)| {
-                let start = old_start.map(map16);
+                let start = old_start.map(map_after_inserted16);
                 let len = old_len.map(|old_len| {
-                    let end = map(old_start.map_or(0, usize::from) + usize::from(old_len));
+                    let end =
+                        map_after_inserted(old_start.map_or(0, usize::from) + usize::from(old_len));
                     (end - start.map_or(0, usize::from)) as u16
                 });
                 (name, desc, slot, start, len)
@@ -700,7 +793,7 @@ impl ClassWriter {
             exceptions,
             lnt,
             lvt,
-            implicit_void_return_pc: method.implicit_void_return_pc.map(map16),
+            implicit_void_return_pc: method.implicit_void_return_pc.map(map_after_inserted16),
             frames,
         })
     }

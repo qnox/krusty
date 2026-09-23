@@ -3570,6 +3570,10 @@ pub struct CodeBuilder {
     /// same-offset dedup. Their frames are dropped instead. Indexed like `labels`; `false` for a
     /// label bound normally, and for one never bound at all.
     dead_bound: Vec<bool>,
+    /// When each label was last bound, by label id (0 = never): the order labels bound at one offset
+    /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
+    bind_sequence: Vec<u32>,
+    next_bind: u32,
 }
 
 impl CodeBuilder {
@@ -3592,6 +3596,8 @@ impl CodeBuilder {
             implicit_void_return_pc: None,
             dead: false,
             dead_bound: Vec::new(),
+            bind_sequence: Vec::new(),
+            next_bind: 0,
         }
     }
 

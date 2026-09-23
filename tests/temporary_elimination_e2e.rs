@@ -77,7 +77,7 @@ const NULL_CHECKS: &str = "fun orZero(s: String?): Int = if (s == null) 0 else s
     }\n";
 
 /// The `StackMapTable` lines of `marker`'s method in a `javap -v` listing.
-fn stack_map(disassembly: &str, marker: &str) -> Option<Vec<String>> {
+pub(super) fn stack_map(disassembly: &str, marker: &str) -> Option<Vec<String>> {
     let mut lines = disassembly.lines().map(str::trim);
     lines
         .by_ref()

@@ -72,6 +72,11 @@ pub(crate) struct Body<'a> {
     pub marks: &'a [bool],
     /// Named locals: `(start index, end index, slot)`, end exclusive.
     pub named: &'a [(usize, usize, u16)],
+    /// The label each branch jumps to, by original index, where the builder recorded one. Several
+    /// labels can stand at one index; kotlinc's rules tell them apart.
+    pub branch_labels: &'a [Option<u32>],
+    /// The labels bound at each original index, in the order they stand (length `insns.len() + 1`).
+    pub labels_at: &'a [Vec<u32>],
     /// Whether a `getstatic` operand's field is one JVM word.
     pub one_word_static: &'a dyn Fn(u16) -> bool,
     /// Whether an `ldc`/`ldc_w` operand is a `String` constant.
@@ -90,6 +95,10 @@ pub(crate) struct Rewrite {
     /// target stood at, original indices of the loads whose value arrives there)`. The value's type
     /// is the loaded local's before each of those loads.
     pub stack_at_target: Vec<(usize, Vec<usize>)>,
+    /// Labels that stand AFTER an instruction a rule inserted right behind an earlier label at their
+    /// index: kotlinc's `L: pop; E:`, where `L` is a null check's target and `E` a later label bound
+    /// at the same offset. Their branches and frames land after the inserted instruction.
+    pub late_labels: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,6 +612,7 @@ impl Working<'_> {
 fn fold_null_checks(
     working: &mut Working,
     stack_at_target: &mut Vec<(usize, Vec<usize>)>,
+    late_labels: &mut BTreeSet<u32>,
 ) -> Option<BTreeSet<usize>> {
     let insns = working.body.insns;
     let is_candidate = |pair: &[(Insn, Placement)]| {
@@ -683,7 +693,37 @@ fn fold_null_checks(
             stack_at_target.push((target, vec![load]));
             continue;
         }
-        // `ifnull`: every jump to the target checks a local and reloads it on the fall-through.
+        // `ifnull`: every jump to the target LABEL checks a local and reloads it on the
+        // fall-through. Of the labels at the target's offset, one bound before it is a predecessor
+        // that is not such a jump; one bound after it is not a predecessor at all, and lands after
+        // the `pop` inserted behind the target.
+        let label_of = |working: &Working, at: usize| match working.nodes[at].1 {
+            Placement::Original(index) => working.body.branch_labels.get(index).copied().flatten(),
+            _ => None,
+        };
+        let (jumps, later) = match label_of(working, at + 1) {
+            None => (jumps, Vec::new()),
+            Some(own) => {
+                let order = &working.body.labels_at[target];
+                let Some(rank) = order.iter().position(|&label| label == own) else {
+                    continue;
+                };
+                let mut to_own = Vec::new();
+                let mut foreign = false;
+                for &jump_at in &jumps {
+                    match label_of(working, jump_at) {
+                        Some(label) if label == own => to_own.push(jump_at),
+                        Some(label)
+                            if order.iter().position(|&other| other == label) > Some(rank) => {}
+                        _ => foreign = true,
+                    }
+                }
+                if foreign {
+                    continue;
+                }
+                (to_own, order[rank + 1..].to_vec())
+            }
+        };
         let mut parts = Vec::with_capacity(jumps.len());
         for &jump_at in &jumps {
             let checked = jump_at.checked_sub(1).filter(|&checked| {
@@ -735,6 +775,7 @@ fn fold_null_checks(
             Placement::Before(target),
         ));
         working.apply(inserts, &reloads);
+        late_labels.extend(later);
         stack_at_target.push((
             target,
             parts.iter().map(|&(_, checked, ..)| checked).collect(),
@@ -827,8 +868,13 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         }
     }
     let mut stack_at_target = Vec::new();
+    let mut late_labels = BTreeSet::new();
     let mut removed = trivially_removed;
-    removed.extend(fold_null_checks(&mut working, &mut stack_at_target)?);
+    removed.extend(fold_null_checks(
+        &mut working,
+        &mut stack_at_target,
+        &mut late_labels,
+    )?);
     let temporaries = temporaries(body, &removed)?;
     let mut changed = removed_nop || !removed.is_empty();
     for (store, loads) in temporaries {
@@ -935,6 +981,7 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         nodes: working.nodes,
         eliminated,
         stack_at_target,
+        late_labels,
     })
 }
 
@@ -970,12 +1017,16 @@ mod tests {
         for &index in marks {
             mark[index] = true;
         }
+        let branch_labels = vec![None; insns.len()];
+        let labels_at = vec![Vec::new(); insns.len() + 1];
         let body = Body {
             insns,
             handlers,
             arrivals: &arrival,
             marks: &mark,
             named,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
             one_word_static: &|field| field == 1,
             string_constant: &|index| index == 7,
             expression_null_check: &|method| method == 9,
@@ -1422,5 +1473,64 @@ mod tests {
         let rewritten = rewrite(&insns, &[], &[]).expect("the load/pop cleanup still applies");
         assert_eq!(rewritten.len(), 8_001);
         assert_eq!(rewritten.last(), Some(&op(ARETURN)));
+    }
+
+    #[test]
+    fn a_label_bound_after_the_null_target_lands_after_its_pop() {
+        // `n?.touch()` as a statement: 0 aload_0; 1 astore_1; 2 aload_1; 3 ifnull L; 4 aload_1;
+        // 5 invokevirtual; 6 goto E; 7 return, with `L` (label 1) then `E` (label 0) bound at 7.
+        // The `goto` jumps to `E`, not to `L`, so `L`'s only predecessor is the null check.
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            branch(IFNULL, 7),
+            op(ALOAD_1),
+            call.clone(),
+            branch(GOTO, 7),
+            op(0xb1),
+        ];
+        let arrivals = {
+            let mut arrivals = vec![false; insns.len() + 1];
+            arrivals[7] = true;
+            arrivals
+        };
+        let marks = vec![false; insns.len() + 1];
+        let mut branch_labels = vec![None; insns.len()];
+        branch_labels[3] = Some(1);
+        branch_labels[6] = Some(0);
+        let mut labels_at = vec![Vec::new(); insns.len() + 1];
+        labels_at[7] = vec![1, 0];
+        let body = Body {
+            insns: &insns,
+            handlers: &[],
+            arrivals: &arrivals,
+            marks: &marks,
+            named: &[],
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
+            one_word_static: &|_| false,
+            string_constant: &|_| false,
+            expression_null_check: &|_| false,
+        };
+        let rewrite = eliminate(&body).expect("folds");
+        assert_eq!(
+            rewrite
+                .nodes
+                .into_iter()
+                .map(|(insn, _)| insn)
+                .collect::<Vec<_>>(),
+            vec![
+                op(ALOAD_0),
+                op(DUP),
+                branch(IFNULL, 7),
+                call,
+                branch(GOTO, 7),
+                op(POP),
+                op(0xb1),
+            ]
+        );
+        assert_eq!(rewrite.late_labels, BTreeSet::from([0]));
     }
 }

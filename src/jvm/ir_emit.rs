@@ -45,6 +45,7 @@ mod operand_stack;
 mod property_access;
 mod property_reference_values;
 mod return_emission;
+mod safe_calls;
 mod try_emission;
 use try_emission::FinallyRegion;
 mod secondary_constructor;
@@ -12865,6 +12866,12 @@ struct Emitter<'a> {
     /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
     /// unassigned on any incoming edge means `top` at the merge.
     label_unassigned_values: HashMap<Label, HashSet<u32>>,
+    /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
+    /// this guard is the chain's outermost one, which binds it and yields the null result.
+    safe_call_null_exits: HashMap<u32, (Label, bool)>,
+    /// A chain's receiver temporaries declared after its first guard already jumped to the shared
+    /// null exit, by that exit: none of them is assigned on every path into it.
+    safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
@@ -12979,6 +12986,8 @@ impl<'a> Emitter<'a> {
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
+            safe_call_null_exits: HashMap::new(),
+            safe_call_exit_temporaries: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             continuation_slot: None,
@@ -14236,6 +14245,7 @@ impl<'a> Emitter<'a> {
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
+                self.link_safe_call_chain(e, code);
                 // Scope block-locals: restore the slot *map* after the block (keeping next_slot
                 // monotonic) so a local declared here doesn't leak into a later merge-point frame
                 // (its slot must read as `Top` once out of scope — else a sibling branch that never
@@ -14547,6 +14557,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
+        if self.emit_discarded_safe_call(e, node, code) {
+            return;
+        }
         if let IrExpr::BottomValue {
             producer,
             completion,
@@ -17116,6 +17129,7 @@ impl<'a> Emitter<'a> {
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
             IrExpr::Block { stmts, value } => {
+                self.link_safe_call_chain(e, code);
                 let enclosing_statement_line = self.statement_line;
                 let saved = self.slots.clone();
                 self.block_depth += 1;
@@ -19235,6 +19249,14 @@ impl<'a> Emitter<'a> {
         } else {
             self.verif_stack(result_ty)
         };
+        if self.emit_safe_call_when(
+            expression,
+            branches,
+            when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end, None),
+            code,
+        ) {
+            return;
+        }
         // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
         // of comparisons. Everything above (the result type, the statement/value decision, the entry
         // height) applies unchanged; only the dispatch differs.
