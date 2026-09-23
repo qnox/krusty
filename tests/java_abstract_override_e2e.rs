@@ -145,6 +145,35 @@ fun box(): String {
     );
 }
 
+/// Exercise the Java-scope erasure rule with repository-owned names. The JDK collection regression
+/// above proves the motivating mapped-builtin case, but this one ensures the behavior is provided
+/// by the normalized Java hierarchy rather than a special case for a library classifier or member.
+#[test]
+fn a_java_class_merges_inherited_members_by_erasure_without_stdlib_names() {
+    let contract = "public interface Receiver<E> { boolean accepts(E value); }";
+    let implementation =
+        "public abstract class ReceiverBase { public boolean accepts(Object value) { return true; } }";
+    let merged =
+        "public abstract class MergedReceiver<E> extends ReceiverBase implements Receiver<E> {}";
+    let main = r#"
+class TextReceiver : MergedReceiver<String>()
+
+fun box(): String = if (TextReceiver().accepts("OK")) "OK" else "FAIL"
+"#;
+    assert_eq!(
+        common::java_interop_box(
+            "abstract-java-erasure",
+            &[
+                ("Receiver.java", contract),
+                ("ReceiverBase.java", implementation),
+                ("MergedReceiver.java", merged),
+            ],
+            main,
+        ),
+        "OK"
+    );
+}
+
 /// The Java-scope erasure rule applies only where one Java classifier inherits both members.
 /// `JBase.add(Object)` erases like `Sink<String>.add(String)`, but nothing in Java merges the two,
 /// so the Kotlin class still owes `add(String)` (kotlinc: "does not implement abstract member").
