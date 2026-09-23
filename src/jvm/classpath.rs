@@ -15,7 +15,9 @@ mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod property_identity;
 
-pub(crate) use property_identity::ExternalPropertyRealization;
+pub(crate) use crate::libraries::{
+    ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
+};
 
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
@@ -1849,28 +1851,6 @@ const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 const SYMBOLS_CAP: usize = 65536;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ExternalCallableKind {
-    TopLevel,
-    Extension,
-    Member,
-    Constructor,
-    /// JVM realization of a provider-normalized Kotlin property getter.
-    InstanceFieldRead,
-    /// JVM realization of a provider-normalized Kotlin property setter.
-    InstanceFieldWrite,
-    /// A selected dependency property whose target realization is a static field read.
-    StaticFieldRead,
-    /// A selected dependency property whose target realization is a static field write.
-    StaticFieldWrite,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ExternalCallableRealization {
-    pub callable: LibraryCallable,
-    pub kind: ExternalCallableKind,
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ExternalPropertyKey {
