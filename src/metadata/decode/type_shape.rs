@@ -43,6 +43,7 @@ pub(crate) struct ParsedTypeNode<'a> {
     pub(crate) type_alias_id: Option<u64>,
     pub(crate) nullable: bool,
     pub(crate) definitely_non_null: bool,
+    pub(crate) suspend: bool,
     pub(crate) flexible_upper_bound: Option<&'a [u8]>,
     pub(crate) flexible_upper_bound_id: Option<u64>,
     pub(crate) arguments: Vec<ParsedTypeArgument<'a>>,
@@ -73,6 +74,7 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
         type_alias_id: None,
         nullable: false,
         definitely_non_null: false,
+        suspend: false,
         flexible_upper_bound: None,
         flexible_upper_bound_id: None,
         arguments: Vec::new(),
@@ -81,7 +83,11 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
     while !protobuf.at_end() {
         let tag = protobuf.varint()?;
         match (tag >> 3, tag & 7) {
-            (1, 0) => node.definitely_non_null = protobuf.varint()? & 0x2 != 0,
+            (1, 0) => {
+                let flags = protobuf.varint()?;
+                node.suspend = flags & 0x1 != 0;
+                node.definitely_non_null = flags & 0x2 != 0;
+            }
             (3, 0) => node.nullable = protobuf.varint()? != 0,
             (5, 2) => {
                 let length = protobuf.varint()? as usize;
@@ -132,7 +138,8 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
                     });
                 }
             }
-            (100, 2) => {
+            // JVM metadata uses extension 100; common/KLIB metadata uses extension 170.
+            (100 | 170, 2) => {
                 let length = protobuf.varint()? as usize;
                 node.annotations
                     .push(parse_type_annotation(protobuf.bytes(length)?)?);

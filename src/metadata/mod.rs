@@ -6,8 +6,11 @@ pub mod builder;
 pub mod class_builder;
 pub(crate) mod decode;
 pub mod encoding;
+pub mod id_signature;
+pub mod klib_ir;
 pub mod module;
 pub mod protobuf;
+pub mod semantic;
 mod type_encoder;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags

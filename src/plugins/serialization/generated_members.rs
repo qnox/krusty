@@ -50,6 +50,7 @@ impl GeneratedSerializerMembers {
         &self,
         generic: bool,
         owner_line: u32,
+        owner_end_line: u32,
     ) -> IrGeneratedMemberPublication {
         let line = IrGeneratedDeclarationDebug::declaration_line(owner_line);
         let metadata = |source_name: &str| {
@@ -85,7 +86,10 @@ impl GeneratedSerializerMembers {
                 self.serialize,
                 &SERIALIZE_PARAMETER_NAMES,
                 metadata("serialize"),
-                line,
+                IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
+                    owner_line,
+                    owner_end_line,
+                ),
             ),
         ];
         if generic {
@@ -118,6 +122,7 @@ pub(super) fn add_serializer_members(
     owner: TypeName,
     serialized_type: Ty,
     owner_line: u32,
+    owner_end_line: u32,
     has_type_parameters: bool,
 ) -> GeneratedSerializerMembers {
     let descriptor = add_instance_method(
@@ -218,7 +223,10 @@ pub(super) fn add_serializer_members(
         child_serializers,
         type_parameter_serializers,
     };
-    ir.publish_generated_members(owner, members.publication(has_type_parameters, owner_line));
+    ir.publish_generated_members(
+        owner,
+        members.publication(has_type_parameters, owner_line, owner_end_line),
+    );
     members
 }
 
@@ -325,7 +333,7 @@ mod tests {
 
     #[test]
     fn serializer_publication_states_exact_generic_and_non_generic_surfaces() {
-        let non_generic = serializer_members().publication(false, 17);
+        let non_generic = serializer_members().publication(false, 17, 23);
         assert_eq!(
             non_generic.metadata_scope,
             IrGeneratedFunctionMetadataScope::Exclusive
@@ -362,13 +370,17 @@ mod tests {
             vec![
                 (3, true, IrGeneratedDeclarationDebug::declaration_line(17)),
                 (2, true, IrGeneratedDeclarationDebug::declaration_line(17)),
-                (1, true, IrGeneratedDeclarationDebug::declaration_line(17)),
+                (
+                    1,
+                    true,
+                    IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(17, 23),
+                ),
                 (0, false, IrGeneratedDeclarationDebug::LocalsOnly),
                 (4, false, IrGeneratedDeclarationDebug::declaration_line(17)),
             ]
         );
 
-        let generic = serializer_members().publication(true, 19);
+        let generic = serializer_members().publication(true, 19, 29);
         assert_eq!(
             metadata_shape(&generic),
             vec![
@@ -431,8 +443,14 @@ mod tests {
     fn default_member_dispatch_stays_semantic_until_backend_realization() {
         let mut ir = IrFile::default();
         let owner = type_name("demo/Plain$$serializer");
-        let members =
-            super::add_serializer_members(&mut ir, owner, super::class_ty("demo/Plain"), 0, false);
+        let members = super::add_serializer_members(
+            &mut ir,
+            owner,
+            super::class_ty("demo/Plain"),
+            0,
+            0,
+            false,
+        );
         let function = members.type_parameter_serializers;
         assert!(ir.open_methods.contains(&function));
         assert!(ir.bridge_methods.contains(&function));
@@ -499,6 +517,7 @@ mod tests {
             &mut ir,
             type_name("demo/Box$$serializer"),
             Ty::obj_args("demo/Box", &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            0,
             0,
             true,
         );

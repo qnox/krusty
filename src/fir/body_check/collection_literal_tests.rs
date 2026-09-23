@@ -22,6 +22,46 @@ fn custom_collection_literal_keeps_the_selected_companion_operator() {
     };
     let target = call.target.module().expect("source companion operator");
     assert_eq!(index.callable_name(target), Some("of"));
+    // The operator is an ordinary member of the companion object, so the checked call must carry
+    // that singleton as its dispatch receiver even though the syntax spells no receiver. A call
+    // emitted without it is one argument short of the declaration it selected.
+    let dispatch = call
+        .dispatch_receiver
+        .expect("a companion `operator fun of` dispatches on its companion instance");
+    assert!(matches!(
+        body.expr(dispatch.value).expect("companion singleton").kind,
+        FirExprKind::SingletonValue { classifier, .. } if classifier.matches("MyList$Companion")
+    ));
+    assert!(call.extension_receiver.is_none());
+    assert_eq!(root.ty.get(), Ty::obj("MyList"));
+}
+
+#[test]
+fn inherited_collection_literal_operator_keeps_the_companion_receiver() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: +CollectionLiterals\n\
+         open class Factory {\n\
+             operator fun of(vararg values: String): MyList = MyList(values)\n\
+         }\n\
+         class MyList(val data: Array<out String>) { companion object : Factory() }\n\
+         fun make(): MyList = [\"O\", \"K\"]\n",
+        "make",
+    );
+    let root = body
+        .expr(root_expression(&body))
+        .expect("collection literal");
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("an inherited collection-literal operator must remain a checked call")
+    };
+    let target = call.target.module().expect("inherited source operator");
+    assert_eq!(index.callable_name(target), Some("of"));
+    let dispatch = call
+        .dispatch_receiver
+        .expect("the inherited operator dispatches on the companion value");
+    assert!(matches!(
+        body.expr(dispatch.value).expect("companion singleton").kind,
+        FirExprKind::SingletonValue { classifier, .. } if classifier.matches("MyList$Companion")
+    ));
     assert!(call.extension_receiver.is_none());
     assert_eq!(root.ty.get(), Ty::obj("MyList"));
 }
