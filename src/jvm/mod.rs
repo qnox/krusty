@@ -10,6 +10,7 @@ pub mod classpath;
 pub mod classreader;
 mod common_metadata;
 pub mod companion;
+pub mod compilation_inputs;
 mod constructor_debug;
 mod constructor_metadata;
 mod debug_local_names;
