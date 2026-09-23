@@ -50,8 +50,12 @@ pub(crate) fn project_underlying<P: RepresentationPolicy + ?Sized>(
         if !seen.insert(classifier) {
             return ty;
         }
-        if ty.is_nullable() && !policy.project_nullable(classifier, underlying, declarations) {
-            return ty;
+        if ty.is_nullable() {
+            if !policy.project_nullable(classifier, underlying, declarations) {
+                return ty;
+            }
+            // `V?` projected onto its carrier stays nullable: the carrier holds `V`'s `null`.
+            return Ty::nullable(project(underlying, declarations, policy, seen));
         }
         project(underlying, declarations, policy, seen)
     }
@@ -125,6 +129,25 @@ mod tests {
         assert_eq!(
             project_underlying(Ty::obj("other/Id"), &declarations, &AlwaysProject),
             Ty::Int,
+        );
+    }
+
+    #[test]
+    fn a_nullable_value_class_projects_onto_a_nullable_carrier() {
+        let declarations = [
+            (crate::types::type_name("left/Id"), Ty::obj("right/Id")),
+            (crate::types::type_name("right/Id"), Ty::String),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            project_underlying(
+                Ty::nullable(Ty::obj("left/Id")),
+                &declarations,
+                &AlwaysProject
+            ),
+            Ty::nullable(Ty::String),
         );
     }
 
