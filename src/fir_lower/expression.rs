@@ -235,6 +235,7 @@ impl BodyLowering<'_> {
                 plugin,
                 operation,
                 data,
+                types,
                 operands,
             } => {
                 let operands = operands
@@ -248,6 +249,7 @@ impl BodyLowering<'_> {
                     kind: operation,
                     exprs: operands,
                     data: data.to_vec(),
+                    types: types.iter().map(|ty| ty.get()).collect(),
                 })
             }
             FirExprKind::Call(call) => {
@@ -2006,18 +2008,38 @@ impl BodyLowering<'_> {
 
 /// An IR constant for a checked FIR one, carrying the value and the checked identity.
 ///
-/// The constant's unsigned type is part of what the frontend checked, so common IR records it.
-/// What primitive holds it is not decided here — see [`IrConst::UByte`].
+/// The constant's TYPE is part of what the frontend checked, so common IR records it: `FirConstant`
+/// has no signed integral case narrower than `Int` and no `UByte`/`UShort` case, so the checked type
+/// is the only thing carrying those widths. What primitive ends up holding an unsigned value is not
+/// decided here — see [`IrConst::UByte`].
 fn lower_constant(
     constant: &FirConstant,
     ty: Ty,
     origin: crate::fir::OriginId,
 ) -> Result<IrConst, FirLoweringFailure> {
     Ok(match constant {
-        FirConstant::Int(value) => IrConst::Int(
-            i32::try_from(*value)
-                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?,
-        ),
+        FirConstant::Int(value) => {
+            let value = i32::try_from(*value)
+                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?;
+            // The checked type says WHICH integral type this constant is, exactly as it does for
+            // the unsigned ones below — `FirConstant` has no narrower integral case, so the type
+            // is the only thing that carries the width.
+            //
+            // Recording a `Byte`-typed constant as an `Int` loses it, and a backend that boxes by
+            // the constant's SHAPE then boxes that value as an `Int`: the JVM backend did, so an
+            // `is Byte` test answered false.
+            match ty.non_null() {
+                Ty::Byte => IrConst::Byte(
+                    i8::try_from(value)
+                        .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?,
+                ),
+                Ty::Short => IrConst::Short(
+                    i16::try_from(value)
+                        .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?,
+                ),
+                _ => IrConst::Int(value),
+            }
+        }
         FirConstant::UInt(value) => {
             let value = u32::try_from(*value)
                 .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?;

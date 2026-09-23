@@ -2,7 +2,7 @@
 //!
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
-pub(super) mod klib_validation;
+pub(super) mod builtin_bridge;
 mod property_identity;
 
 use property_identity::inline_underlying_property_name_id;
@@ -17,7 +17,6 @@ use crate::libraries::{CallSig, GenericSig, ParamList, TypeKind};
 use crate::metadata::decode::{
     packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
-    QName,
 };
 use crate::types::{intern, type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
@@ -3920,34 +3919,6 @@ fn parse_type_class_and_nullable(body: &[u8]) -> (Option<u64>, bool) {
 // (field 30 → `TypeTable.type` field 1), whose `Type.class_name` (field 6) is a `QualifiedNameTable`
 // id, resolved against the fragment's `StringTable` exactly as kotlinc's `NameResolverImpl`.
 
-/// Resolve a `QualifiedNameTable` id to its internal name, mirroring `NameResolverImpl.traverseIds`:
-/// walk the parent chain, prepending each segment, joining PACKAGE segments with `/` and the relative
-/// CLASS segments with `.`, then `package/Relative.Class` (`kotlin/collections/MutableList`).
-fn resolve_qname(qnames: &[QName], strings: &[String], mut idx: i64) -> String {
-    let mut pkg: Vec<&str> = Vec::new();
-    let mut cls: Vec<&str> = Vec::new();
-    while idx != -1 {
-        let Some(q) = qnames.get(idx as usize) else {
-            break;
-        };
-        let Some(name) = strings.get(q.short) else {
-            break;
-        };
-        if q.kind == 1 {
-            pkg.insert(0, name);
-        } else {
-            cls.insert(0, name);
-        }
-        idx = q.parent;
-    }
-    let c = cls.join(".");
-    if pkg.is_empty() {
-        c
-    } else {
-        format!("{}/{c}", pkg.join("/"))
-    }
-}
-
 /// A type decoded from a `.kotlin_builtins` fragment. A bare internal name cannot express the two
 /// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
 /// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
@@ -3958,6 +3929,7 @@ pub enum BuiltinTy {
         internal: String,
         args: Vec<BuiltinTy>,
         nullable: bool,
+        shape: crate::metadata::semantic::KotlinFunctionTypeShape,
     },
     Param {
         name: String,
@@ -3973,6 +3945,7 @@ impl BuiltinTy {
             internal: internal.into(),
             args: Vec::new(),
             nullable: false,
+            shape: crate::metadata::semantic::KotlinFunctionTypeShape::default(),
         }
     }
 
@@ -4000,6 +3973,7 @@ impl BuiltinTy {
                 internal,
                 args,
                 nullable,
+                ..
             } => (internal.clone(), args.as_slice(), *nullable),
             BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
@@ -4016,14 +3990,6 @@ impl BuiltinTy {
             out.push('?');
         }
         out
-    }
-}
-
-fn project_builtin_ty(projection: ParsedProjection, ty: BuiltinTy) -> BuiltinTy {
-    match projection {
-        ParsedProjection::In => BuiltinTy::InProjection(Box::new(ty)),
-        ParsedProjection::Out => BuiltinTy::OutProjection(Box::new(ty)),
-        ParsedProjection::Invariant => ty,
     }
 }
 
@@ -4048,6 +4014,10 @@ pub struct BuiltinMember {
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+    pub constant: Option<crate::libraries::LibConst>,
+    pub param_names: Vec<String>,
+    pub param_defaults: Vec<bool>,
+    pub vararg: Option<usize>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -4077,6 +4047,18 @@ pub struct BuiltinFunction {
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
     pub functions: Vec<BuiltinFunction>,
+    pub properties: Vec<BuiltinProperty>,
+}
+
+pub struct BuiltinProperty {
+    pub name: String,
+    pub receiver: Option<BuiltinTy>,
+    pub ty: BuiltinTy,
+    pub formals: Vec<BuiltinTypeParam>,
+    pub visibility: crate::types::Visibility,
+    pub is_var: bool,
+    pub context_count: usize,
+    pub constant: Option<crate::libraries::LibConst>,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;
@@ -4117,12 +4099,17 @@ pub struct BuiltinClass {
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub kind: TypeKind,
+    pub is_fun_interface: bool,
     /// Source visibility from the metadata flag word. This is deliberately separate from `access`:
     /// Kotlin `internal` declarations are public in classfiles after name mangling.
     pub visibility: Visibility,
     /// Kotlin metadata's `IS_EXPECT_CLASS` declaration flag. KLIB consumers use this semantic bit
     /// to distinguish common declarations from platform-only classifiers in the same archive.
     pub is_expect: bool,
+    pub enum_entries: Vec<String>,
+    pub sealed_subclasses: Vec<String>,
+    pub inline_class_property: Option<String>,
+    pub modality: crate::metadata::semantic::KotlinModality,
     pub is_nested: bool,
     /// The JVM class access flags the same `Class.flags` word describes (`public static interface
     /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin
@@ -4181,20 +4168,7 @@ pub fn parse_builtins(data: &[u8]) -> Result<BuiltinPackage, PackageFragmentDeco
             detail: "truncated Kotlin builtins version header".to_string(),
         }
     })?;
-    klib_validation::parse_package_fragment_checked(pf)
-}
-
-fn builtin_class_kind(flags: u64) -> TypeKind {
-    metadata_class_kind(flags)
-}
-
-fn builtin_class_visibility(flags: u64) -> Visibility {
-    match (flags >> 1) & 0x7 {
-        1 | 4 => Visibility::Private,
-        2 => Visibility::Protected,
-        3 => Visibility::Public,
-        _ => Visibility::Internal,
-    }
+    builtin_bridge::parse_package_fragment_checked(pf)
 }
 
 /// The JVM class access flags a `.kotlin_builtins` `Class.flags` word describes.
@@ -4205,7 +4179,7 @@ fn builtin_class_visibility(flags: u64) -> Visibility {
 /// emitted, so a nesting fact recovered from the builtin agrees byte-for-byte with the one read off
 /// that class file: `kotlin/collections/Map.Entry` is a public, non-inner (hence `ACC_STATIC`) nested
 /// interface, exactly the `0x0609` `java/util/Map$Entry` carries.
-fn builtin_class_access(flags: u64) -> u16 {
+pub(super) fn builtin_class_access(flags: u64) -> u16 {
     // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. `internal`
     // is PUBLIC on the JVM — kotlinc mangles the NAME rather than narrowing the flag. An omitted field
     // has already become the protobuf default `6` at the parse boundary; zero here therefore means an
@@ -4417,7 +4391,7 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_metadata_type, decode_properties, klib_validation, parse_function, parse_type_alias,
+        builtin_bridge, decode_metadata_type, decode_properties, parse_function, parse_type_alias,
         parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
         BuiltinTy, MetaCtx, ParsedValueParam,
     };
@@ -5076,7 +5050,7 @@ mod module_reader_tests {
         // Exact bytes from Kotlin's checked-in `unpackedExampleKlib` fixture. Keeping them here
         // makes semantic KLIB decoding independent of an installed Kotlin distribution.
         let bytes = b"\x0a\x1d\x0a\x04main\x0a\x06kotlin\x0a\x04Unit\x0a\x07main.kt\x12\x0c\x0a\x02\x10\x01\x0a\x06\x08\x00\x10\x02\x18\x00\x1a\x1c\x1a\x07\x10\x00\x38\x00\xe0\x0a\x03\xf2\x01\x04\x0a\x02\x30\x01\xd8\x0a\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\xe0\x0a\x00\xea\x0a\x00";
-        let package = klib_validation::parse_package_fragment_checked(bytes)
+        let package = builtin_bridge::parse_package_fragment_checked(bytes)
             .expect("repository-owned semantic KLIB fragment");
         assert!(package.classes.is_empty());
         assert_eq!(package.functions.len(), 1);

@@ -15,6 +15,7 @@ pub use relocation::{
 mod method_bodies;
 pub use method_bodies::{MethodBodies, PropertyAccess, StaticMemberRealization};
 mod continuation_flow;
+mod debug_lines;
 mod reified_operands;
 use continuation_flow::caller_continuation_reachable;
 pub use reified_operands::substitute_reified;
@@ -2822,61 +2823,18 @@ pub fn splice_unified(
             lambda_locals.push((start, length, *slot, name.clone(), descriptor.clone()));
         }
     }
-    // The host's own line marks, relocated the same way. They name lines of the DEPENDENCY's file.
-    let mut relocated_lines: Vec<(u16, u16, bool)> = Vec::new();
-    for &(start_pc, line) in &body.lines {
-        let Some(index) = byte_to_index(start_pc) else {
-            continue;
-        };
-        let Ok(at) = u16::try_from(offs[p + old2new[index]]) else {
-            continue;
-        };
-        relocated_lines.push((at, line, true));
-    }
-    for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_bodies[occurrence];
-        let body_start = offs[p + old2new[site]];
-        let prefix = dropped_prefix[occurrence];
-        for &(at, line) in &lambda.lines {
-            let Some(offset) = (at as usize).checked_sub(prefix) else {
-                continue;
-            };
-            let Ok(at) = u16::try_from(body_start + offset) else {
-                continue;
-            };
-            relocated_lines.push((at, line, false));
-        }
-    }
-    // Where an inlined lambda returns, the host's own line resumes. The dependency's table has no
-    // entry there — it never had a lambda body in the middle of its line — so the line in effect
-    // when the region opened is restored at its end, which is what the reference compiler emits.
-    let mut resumed = Vec::new();
-    for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_bodies[occurrence];
-        if lambda.lines.is_empty() {
-            continue;
-        }
-        let body_start = offs[p + old2new[site]];
-        let built = assemble(&lambda.body).len();
-        let Some(spliced_len) =
-            built.checked_sub(dropped_prefix[occurrence] + dropped_suffix[occurrence])
-        else {
-            continue;
-        };
-        let Ok(end) = u16::try_from(body_start + spliced_len) else {
-            continue;
-        };
-        let host_line = relocated_lines
-            .iter()
-            .filter(|&&(at, _, inlined)| inlined && (at as usize) <= body_start)
-            .max_by_key(|&&(at, _, _)| at)
-            .map(|&(_, line, _)| line);
-        if let Some(line) = host_line {
-            resumed.push((end, line, true));
-        }
-    }
-    relocated_lines.extend(resumed);
-    relocated_lines.sort_by_key(|&(at, _, _)| at);
+    let relocated_lines = debug_lines::relocate(debug_lines::Relocation {
+        host_lines: &body.lines,
+        original_offsets: &old_off,
+        old_to_new: &old2new,
+        prologue_len: p,
+        output_offsets: &offs,
+        output_instruction_count: final_insns.len(),
+        lambda_sites: &lambda_sites,
+        site_bodies: &site_bodies,
+        dropped_prefix: &dropped_prefix,
+        dropped_suffix: &dropped_suffix,
+    })?;
     lambda_locals.extend(relocated_locals);
     let relocated_locals = lambda_locals;
     let external_branches = final_insns
@@ -3216,6 +3174,8 @@ mod tests {
             locals: vec![],
             lines: Vec::new(),
             source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
@@ -3524,6 +3484,8 @@ mod tests {
             locals: vec![],
             lines: Vec::new(),
             source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
             bootstrap_methods: Vec::new(),
         };
         assert!(!is_reified_inline(&body));
@@ -3542,6 +3504,8 @@ mod tests {
             locals: vec![],
             lines: Vec::new(),
             source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");

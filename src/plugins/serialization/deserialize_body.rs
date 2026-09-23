@@ -1,9 +1,10 @@
 //! Checked generation of a serializer's `deserialize` body.
 
+use super::element_serializer::unsupported_element_serializer;
 use super::{
-    class_ty, collection_serializer_builder, contextual_serializer_for, decode_element_method,
-    element_serializer_expr, element_serializer_plan, inline_prim_methods, is_nullable,
-    property_is_contextual, value_class_underlying, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, decode_element_method,
+    element_serializer_expr, element_serializer_plan, field_serializer_of, inline_prim_methods,
+    is_nullable, property_is_contextual, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -59,6 +60,53 @@ impl ElementDecode<'_> {
         )
     }
 
+    /// `f_k = (T) c.decode[Nullable]SerializableElement(desc, k, <serializer>, f_k)`, from the
+    /// descriptor, index and composite-decoder operands the caller already read.
+    ///
+    /// `decodeSerializableElement` merges into the value decoded so far, so the element's own local
+    /// is what it receives — a literal `null` discards whatever a merging serializer would have
+    /// built on.
+    ///
+    /// On the first pass that local holds its JVM zero, which for a reference element is `null`:
+    /// the body declares and zero-initializes every field local before decoding begins. So the
+    /// first decode of an element passes the same `null` the old code spelled out, and every LATER
+    /// one passes what the previous decode produced — which is the whole difference, and the reason
+    /// disassembly parity alone does not prove it.
+    fn decode_serializable(
+        &self,
+        ir: &mut IrFile,
+        k: usize,
+        [dk, idxc, cdk]: [ExprId; 3],
+        serializer: ExprId,
+    ) -> ExprId {
+        let ty = self.fields[k].1;
+        let inst = narrowed(
+            ir,
+            serializer,
+            "kotlinx/serialization/DeserializationStrategy",
+        );
+        let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
+        let method = if is_nullable(&ty) {
+            "decodeNullableSerializableElement"
+        } else {
+            "decodeSerializableElement"
+        };
+        let raw = ir.add_expr(IrExpr::Call {
+            callee: virtual_iface(
+                "kotlinx/serialization/encoding/CompositeDecoder",
+                method,
+                "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+            ),
+            dispatch_receiver: Some(cdk),
+            args: vec![dk, idxc, inst, prev],
+        });
+        ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: raw,
+            type_operand: ty,
+        })
+    }
+
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {
         let ty = self.fields[k].1;
         let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
@@ -69,117 +117,33 @@ impl ElementDecode<'_> {
             property_is_contextual(ctx, ir, self.serialized_class, &self.fields[k].0),
             &ty,
         ) {
-            // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
-            // desc, k, ContextualSerializer(<type>::class), null).
-            // `decodeSerializableElement` merges into the value decoded so far, so the element's
-            // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on.
-            //
-            // On the first pass that local holds its JVM zero, which for a reference element is
-            // `null`: the body declares and zero-initializes every field local before decoding
-            // begins. So the first decode of an element passes the same `null` the old code
-            // spelled out, and every LATER one passes what the previous decode produced — which is
-            // the whole difference, and the reason disassembly parity alone does not prove it.
-            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
-            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
-            let method = if is_nullable(&ty) {
-                "decodeNullableSerializableElement"
-            } else {
-                "decodeSerializableElement"
-            };
-            let raw = ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeDecoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                    ),
-                    dispatch_receiver: Some(cdk),
-                    args: vec![dk, idxc, inst, prev],
-                });
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: raw,
-                type_operand: ty,
-            })
+            // Contextual element: `ContextualSerializer(<type>::class)`.
+            self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if let Some(fidx) = self.type_parameter_serializer_fields[k] {
-            // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
-            // this.typeSerialK, null) — the ctor-supplied type-param serializer.
+            // Type-parameter element: `this.typeSerialK`, the ctor-supplied serializer.
             let this_s = ir.add_expr(IrExpr::GetValue(0));
             let inst = ir.add_expr(IrExpr::GetField {
                 receiver: this_s,
                 class: self.serializer_class,
                 index: fidx,
             });
-            // `decodeSerializableElement` merges into the value decoded so far, so the element's
-            // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on.
-            //
-            // On the first pass that local holds its JVM zero, which for a reference element is
-            // `null`: the body declares and zero-initializes every field local before decoding
-            // begins. So the first decode of an element passes the same `null` the old code
-            // spelled out, and every LATER one passes what the previous decode produced — which is
-            // the whole difference, and the reason disassembly parity alone does not prove it.
-            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
-            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
-            let method = if is_nullable(&ty) {
-                "decodeNullableSerializableElement"
-            } else {
-                "decodeSerializableElement"
-            };
-            let raw = ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeDecoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                    ),
-                    dispatch_receiver: Some(cdk),
-                    args: vec![dk, idxc, inst, prev],
-                });
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: raw,
-                type_operand: ty,
-            })
+            self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
+        } else if let Some(internal) =
+            field_serializer_of(ctx, ir, self.serialized_class, &self.fields[k].0)
+        {
+            // An explicit per-property serializer takes precedence over the property's type, as it
+            // does in `serialize` and `childSerializers`: what `X` wrote only `X` can read back.
+            let inst = build_field_serializer_instance(ir, internal);
+            self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if is_nullable(&ty) || decode_element_method(&ty).is_none() {
-            // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
-            // <element serializer>, null) — the nested `$serializer.INSTANCE`
-            // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
-            // (collection). Same descriptor; the nullable variant yields null for a
-            // JSON-null element.
+            // The nested `$serializer.INSTANCE` (non-generic) / `Foo.serializer(A_ser)` (generic) /
+            // `ListSerializer(…)` (collection). Same descriptor; the nullable variant yields null
+            // for a JSON-null element.
             let inst = self
                 .cached_slot(ir, k)
                 .or_else(|| element_serializer_expr(ir, ctx, &ty))
-                .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
-            // `decodeSerializableElement` merges into the value decoded so far, so the element's
-            // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on.
-            //
-            // On the first pass that local holds its JVM zero, which for a reference element is
-            // `null`: the body declares and zero-initializes every field local before decoding
-            // begins. So the first decode of an element passes the same `null` the old code
-            // spelled out, and every LATER one passes what the previous decode produced — which is
-            // the whole difference, and the reason disassembly parity alone does not prove it.
-            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
-            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
-            let method = if is_nullable(&ty) {
-                "decodeNullableSerializableElement"
-            } else {
-                "decodeSerializableElement"
-            };
-            let raw = ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeDecoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                    ),
-                    dispatch_receiver: Some(cdk),
-                    args: vec![dk, idxc, inst, prev],
-                });
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: raw,
-                type_operand: ty,
-            })
+                .unwrap_or_else(|| unsupported_element_serializer(ir, ty));
+            self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else {
             let (mname, mdesc) = decode_element_method(&ty).unwrap();
             ir.add_expr(IrExpr::Call {
@@ -226,7 +190,6 @@ pub(super) struct DeserializeBody<'a> {
     pub(super) serializer_class: ClassId,
     pub(super) serialized_class: ClassId,
     pub(super) fields: &'a [(String, Ty)],
-    pub(super) nested_serializers: &'a [Option<ClassId>],
     pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache. Passed in
     /// rather than rediscovered: the builder's answer about which properties have a slot is the
@@ -241,7 +204,6 @@ impl DeserializeBody<'_> {
             serializer_class,
             serialized_class: foo_id,
             fields,
-            nested_serializers: nested,
             type_parameter_serializer_fields: tp_field,
             cache: cache_plan,
         } = self;
@@ -324,27 +286,16 @@ impl DeserializeBody<'_> {
             return;
         }
         let decodable = fields.iter().enumerate().all(|(i, (pname, t))| {
-            if tp_field[i].is_some() || property_is_contextual(ctx, ir, class_id, pname) {
+            if tp_field[i].is_some()
+                || property_is_contextual(ctx, ir, class_id, pname)
+                || field_serializer_of(ctx, ir, class_id, pname).is_some()
+            {
                 return true;
             }
-            // A nested @Serializable element is decodable only if its serializer is
-            // actually derivable (a generic field with an un-derivable type arg is not) —
-            // else deserialize stubs cleanly rather than emit a `null` element serializer.
-            if nested[i].is_some() {
-                return element_serializer_plan(ir, ctx, t).is_some();
-            }
-            // A standard collection field decodes through its builtin collection serializer
-            // (via the `element_serializer_expr` fallback below) when its elements derive.
-            if t.non_null()
-                .obj_internal()
-                .and_then(collection_serializer_builder)
-                .is_some()
-            {
-                return element_serializer_plan(ir, ctx, t).is_some();
-            }
-            // Everything else decodes either as a PRIMITIVE through its own `decode<T>Element`, or
-            // through an element serializer — the same one `serialize` and `childSerializers` use. A
-            // nullable element always takes the serializer path
+            // A non-null primitive decodes through its own `decode<T>Element`. Every other field
+            // consumes the same semantic serializer plan as `serialize` and `childSerializers`;
+            // there is no separate nested/collection classifier path. A nullable element always
+            // takes the serializer path
             // (`decodeNullableSerializableElement`), which is why its builtin is not the only way to
             // decode it: a nullable nested class, enum or collection has no builtin at all.
             if !is_nullable(t) && decode_element_method(t).is_some() {

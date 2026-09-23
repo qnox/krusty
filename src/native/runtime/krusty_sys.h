@@ -1,4 +1,5 @@
-/* krusty native runtime — generated; do not edit. */
+/* krusty native runtime: the system-call shim. Hand-written freestanding C; build.rs compiles it
+   into the runtime for every target. */
 #ifndef KRUSTY_SYS_H
 #define KRUSTY_SYS_H
 
@@ -60,18 +61,27 @@ static inline long kt_syscall(long number, long a0, long a1, long a2, long a3, l
 #endif
 }
 
-static inline void kt_sys_exit(long status) {
+__attribute__((noreturn)) static inline void kt_sys_exit(long status) {
     kt_syscall(KT_SYS_EXIT, status, 0, 0, 0, 0, 0);
     __builtin_unreachable();
 }
+
+#define KT_EINTR 4
+#define KT_EAGAIN 11
 
 static inline void kt_sys_write(long fd, const char *bytes, size_t length) {
     size_t written = 0;
     while (written < length) {
         long step = kt_syscall(KT_SYS_WRITE, fd, (long)(bytes + written), (long)(length - written),
                                0, 0, 0);
-        /* A short write is normal; anything negative is an error there is nothing useful to do
-           about while printing. */
+        /* A short write is normal, and so are an interrupted one and a full non-blocking pipe: the
+           rest of the buffer can still be written, so dropping it would lose output that the
+           reader is about to accept. Every other error (a closed pipe, a bad descriptor) ends the
+           write the way the JVM's `PrintStream` ends it: silently, because printing has no caller
+           to report to. */
+        if (step == -KT_EINTR || step == -KT_EAGAIN) {
+            continue;
+        }
         if (step <= 0) {
             return;
         }
