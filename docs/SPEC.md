@@ -6116,6 +6116,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `try` or an inlined lambda, and only on a singly reached node.
   Tests: `tests/tailrec_e2e.rs` (`a_unit_tailrec_bare_return_loops_wherever_it_stands`,
   cross-checked against the reference compiler).
+- **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
+  `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
+  `deserialize` did not. A property whose type has no derivable serializer made the whole
+  `deserialize` a throwing stub although `X` was right there, and a property whose type HAS one
+  (a `String`) decoded through the type's builtin, so what `X` wrote was misread. The element decode
+  now takes the same order as the encode — contextual, type parameter, explicit property
+  serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
+  Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
+  `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
 - **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
   extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
   `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for
