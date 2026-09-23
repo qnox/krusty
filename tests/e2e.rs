@@ -1259,6 +1259,8 @@ mod property_conversion_inference_e2e;
 mod property_infer_member_e2e;
 #[path = "property_initializer_newline_e2e.rs"]
 mod property_initializer_newline_e2e;
+#[path = "property_serializer_decode_e2e.rs"]
+mod property_serializer_decode_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
 #[path = "qualified_call_receiver_lambda_e2e.rs"]
