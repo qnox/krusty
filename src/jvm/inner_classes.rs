@@ -129,11 +129,14 @@ impl InnerClasses {
 
             // A source local class is not a member of the textual classifier prefix in its generated
             // JVM name, and kotlinc lists it under its source name from the checked naming
-            // provenance. A class nested in a local class is a member of that class. A coroutine
-            // state machine is anonymous in `InnerClasses` even though its own IR class is not a
-            // source anonymous-object declaration.
+            // provenance. kotlinc names an outer class exactly when the declaration's parent is a
+            // class: a class nested in a local class is local too, but it is a member of that
+            // class and records no enclosing scope, while one declared in executable code records
+            // the scope it was lowered in. A coroutine state machine is anonymous in
+            // `InnerClasses` even though its own IR class is not a source anonymous-object
+            // declaration.
             let coroutine = is_coroutine_state_machine(class);
-            let local = class.is_local_class;
+            let local = class.is_local_class && class.enclosure.is_some();
             let name = if local && !coroutine {
                 source_name(
                     ir,
@@ -303,7 +306,10 @@ mod tests {
                 ordinal: None,
             },
         );
-        ir.add_class(IrClass::synthetic(member));
+        // The frontend marks a class nested in a local class local as well; it is still a member.
+        let mut member_class = IrClass::synthetic(member);
+        member_class.is_local_class = true;
+        ir.add_class(member_class);
 
         assert_eq!(
             InnerClasses::new(&ir).specs,

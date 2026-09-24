@@ -6180,9 +6180,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InnerClasses`, `EnclosingMethod`, `Signature`, `SourceFile`. The class that CONSTRUCTS
   it must carry the same `InnerClasses` entry, including the file facade: reflection cross-checks
   the two sides and throws `IncompatibleClassChangeError` when only one has it.
-  A class literal on a local class is rejected (the file skips): reflection reports `simpleName`
-  from the Kotlin `@Metadata` local-class marking, which krusty does not emit, so the name would come
-  back qualified (`codegen/box/reflection/classes/localClassSimpleName.kt`).
+  Reflection reports a local class's `simpleName` from that `InnerClasses` source name, so it is
+  exact even when the name itself contains `$`
+  (`codegen/box/reflection/classes/localClassSimpleName.kt`).
 
   A local class's BODY properties are numbered from the body, and the stable declaration of each is
   read from the active-declaration table under that same coordinate
