@@ -35,6 +35,16 @@ fun bounded(a: Int): Int {
 
 fun value(a: Int, b: Int): Boolean = a > 0 && b > 0
 
+fun valueEither(a: Int, b: Int): Boolean = a > 0 || b > 0
+
+fun falseLeft(a: Int): Boolean = false && a > 0
+
+fun falseRight(a: Int): Boolean = a > 0 && false
+
+fun trueLeft(a: Int): Boolean = true || a > 0
+
+fun trueRight(a: Int): Boolean = a > 0 || true
+
 fun handWritten(a: Int, b: Int): Int {
     if (if (a > 0) b > 0 else false) return 1
     return 0
@@ -55,8 +65,6 @@ fun handWritten(a: Int, b: Int): Int {
 /// The right operand runs only when the left one does not decide the result.
 #[test]
 fn short_circuit_operators_skip_the_right_operand() {
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
     let src = "\
 var log = \"\"
 
@@ -77,11 +85,5 @@ fun box(): String {
     return if (log == \"acefghijiji\") \"OK\" else \"FAIL log: \" + log
 }
 ";
-    let out = common::compile_and_run_box(
-        src,
-        "ShortCircuitOrder",
-        &[stdlib, jdk.clone()],
-        Some(jdk.as_path()),
-    );
-    assert_eq!(out.as_deref(), Some("OK"));
+    common::expect_box_same_as_kotlinc(src, "ShortCircuitOrder");
 }
