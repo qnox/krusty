@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>krusty: a Kotlin compiler written in Rust</title>
+<meta name="description" content="krusty is a Kotlin compiler written in Rust. A drop-in replacement for kotlinc on the JVM: the same command-line flags, and .class files byte-for-byte identical to kotlinc's.">
+<link rel="canonical" href="https://krustythecompiler.dev/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://krustythecompiler.dev/">
+<meta property="og:title" content="krusty: a Kotlin compiler written in Rust">
+<meta property="og:description" content="A drop-in replacement for kotlinc on the JVM, with byte-for-byte identical bytecode.">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237f52ff'/%3E%3Cpath d='M9 7h4v8l7-8h5l-8 9 8 9h-5l-7-8v8H9z' fill='%23fff'/%3E%3C/svg%3E">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "krusty",
+  "alternateName": "krusty Kotlin compiler",
+  "description": "A Kotlin compiler written in Rust: a drop-in replacement for kotlinc on the JVM with byte-for-byte identical bytecode.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS, Windows",
+  "programmingLanguage": "Rust",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "url": "https://krustythecompiler.dev/",
+  "codeRepository": "https://github.com/qnox/krusty",
+  "downloadUrl": "https://github.com/qnox/krusty/releases/latest",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<style>
+:root {
+  --bg: #fbfaf8; --fg: #1b1a1f; --muted: #5d5a66; --line: #e4e1ea;
+  --card: #ffffff; --accent: #7f52ff; --accent-2: #e2552b; --code-bg: #f1eff5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131217; --fg: #ecebf0; --muted: #a09cab; --line: #2b2933;
+    --card: #1b1a21; --accent: #a78bff; --accent-2: #ff7a50; --code-bg: #201e27;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--accent); }
+.wrap { max-width: 920px; margin: 0 auto; padding: 0 16px; }
+header.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+.brand { font-weight: 700; font-size: 20px; color: var(--fg); text-decoration: none; letter-spacing: -0.01em; }
+nav a { margin-left: 18px; color: var(--muted); text-decoration: none; font-size: 15px; }
+nav a:hover { color: var(--fg); }
+.hero { padding: 56px 0 40px; }
+.hero h1 { font-size: clamp(34px, 6vw, 54px); line-height: 1.08; margin: 0 0 18px; letter-spacing: -0.02em; }
+.hero h1 .k { color: var(--accent); }
+.hero h1 .r { color: var(--accent-2); }
+.hero p.lead { font-size: 20px; color: var(--muted); max-width: 680px; margin: 0 0 28px; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn {
+  display: inline-block; padding: 11px 20px; border-radius: 10px; font-weight: 600;
+  text-decoration: none; border: 1px solid var(--line); color: var(--fg); background: var(--card);
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.badges { margin-top: 24px; display: flex; gap: 8px; flex-wrap: wrap; }
+.badges img { height: 20px; }
+pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px 18px; overflow-x: auto; font-size: 14.5px; line-height: 1.55; margin: 0;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+p code, li code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; font-size: 0.92em; }
+section { padding: 36px 0; border-top: 1px solid var(--line); }
+section h2 { font-size: 26px; margin: 0 0 16px; letter-spacing: -0.01em; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.card h3 { margin: 0 0 6px; font-size: 18px; }
+.card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+@media (max-width: 560px) { nav a:not(.gh) { display: none; } .hero { padding-top: 32px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/">krusty</a>
+    <nav>
+      <a href="#usage">Usage</a>
+      <a href="#why">Why</a>
+      <a href="#editor">Editor</a>
+      <a class="gh" href="https://github.com/qnox/krusty">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <h1>A <span class="k">Kotlin</span> compiler<br>written in <span class="r">Rust</span></h1>
+      <p class="lead">krusty is a drop-in replacement for <code>kotlinc</code> on the JVM: the same
+        command-line flags in, and <code>.class</code> files that are byte-for-byte identical to
+        <code>kotlinc</code>'s out, from a single native binary.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/qnox/krusty/releases/latest">Download</a>
+        <a class="btn" href="https://github.com/qnox/krusty">Source on GitHub</a>
+      </div>
+      <div class="badges">
+        <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Supported Kotlin versions">
+        <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin codegen/box conformance">
+        <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license">
+      </div>
+    </div>
+
+    <section id="usage">
+      <h2>Use it like kotlinc</h2>
+      <pre><code>krusty src/ -d out/                          # compile a source tree to a class dir
+krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
+krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
+krusty -version</code></pre>
+      <p>Prebuilt binaries for Linux, macOS and Windows (x86_64 and arm64) are attached to every
+        <a href="https://github.com/qnox/krusty/releases/latest">release</a>. To build from source:
+        <code>cargo build --release -p krusty-cli</code>.</p>
+    </section>
+
+    <section id="why">
+      <h2>Why krusty</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Byte-for-byte identical</h3>
+          <p>Output is checked against the real <code>kotlinc</code>: class files,
+            <code>@kotlin.Metadata</code> and <code>.kotlin_module</code>, plus Kotlin and Java consumers
+            compiled against it.</p>
+        </div>
+        <div class="card">
+          <h3>Tested on Kotlin's own suite</h3>
+          <p>Every build runs JetBrains' <code>codegen/box</code> corpus on the JVM. The badge above shows
+            the current pass rate.</p>
+        </div>
+        <div class="card">
+          <h3>Memory-lean</h3>
+          <p>Compact, index-based compiler data and a file-at-a-time backend, so more builds fit on one
+            CI runner.</p>
+        </div>
+        <div class="card">
+          <h3>Native binary</h3>
+          <p>Written in Rust with its own class-file writer and no bytecode library. The compiler runs
+            natively, with no JVM start-up or warm-up.</p>
+        </div>
+        <div class="card">
+          <h3>Serialization and KSP</h3>
+          <p>kotlinx.serialization runs as a native compiler pass, and KSP processors run through a
+            code-generation host.</p>
+        </div>
+        <div class="card">
+          <h3>Kotlin 2.4</h3>
+          <p>Matches the current Kotlin 2.4 releases; the badge above lists the supported versions.
+            Choose which one to match with <code>KRUSTY_LANGUAGE_VERSION</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="editor">
+      <h2>Language server and Zed</h2>
+      <p><code>krusty-lsp</code> is a Kotlin language server backed by the same compiler: diagnostics,
+        completion, hover, go-to-definition, find references, rename and more. It reads Gradle, Maven and
+        BSP project models. A <a href="https://github.com/qnox/krusty/tree/master/editors/zed">Zed
+        extension</a> ships with every release.</p>
+    </section>
+  </main>
+
+  <footer>
+    krusty is open source under the Apache License 2.0 ·
+    <a href="https://github.com/qnox/krusty">github.com/qnox/krusty</a> ·
+    Kotlin is a trademark of JetBrains s.r.o.; krusty is an independent project.
+  </footer>
+</div>
+</body>
+</html>

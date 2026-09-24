@@ -22,6 +22,8 @@ finalize module metadata. It emits `.class` files,
 construct krusty supports, not only ABI-compatible output. Differential bytecode tests, Kotlin/Java
 consumer tests, and the Kotlin `codegen/box` corpus provide the oracle for that goal.
 
+Website: [krustythecompiler.dev](https://krustythecompiler.dev) · Downloads: [latest release](https://github.com/qnox/krusty/releases/latest)
+
 ---
 
 ## Contents

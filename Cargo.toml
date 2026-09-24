@@ -5,6 +5,7 @@ edition = "2021"
 description = "Kotlin compiler written in Rust: a drop-in replacement for kotlinc with byte-for-byte identical JVM bytecode"
 license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
+homepage = "https://krustythecompiler.dev"
 readme = "README.md"
 keywords = ["kotlin", "compiler", "jvm", "bytecode", "kotlinc"]
 categories = ["compilers", "development-tools"]
