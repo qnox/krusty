@@ -358,23 +358,10 @@ impl BodyLowering<'_> {
         next: &FirIteratorCall,
         body: FirExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let iterable_ty = self
-            .body
-            .expr(iterable)
-            .ok_or(FirLoweringFailure::MissingExpression(iterable))?
-            .ty
-            .get();
+        // `iterator()` is called on the iterable value itself, as kotlinc does: a temporary holding
+        // the iterable would be read once and still claim a local slot.
         let iterable_value = self.expression(iterable)?;
-        let iterable_slot = self.allocate_temporary();
-        let iterable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: iterable_slot,
-            ty: iterable_ty,
-            init: Some(iterable_value),
-            named: false,
-        });
-
-        let iterable_read = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
-        let iterator_value = self.iterator_call(iterator, iterable_read)?;
+        let iterator_value = self.iterator_call(iterator, iterable_value)?;
         let iterator_slot = self.allocate_temporary();
         let iterator_declaration = self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
@@ -402,7 +389,7 @@ impl BodyLowering<'_> {
             label: Some(self.control_label(0, target)?),
         });
         Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![iterable_declaration, iterator_declaration, loop_expression],
+            stmts: vec![iterator_declaration, loop_expression],
             value: None,
         }))
     }
