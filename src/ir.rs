@@ -22,17 +22,6 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// Whether a source-language binding read may observe a later assignment to that binding.
-///
-/// This is a semantic property of the binding, not of any backend storage chosen for it. Function
-/// parameters, `val` locals, destructuring `val`s, loop variables, and catch parameters are stable;
-/// a source `var` is mutable even when the current backend happens to keep it in an ordinary local.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrBindingStability {
-    Stable,
-    Mutable,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrNodeOrigin {
     Fir(crate::fir::OriginId),
@@ -42,76 +31,31 @@ pub enum IrNodeOrigin {
     },
 }
 
+mod bindings;
 mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod default_arguments;
+mod intrinsic;
+mod local_class_names;
 mod referenced_classifiers;
 mod references;
+mod type_reflection;
 mod value_class_constructors;
+pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use intrinsic::IrIntrinsic;
+pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use referenced_classifiers::collect_classifiers;
 pub use references::{FuncRef, PropRef};
-
-/// A compiler-supplied operation selected from a real semantic declaration. This is an operation
-/// identity, not a library name: backends implement it without recovering signature facts from text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrIntrinsic {
-    /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
-    /// optional zero-argument message function. A backend must guard/elide the whole operation
-    /// before evaluating either child according to `mode`.
-    Assert {
-        mode: crate::types::AssertionMode,
-    },
-    ArrayGet,
-    ArraySet,
-    ArraySize,
-    StringGet,
-    StringLength,
-    StringPlus,
-    NullableAnyToString,
-    /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
-    /// reified type parameter in the emitted inline template; call-site inline specialization turns
-    /// it into the exact enum classifier without reopening resolution.
-    EnumValueOf {
-        classifier: Ty,
-    },
-    /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
-    /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
-    /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
-    /// even when its integer result is later compared with zero.
-    PrimitiveCompare {
-        operand: Ty,
-        relational_operator: bool,
-    },
-    /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
-    /// this operation with the continuation parameter's `Continuation.getContext()` call.
-    CoroutineContext,
-    UnsignedToString {
-        source: Ty,
-    },
-    PrimitiveArrayNew {
-        element: Ty,
-    },
-    /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
-    /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
-    DataClassFieldEquals {
-        ty: Ty,
-    },
-    /// Kotlin data-class hash contribution for one primary-constructor property.
-    DataClassFieldHash {
-        ty: Ty,
-    },
-    /// Kotlin's content rendering for an array stored in a data-class property.
-    DataClassArrayToString {
-        ty: Ty,
-    },
-}
+pub use type_reflection::IrGenericTopLevelProperty;
+use type_reflection::TypeReflectionFacts;
 
 /// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +126,7 @@ pub enum Callee {
     /// The argument vector contains supplied values in declaration order; defaults identifies holes.
     ModuleWithDefaults {
         target: crate::fir::CallableId,
+        default_provider: crate::fir::ResolvedFunctionOverrideTarget,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -2241,6 +2186,10 @@ pub struct IrFile {
     /// Stable checked-FIR classifier declaration to its common-IR class realization. Member bodies
     /// attach through this edge; neither the sink nor a backend searches by rendered class name.
     pub checked_classifier_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Backend-neutral lexical naming context for source classifiers declared in executable code.
+    /// A target consumes this exact class-id ownership graph and chooses physical spellings.
+    pub(crate) local_class_name_provenance:
+        std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
@@ -2488,6 +2437,7 @@ pub struct IrFile {
     /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
+    type_reflection: TypeReflectionFacts,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
@@ -2580,6 +2530,8 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,
+    /// Provenance and initialization placement for statics generated without a Kotlin declaration.
+    generated_static_facts: std::collections::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
     /// `@Serializable` class's `get<Prop>$annotations()` markers, which kotlinc deprecates HIDDEN. ASM
     /// surfaces the attribute as `ACC_DEPRECATED` (0x20000) in the access int, so the ABI gate compares it.

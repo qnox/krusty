@@ -1,9 +1,9 @@
 //! Generation of a serializer method and its serialized-class write helper.
 
+use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, collection_serializer_builder,
-    contextual_serializer_for, element_serializer_expr, encode_element_method, field_serializer_of,
-    is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, encode_element_method,
+    field_serializer_of, is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -33,10 +33,16 @@ pub(super) struct SerializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
     pub(super) serialized_class: ClassId,
+    /// Every backing field's name and type, by field index.
     pub(super) fields: &'a [(String, Ty)],
+    /// The backing field of each serial element, in element order. A `@Transient` property's
+    /// field is not among them and is never written.
+    pub(super) elements: &'a [usize],
     pub(super) field_defaults: &'a [Option<IrConst>],
     pub(super) nested_serializers: &'a [Option<ClassId>],
-    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serializers of the class's type parameters, on the generic `$serializer`.
+    pub(super) type_parameter_serializers:
+        super::type_parameter_serializers::TypeParameterSerializers<'a>,
     pub(super) write_self: Option<u32>,
     pub(super) write_self_name: String,
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache.
@@ -50,9 +56,10 @@ impl SerializeBody<'_> {
             serializer_class,
             serialized_class: foo_id,
             fields,
+            elements,
             field_defaults,
             nested_serializers: nested,
-            type_parameter_serializer_fields: tp_field,
+            type_parameter_serializers,
             write_self,
             write_self_name,
             cache: cache_plan,
@@ -115,12 +122,19 @@ impl SerializeBody<'_> {
                 plan.as_ref(),
                 Some(cache_local),
                 i,
-                fields.len(),
+                elements.len(),
                 "kotlinx/serialization/SerializationStrategy",
             ) {
                 return Some(cached);
             }
-            element_serializer_expr(ir, ctx, ty)
+            // A delegating `write$Self` is a static helper with no `$serializer` to read a
+            // type-parameter serializer off; only the inlined generic shape has one.
+            let scope = if delegate {
+                super::type_parameter_serializers::TypeParameterSerializers::NONE
+            } else {
+                type_parameter_serializers
+            };
+            super::element_serializer::element_serializer_expr_in(ir, ctx, ty, scope)
         };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
@@ -150,7 +164,9 @@ impl SerializeBody<'_> {
                     args: vec![],
                 }))
             };
-        for (i, (pname, ty)) in fields.iter().enumerate() {
+        // Element `i` is written from backing field `field`; they differ after a transient property.
+        for (i, &field) in elements.iter().enumerate() {
+            let (pname, ty) = &fields[field];
             let n_before = stmts.len();
             let d = if delegate {
                 ir.add_expr(IrExpr::GetValue(2))
@@ -158,7 +174,7 @@ impl SerializeBody<'_> {
                 this_desc(ir)
             };
             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-            let Some(v) = read_property(ir, i, pname, ty) else {
+            let Some(v) = read_property(ir, field, pname, ty) else {
                 bail = true;
                 break;
             };
@@ -168,34 +184,6 @@ impl SerializeBody<'_> {
             {
                 // Contextual element: encode[Nullable]SerializableElement(desc, i,
                 // ContextualSerializer(<type>::class), value.getX()).
-                let method = if is_nullable(ty) {
-                    "encodeNullableSerializableElement"
-                } else {
-                    "encodeSerializableElement"
-                };
-                let inst = super::deserialize_body::narrowed(
-                    ir,
-                    inst,
-                    "kotlinx/serialization/SerializationStrategy",
-                );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
-            } else if let Some(fidx) = tp_field[i] {
-                // Type-parameter element: encode[Nullable]SerializableElement(desc, i,
-                // this.typeSerialK, value.getX()) — the serializer is the ctor-supplied one.
-                let this_s = ir.add_expr(IrExpr::GetValue(0));
-                let inst = ir.add_expr(IrExpr::GetField {
-                    receiver: this_s,
-                    class: ser_idx as u32,
-                    index: fidx,
-                });
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {
@@ -237,14 +225,15 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, inst, v],
                 }));
-            } else if nested[i].is_some()
+            } else if nested[field].is_some()
                 || ty
                     .non_null()
                     .obj_internal()
-                    .and_then(collection_serializer_builder)
+                    .and_then(constructed_standard_serializer)
                     .is_some()
             {
-                // Nested @Serializable OR a standard collection: encode[Nullable]Serializable
+                // Nested @Serializable OR a constructed standard type:
+                // encode[Nullable]Serializable
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
@@ -324,75 +313,120 @@ impl SerializeBody<'_> {
                 bail = true;
                 break;
             }
-            // OPTIONAL element (a constant default): omit it on encode when it still
-            // equals the default — wrap the just-pushed encode call in
+            // OPTIONAL element: omit it on encode when it still equals the default — wrap the
+            // just-pushed encode call in
             //   if (c.shouldEncodeElementDefault(desc, i) || value.getX() != default) { … }
-            if let Some(Some(dc)) = field_defaults.get(i) {
-                if stmts.len() == n_before + 1 {
-                    let enc_stmt = stmts.pop().unwrap();
-                    let cd = if delegate {
-                        ir.add_expr(IrExpr::GetValue(2))
-                    } else {
-                        this_desc(ir)
-                    };
-                    let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                    let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
-                    let should = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeEncoder",
-                            "shouldEncodeElementDefault",
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
-                        ),
-                        dispatch_receiver: Some(cc),
-                        args: vec![cd, ci],
-                    });
-                    // Re-read the property because one IR expression cannot occupy two tree nodes.
-                    let Some(cur) = read_property(ir, i, pname, ty) else {
-                        bail = true;
-                        break;
-                    };
-                    let def = ir.add_expr(IrExpr::Const(dc.clone()));
-                    // The default value carries the property's own declaration line, as it does in
-                    // the deserialization constructor. The comparison that consumes it is marked
-                    // back to the statement's line by the emitter, which is where that rule lives.
-                    // A `null` default is excluded: it is tested with `ifnull`, which pushes
-                    // nothing, and kotlinc marks no line for it.
-                    if !matches!(dc, IrConst::Null) {
-                        if let Some(line) = ir
-                            .prop_decl_lines
-                            .get(&(serialized_name, pname.clone()))
-                            .copied()
-                            .filter(|line| *line != 0)
-                        {
-                            ir.expr_source_lines.insert(def, line);
+            // A constant default is compared as that constant. Any other default is the property's
+            // checked initializer, evaluated again here with an earlier property read off the
+            // object being written, which is what kotlinc's `write$Self` does.
+            let constant_default = field_defaults.get(field).cloned().flatten();
+            let computed_default = constant_default.is_none()
+                && super::property_default::checked_default(ir, foo_id, field).is_some();
+            if (constant_default.is_some() || computed_default) && stmts.len() == n_before + 1 {
+                let enc_stmt = stmts.pop().unwrap();
+                let cd = if delegate {
+                    ir.add_expr(IrExpr::GetValue(2))
+                } else {
+                    this_desc(ir)
+                };
+                let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
+                let should = ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface(
+                        "kotlinx/serialization/encoding/CompositeEncoder",
+                        "shouldEncodeElementDefault",
+                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
+                    ),
+                    dispatch_receiver: Some(cc),
+                    args: vec![cd, ci],
+                });
+                // Re-read the property because one IR expression cannot occupy two tree nodes.
+                let Some(cur) = read_property(ir, field, pname, ty) else {
+                    bail = true;
+                    break;
+                };
+                let def = match &constant_default {
+                    Some(dc) => {
+                        let def = ir.add_expr(IrExpr::Const(dc.clone()));
+                        // The default value carries the property's own declaration line, as
+                        // it does in the deserialization constructor. The comparison that
+                        // consumes it is marked back to the statement's line by the emitter,
+                        // which is where that rule lives. A `null` default is excluded: it is
+                        // tested with `ifnull`, which pushes nothing, and kotlinc marks no
+                        // line for it.
+                        if !matches!(dc, IrConst::Null) {
+                            if let Some(line) = ir
+                                .prop_decl_lines
+                                .get(&(serialized_name, pname.clone()))
+                                .copied()
+                                .filter(|line| *line != 0)
+                            {
+                                ir.expr_source_lines.insert(def, line);
+                            }
                         }
+                        def
                     }
-                    let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: crate::ir::IrBinOp::Ne,
-                        lhs: cur,
-                        rhs: def,
-                    });
-                    // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
-                    // `true` without reading the property at all, otherwise fall through to the
-                    // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
-                    // in a temp and combines with `ior`, which is a different method body from
-                    // kotlinc's for every defaulted property in the class.
-                    let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-                    let cond = ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(should), encode_anyway), (None, neq)],
-                    });
-                    let guard = ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(cond), enc_stmt)],
-                    });
-                    // The guard is a statement of the class's own declaration, so it carries the
-                    // class's start line. That is also what puts the emitter's "current statement
-                    // line" in effect, which the comparison inside the condition returns to.
-                    let start_line = ir.classes[foo_id as usize].decl_start_line;
-                    if start_line != 0 {
-                        ir.expr_lines.insert(guard, start_line);
+                    None => {
+                        let mut read_field = |ir: &mut IrFile, field: usize| {
+                            let (name, ty) = fields.get(field)?;
+                            read_property(ir, field, name, ty)
+                        };
+                        let Some(def) = super::property_default::default_in_frame(
+                            ir,
+                            foo_id,
+                            field,
+                            super::property_default::DefaultFrame {
+                                first_free_local: if delegate {
+                                    cache_local + u32::from(plan.is_some())
+                                } else {
+                                    encoder_slot + 1
+                                },
+                                read_field: &mut read_field,
+                                // `write$Self` is a static member of the class, so the object it
+                                // writes stands in for the receiver the default was checked
+                                // against. The inlined shape lives on the `$serializer`, which
+                                // cannot reach the object's private state.
+                                receiver: delegate.then_some(value_slot),
+                                property_line: ir
+                                    .prop_decl_lines
+                                    .get(&(serialized_name, pname.clone()))
+                                    .copied()
+                                    .filter(|line| *line != 0),
+                                read_line: Some(ir.classes[foo_id as usize].decl_start_line)
+                                    .filter(|line| *line != 0),
+                            },
+                        ) else {
+                            bail = true;
+                            break;
+                        };
+                        def
                     }
-                    stmts.push(guard);
+                };
+                let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: crate::ir::IrBinOp::Ne,
+                    lhs: cur,
+                    rhs: def,
+                });
+                // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
+                // `true` without reading the property at all, otherwise fall through to the
+                // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
+                // in a temp and combines with `ior`, which is a different method body from
+                // kotlinc's for every defaulted property in the class.
+                let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                let cond = ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(should), encode_anyway), (None, neq)],
+                });
+                let guard = ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(cond), enc_stmt)],
+                });
+                // The guard is a statement of the class's own declaration, so it carries the
+                // class's start line. That is also what puts the emitter's "current statement
+                // line" in effect, which the comparison inside the condition returns to.
+                let start_line = ir.classes[foo_id as usize].decl_start_line;
+                if start_line != 0 {
+                    ir.expr_lines.insert(guard, start_line);
                 }
+                stmts.push(guard);
             }
         }
         let delegated_write_self = delegate.then_some(write_self).flatten();
@@ -572,9 +606,11 @@ mod tests {
             serializer_class,
             serialized_class,
             fields: &fields,
+            elements: &[0],
             field_defaults: &[None],
             nested_serializers: &[None],
-            type_parameter_serializer_fields: &[None],
+            type_parameter_serializers:
+                super::super::type_parameter_serializers::TypeParameterSerializers::NONE,
             write_self: Some(write_self),
             write_self_name: "write$Self".to_owned(),
             // This fixture's property has no derivable serializer at all, so its class has no

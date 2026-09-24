@@ -2,7 +2,7 @@
 
 mod kotlin_metadata;
 mod native_backend;
-mod source_set_compile;
+pub mod source_set_compile;
 
 // Re-exported so a test writes `common::expect_native_box` like every other helper here. The
 // conformance binary compiles this module too and uses none of them, exactly as it uses none of
@@ -282,19 +282,19 @@ fn parse_source_set(
     )
 }
 
-/// [`parse_source_set`] with per-source stems, so anonymous classes take their kotlinc names
-/// (`<Stem>Kt$fn$1` for a top-level enclosing) instead of the parse-time placeholder.
+/// [`parse_source_set`] with source labels retained by the caller's fixture table.
+/// Local classifier identities remain backend-neutral in this frontend-only helper.
 fn parse_source_set_named(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
     let files = sources
         .iter()
-        .map(|(stem, source)| {
+        .map(|(_, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
             let tokens = krusty::lexer::lex(source, diags);
             let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
-            krusty::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            krusty::frontend::record_local_class_name_provenance(&mut file);
             file
         })
         .collect::<Vec<_>>();
@@ -347,6 +347,17 @@ struct InProcessEmissionReport {
     diagnostics: Vec<String>,
 }
 
+/// What in-process compiles analyze against: `platform` plus every native compiler plugin krusty
+/// ships — the configuration a build applying the kotlinx.serialization plugin selects with
+/// `-Xplugin`. Without a selection no plugin runs, as with kotlinc (`cli_compiler_plugin_e2e`).
+pub fn with_native_plugins(
+    platform: impl Into<krusty::frontend::PlatformProvider>,
+) -> krusty::frontend::PlatformProvider {
+    platform.into().with_native_plugins(
+        krusty::plugins::registry::PluginRegistry::with_builtins().every_native_extension(),
+    )
+}
+
 /// The target-independent in-process compiler path used by backend tests. Frontend analysis always
 /// produces the same checked streaming module; the caller supplies only the semantic platform and
 /// the backend that realizes common IR as target artifacts.
@@ -365,7 +376,10 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        with_native_plugins(platform),
+        &features,
+        &mut diags,
     );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "main", &mut diags);
     InProcessEmissionReport {
@@ -512,7 +526,7 @@ pub fn compile_in_process_metadata_cp_module_target(
     let features = krusty::features::LangFeatures::from_source(src);
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        with_native_plugins(platform),
         &features,
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -726,7 +740,7 @@ where
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        with_native_plugins(platform),
         &krusty::features::LangFeatures::new(),
         prepare,
         &mut diags,
@@ -2023,7 +2037,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        with_native_plugins(platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,

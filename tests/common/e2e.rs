@@ -160,6 +160,25 @@ pub fn compiler_diagnostics_with_reference_args(
     classpath: &[PathBuf],
     reference_extra_args: &[String],
 ) -> CompilerDiagnosticResult {
+    compiler_diagnostics_with_args(sources, classpath, &[], reference_extra_args)
+}
+
+/// Compile named sources with both compiler CLIs, handing both the same `shared_args` — switches a
+/// build passes every compiler alike, such as `-Xplugin`.
+pub fn compiler_diagnostics_with_shared_args(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+    shared_args: &[String],
+) -> CompilerDiagnosticResult {
+    compiler_diagnostics_with_args(sources, classpath, shared_args, shared_args)
+}
+
+fn compiler_diagnostics_with_args(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+    krusty_extra_args: &[String],
+    reference_extra_args: &[String],
+) -> CompilerDiagnosticResult {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let joined_classpath = (!classpath.is_empty())
@@ -173,6 +192,7 @@ pub fn compiler_diagnostics_with_reference_args(
     if let Some(classpath) = &joined_classpath {
         krusty.arg("-cp").arg(classpath);
     }
+    krusty.args(krusty_extra_args);
     krusty.args(&source_paths);
     let krusty = krusty.output().expect("run krusty diagnostic fixture");
 
@@ -219,7 +239,7 @@ pub fn front_end_diagnostics_inputs(
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
-        platform,
+        common::with_native_plugins(platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -463,7 +483,7 @@ pub fn front_end_diagnostics_located(
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        common::with_native_plugins(platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diags,

@@ -204,8 +204,13 @@ pub(super) fn compare_files_with_kotlinc_plugin(
     let (code, stderr) = common::kotlinc_compile(&arguments)?;
     assert_eq!(code, 0, "kotlinc(source set) failed: {stderr}");
 
-    let classes =
-        common::compile_in_process_files(sources, cp_jars, Some(common::jdk_modules().as_path()))?;
+    // kotlinc targets JVM 25 above; krusty emits the same class-file version (25 + 44).
+    let classes = common::source_set_compile::compile_in_process_files_target(
+        sources,
+        cp_jars,
+        Some(common::jdk_modules().as_path()),
+        Some(69),
+    )?;
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
