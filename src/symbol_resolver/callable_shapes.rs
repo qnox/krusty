@@ -139,6 +139,7 @@ mod tests {
             callable_signature: Some(Ty::fun(Vec::new(), Ty::String)),
             callable_signatures: vec![Ty::fun(Vec::new(), Ty::String)],
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

@@ -7,6 +7,24 @@
 
 use super::*;
 
+/// Normalize parser classifier flags into the provider-neutral kind a frontend plugin consumes.
+pub(in crate::resolve) fn frontend_class_kind(
+    flags: ClassFlags,
+    is_enum: bool,
+) -> crate::libraries::TypeKind {
+    if flags.has(ClassFlags::ANNOTATION) {
+        crate::libraries::TypeKind::Annotation
+    } else if flags.has(ClassFlags::OBJECT) {
+        crate::libraries::TypeKind::Object
+    } else if is_enum {
+        crate::libraries::TypeKind::Enum
+    } else if flags.has(ClassFlags::INTERFACE) {
+        crate::libraries::TypeKind::Interface
+    } else {
+        crate::libraries::TypeKind::Class
+    }
+}
+
 fn type_ref_formal_occurrences(ty: &TypeRef, name: &str, projected: bool) -> (bool, bool) {
     let projected = projected || ty.in_projection() || ty.out_projection();
     let mut occurrences = (projected && ty.name == name, !projected && ty.name == name);

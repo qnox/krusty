@@ -8,6 +8,7 @@ use crate::source::SourceInput;
 use crate::types::{Ty, TypeName, TypeNameList, Visibility};
 
 mod analysis;
+mod annotation_publication;
 mod retention;
 mod streaming;
 

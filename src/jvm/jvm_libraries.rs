@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod builtin_classifier_shapes;
+mod classifier_facts;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
@@ -2282,26 +2283,32 @@ impl JvmLibraries {
                     supertypes.push_name(k);
                 }
             }
-            // A companion object compiles to a `public static final C$Name` field on `C` (default name
-            // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
-            // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
-            let companion_object = ci
-                .fields
-                .iter()
-                .find_map(|f| {
-                    // A Kotlin companion-object instance field is always `public static final`, typed as the
-                    // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
-                    // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
-                    // (a nested-class-typed `public static final` field) vanishingly unlikely.
-                    let public_static_final =
-                        f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
-                    if !public_static_final {
-                        return None;
-                    }
-                    let nested = format!("{internal}${}", f.name);
-                    (f.descriptor == format!("L{nested};"))
-                        .then(|| (f.name.clone(), type_name(&nested)))
+            // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
+            // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
+            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+                let companion = crate::types::type_name_nested_child(internal_name, &field);
+                Some((field, companion))
+            });
+            let classfile_companion = (!ci.meta.is_present())
+                .then(|| {
+                    ci.fields.iter().find_map(|f| {
+                        // A Kotlin companion-object instance field is always `public static final`, typed as the
+                        // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
+                        // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
+                        // (a nested-class-typed `public static final` field) vanishingly unlikely.
+                        let public_static_final =
+                            f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
+                        if !public_static_final {
+                            return None;
+                        }
+                        let nested = format!("{internal}${}", f.name);
+                        (f.descriptor == format!("L{nested};"))
+                            .then(|| (f.name.clone(), type_name(&nested)))
+                    })
                 })
+                .flatten();
+            let companion_object = metadata_companion
+                .or(classfile_companion)
                 .or_else(|| self.cp.builtin_companion_object(internal_name));
             let kind = if let Some(kind) = ci.meta.class_kind {
                 kind
@@ -2739,6 +2746,7 @@ impl JvmLibraries {
                 callable_signature,
                 callable_signatures,
                 companion_object,
+                qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
                 value_underlying_property: value_class.and_then(|declaration| declaration.property),
                 alias_target: None,
@@ -5048,28 +5056,9 @@ impl SymbolSource for JvmLibraries {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         super::jvm_class_map::platform_flexible_upper_bound(lower)
     }
-}
 
-impl crate::types::ClassifierFactSource for JvmLibraries {
-    fn classifier_annotations(
-        &self,
-        classifier: TypeName,
-    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
-    }
-
-    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
-        SymbolSource::classifier(self, classifier)
-            .map(|shape| shape.kind == crate::libraries::TypeKind::Object)
-    }
-
-    fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
-        SymbolSource::classifier(self, classifier).and_then(|shape| shape.value_underlying)
-    }
-
-    fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
-        SymbolSource::classifier(self, classifier)
-            .and_then(|shape| shape.value_underlying_property.clone())
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        classifier_facts::generated_serializer_singleton(self, classifier)
     }
 }
 

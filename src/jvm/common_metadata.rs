@@ -273,6 +273,7 @@ fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
         callable_signature: None,
         callable_signatures: Vec::new(),
         companion_object: None,
+        qualified_name: None,
         value_underlying: None,
         value_underlying_property: None,
         alias_target: None,

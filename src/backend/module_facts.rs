@@ -64,6 +64,19 @@ pub struct BackendClassifierFact {
     pub value_underlying_property: Option<Box<str>>,
 }
 
+/// Declaration facts of a current-module classifier that a dependency's classifier record carries
+/// in its own form (modality, companion, and qualified name).
+#[derive(Clone, Debug, PartialEq)]
+struct SourceDeclaration {
+    is_sealed: bool,
+    /// The declared companion object: its static field's name and its classifier.
+    companion: Option<(Box<str>, TypeName)>,
+    /// The Kotlin qualified name with every boundary dotted (`pkg.Outer.Nested`).
+    qualified_name: Option<Box<str>>,
+    /// Exact accessor owner and arity published by the serialization frontend plugin.
+    serialization_companion_accessor: Option<(Box<str>, TypeName, usize)>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendMemberFact {
     pub name: BackendMemberName,
@@ -295,6 +308,7 @@ pub struct BackendModuleFacts {
     body_local_classifiers: HashSet<TypeName>,
     source_value_classes: HashMap<TypeName, Ty>,
     metadata_readable_value_classes: HashSet<TypeName>,
+    source_declarations: HashMap<TypeName, SourceDeclaration>,
 }
 
 impl BackendModuleFacts {
@@ -307,6 +321,7 @@ impl BackendModuleFacts {
         let mut body_local_classifiers = HashSet::new();
         let mut source_value_classes = HashMap::new();
         let mut metadata_readable_value_classes = HashSet::new();
+        let mut source_declarations = HashMap::new();
         let mut generated_classifiers = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
@@ -571,6 +586,8 @@ impl BackendModuleFacts {
                 }
             }
             surface.sort_by_key(|(order, _)| *order);
+            let companion = source_companion(index, declaration);
+            let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
@@ -586,34 +603,25 @@ impl BackendModuleFacts {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 annotations: index
-                    .declaration_annotations(declaration)
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(ordinal, annotation)| crate::types::ResolvedAnnotation {
-                        annotation,
-                        // The class-valued arguments the frontend resolved for this occurrence.
-                        // A dependency's annotations reach a backend with their arguments intact;
-                        // one declared in ANOTHER FILE OF THIS MODULE must too, or the two sides of
-                        // the same boundary answer the same question differently.
-                        arguments: index
-                            .declaration_annotation_class_arguments(declaration, ordinal as u32)
-                            .iter()
-                            .map(|&classifier| {
-                                (
-                                    String::new(),
-                                    crate::types::AnnotationValue::Class(classifier),
-                                )
-                            })
-                            .collect(),
-                    })
-                    .collect::<Vec<_>>()
+                    .declaration_applied_annotations(declaration)
+                    .to_vec()
                     .into_boxed_slice(),
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
                 value_underlying_property,
             };
+            source_declarations.insert(
+                classifier.classifier,
+                SourceDeclaration {
+                    is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
+                    companion,
+                    qualified_name,
+                    serialization_companion_accessor: index
+                        .serialization_companion_accessor(declaration)
+                        .map(|(field, companion, arity)| (Box::from(field), companion, arity)),
+                },
+            );
             if let Some(underlying) = value_underlying {
                 source_value_classes.insert(classifier.classifier, underlying);
                 let has_secondary_constructor = (0..index.declaration_count()).any(|raw| {
@@ -636,6 +644,7 @@ impl BackendModuleFacts {
             body_local_classifiers,
             source_value_classes,
             metadata_readable_value_classes,
+            source_declarations,
         })
     }
 
@@ -667,6 +676,7 @@ impl BackendModuleFacts {
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
+            source_declarations: HashMap::new(),
         })
     }
 
@@ -695,6 +705,37 @@ impl BackendModuleFacts {
     pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
         &self.metadata_readable_value_classes
     }
+}
+
+/// A declared source companion's exact field spelling and classifier identity. The stable name-tree
+/// edge from its enclosing classifier is authoritative even when the segment contains `$`.
+fn source_companion(
+    index: &crate::fir::ResolvedModuleIndex,
+    owner: crate::fir::DeclarationId,
+) -> Option<(Box<str>, TypeName)> {
+    let declaration = index.companion_declaration(owner)?;
+    let classifier = index.classifier_header(declaration)?.classifier;
+    let owner = index.classifier_header(owner)?.classifier;
+    Some((
+        Box::from(classifier.nested_segment_within(owner)?),
+        classifier,
+    ))
+}
+
+/// The dotted Kotlin declaration name of a source classifier. The stable declaration name already
+/// contains its lexical classifier path, so no JVM/internal name needs to be reinterpreted.
+fn source_qualified_name(
+    index: &crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> Option<Box<str>> {
+    let source = index.declaration_anchor(declaration)?.source;
+    let declaration = index.declaration_name(declaration)?;
+    let package = index.source_package(source)?.render().replace('/', ".");
+    Some(if package.is_empty() {
+        Box::from(declaration)
+    } else {
+        format!("{package}.{declaration}").into_boxed_str()
+    })
 }
 
 /// A per-call view federating the frozen current module with dependency classifier metadata.
@@ -747,6 +788,124 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
         BackendClassifierSource::classifier(self, classifier)
             .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
+    }
+
+    fn classifier_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::ClassifierDeclarationFacts> {
+        let fact = BackendClassifierSource::classifier(self, classifier)?;
+        let (is_sealed, companion, qualified_name) =
+            match self.module.source_declarations.get(&classifier) {
+                Some(source) => (
+                    source.is_sealed,
+                    source.companion.clone(),
+                    source.qualified_name.clone(),
+                ),
+                None => {
+                    let shape = self.dependencies.classifier(classifier)?;
+                    (
+                        // Only a sealed class records its subclasses; one without any is still
+                        // abstract in its class file.
+                        !shape.sealed_subclasses.is_empty(),
+                        shape
+                            .companion_object
+                            .as_ref()
+                            .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
+                        shape.qualified_name.clone(),
+                    )
+                }
+            };
+        Some(crate::types::ClassifierDeclarationFacts {
+            kind: fact.kind.into(),
+            is_abstract: fact.is_abstract || is_sealed,
+            own_type_parameter_count: fact.own_type_parameter_count,
+            companion,
+            qualified_name,
+            source: fact.source,
+        })
+    }
+
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        if let Some(generated) = self
+            .module
+            .generated_classifiers()
+            .iter()
+            .find(|generated| {
+                generated.lexical_owner == classifier
+                    && generated.purpose
+                        == crate::types::GeneratedClassifierPurpose::SerializationSerializer
+            })
+        {
+            return (BackendClassifierSource::classifier(self, classifier)?
+                .own_type_parameter_count
+                == 0)
+                .then_some(generated.classifier);
+        }
+        self.dependencies.generated_serializer_singleton(classifier)
+    }
+
+    fn has_serialization_serializer_accessor(
+        &self,
+        companion: TypeName,
+        type_parameters: usize,
+    ) -> bool {
+        if self.module.source_declarations.values().any(|source| {
+            source
+                .serialization_companion_accessor
+                .as_ref()
+                .is_some_and(|(_, owner, arity)| *owner == companion && *arity == type_parameters)
+        }) {
+            return true;
+        }
+        if let Some(generated) = self
+            .module
+            .generated_classifiers()
+            .iter()
+            .find(|generated| {
+                generated.classifier == companion
+                    && generated.purpose
+                        == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+            })
+        {
+            return self
+                .module
+                .classifier(generated.lexical_owner)
+                .is_some_and(|owner| owner.own_type_parameter_count == type_parameters);
+        }
+        self.dependencies
+            .has_serialization_serializer_accessor(companion, type_parameters)
+    }
+
+    fn serialization_companion(&self, classifier: TypeName) -> Option<(Box<str>, TypeName)> {
+        self.module
+            .source_declarations
+            .get(&classifier)
+            .and_then(|source| {
+                source
+                    .serialization_companion_accessor
+                    .as_ref()
+                    .map(|(field, companion, _)| (field.clone(), *companion))
+                    .or_else(|| source.companion.clone())
+            })
+            .or_else(|| {
+                self.module
+                    .generated_classifiers()
+                    .iter()
+                    .find(|generated| {
+                        generated.lexical_owner == classifier
+                            && generated.purpose
+                                == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+                    })
+                    .map(|generated| (generated.source_name.clone(), generated.classifier))
+            })
+            .or_else(|| {
+                self.dependencies
+                    .classifier(classifier)?
+                    .companion_object
+                    .as_ref()
+                    .map(|(field, companion)| (Box::from(field.as_str()), *companion))
+            })
     }
 
     fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
@@ -1068,5 +1227,68 @@ mod tests {
         let legacy = provider.classifier(classifier).expect("module classifier");
         let legacy = BackendClassifierFact::from_library(&legacy);
         assert_eq!(*stable, legacy);
+    }
+
+    #[test]
+    fn source_qualified_name_retains_each_lexical_classifier_segment() {
+        let source = r#"
+            package demo
+            class Outer { object Inner }
+        "#;
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Nested")],
+            Box::new(crate::libraries::EmptySymbolSource),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let inner = index
+            .classifier_declaration(crate::types::type_name("demo/Outer.Inner"))
+            .expect("nested classifier declaration");
+
+        assert_eq!(
+            source_qualified_name(index, inner).as_deref(),
+            Some("demo.Outer.Inner")
+        );
+    }
+
+    #[test]
+    fn source_companion_retains_only_its_exact_field_segment() {
+        let source = r#"
+            package demo
+            class Outer { companion object Named }
+        "#;
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Companion")],
+            Box::new(crate::libraries::EmptySymbolSource),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let outer = index
+            .classifier_declaration(crate::types::type_name("demo/Outer"))
+            .expect("enclosing classifier declaration");
+
+        assert_eq!(
+            source_companion(index, outer),
+            Some((
+                Box::from("Named"),
+                crate::types::type_name("demo/Outer.Named")
+            ))
+        );
     }
 }

@@ -3030,17 +3030,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
                         classifier: internal,
-                        kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
-                            crate::libraries::TypeKind::Annotation
-                        } else if classifier_flags.has(ClassFlags::OBJECT) {
-                            crate::libraries::TypeKind::Object
-                        } else if classifier_is_enum {
-                            crate::libraries::TypeKind::Enum
-                        } else if classifier_flags.has(ClassFlags::INTERFACE) {
-                            crate::libraries::TypeKind::Interface
-                        } else {
-                            crate::libraries::TypeKind::Class
-                        },
+                        companion: direct_companion,
+                        kind: frontend_class_kind(classifier_flags, classifier_is_enum),
                         is_sealed: classifier_flags.has(ClassFlags::SEALED),
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
@@ -3442,6 +3433,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             source_decl: Some(d),
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
+                            applied_annotations: Vec::new(),
                             annotation_class_arguments: resolved_annotation_class_arguments,
                             generated_nested_classifiers,
                             props,
@@ -3585,6 +3577,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     source_decl: None,
                                     visibility: Visibility::Public,
                                     annotations: Vec::new(),
+                                    applied_annotations: Vec::new(),
                                     annotation_class_arguments: Vec::new(),
                                     generated_nested_classifiers: Vec::new(),
                                     props: Vec::new(),
