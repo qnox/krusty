@@ -823,6 +823,47 @@ fn an_abstract_member_carries_the_default_its_override_is_called_with() {
     );
 }
 
+#[test]
+fn an_override_called_by_its_own_type_takes_the_defaults_of_the_member_it_overrides() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An override cannot declare defaults, so `Mid().f()` fills its arguments from `Base.f`'s
+    // declaration and still runs `Mid.f`. The call names the override, and the frontend hands it
+    // over with the declaration the defaults come from; the arguments are computed in THAT frame
+    // (`b = a + 1` reads the `a` passed to it) and the call then dispatches, so a `Mid`-typed
+    // `Leaf` runs `Leaf.f`.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open fun f(x: Int = 23, y: String = \"b\"): String = \"Base:\" + x + y\n\
+             \x20   open fun g(a: Int, b: Int = a + 1): String = \"Base:\" + a + b\n\
+             }\n\
+             open class Mid : Base() {\n\
+             \x20   override fun f(x: Int, y: String) = \"Mid:\" + x + y\n\
+             \x20   override fun g(a: Int, b: Int) = \"Mid:\" + a + b\n\
+             }\n\
+             class Leaf : Mid() {\n\
+             \x20   override fun f(x: Int, y: String) = \"Leaf:\" + x + y\n\
+             }\n\
+             interface I {\n\
+             \x20   fun h(x: Int = 7): String\n\
+             }\n\
+             class K : I {\n\
+             \x20   override fun h(x: Int) = \"K:\" + x\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Mid().f())\n\
+             \x20   println(Leaf().f(1))\n\
+             \x20   val m: Mid = Leaf()\n\
+             \x20   println(m.f(y = \"z\"))\n\
+             \x20   println(Mid().g(4))\n\
+             \x20   println(K().h())\n\
+             }\n"),
+        "Mid:23b\nLeaf:1b\nLeaf:23z\nMid:45\nK:7\n"
+    );
+}
+
 /// A `value class` declines until the backend reads what the frontend checked about it.
 ///
 /// It is not a one-field class: Kotlin answers its `equals`, `hashCode` and `toString` by the
