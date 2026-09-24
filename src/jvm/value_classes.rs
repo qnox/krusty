@@ -932,6 +932,9 @@ pub(crate) fn lower_value_classes(
     // Keep their declaration identities so return adaptation follows that realized ABI instead of the
     // boxed-instance convention used by synthesized wrapper members.
     let mut lowered_value_members = HashSet::new();
+    // Positions erased from a non-null value class to a null-capable carrier, moved into
+    // `ir.jvm_non_null_value_class_positions` once the loop releases `ir.functions`.
+    let mut non_null_positions: HashMap<u32, crate::ir::IrValueClassPositions> = HashMap::new();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -1063,7 +1066,15 @@ pub(crate) fn lower_value_classes(
                 if vc_underlying_nullable(p, &under) {
                     default_boxed.push((fid as u32, idx, *p));
                 }
+                let declared_non_null = !p.is_nullable() && is_vc_ty(p);
                 *p = erase(p, &under);
+                if declared_non_null && p.is_nullable() {
+                    non_null_positions
+                        .entry(fid as u32)
+                        .or_default()
+                        .params
+                        .push(idx as u32);
+                }
             }
         }
         if !(is_box_impl || vc_member && !f.is_static && is_vc_ty(&f.ret)) {
@@ -1076,7 +1087,12 @@ pub(crate) fn lower_value_classes(
                 .map(crate::ir::IrValueClassSuspendResult::boundary_ty)
                 .unwrap_or_else(|| erase(&f.ret, &under))
             } else {
-                erase(&f.ret, &under)
+                let declared_non_null = !f.ret.is_nullable() && is_vc_ty(&f.ret);
+                let carrier = erase(&f.ret, &under);
+                if declared_non_null && carrier.is_nullable() {
+                    non_null_positions.entry(fid as u32).or_default().ret = true;
+                }
+                carrier
             };
         }
         if !f.param_checks.is_empty() {
@@ -1104,6 +1120,7 @@ pub(crate) fn lower_value_classes(
             }
         }
     }
+    ir.jvm_non_null_value_class_positions = non_null_positions;
     for function in lowered_value_members.iter().copied() {
         super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }

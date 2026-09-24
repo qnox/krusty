@@ -828,6 +828,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   realization; kotlinc rejects those sources outright), instance (constructor-property) `@JvmField`,
   and `@JvmField` on a named `object`'s properties, which keeps the previous private-static +
   accessor realization.
+- **A parameter or return declared as a NON-null value class is `@NotNull`, even when its carrier
+  admits null.** `fun slotRaw(value: Slot)` over `value class Slot(val raw: Any?)` takes `Object`
+  and `Count(val raw: Int?)` takes `Integer`, yet kotlinc annotates both by the declared type, not
+  the carrier. JVM value-class lowering records the positions it erased from a non-null value class
+  to a null-capable carrier (`IrFile::jvm_non_null_value_class_positions`), and the annotation
+  writer consults them. A nullable `Slot?` stays `@Nullable`. Test:
+  `tests/value_class_position_nullability_e2e.rs`.
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by

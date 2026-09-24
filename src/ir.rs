@@ -2128,6 +2128,15 @@ impl IrStatic {
     }
 }
 
+/// Parameter and return positions of one function, as JVM value-class lowering records them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IrValueClassPositions {
+    /// The return position.
+    pub ret: bool,
+    /// Physical parameter ordinals (after any carrier receiver was prepended).
+    pub params: Vec<u32>,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2400,6 +2409,11 @@ pub struct IrFile {
     /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
+    /// Per function, the parameter and return positions JVM value-class lowering erased from a
+    /// NON-null value class to a null-capable carrier (`value class A(val raw: Any?)` → `Object`).
+    /// kotlinc annotates such a position by its declared type, so it is `@NotNull` even though the
+    /// carrier admits null. Written only by `jvm::value_classes`; read by the annotation writer.
+    pub jvm_non_null_value_class_positions: std::collections::HashMap<u32, IrValueClassPositions>,
     /// How SOURCE spelled a member's declared types, by `FunId` — see [`crate::spelling`].
     ///
     /// Class `@Metadata` is built from the IR alone (no AST, no `FrontendSymbols`), so a declared

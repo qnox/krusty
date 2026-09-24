@@ -10679,6 +10679,16 @@ fn emit_method_inner_with_holder(
         && member_sem.is_none_or(|(_, r)| !matches!(r, Ty::TyParam(..))))
     .then(|| ann_of(f.ret))
     .flatten();
+    // A position erased from a non-null value class to a null-capable carrier is annotated by its
+    // declared type: `@NotNull`, as kotlinc does, though the carrier (`Object` for `Any?`) admits null.
+    let non_null_value_class = ir.jvm_non_null_value_class_positions.get(&fid);
+    let ret_ann = ret_ann.map(|annotation| {
+        if non_null_value_class.is_some_and(|positions| positions.ret) {
+            "Lorg/jetbrains/annotations/NotNull;"
+        } else {
+            annotation
+        }
+    });
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
     // mangle); consult it so a nullable reference parameter is annotated `@Nullable`, not `@NotNull`.
     let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
@@ -10698,6 +10708,10 @@ fn emit_method_inner_with_holder(
                 .unwrap_or(false)
             {
                 ann_of(Ty::nullable(*t))
+            } else if non_null_value_class
+                .is_some_and(|positions| positions.params.contains(&(i as u32)))
+            {
+                ann_of(*t).map(|_| "Lorg/jetbrains/annotations/NotNull;")
             } else {
                 ann_of(*t)
             }
