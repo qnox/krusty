@@ -386,8 +386,7 @@ impl ClassWriter {
                 .as_ref()
         };
         let original_types = || original_analysis().map(|(types, _)| types);
-        let redundant_casts =
-            redundant_checkcasts::select(self, method, &insns, &offsets, &original_types);
+        let redundant_casts = redundant_checkcasts::select(self, &insns, &original_types);
         // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
         // nullability analysis proves non-null goes (see `null_checks`).
         let redundant_null_checks = self.redundant_null_checks(
