@@ -4074,6 +4074,35 @@ property references, and the harness does supply `kotlin-reflect.jar`); what was
   exists nowhere), and a generic function's `@Metadata` recorded an INFERRED type-parameter return as
   `Any` with no JVM signature handle, which left reflection unable to identify the method.
 
+## Phase — `typeOf<T>()` as a compiler intrinsic  ◐
+
+The box corpus goes from 6405 to 6454 passing, with no case newly failing. Of the 61 applicable box
+cases that call `typeOf`, 50 pass now; before this, one did. The semantics are in `docs/SPEC.md`.
+
+- The call boundary (`jvm::external_calls`) routes `kotlin.reflect.typeOf` to
+  `IrIntrinsic::TypeOf { ty }`. `jvm::type_of` generates kotlinc's `generateTypeOf` sequence as a
+  small instruction list. The emitter encodes it directly. The bytecode splicer encodes it in place of a
+  `reifiedOperationMarker(6, …)` placeholder, and its stack growth is added to the host's max stack.
+- IR inline expansion substitutes only the callee's reified parameters into dependency calls. A
+  non-reified one stays a type parameter and is described by its declaring container.
+- A foreign inline template records its declaring source, and the JVM backend resolves that to a file
+  facade. A top-level generic extension property records its type parameters so that a `typeOf` in its
+  accessors names the property.
+- Signature publication resolves a classifier or property bound against the enclosing declarations'
+  published type parameters. Before, it used only the declaration's own parameters.
+
+- A generic top-level extension property's accessors carry their generic `Signature`
+  (`<P:Ljava/lang/Object;>(TP;)…`), as a member extension property's already did.
+
+Remaining:
+- Six `typeErasure/*InsideClass` cases. A reified MEMBER inline function is called, not inlined, so it
+  throws whatever its body does. That is not specific to `typeOf`.
+- Reified parameters in anonymous objects regenerated per call site (`reifiedAsNestedArgument`,
+  `localClass`).
+- Reified intersection-type arguments (`intersectionType`,
+  `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
+- Typealias use-site projections (`typeAliasedType`).
+
 ## Phase — local classifiers and type parameters in the lexical scope chain  ◐
 
 Removing the parser's local-class hoisting hack in favour of proper lexical scoping. Two of the five
