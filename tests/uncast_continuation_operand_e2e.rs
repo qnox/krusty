@@ -48,7 +48,11 @@ fn a_machine_passes_its_continuation_uncast_like_kotlinc() {
     let member = "java.lang.Object twice(";
     assert!(
         !method_instructions(&built.reference, member).is_empty(),
-        "{member} not found"
+        "kotlinc: {member} not found"
+    );
+    assert!(
+        !method_instructions(&built.krusty, member).is_empty(),
+        "krusty: {member} not found"
     );
     assert_eq!(continuation_casts(&built.reference, member), 0, "kotlinc");
     assert_eq!(continuation_casts(&built.krusty, member), 0, "krusty");
@@ -74,4 +78,45 @@ fn a_machine_with_an_uncast_continuation_still_resumes() {
             .as_deref(),
         Some("OK")
     );
+}
+
+/// A classpath `@JvmStatic` callable is selected as a member with a source receiver, then emitted as
+/// a static method with that receiver dropped. Its continuation is still argument-owned provenance;
+/// routing this branch through descriptor-only adaptation would reintroduce `checkcast Continuation`.
+#[test]
+fn a_jvm_static_suspend_call_keeps_its_recorded_continuation_uncast() {
+    const LIBRARY: &str = "package boundary\n\
+        object StaticSuspendBoundary {\n\
+        \x20   @JvmStatic suspend fun step(value: Int): Int = value\n\
+        }\n";
+    const CALLER: &str = "import boundary.StaticSuspendBoundary\n\
+        suspend fun twiceStatic(): Int {\n\
+        \x20   val first = StaticSuspendBoundary.step(3)\n\
+        \x20   return first + StaticSuspendBoundary.step(4)\n\
+        }\n";
+    let Some(library) = common::compile_lib("uncast-jvm-static-boundary", LIBRARY) else {
+        return;
+    };
+    let Some(built) = compare_with_kotlinc_plugin(
+        "JvmStaticContinuationCaller",
+        CALLER,
+        "JvmStaticContinuationCallerKt",
+        &[common::stdlib_jar(), library],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let member = "java.lang.Object twiceStatic(";
+    assert!(
+        !method_instructions(&built.reference, member).is_empty(),
+        "kotlinc: {member} not found"
+    );
+    assert!(
+        !method_instructions(&built.krusty, member).is_empty(),
+        "krusty: {member} not found"
+    );
+    assert_eq!(continuation_casts(&built.reference, member), 0, "kotlinc");
+    assert_eq!(continuation_casts(&built.krusty, member), 0, "krusty");
 }

@@ -13,6 +13,15 @@
 
 use super::*;
 
+/// Map a physical descriptor operand back to the selected call's checked argument vector. A
+/// retained receiver can lead the JVM operand list without belonging to that vector.
+fn call_argument_index(
+    physical_index: usize,
+    leading_non_argument_operands: usize,
+) -> Option<usize> {
+    physical_index.checked_sub(leading_non_argument_operands)
+}
+
 /// A selected call whose checked argument vector disagrees with its physical descriptor.
 ///
 /// Carried rather than reported at the point of detection: the operand helpers do not know whether
@@ -145,27 +154,6 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
-    pub(super) fn emit_descriptor_operands(
-        &mut self,
-        ops: &[u32],
-        physical: &[Ty],
-        code: &mut CodeBuilder,
-    ) -> Result<(), DescriptorArityMismatch> {
-        DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
-        // Fail CLOSED, exactly as the sibling `MethodCall` path does for the same condition: record
-        // the stable reason, stop emitting, and let the backend report
-        // `JVM backend inline error: call arity mismatch`. Emitting an unverifiable call is worse,
-        // and so is panicking — that loses the diagnostic and takes down the whole compilation
-        let mut index = 0usize;
-        self.emit_operands_adapted(None, ops, code, |this, source, code| {
-            let expression = ops[index];
-            let target = physical[index];
-            index += 1;
-            this.adapt_physical_operand_for(expression, source, target, code);
-        });
-        Ok(())
-    }
-
     /// Operands of a call to a function this module declares. Lowering already realized every
     /// representation change its checked arguments need, so each reference operand is only
     /// materialized at its parameter's type, the cast kotlinc writes for an upcast.
@@ -262,9 +250,13 @@ impl Emitter<'_> {
         *inside_run = synthesized;
     }
 
+    /// Emit an already-selected descriptor call without losing checked argument provenance.
+    /// `leading_non_argument_operands` covers a receiver retained separately by common IR but
+    /// prepended to a static JVM invocation; it is never inferred from descriptor shape here.
     pub(super) fn emit_call_descriptor_operands(
         &mut self,
         call_expression: u32,
+        leading_non_argument_operands: usize,
         ops: &[u32],
         physical: &[Ty],
         code: &mut CodeBuilder,
@@ -279,18 +271,27 @@ impl Emitter<'_> {
             ops,
             code,
             |this, source, code| {
-                let parameter_index = index;
-                let expression = ops[parameter_index];
-                let target = physical[parameter_index];
+                let physical_index = index;
+                let expression = ops[physical_index];
+                let target = physical[physical_index];
                 index += 1;
-                this.adapt_physical_call_operand_for(
-                    call_expression,
-                    parameter_index,
-                    expression,
-                    source,
-                    target,
-                    code,
-                );
+                if let Some(argument_index) =
+                    call_argument_index(physical_index, leading_non_argument_operands)
+                {
+                    this.adapt_physical_call_operand_for(
+                        call_expression,
+                        argument_index,
+                        expression,
+                        source,
+                        target,
+                        code,
+                    );
+                } else {
+                    // A retained dispatch/extension receiver is a physical JVM operand, but not an
+                    // entry in the call's checked argument vector. Materialize it at the selected
+                    // descriptor slot without shifting argument-owned provenance onto it.
+                    this.adapt_physical_operand_for(expression, source, target, code);
+                }
             },
         );
         Ok(())
@@ -358,11 +359,26 @@ impl Emitter<'_> {
 /// emitted against operands that were never pushed.
 #[cfg(test)]
 mod tests {
-    use super::{DescriptorArityMismatch, VirtualCallTarget};
+    use super::{call_argument_index, DescriptorArityMismatch, VirtualCallTarget};
     use crate::ir::{Callee, IrConst, IrExpr, IrFile, IrFunction};
     use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
+
+    #[test]
+    fn a_retained_receiver_does_not_shift_argument_owned_continuation_provenance() {
+        let mut provenance = crate::jvm::default_call_operands::DefaultCallOperands::default();
+        assert!(provenance.record_continuation(7, 1));
+
+        let receiver = call_argument_index(0, 1);
+        let first_argument = call_argument_index(1, 1);
+        let continuation = call_argument_index(2, 1);
+        assert_eq!(receiver, None);
+        assert_eq!(first_argument, Some(0));
+        assert_eq!(continuation, Some(1));
+        assert!(!first_argument.is_some_and(|index| provenance.is_continuation(7, index)));
+        assert!(continuation.is_some_and(|index| provenance.is_continuation(7, index)));
+    }
 
     #[test]
     fn arity_mismatch_keeps_the_exact_realized_callable() {

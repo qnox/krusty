@@ -13720,6 +13720,7 @@ impl<'a> Emitter<'a> {
         call_expression: u32,
         target: InlineStaticTarget<'_>,
         args: &[u32],
+        leading_non_argument_operands: usize,
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
         reified: &crate::jvm::inline::ReifiedArguments,
@@ -13866,7 +13867,13 @@ impl<'a> Emitter<'a> {
             // nothing has been pushed, so the ordinary call path still gets its chance to emit this
             // call correctly. Only the committed paths turn the mismatch into a bail.
             if self
-                .emit_call_descriptor_operands(call_expression, args, &physical_params, code)
+                .emit_call_descriptor_operands(
+                    call_expression,
+                    leading_non_argument_operands,
+                    args,
+                    &physical_params,
+                    code,
+                )
                 .is_err()
             {
                 return false;
@@ -13893,7 +13900,13 @@ impl<'a> Emitter<'a> {
         }
         // See the branchless arm above: decline, do not bail.
         if self
-            .emit_call_descriptor_operands(call_expression, args, &physical_params, code)
+            .emit_call_descriptor_operands(
+                call_expression,
+                leading_non_argument_operands,
+                args,
+                &physical_params,
+                code,
+            )
             .is_err()
         {
             return false;
@@ -16141,7 +16154,7 @@ impl<'a> Emitter<'a> {
                     let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
                     if let Err(mismatch) =
-                        self.emit_call_descriptor_operands(e, &args, &param_tys, code)
+                        self.emit_call_descriptor_operands(e, 0, &args, &param_tys, code)
                     {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
@@ -16219,7 +16232,7 @@ impl<'a> Emitter<'a> {
                                 splice_desc: &splice_desc,
                                 inline_only: inline.must_inline(),
                             };
-                            self.try_inline_static_as(e, target, &all, code, true, &reified)
+                            self.try_inline_static_as(e, target, &all, 1, code, true, &reified)
                         } else {
                             let has_lambda_arg = args.iter().any(|&a| {
                                 matches!(self.ir.expr(a), IrExpr::Lambda { .. })
@@ -16237,6 +16250,7 @@ impl<'a> Emitter<'a> {
                                 e,
                                 target,
                                 &args,
+                                0,
                                 code,
                                 inline.must_inline() || has_lambda_arg,
                                 &reified,
@@ -16258,18 +16272,20 @@ impl<'a> Emitter<'a> {
                     }
                     let physical_params = parse_descriptor_params(&descriptor)
                         .expect("static call descriptor must be valid");
-                    let physical_args = match dispatch_receiver.as_ref() {
-                        Some(&recv) if physical_params.len() == args.len() + 1 => {
-                            let mut all = Vec::with_capacity(args.len() + 1);
-                            all.push(recv);
-                            all.extend(args.iter().copied());
-                            all
-                        }
-                        _ => args,
-                    };
+                    let (physical_args, leading_non_argument_operands) =
+                        match dispatch_receiver.as_ref() {
+                            Some(&recv) if physical_params.len() == args.len() + 1 => {
+                                let mut all = Vec::with_capacity(args.len() + 1);
+                                all.push(recv);
+                                all.extend(args.iter().copied());
+                                (all, 1)
+                            }
+                            _ => (args, 0),
+                        };
                     let ret = ty_from_descriptor_ret(&descriptor);
                     if let Err(mismatch) = self.emit_call_descriptor_operands(
                         e,
+                        leading_non_argument_operands,
                         &physical_args,
                         &physical_params,
                         code,
@@ -16360,9 +16376,13 @@ impl<'a> Emitter<'a> {
                             operands.push(recv);
                             operands.extend(args.iter().copied());
                             let physical_ret = ty_from_descriptor_ret(&realization.descriptor);
-                            if let Err(mismatch) =
-                                self.emit_descriptor_operands(&operands, &physical_params, code)
-                            {
+                            if let Err(mismatch) = self.emit_call_descriptor_operands(
+                                e,
+                                1,
+                                &operands,
+                                &physical_params,
+                                code,
+                            ) {
                                 self.bail_descriptor_arity(&mismatch, physical_ret, code);
                                 return;
                             }
@@ -16468,7 +16488,7 @@ impl<'a> Emitter<'a> {
                             .expect("static method descriptor must be valid");
                         let ret = ty_from_descriptor_ret(&descriptor);
                         if let Err(mismatch) =
-                            self.emit_descriptor_operands(&args, &physical_params, code)
+                            self.emit_call_descriptor_operands(e, 0, &args, &physical_params, code)
                         {
                             self.bail_descriptor_arity(&mismatch, ret, code);
                             return;
@@ -16488,9 +16508,13 @@ impl<'a> Emitter<'a> {
                         let physical_params = parse_descriptor_params(&descriptor)
                             .expect("static extension descriptor must be valid");
                         let ret = ty_from_descriptor_ret(&descriptor);
-                        if let Err(mismatch) =
-                            self.emit_descriptor_operands(&physical_args, &physical_params, code)
-                        {
+                        if let Err(mismatch) = self.emit_call_descriptor_operands(
+                            e,
+                            1,
+                            &physical_args,
+                            &physical_params,
+                            code,
+                        ) {
                             self.bail_descriptor_arity(&mismatch, ret, code);
                             return;
                         }
