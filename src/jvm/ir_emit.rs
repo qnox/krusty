@@ -46,6 +46,7 @@ mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
+mod local_updates;
 mod member_schedule;
 mod metadata_policy;
 mod object_static_initialization;
@@ -14090,40 +14091,8 @@ impl<'a> Emitter<'a> {
                     );
                     return;
                 };
-                // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
-                // compiles to `iinc slot, k` (kotlinc's form), not load/const/add/store.
-                // `i++`/`i--` carry the checked result type as an identity coercion around the same
-                // arithmetic, so it is the same update as `i += 1`.
-                let arithmetic = match *self.ir.expr(value) {
-                    IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg,
-                        type_operand: Ty::Int,
-                    } => arg,
-                    _ => value,
-                };
-                let delta: Option<i32> = if jt == Ty::Int {
-                    if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(arithmetic) {
-                        let cint = |e: u32| match self.ir.expr(e) {
-                            IrExpr::Const(IrConst::Int(k)) => Some(*k),
-                            _ => None,
-                        };
-                        let isvar =
-                            |e: u32| matches!(self.ir.expr(e), IrExpr::GetValue(v) if *v == var);
-                        match op {
-                            IrBinOp::Add if isvar(lhs) => cint(rhs),
-                            IrBinOp::Add if isvar(rhs) => cint(lhs),
-                            IrBinOp::Sub if isvar(lhs) => cint(rhs).map(|k| -k),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                match delta {
-                    Some(d) if (-128..=127).contains(&d) => code.iinc(slot, d as i8),
+                match local_updates::iinc_delta(self.ir, var, value, jt) {
+                    Some(delta) => code.iinc(slot, delta),
                     _ => {
                         self.emit_value(value, code);
                         emit_num_conv(self.value_ty(value), jt, code);
