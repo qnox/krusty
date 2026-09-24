@@ -20816,30 +20816,36 @@ impl<'a> Checker<'a> {
                     args,
                     arg_tys: &arg_tys,
                 };
-                let extension_ret = match extension_rung {
-                    Some(extension) => self.record_extension_selection(
+                let extension_rung = match extension_rung {
+                    Some(extension) => extension,
+                    None => self.select_extension_rung(
                         scope,
                         call_args,
-                        &name,
-                        CallConstraints {
-                            type_args: &call_targs,
-                            receiver: rt,
-                            expected,
-                        },
-                        extension,
-                    ),
-                    None => self.record_extension_call_from_callables(
-                        scope,
-                        call_args,
-                        &name,
-                        CallConstraints {
-                            type_args: &call_targs,
-                            receiver: rt,
-                            expected,
-                        },
+                        rt,
+                        &call_targs,
+                        expected,
                         &receiver_callables,
                     ),
                 };
+                // A member that exists but rejected the arguments owns the failure: kotlinc reports
+                // it below, alone or joined with these extensions, never an extension's own
+                // rejection in its place.
+                let extension_ret =
+                    if extension_rung.selection.is_none() && member_mapping_failure.is_some() {
+                        None
+                    } else {
+                        self.record_extension_selection(
+                            scope,
+                            call_args,
+                            &name,
+                            CallConstraints {
+                                type_args: &call_targs,
+                                receiver: rt,
+                                expected,
+                            },
+                            extension_rung,
+                        )
+                    };
                 if let Some(ret) = extension_ret {
                     return ret;
                 }
@@ -20998,6 +21004,13 @@ impl<'a> Checker<'a> {
                 if self.call_has_error_argument(args)
                     && (member_mapping_failure.is_some() || !inapplicable_candidates.is_empty())
                 {
+                    return Ty::Error;
+                }
+                if self.report_member_and_extensions_inapplicable(
+                    call,
+                    &name,
+                    &inapplicable_candidates,
+                ) {
                     return Ty::Error;
                 }
                 if let Some(failure) = member_mapping_failure {
@@ -42957,6 +42970,47 @@ impl<'a> Checker<'a> {
     /// selection prevents a wrong call shape from degrading into "unresolved reference": if every
     /// candidate rejects the same mapping, report that precise kotlinc diagnostic; otherwise the
     /// ordinary inapplicable-overload family remains the honest result.
+    /// Report a receiver call whose member exists but rejected the arguments, after every extension
+    /// rung also failed: the member owns the failure, alone or joined with the extensions.
+    fn report_owned_member_failure(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        receiver: Ty,
+        failure: MemberMappingFailure,
+    ) -> Ty {
+        let candidates = self
+            .stable_receiver_callables(receiver, name)
+            .functions()
+            .to_vec();
+        if !self.report_member_and_extensions_inapplicable(call, name, &candidates) {
+            self.report_retained_member_mapping_failure(call, name, args, failure);
+        }
+        Ty::Error
+    }
+
+    /// NONE_APPLICABLE for a receiver call whose member and same-name extensions were all rejected,
+    /// when the target release reports them together
+    /// ([`crate::diagnostic_wording::inapplicable_member_joins_extensions`]).
+    fn report_member_and_extensions_inapplicable(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> bool {
+        let joined = crate::diagnostic_wording::inapplicable_member_joins_extensions()
+            && candidates.iter().any(|candidate| !candidate.is_extension())
+            && candidates.iter().any(|candidate| candidate.is_extension());
+        if joined {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                self.inapplicable_member_candidates_message(name, candidates),
+            );
+        }
+        joined
+    }
+
     fn report_inapplicable_member_mapping_error(
         &mut self,
         call: ExprId,
@@ -42991,14 +43045,6 @@ impl<'a> Checker<'a> {
         let Some((failure, index)) = take_unanimous_mapping_error(&mut failures) else {
             return false;
         };
-        if !crate::diagnostic_wording::specific_too_many_arguments_for_member()
-            && failure
-                .errors
-                .iter()
-                .any(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
-        {
-            return false;
-        }
         let candidate = &candidates[index];
         // A missing-argument diagnostic names the missing declaration parameter. Java bytecode may
         // expose the arity without exposing source parameter names; in that case kotlinc reports the
@@ -45855,17 +45901,7 @@ impl<'a> Checker<'a> {
         if !same_mapping_shape {
             return None;
         }
-        let retained = take_unanimous_mapping_error(&mut failures)?;
-        if !crate::diagnostic_wording::specific_too_many_arguments_for_member()
-            && retained
-                .0
-                .errors
-                .iter()
-                .any(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
-        {
-            return None;
-        }
-        Some(retained)
+        take_unanimous_mapping_error(&mut failures)
     }
 
     fn report_retained_member_mapping_failure(
@@ -49060,8 +49096,10 @@ impl<'a> Checker<'a> {
     }
 
     fn call_callee_name_span(&self, call: ExprId) -> Span {
-        let Expr::Call { callee, .. } = self.file.expr(call) else {
-            return self.span(call);
+        let callee = match self.file.expr(call) {
+            Expr::Call { callee, .. } => callee,
+            Expr::SafeCall { name, .. } => return self.member_name_span(call, name),
+            _ => return self.span(call),
         };
         match self.file.expr(*callee) {
             Expr::Member { name, .. } => self.member_name_span(*callee, name),
@@ -68747,7 +68785,10 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::ExtensionRung { extension, .. } => self
+                            MemberSlotCall::ExtensionRung {
+                                extension,
+                                member_mapping_failure,
+                            } => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -68764,8 +68805,13 @@ impl<'a> Checker<'a> {
                                         &name,
                                     )
                                 })
-                                .or_else(|| {
-                                    self.record_extension_selection(
+                                .or_else(|| match member_mapping_failure {
+                                    Some(failure) if extension.selection.is_none() => {
+                                        Some(self.report_owned_member_failure(
+                                            e, &name, a, recv, *failure,
+                                        ))
+                                    }
+                                    _ => self.record_extension_selection(
                                         scope,
                                         CallArgs {
                                             call: e,
@@ -68779,7 +68825,7 @@ impl<'a> Checker<'a> {
                                             expected,
                                         },
                                         extension,
-                                    )
+                                    ),
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
@@ -68814,7 +68860,10 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::ExtensionRung { extension, .. } => self
+                            MemberSlotCall::ExtensionRung {
+                                extension,
+                                member_mapping_failure,
+                            } => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -68831,8 +68880,13 @@ impl<'a> Checker<'a> {
                                         &name,
                                     )
                                 })
-                                .or_else(|| {
-                                    self.record_extension_selection(
+                                .or_else(|| match member_mapping_failure {
+                                    Some(failure) if extension.selection.is_none() => {
+                                        Some(self.report_owned_member_failure(
+                                            e, &name, a, recv, *failure,
+                                        ))
+                                    }
+                                    _ => self.record_extension_selection(
                                         scope,
                                         CallArgs {
                                             call: e,
@@ -68846,7 +68900,7 @@ impl<'a> Checker<'a> {
                                             expected,
                                         },
                                         extension,
-                                    )
+                                    ),
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
@@ -69009,23 +69063,26 @@ impl<'a> Checker<'a> {
                 );
                 if !candidates.is_empty() {
                     let type_args = self.resolved_explicit_type_args(scope, e);
-                    reported_inapplicable = self.report_inapplicable_member_mapping_error(
-                        e,
-                        &name,
-                        args.as_deref().unwrap_or_default(),
-                        &candidates,
-                    ) || self.report_single_mapped_candidate_type_errors(
-                        scope,
-                        e,
-                        args.as_deref().unwrap_or_default(),
-                        &checked_arg_tys,
-                        CallConstraints {
-                            type_args: &type_args,
-                            receiver: safe_rt,
-                            expected,
-                        },
-                        &candidates,
-                    );
+                    reported_inapplicable =
+                        self.report_member_and_extensions_inapplicable(e, &name, &candidates)
+                            || self.report_inapplicable_member_mapping_error(
+                                e,
+                                &name,
+                                args.as_deref().unwrap_or_default(),
+                                &candidates,
+                            )
+                            || self.report_single_mapped_candidate_type_errors(
+                                scope,
+                                e,
+                                args.as_deref().unwrap_or_default(),
+                                &checked_arg_tys,
+                                CallConstraints {
+                                    type_args: &type_args,
+                                    receiver: safe_rt,
+                                    expected,
+                                },
+                                &candidates,
+                            );
                     if !reported_inapplicable {
                         self.diags.error(
                             self.call_callee_name_span(e),

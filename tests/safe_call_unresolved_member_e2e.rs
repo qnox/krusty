@@ -70,6 +70,24 @@ fn assert_rejected_as_kotlinc(label: &str, src: &str) {
     );
 }
 
+/// A known divergence: kotlinc's recorded messages and krusty's, each exact.
+fn assert_rejected_divergently(label: &str, src: &str, krusty: &[&str]) {
+    let expected = common::recorded_named(label, || common::reference_error_messages("Main", src));
+    assert!(
+        !expected.is_empty(),
+        "kotlinc must reject the inapplicable call in {src:?}"
+    );
+    assert_ne!(
+        expected, krusty,
+        "krusty now matches kotlinc for {src:?}: compare them with assert_inapplicable"
+    );
+    assert_eq!(
+        diags(src),
+        krusty,
+        "krusty's complete ordered diagnostics for {src:?}"
+    );
+}
+
 /// The reported shape: a statically-`null` receiver. The always-null fold must not buy the program
 /// out of member resolution.
 #[test]
@@ -156,8 +174,18 @@ fn unselectable_but_existing_members_are_not_called_unresolved() {
     );
     // `Int.toString(radix)` is a real stdlib extension and is therefore applicable.
     assert_accepted("fun f(i: Int?): Any? = i?.toString(1)\n");
+    // kotlinc 2.4.20 joins the rejected member with the same-name extensions it climbed past
+    // (`Any?.hashCode()`); earlier versions report the member's own arity error.
     assert_inapplicable("hash-code-arity", "fun f(i: Int?): Any? = i?.hashCode(1)\n");
-    assert_inapplicable("equals-arity", "fun f(i: Int?): Any? = i?.equals()\n");
+    // Both compilers reject `equals()`, but kotlinc reports it against the mapped Kotlin member
+    // `equals(other: Any?)` while krusty still sees the Java `Object.equals` overloads
+    // (docs/IMPLEMENTATION_PLAN.md). krusty's exact output is pinned beside kotlinc's recorded one,
+    // so neither can drift unnoticed.
+    assert_rejected_divergently(
+        "equals-arity",
+        "fun f(i: Int?): Any? = i?.equals()\n",
+        &["none of the following candidates is applicable:"],
+    );
 }
 
 /// The classpath-less `String` table stands in for stdlib EXTENSIONS (`kotlin.String` has no

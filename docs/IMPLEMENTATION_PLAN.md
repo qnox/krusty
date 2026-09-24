@@ -4384,5 +4384,12 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   under the receiver and expected result (`s.let(1)` expects `(String) -> Int`).
 - ⬜ With no expected result, kotlinc also reports CANNOT_INFER for the unfixed type parameter and
   renders it `uninferred R (of fun <T, R> T.let)`; krusty renders the bound.
+- ✅ kotlinc 2.4.20 joins a rejected member with the rejected same-name extensions into one
+  NONE_APPLICABLE at the callee name, for plain and safe calls; earlier releases keep the member's
+  own error (`unselectable_but_existing_members_are_not_called_unresolved`).
+- ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
+  names parameter `p0` (kotlinc: `other`), and on `Int` it sees two Java `equals` overloads and
+  reports NONE_APPLICABLE where kotlinc reports NO_VALUE_FOR_PARAMETER. Pinned as a divergence
+  (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
 - ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
   its reasons, anchored at the callee name) differs from krusty's.

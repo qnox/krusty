@@ -218,7 +218,11 @@ in package `Package` resolves `Package` to the default-imported `java.lang.Packa
 the unresolved segment, as it is for any prefix with no value facet (`Thread.Missing.x`). An
 inapplicable generic call reports a mismatched argument against its parameter under the type
 arguments fixed by the receiver and the expected result (`s.let(1)` where `Int` is expected
-expects `(String) -> Int`). Tests follow the same target:
+expects `(String) -> Int`). When a member exists but rejects the arguments and every same-name
+extension the tower climbs to is rejected too, kotlinc 2.4.20 reports NONE_APPLICABLE over all of
+them at the callee name (`i?.hashCode(1)` lists `hashCode()` and `Any?.hashCode()`); earlier
+releases report the member's own error (`too many arguments for 'fun hashCode(): Int'.` at the
+argument). Tests follow the same target:
 differential tests compare against whichever kotlinc the run provisions, and a test that pins what
 kotlinc says reads it from a values file recorded per version from kotlinc itself
 (`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
