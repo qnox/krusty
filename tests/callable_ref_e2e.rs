@@ -56,6 +56,56 @@ fun box(): String {
     );
 }
 
+/// A reference to a builtin scalar member (`Int::times`) names a declaration with no JVM method.
+/// The adapter handed to an inline stdlib function (`reduce`), an ordinary function value, a bound
+/// receiver, and a reflective `KFunction` must each realize the declaration's primitive operation,
+/// including numeric promotion (`Int.plus(Long)`), `Char` arithmetic, shifts, bit and unary operations,
+/// conversions, `compareTo`, and a platform-typed (`Int!`) Java functional parameter.
+#[test]
+fn builtin_scalar_member_references_realize_their_primitive_operations() {
+    const SRC: &str = r#"
+import kotlin.reflect.KFunction1
+import kotlin.reflect.KFunction2
+
+fun product(w: List<Int>): Int = w.reduce(Int::times)
+fun mixed(f: (Int, Long) -> Long) = f(2, 40L)
+fun chars(f: (Char, Char) -> Int) = f('d', 'a')
+fun charOffset(f: (Char, Int) -> Char) = f('a', 2)
+fun bytes(f: (Byte, Byte) -> Int) = f(3, 4)
+fun compare(f: (Int, Double) -> Int) = f(3, 2.5)
+
+fun box(): String {
+    if (product(listOf(2, 3, 4)) != 24) return "inline reduce"
+    val times: (Int, Int) -> Int = Int::times
+    if (times(6, 7) != 42) return "function value"
+    if (mixed(Int::plus) != 42L) return "promoted plus"
+    if (chars(Char::minus) != 3) return "char minus"
+    if (charOffset(Char::plus) != 'c') return "char plus"
+    if (bytes(Byte::times) != 12) return "byte times"
+    if (listOf(7.0, 2.0).reduce(Double::div) != 3.5) return "double div"
+    if (listOf(7L, 2L).fold(10L, Long::rem) != 1L) return "long rem"
+    if (listOf(true, false).reduce(Boolean::xor) != true) return "boolean xor"
+    if (listOf(6, 3).reduce(Int::and) != 2) return "and"
+    if (listOf(3, 2).map(1L::shl) != listOf(8L, 4L)) return "bound shl"
+    if (listOf(3, -2).map(Int::unaryMinus) != listOf(-3, 2)) return "unary minus"
+    if (listOf(1, 2).map(Int::inv) != listOf(-2, -3)) return "inv"
+    if (listOf(3.7, -2.2).map(Double::toInt) != listOf(3, -2)) return "conversion"
+    if (listOf(true, false).map(Boolean::not) != listOf(false, true)) return "not"
+    if (compare(Int::compareTo) != 1) return "compare"
+    val counts = java.util.HashMap<String, Int>()
+    counts["a"] = 1
+    counts.merge("a", 2, Int::plus)
+    if (counts["a"] != 3) return "platform merge"
+    val bound: KFunction1<Int, Int> = 5::times
+    if (bound(6) != 30 || bound.name != "times") return "reflective bound"
+    val shift: KFunction2<Long, Int, Long> = Long::ushr
+    if (shift(-1L, 60) != 15L) return "reflective ushr"
+    return "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "BuiltinScalarMemberReferences");
+}
+
 #[test]
 fn inline_extension_plan_names_its_receiver_semantically() {
     const SRC: &str = r#"

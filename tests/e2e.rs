@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "cast_operand_reread_e2e.rs"]
+mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
 #[path = "common/e2e.rs"]
@@ -308,6 +310,8 @@ mod classpath_relocated_facade_typealias_e2e;
 mod classpath_runblocking_e2e;
 #[path = "classpath_serializable_round_trip_e2e.rs"]
 mod classpath_serializable_round_trip_e2e;
+#[path = "classpath_star_projection_bound_e2e.rs"]
+mod classpath_star_projection_bound_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
@@ -526,6 +530,8 @@ mod diagnostics_parity_support;
 mod diagnostics_receiver_reference_cases_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
+#[path = "discarded_when_e2e.rs"]
+mod discarded_when_e2e;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
 #[path = "diverging_lambda_e2e.rs"]
@@ -794,8 +800,6 @@ mod infix_newline_operand_e2e;
 mod inheritance_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
 mod inline_deep_coverage_e2e;
-#[path = "inline_e2e.rs"]
-mod inline_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]
@@ -858,6 +862,8 @@ mod is_nullable_and_notnull_smartcast_e2e;
 mod is_nullable_primitive_e2e;
 #[path = "is_primitive_smartcast_e2e.rs"]
 mod is_primitive_smartcast_e2e;
+#[path = "java_abstract_override_e2e.rs"]
+mod java_abstract_override_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
@@ -1232,6 +1238,12 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "redundant_checkcast_e2e.rs"]
+mod redundant_checkcast_e2e;
+#[path = "renamed_builtin_bridge_owner_e2e.rs"]
+mod renamed_builtin_bridge_owner_e2e;
+#[path = "spliced_expression_null_check_e2e.rs"]
+mod spliced_expression_null_check_e2e;
 #[path = "temporary_elimination_e2e.rs"]
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
@@ -1297,6 +1309,8 @@ mod platform_map_index_assign_e2e;
 mod plugins_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
 mod postponed_bound_inference_e2e;
+#[path = "postponed_constructor_applicability_e2e.rs"]
+mod postponed_constructor_applicability_e2e;
 #[path = "postponed_lambda_probe_e2e.rs"]
 mod postponed_lambda_probe_e2e;
 #[path = "primitive_array_members_e2e.rs"]
@@ -1371,6 +1385,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "reified_parameter_forwarding_e2e.rs"]
+mod reified_parameter_forwarding_e2e;
 #[path = "reified_splice_host_pool_wide_e2e.rs"]
 mod reified_splice_host_pool_wide_e2e;
 #[path = "relational_compare_to_seam_e2e.rs"]
@@ -1409,6 +1425,8 @@ mod safe_call_collection_transform_e2e;
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
 mod safe_call_generic_field_e2e;
+#[path = "safe_call_layout_e2e.rs"]
+mod safe_call_layout_e2e;
 #[path = "safe_call_let_destructure_e2e.rs"]
 mod safe_call_let_destructure_e2e;
 #[path = "safe_call_member_on_generic_result_e2e.rs"]
