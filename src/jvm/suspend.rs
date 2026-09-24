@@ -227,9 +227,9 @@ pub(crate) fn lower_suspend(
         // the RAW body, before splice/hoist/desugar reshape the tail suspension into a bound resume point.
         // The call `ExprId` is stable across the later `shift_locals`, so remember it and thread
         // `$completion` in below. When it matches, the splice/hoist/desugar normalizations are all skipped.
-        let fn_unit_ret = orig_rets[fid as usize] == Ty::Unit;
-        let forward =
-            body.and_then(|b| tail_forward_call(ir, b, &suspend_set, fn_unit_ret, &orig_rets));
+        let forward = body.and_then(|b| {
+            tail_forward_call(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets)
+        });
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
         // rewrites descendants in place and installs each suspension temp in the current parent's
         // prelude, so every non-forward body that can reach a suspension must own one node per use.
@@ -2132,9 +2132,10 @@ fn tail_forward_call(
     ir: &IrFile,
     b: ExprId,
     set: &HashSet<u32>,
-    unit_ret: bool,
+    declared_ret: Ty,
     orig_rets: &[Ty],
 ) -> Option<ExprId> {
+    let unit_ret = declared_ret == Ty::Unit;
     if !exactly_one_suspension_point(ir, b, set) {
         return None;
     }
@@ -2183,6 +2184,26 @@ fn tail_forward_call(
         Some(tail)
     }
     let tail = tail_expression(ir, b, set, unit_ret, orig_rets)?;
+    // A dependency call's erased `Object` result is coerced to its declared type. When that is the
+    // function's own declared return, the callee's CPS `Object` is already what this function hands
+    // back, so kotlinc forwards it (`invoke…; areturn`). A value class or unsigned result is left
+    // alone: its carrier, not the declared type, travels through the `Object`.
+    let carried = |ty: Ty| {
+        let ty = ty.non_null();
+        ty.is_unsigned()
+            || ty.obj_internal().is_some_and(|name| {
+                ir.classes.iter().any(|c| c.is_value && c.fq_name == name)
+                    || ir.has_external_value_class_name(name)
+            })
+    };
+    let tail = match ir.exprs[tail as usize] {
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } if type_operand == declared_ret && !carried(type_operand) => arg,
+        _ => tail,
+    };
     // A generic suspend call's erased result is cast to the declared type at the call site; a
     // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
     let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true).point;
