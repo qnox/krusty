@@ -2769,6 +2769,11 @@ pub struct IrFile {
     /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
     /// declared returns are recorded: a nullable value class really is boxed.
     pub call_declared_ret: std::collections::HashMap<u32, Ty>,
+    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
+    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// where it was lowered, not from its shape: an adaptation or widening over the same call is
+    /// another coercion. A target decides whether the conversion crosses a physical result slot.
+    pub declaration_result_coercions: std::collections::HashSet<ExprId>,
     /// Realized dependency-call `ExprId` → declaration parameter types in the order of the call's
     /// ordinary argument vector. These are copied from the provider record selected by FIR, never
     /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
