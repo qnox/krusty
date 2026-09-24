@@ -2646,11 +2646,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and so does a different line reached with nothing in between. A protected range left empty goes
   (`removeEmptyCatchBlocks`), and so does a local variable the removal empties (`prepareForEmitting`).
   The transformer's `removeUnusedLocalVariables` then closes every gap in the used slots (`this`, the
-  parameters, loads, stores, `iinc`, named locals — a wide load/store and a wide named local both
-  words), renumbering accesses in ASM's shortest form (`src/jvm/classfile/local_slots.rs`): a `for`
-  loop's iterable temporary, folded away, leaves its slot to the iterator and the element. All of it is
-  read off kotlinc 2.4.10's `DeadCodeEliminationMethodTransformer`, `InstructionLivenessAnalyzer` and
-  `optimization.common.UtilKt` bytecode. (`tests/final_dead_code_e2e.rs`; unit tests in both modules.)
+  parameters, loads, stores, `iinc`, and retained named locals — a wide load/store and a wide named
+  local both occupy two words), renumbering accesses in ASM's shortest form
+  (`src/jvm/classfile/local_slots.rs`). A named local whose range DCE empties no longer pins its old
+  slot. All of it is read off kotlinc 2.4.10's `DeadCodeEliminationMethodTransformer`,
+  `InstructionLivenessAnalyzer` and `optimization.common.UtilKt` bytecode.
+  (`tests/final_dead_code_e2e.rs`; unit tests in both modules.)
 - **A `for`-range `step` is evaluated exactly once** (hoisted to a temp before the loop), not per
   iteration — a side-effecting `step` (`a until b step sideEffect()`) must run a single time, matching
   kotlinc's evaluation order. `DeadCodeAndStep` in `tests/feature_box_e2e.rs`.

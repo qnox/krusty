@@ -558,13 +558,6 @@ impl ClassWriter {
                     .flatten()
             })
             .collect();
-        let mut fixed_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
-        for &(_, desc, slot, _, _) in &method.lvt {
-            fixed_slots.insert(slot);
-            if matches!(self.cp.utf8_at(desc), Some("J" | "D")) {
-                fixed_slots.insert(slot + 1);
-            }
-        }
         let dead = dead_code::eliminate(
             &mut rewrite.nodes,
             &dead_code::Flow {
@@ -580,6 +573,19 @@ impl ClassWriter {
                 locals: &local_ranges,
             },
         );
+        let removed = |table: fn(&dead_code::Elimination) -> &[bool], at: usize| {
+            dead.as_ref().is_some_and(|dead| table(dead)[at])
+        };
+        let mut fixed_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
+        for (at, &(_, desc, slot, _, _)) in method.lvt.iter().enumerate() {
+            if removed(|dead| &dead.removed_locals, at) {
+                continue;
+            }
+            fixed_slots.insert(slot);
+            if matches!(self.cp.utf8_at(desc), Some("J" | "D")) {
+                fixed_slots.insert(slot + 1);
+            }
+        }
         let renumbered = local_slots::compact(&mut rewrite.nodes, &fixed_slots);
         if !folded_any
             && !peephole.changed
@@ -590,9 +596,6 @@ impl ClassWriter {
         {
             return None;
         }
-        let removed = |table: fn(&dead_code::Elimination) -> &[bool], at: usize| {
-            dead.as_ref().is_some_and(|dead| table(dead)[at])
-        };
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
         // later one — where a label that stood at `k` lands.
         let mut new_index = vec![rewrite.nodes.len(); n + 1];
