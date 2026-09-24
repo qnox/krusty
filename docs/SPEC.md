@@ -3930,6 +3930,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or property reference class it realizes from it (`AKt$box$2`, `A$bound$1`, `RefsKt$box$r$1`); a
   reference the walk never saw, one lowering synthesized or a second copy an inline splice made,
   keeps an internal name (`tests/local_class_naming_e2e.rs`).
+  The function reference class takes the shape of kotlinc's `FunctionReferenceLowering`: the
+  reference's adapter becomes the class's own `invoke` over the function type's parameters, which
+  calls the referenced declaration directly, boxes a scalar result (it overrides the generic `R`),
+  declares `void` for a `Unit` result and carries no nullability annotations; a synthetic erased
+  `invoke(Object…)Object` bridge casts or unboxes each argument into it. The class is
+  `ACC_SYNTHETIC`, its generic header is `FunctionReferenceImpl` plus `FunctionN<P…, R>` without
+  wildcards, it carries `@Metadata(k = 3)`, and a singleton writes `<clinit>` and its `INSTANCE`
+  field after the methods. The use site casts the carrier to the function type, as kotlinc's
+  implicit cast does (`checkcast FunctionN`). Suspend references, arities past 22, captured
+  local-function state and value-class signatures keep the dispatching `invoke`
+  (`tests/function_reference_invoke_e2e.rs`). Their exact exclusion plan and runtime behavior are
+  pinned, but byte parity is not claimed until those shapes acquire their own specialized
+  invoke/bridge. For supported carriers the end-to-end test compares the exact method flags,
+  descriptors, raw code/debug components and Kotlin metadata; class-level `EnclosingMethod` and
+  `InnerClasses` remain the separately owned enclosure-realization contract.
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
