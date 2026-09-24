@@ -17460,7 +17460,9 @@ impl<'a> Emitter<'a> {
             .flatten()
         {
             let array_descriptor = type_descriptor(self.value_ty(array));
-            let component = array_descriptor.strip_prefix('[').unwrap_or("Ljava/lang/Object;");
+            let component = array_descriptor
+                .strip_prefix('[')
+                .unwrap_or("Ljava/lang/Object;");
             unbox_prim_from_descriptor(self.cw, code, component, primitive);
         }
     }

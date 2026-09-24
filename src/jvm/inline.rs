@@ -1635,8 +1635,15 @@ fn wrapper_primitive(class: &str) -> Option<char> {
     })
 }
 
+/// Whether `class` is an owner an unboxing to `primitive` goes through: its own wrapper, or
+/// `java/lang/Number` for a number (kotlinc's coercion of any other reference).
+fn unboxes_through(class: &str, primitive: char) -> bool {
+    wrapper_primitive(class) == Some(primitive)
+        || (class == "java/lang/Number" && "IJSBFD".contains(primitive))
+}
+
 /// How many leading instructions of `insns` form an unboxing of `primitive` — an optional
-/// `checkcast` onto the wrapper followed by its `xxxValue()` call — in the TARGET pool.
+/// `checkcast` onto the wrapper or `Number` followed by its `xxxValue()` call — in the TARGET pool.
 ///
 /// `0` when the head is not an unboxing.
 fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize {
@@ -1646,8 +1653,7 @@ fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize 
             let index = (u16::from(*high) << 8) | u16::from(*low);
             if cw
                 .class_name_at(index)
-                .and_then(wrapper_primitive)
-                .is_some_and(|carried| carried == primitive)
+                .is_some_and(|name| unboxes_through(name, primitive))
             {
                 at = 1;
             }
@@ -1663,7 +1669,7 @@ fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize 
     let Some((class, _, descriptor)) = cw.methodref_parts(index) else {
         return 0;
     };
-    let unboxes = wrapper_primitive(class).is_some_and(|carried| carried == primitive)
+    let unboxes = unboxes_through(class, primitive)
         && descriptor.starts_with("()")
         && descriptor[2..].starts_with(primitive);
     if unboxes {

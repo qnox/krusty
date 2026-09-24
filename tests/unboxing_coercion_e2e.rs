@@ -42,7 +42,12 @@ fn unboxing_and_casts_match_kotlinc_byte_for_byte() {
         fun arr(a: Array<Int>): Int = a[0]
         fun call(f: (Int) -> Double): Double = f(1)
     "#;
-    match common::byte_diff_against_kotlinc("Unboxing", checked, "u/UnboxingKt") {
+    match common::byte_diff_against_kotlinc_cp(
+        "Unboxing",
+        checked,
+        "u/UnboxingKt",
+        &[common::stdlib_jar()],
+    ) {
         Some(Ok(())) | None => {}
         Some(Err(difference)) => panic!("unboxing facade differs from kotlinc:\n{difference}"),
     }
