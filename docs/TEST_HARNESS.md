@@ -132,6 +132,11 @@ The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "
 be up to date") on and the `conformance` checks required, every merge is checked on the combined
 commit before master moves. A branch that falls behind merges master in and re-blesses.
 
+The manifests only shrink. The required `ci` job runs `scripts/check-box-lists.sh` before building
+and fails a pull request that adds an entry to either manifest compared with its merge base,
+including one entry swapped for another: a regression is fixed, not recorded, and a fix does not
+pay for one. A manifest for a newly supported Kotlin version is exempt.
+
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
