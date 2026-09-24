@@ -1190,6 +1190,8 @@ mod number_assignability_e2e;
 mod numeric_eq_conform_e2e;
 #[path = "numeric_ops_coverage_e2e.rs"]
 mod numeric_ops_coverage_e2e;
+#[path = "object_carrier_generic_element_e2e.rs"]
+mod object_carrier_generic_element_e2e;
 #[path = "object_const_val_e2e.rs"]
 mod object_const_val_e2e;
 #[path = "object_default_ctor_arg_e2e.rs"]
