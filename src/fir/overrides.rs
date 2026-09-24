@@ -99,6 +99,11 @@ pub struct ResolvedFunctionOverride {
     pub implementation_parameters: Box<[ResolvedTy]>,
     pub implementation_parameter_identities: Box<[ResolvedParameterIdentity]>,
     pub implementation_result: ResolvedTy,
+    /// Default availability exposed by the overridden declaration at this exact applied edge.
+    /// Kept beside the stable provider identity so module-to-dependency inheritance never has to
+    /// reopen metadata after the override graph is frozen.
+    pub overridden_parameter_defaults: Box<[bool]>,
+    pub overridden_default_provider: Option<ResolvedFunctionOverrideTarget>,
     pub suspend: bool,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
     /// functions itself overrides `overridden`; see

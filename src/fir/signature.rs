@@ -14,6 +14,9 @@ use super::header::{
 };
 use super::ResolvedParameterIdentity;
 
+mod selections;
+pub use selections::*;
+
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OperandRange {
@@ -94,34 +97,6 @@ pub struct SigSubstitution {
 pub struct SignatureScope {
     pub owner: DeclarationId,
     pub source: SourceFileId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredCallableSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
-    pub type_arguments: OperandRange,
-    pub trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredMemberSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
-    pub type_arguments: OperandRange,
-    pub trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredValueSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -941,6 +916,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         spelling: &str,
+        classifier: Option<DeclarationId>,
         origin: OriginId,
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
@@ -953,6 +929,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         spelling: &str,
+        classifier: Option<DeclarationId>,
         origin: OriginId,
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
@@ -1583,6 +1560,7 @@ pub struct ResolvedModuleIndex {
     /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
     /// sequence; every consumer reads it rather than deriving a second answer.
     continuation_ordinals: HashMap<DeclarationId, u32>,
+    pub(super) local_class_name_provenance: HashMap<DeclarationId, super::LocalClassNameProvenance>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
@@ -1624,7 +1602,10 @@ pub struct ResolvedModuleIndex {
     /// is checked in Pass 2.
     classifier_identities: HashMap<DeclarationId, TypeName>,
     classifiers: HashMap<DeclarationId, ResolvedClassifierHeader>,
-    classifier_declarations: HashMap<TypeName, DeclarationId>,
+    /// Reverse classifier identity index. `None` records a source-level duplicate, which remains a
+    /// frontend diagnostic rather than becoming an arbitrary declaration selection or an internal
+    /// assertion while the recovering signature pass publishes the rest of the module.
+    classifier_declarations: HashMap<TypeName, Option<DeclarationId>>,
     /// Complete applied semantic hierarchy for each source classifier, including the classifier
     /// itself at depth zero. Pass 1 computes this while providers are live; lowering and backends
     /// must consume this closed fact instead of reopening source/module/classpath lookup.
@@ -1647,6 +1628,9 @@ pub struct ResolvedModuleIndex {
     compile_time_constants: HashMap<DeclarationId, crate::libraries::LibraryConst>,
     callables: HashMap<CallableId, ResolvedCallableHeader>,
     callable_by_declaration: HashMap<DeclarationId, CallableId>,
+    /// Provider identity for defaults inherited through a resolved override edge.
+    pub(super) callable_default_providers:
+        HashMap<CallableId, super::ResolvedFunctionOverrideTarget>,
     /// Compiler-generated callable stubs that Kotlin suppresses after resolving the enclosing
     /// classifier hierarchy. The motivating case is a data-class `toString`/`hashCode`/`equals`
     /// whose nearest inherited declaration is final: the stable inventory still owns the generated
@@ -2364,7 +2348,10 @@ impl ResolvedModuleIndex {
     }
 
     pub fn classifier_declaration(&self, classifier: TypeName) -> Option<DeclarationId> {
-        self.classifier_declarations.get(&classifier).copied()
+        self.classifier_declarations
+            .get(&classifier)
+            .copied()
+            .flatten()
     }
 
     pub fn classifier_hierarchy(
@@ -2880,11 +2867,28 @@ impl ResolvedModuleIndex {
                 "a stable classifier declaration cannot change semantic identity"
             );
         }
-        if let Some(existing) = self.classifier_declarations.insert(classifier, declaration) {
-            assert_eq!(
-                existing, declaration,
-                "a stable classifier identity may have only one module declaration"
-            );
+        match self.classifier_declarations.get(&classifier).copied() {
+            None => {
+                self.classifier_declarations
+                    .insert(classifier, Some(declaration));
+            }
+            Some(Some(existing)) if existing == declaration => {}
+            Some(Some(existing)) => {
+                let is_source_classifier = |declaration| {
+                    self.declaration_headers
+                        .get(&declaration)
+                        .is_some_and(|header| {
+                            header.kind == DeclarationKind::Classifier
+                                && !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                        })
+                };
+                assert!(
+                    is_source_classifier(existing) && is_source_classifier(declaration),
+                    "distinct generated classifiers cannot share one stable semantic identity"
+                );
+                self.classifier_declarations.insert(classifier, None);
+            }
+            Some(None) => {}
         }
     }
 
@@ -3079,10 +3083,12 @@ impl ResolvedModuleIndex {
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
+            && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
+            && self.callable_default_providers.is_empty()
             && self.callable_equality_bounds.is_empty()
             && self.properties.is_empty()
     }
@@ -3630,6 +3636,8 @@ impl ResolvedModuleIndex {
                     + std::mem::size_of::<ResolvedCallableHeader>())
             + self.callable_by_declaration.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<CallableId>())
+            + self.callable_default_providers.len()
+                * std::mem::size_of::<(CallableId, super::ResolvedFunctionOverrideTarget)>()
             + self.diagnostic_callables.len() * std::mem::size_of::<CallableId>()
             + self.classifier_type_arguments.len()
                 * (std::mem::size_of::<DeclarationId>()

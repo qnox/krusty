@@ -81,9 +81,9 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
                 }
             }
         }
-        if let Some(siblings) = context.and_then(|context| context.sibling_classifiers.get(owner)) {
-            for (source_name, identity) in siblings {
-                names.insert_name(source_name.clone(), *identity);
+        if let Some(context) = context {
+            for (source_name, identity) in context.sibling_classifiers(headers, *owner) {
+                names.insert_name(source_name, identity);
             }
         }
 

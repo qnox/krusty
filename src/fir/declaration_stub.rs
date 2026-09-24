@@ -7,6 +7,10 @@ use super::identities::{
 };
 use super::signature::InferredSignatureKind;
 
+/// Exact same-parse binding from parser declarations to their stable Pass-1 identities.
+pub(crate) type ParserDeclarationIdentities =
+    std::collections::HashMap<crate::ast::DeclId, DeclarationId>;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BodyKind {
     Function,
@@ -78,6 +82,10 @@ impl DeclarationFlags {
     /// same shape in the same package would actualize one, which suppresses the unmatched-`expect`
     /// error, excludes the `expect` subtree and inherits its defaults — all from a coincidence.
     pub const ACTUAL: u64 = 1 << 36;
+    /// This classifier is a semantic member of another classifier. Parser-hoisted members retain
+    /// this fact even when a local owner makes every descendant a `LOCAL_CLASS`; executable roots
+    /// and anonymous objects remain non-members regardless of their lexical naming owner.
+    pub const CLASSIFIER_MEMBER: u64 = 1 << 37;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

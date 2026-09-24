@@ -87,3 +87,13 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("vc defaulted param omitted"), "OK");
 }
+
+#[test]
+fn inherited_default_uses_the_provider_value_class_mangling() {
+    const SRC: &str = "@JvmInline\n\
+value class X(val s: String)\n\
+open class A { open fun value(x: X = X(\"OK\")): String = x.s }\n\
+class B : A() { override fun value(x: X): String = x.s }\n\
+fun box(): String = B().value()\n";
+    assert_eq!(run(SRC).expect("inherited value-class default"), "OK");
+}

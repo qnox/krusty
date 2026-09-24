@@ -22,17 +22,6 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// Whether a source-language binding read may observe a later assignment to that binding.
-///
-/// This is a semantic property of the binding, not of any backend storage chosen for it. Function
-/// parameters, `val` locals, destructuring `val`s, loop variables, and catch parameters are stable;
-/// a source `var` is mutable even when the current backend happens to keep it in an ordinary local.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrBindingStability {
-    Stable,
-    Mutable,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrNodeOrigin {
     Fir(crate::fir::OriginId),
@@ -42,14 +31,18 @@ pub enum IrNodeOrigin {
     },
 }
 
+mod bindings;
 mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod default_arguments;
 mod intrinsic;
+mod local_class_names;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
+pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
@@ -57,6 +50,7 @@ pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use intrinsic::IrIntrinsic;
+pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -130,6 +124,7 @@ pub enum Callee {
     /// The argument vector contains supplied values in declaration order; defaults identifies holes.
     ModuleWithDefaults {
         target: crate::fir::CallableId,
+        default_provider: crate::fir::ResolvedFunctionOverrideTarget,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -2189,6 +2184,10 @@ pub struct IrFile {
     /// Stable checked-FIR classifier declaration to its common-IR class realization. Member bodies
     /// attach through this edge; neither the sink nor a backend searches by rendered class name.
     pub checked_classifier_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Backend-neutral lexical naming context for source classifiers declared in executable code.
+    /// A target consumes this exact class-id ownership graph and chooses physical spellings.
+    pub(crate) local_class_name_provenance:
+        std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from

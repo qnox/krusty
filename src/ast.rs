@@ -1365,6 +1365,20 @@ pub enum AnonymousEnclosingFunction {
     Member { class: DeclId, method: u32 },
 }
 
+/// Backend-neutral source provenance for a class declared in executable code.
+///
+/// `lexical_owner` is the exact source classifier whose class body owns the declaration, or
+/// `None` for the file. `segments` are source declaration identities below that owner (function,
+/// property, or local binding names). `ordinal` is the shared local-artifact sequence position for
+/// an unnamed declaration. No target separator, facade spelling, or synthetic class name crosses
+/// this boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalClassNameProvenance {
+    pub lexical_owner: Option<DeclId>,
+    pub segments: Vec<String>,
+    pub ordinal: Option<u32>,
+}
+
 /// One parsed import directive with the source span of each path segment.
 #[derive(Clone, Debug)]
 pub struct ImportPath {
@@ -1518,6 +1532,9 @@ pub struct File {
     /// receiver expression still names classifier `A`; this sparse marker preserves the source type
     /// so extension-reference selection does not silently narrow it to `A`.
     pub nullable_callable_ref_receivers: std::collections::HashSet<u32>,
+    /// Exact parser identities of `::class` expressions. A backticked callable named `class` is a
+    /// different syntax form and is intentionally absent.
+    pub class_literal_references: std::collections::HashSet<u32>,
     /// Dot spans for member expressions with trivia between `.` and the member name.
     pub non_adjacent_member_dot_spans: Vec<(u32, Span)>,
     /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
@@ -1540,6 +1557,8 @@ pub struct File {
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
         std::collections::HashMap<DeclId, AnonymousEnclosingFunction>,
+    /// Local/anonymous classifier declaration → backend-neutral lexical naming provenance.
+    pub local_class_name_provenance: std::collections::HashMap<DeclId, LocalClassNameProvenance>,
     /// Each `suspend` function → the position its continuation takes in the generated-class
     /// sequence its enclosing scope numbers, 1-based in declaration order.
     ///
@@ -1569,6 +1588,9 @@ pub struct File {
     /// Nested types hoisted out of a local class during its parse, named by the path from that
     /// class (`Local.Inner`). They are requalified with it when it is given its final name.
     pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,
+    /// Written simple name of each parser-hoisted nested classifier. Ownership is carried by
+    /// declaration identities separately; consumers never split the hoisted qualified spelling.
+    pub hoisted_classifier_source_names: std::collections::HashMap<DeclId, String>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
@@ -1751,6 +1773,7 @@ impl File {
         self.empty_call_open_paren_spans = Default::default();
         self.exact_member_name_spans = Default::default();
         self.nullable_callable_ref_receivers = Default::default();
+        self.class_literal_references = Default::default();
         self.non_adjacent_member_dot_spans = Default::default();
         self.call_has_trailing_lambda = Default::default();
         self.trailing_call_close_paren_ends = Default::default();
@@ -1758,11 +1781,13 @@ impl File {
         self.call_type_args = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();
+        self.local_class_name_provenance = Default::default();
         self.suspend_continuation_ordinals = Default::default();
         self.local_class_decls = Default::default();
         self.local_class_enclosing_declarations = Default::default();
         self.local_class_lexical_classifier_owners = Default::default();
         self.local_class_nested = Default::default();
+        self.hoisted_classifier_source_names = Default::default();
         self.lambda_param_types = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
@@ -1828,6 +1853,20 @@ impl File {
     pub fn add_decl(&mut self, d: Decl) -> DeclId {
         let id = DeclId(self.decl_arena.len() as u32);
         self.decl_arena.push(d);
+        id
+    }
+
+    pub(crate) fn add_hoisted_classifier(
+        &mut self,
+        mut classifier: ClassDecl,
+        owner: &str,
+        position: usize,
+    ) -> DeclId {
+        let source_name = std::mem::take(&mut classifier.name);
+        classifier.name = format!("{owner}.{source_name}");
+        let id = self.add_decl(Decl::Class(classifier));
+        self.decls.insert(position, id);
+        self.hoisted_classifier_source_names.insert(id, source_name);
         id
     }
 

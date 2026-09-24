@@ -147,6 +147,7 @@ pub(super) fn defaults(
     index: &mut crate::fir::ResolvedModuleIndex,
     mut providers: Vec<crate::fir::DefaultArgumentProvider>,
     files: &[File],
+    local_contexts: &[crate::resolve::PassOneLocalClassContext],
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
@@ -173,6 +174,7 @@ pub(super) fn defaults(
         diags.set_file(raw_source as u32);
         if !check_default_source(
             &files[raw_source],
+            &local_contexts[raw_source],
             raw_source,
             &selection,
             &mut providers,
@@ -196,6 +198,7 @@ pub(super) fn defaults(
 #[allow(clippy::too_many_arguments)]
 fn check_default_source(
     file: &File,
+    local_context: &crate::resolve::PassOneLocalClassContext,
     raw_source: usize,
     selection: &DefaultCheckSelection,
     providers: &mut Vec<crate::fir::DefaultArgumentProvider>,
@@ -229,6 +232,7 @@ fn check_default_source(
         index,
         &selection.roots[raw_source],
         &selection.bodies[raw_source],
+        local_context.parser_classifier_identities(),
         &items,
     ) {
         Ok(active) => active,
@@ -481,6 +485,7 @@ pub(super) fn streaming(
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
     files: &mut [File],
+    local_contexts: &[crate::resolve::PassOneLocalClassContext],
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
@@ -546,6 +551,7 @@ pub(super) fn streaming(
                 &index,
                 &active_roots,
                 &selection.stable_bodies[raw_source],
+                local_contexts[raw_source].parser_classifier_identities(),
             ) {
                 Ok(active) => active,
                 Err(error) => {

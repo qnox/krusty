@@ -623,6 +623,7 @@ impl Parser<'_> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     self.bump(); // '?'
                     self.bump(); // '::'
+                    let class_literal = self.at(TokenKind::KwClass);
                     let name = if self.at(TokenKind::Ident) {
                         let n = self.text().to_string();
                         self.bump();
@@ -652,6 +653,9 @@ impl Parser<'_> {
                     self.file
                         .nullable_callable_ref_receivers
                         .insert(reference.0);
+                    if class_literal {
+                        self.file.class_literal_references.insert(reference.0);
+                    }
                     lhs = reference;
                 }
                 TokenKind::Dot => {
@@ -709,6 +713,7 @@ impl Parser<'_> {
                 TokenKind::ColonColon => {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     self.bump(); // '::'
+                    let class_literal = self.at(TokenKind::KwClass);
                     let name = if self.at(TokenKind::Ident) {
                         let n = self.text().to_string();
                         self.bump();
@@ -736,6 +741,9 @@ impl Parser<'_> {
                         },
                         Span::new(lspan.lo, end.hi),
                     );
+                    if class_literal {
+                        self.file.class_literal_references.insert(reference.0);
+                    }
                     lhs = reference;
                 }
                 TokenKind::LParen => {
@@ -1136,6 +1144,7 @@ impl Parser<'_> {
                 self.bump(); // '::'
                 let name_token = self.tok();
                 let name_span = self.syntactic_ident_span(name_token);
+                let class_literal = self.at(TokenKind::KwClass);
                 let name = if self.at(TokenKind::Ident) {
                     let n = self.text().to_string();
                     self.bump();
@@ -1157,6 +1166,9 @@ impl Parser<'_> {
                 self.file
                     .exact_member_name_spans
                     .insert(reference.0, name_span);
+                if class_literal {
+                    self.file.class_literal_references.insert(reference.0);
+                }
                 reference
             }
             _ => {

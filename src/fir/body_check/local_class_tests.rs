@@ -374,6 +374,31 @@ fn nested_default_preparation_does_not_own_the_enclosing_ordinary_expression() {
 }
 
 #[test]
+fn body_local_default_provider_survives_a_shared_provider_diamond() {
+    production_frontend_ok(
+        "interface A { fun value(x: String = \"OK\"): String }\n\
+         interface B : A { override fun value(x: String): String }\n\
+         interface C : A { override fun value(x: String): String }\n\
+         fun box(): String {\n\
+             class D : B, C { override fun value(x: String): String = x }\n\
+             return D().value()\n\
+         }\n",
+    );
+}
+
+#[test]
+fn body_local_default_provider_crosses_a_deferred_local_intermediate() {
+    production_frontend_ok(
+        "fun box(): String {\n\
+             open class A { open fun value(x: String = \"OK\"): String = x }\n\
+             open class B : A() { override fun value(x: String): String = x }\n\
+             class C : B() { override fun value(x: String): String = x }\n\
+             return C().value()\n\
+         }\n",
+    );
+}
+
+#[test]
 fn anonymous_object_outer_capture_publishes_exact_inner_receiver_path() {
     let (body, index) = checked_function_body(
         "class Test {\n\

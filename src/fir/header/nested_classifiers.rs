@@ -7,6 +7,72 @@
 
 use super::*;
 
+pub(super) fn bind_parser_identity(
+    identities: &mut ParserDeclarationIdentities,
+    parser: DeclId,
+    stable: DeclarationId,
+) {
+    assert!(
+        identities.insert(parser, stable).is_none(),
+        "one parser declaration binds one stable declaration"
+    );
+}
+
+pub(super) fn companion_declarations(file: &File) -> std::collections::HashSet<DeclId> {
+    file.decls
+        .iter()
+        .filter_map(|declaration| match file.decl(*declaration) {
+            Decl::Class(class) => class.companion,
+            Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .collect()
+}
+
+pub(super) fn classifier_identity(
+    file: &File,
+    source: SourceFileId,
+    ids: &mut DeclarationIds,
+    declaration: DeclId,
+) -> Option<DeclarationId> {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return None;
+    };
+    let owner = file
+        .decls
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != declaration && !file.is_local_declaration(*candidate))
+        .filter_map(|candidate| match file.decl(candidate) {
+            Decl::Class(candidate_class)
+                if candidate_class.span.lo < class.span.lo
+                    && class.span.hi < candidate_class.span.hi =>
+            {
+                Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
+            }
+            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .min_by_key(|(length, _)| *length)
+        .and_then(|(_, owner)| classifier_identity(file, source, ids, owner));
+    let companions = companion_declarations(file);
+    let sibling = if companions.contains(&declaration) {
+        0
+    } else {
+        u32::try_from(
+            file.decls
+                .iter()
+                .position(|candidate| *candidate == declaration)?,
+        )
+        .ok()?
+    };
+    Some(ids.intern(DeclarationAnchor {
+        source,
+        range: class.span,
+        owner,
+        kind: DeclarationKind::Classifier,
+        sibling,
+    }))
+}
+
 pub(super) fn nested_classifier_owners(
     file: &File,
     source: SourceFileId,

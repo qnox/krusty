@@ -6,6 +6,31 @@ use crate::source::SourceInput;
 use super::*;
 
 #[test]
+fn duplicate_classifier_identity_is_ambiguous_without_losing_forward_identities() {
+    let mut index = ResolvedModuleIndex::default();
+    let first = DeclarationId::from_raw(3);
+    let second = DeclarationId::from_raw(6);
+    let identity = crate::types::type_name("sample/Duplicate");
+    let header = ResolvedDeclarationHeader {
+        kind: DeclarationKind::Classifier,
+        owner: None,
+        name: None,
+        visibility: crate::types::Visibility::Public,
+        flags: DeclarationFlags::default(),
+        initialization_order: None,
+    };
+
+    index.publish_declaration_header(first, header, Some("Duplicate"));
+    index.publish_declaration_header(second, header, Some("Duplicate"));
+    index.publish_classifier_identity(first, identity);
+    index.publish_classifier_identity(second, identity);
+
+    assert_eq!(index.classifier_identity(first), Some(identity));
+    assert_eq!(index.classifier_identity(second), Some(identity));
+    assert_eq!(index.classifier_declaration(identity), None);
+}
+
+#[test]
 fn member_source_order_interleaves_functions_and_properties() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(

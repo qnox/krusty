@@ -2177,7 +2177,6 @@ impl SignatureSemantics for TestSignatureSemantics {
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.resolve_type(scope, origin, syntax, graph)
     }
-
     fn select_value(
         &self,
         _scope: SignatureScope,
@@ -2194,11 +2193,11 @@ impl SignatureSemantics for TestSignatureSemantics {
         }
         expected.ok_or_else(|| DiagnosticId::from_raw(2_001))
     }
-
     fn select_call(
         &self,
         _scope: SignatureScope,
         spelling: &str,
+        _classifier: Option<DeclarationId>,
         _origin: OriginId,
         arguments: &[ResolvedSigCallArgument<'_>],
         _type_arguments: &[ResolvedTy],
@@ -2216,11 +2215,11 @@ impl SignatureSemantics for TestSignatureSemantics {
             .or_else(|| arguments.first().map(|argument| argument.ty))
             .unwrap())
     }
-
     fn call_argument_expectations(
         &self,
         _scope: SignatureScope,
         _spelling: &str,
+        _classifier: Option<DeclarationId>,
         _origin: OriginId,
         arguments: &[SigCallArgumentProbe<'_>],
         _type_arguments: &[ResolvedTy],
@@ -2233,7 +2232,6 @@ impl SignatureSemantics for TestSignatureSemantics {
             .push("call-expectations".into());
         Ok(vec![None; arguments.len()].into_boxed_slice())
     }
-
     fn select_callable_reference(
         &self,
         _scope: SignatureScope,
@@ -2509,6 +2507,7 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
     let target = graph.add_callable_selection(DeferredCallableSelection {
         scope,
         spelling,
+        lexical_classifier: None,
         origin,
         expected: None,
         type_arguments: OperandRange::default(),
@@ -2564,6 +2563,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     let call_selection = graph.add_callable_selection(DeferredCallableSelection {
         scope,
         spelling: function_name,
+        lexical_classifier: None,
         origin,
         expected: Some(string),
         type_arguments: OperandRange::default(),

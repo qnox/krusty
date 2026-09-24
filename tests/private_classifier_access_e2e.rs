@@ -112,7 +112,7 @@ fn a_private_classifier_is_package_private_for_every_kind() {
         "a protected classifier keeps ACC_PUBLIC — the JVM cannot spell protection on a class"
     );
     assert!(
-        class_flags(krusty_dir, "localFactory$LocalClassifier").contains("ACC_PUBLIC"),
+        class_flags(krusty_dir, "HiddenKt$localFactory$LocalClassifier").contains("ACC_PUBLIC"),
         "a local classifier keeps ACC_PUBLIC, as kotlinc emits it"
     );
     assert!(

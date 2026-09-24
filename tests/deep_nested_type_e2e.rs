@@ -21,3 +21,15 @@ fn nested_class_resolves_own_nested_type() {
         fun box(): String = \"OK\"\n";
     assert_eq!(run(SRC).expect("deep nested-type file compiles"), "OK");
 }
+
+#[test]
+fn a_dollar_in_a_nested_name_is_part_of_the_name() {
+    // `$` is an ordinary character of a backticked name, not a nesting separator: `Dollar$Point`
+    // and `Point` are distinct members of `Outer` (`Outer$Dollar$Point` and `Outer$Point`).
+    const SRC: &str = "class Outer {\n\
+        \x20 class `Dollar$Point`(val x: Int)\n\
+        \x20 class Point(val y: Int)\n\
+        }\n\
+        fun box(): String = if (Outer.`Dollar$Point`(1).x + Outer.Point(2).y == 3) \"OK\" else \"fail\"\n";
+    common::expect_box_same_as_kotlinc(SRC, "NestedDollarName");
+}

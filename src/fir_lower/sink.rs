@@ -581,6 +581,7 @@ impl<'a> CommonIrBodySink<'a> {
         allow_deferred_body_local: bool,
     ) -> Result<(), FirFileLoweringFailure> {
         let mut newly_declared = std::collections::HashSet::new();
+        let mut pending_local_names = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -736,6 +737,9 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a stable classifier has one common-IR realization per file"
             );
+            if let Some(provenance) = index.local_class_name_provenance(declaration) {
+                pending_local_names.push((class, provenance.clone()));
+            }
             newly_declared.insert(declaration);
             let mut type_aliases = Vec::new();
             for alias_raw in 0..index.declaration_count() {
@@ -867,6 +871,43 @@ impl<'a> CommonIrBodySink<'a> {
                     );
                 }
             }
+        }
+        for (class, provenance) in pending_local_names {
+            // An inline payload's local classifier may be owned by a classifier of its declaring
+            // source that this file does not realize; that owner is named by its identity.
+            let lexical_owner = provenance
+                .lexical_owner
+                .map(|owner| {
+                    if let Some(&class) = self.ir.checked_classifier_classes.get(&owner) {
+                        return Ok(crate::ir::IrLocalClassOwner::Class(class));
+                    }
+                    index
+                        .classifier_header(owner)
+                        .filter(|_| index.local_class_name_provenance(owner).is_none())
+                        .map(|header| crate::ir::IrLocalClassOwner::External(header.classifier))
+                        .ok_or(FirFileLoweringFailure::MissingClassifier(owner))
+                })
+                .transpose()?;
+            assert!(
+                self.ir
+                    .local_class_name_provenance
+                    .insert(
+                        class,
+                        crate::ir::IrLocalClassNameProvenance {
+                            source: crate::ir::IrModuleSource {
+                                source: provenance.source,
+                                package: index.source_package(provenance.source).ok_or(
+                                    FirFileLoweringFailure::MissingSourcePackage(provenance.source),
+                                )?,
+                            },
+                            lexical_owner,
+                            segments: provenance.segments,
+                            ordinal: provenance.ordinal,
+                        },
+                    )
+                    .is_none(),
+                "a source classifier may publish one target-neutral naming plan"
+            );
         }
         for raw in 0..index.declaration_count() {
             let declaration = DeclarationId::from_raw(
@@ -1129,10 +1170,11 @@ impl<'a> CommonIrBodySink<'a> {
                 .flags
                 .has(crate::fir::DeclarationFlags::SUSPEND)
             {
-                let ordinal = index.continuation_ordinal(declaration).ok_or(
-                    FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
-                )?;
-                self.ir.fn_continuation_ordinal.insert(function, ordinal);
+                // Only a suspend function with a body holds a continuation ordinal; one is
+                // required when its body is accepted.
+                if let Some(ordinal) = index.continuation_ordinal(declaration) {
+                    self.ir.fn_continuation_ordinal.insert(function, ordinal);
+                }
                 self.ir.suspend_funs.push(function);
             }
             if declaration_header
@@ -1364,6 +1406,15 @@ impl<'a> CommonIrBodySink<'a> {
             )
             .map_err(FirFileLoweringFailure::Body)?
         };
+        if declaration_header
+            .flags
+            .has(crate::fir::DeclarationFlags::SUSPEND)
+        {
+            let ordinal = index.continuation_ordinal(declaration).ok_or(
+                FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
+            )?;
+            self.ir.fn_continuation_ordinal.insert(function, ordinal);
+        }
         self.ir.functions[function as usize].body = Some(body);
 
         self.attach_callable_defaults(

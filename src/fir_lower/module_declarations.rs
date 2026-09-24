@@ -255,10 +255,26 @@ pub(super) fn publish_referenced(
     for expression in &ir.exprs {
         match expression {
             IrExpr::Call {
-                callee: Callee::Module { target, .. } | Callee::ModuleWithDefaults { target, .. },
+                callee: Callee::Module { target, .. },
                 ..
             } => {
                 callables.insert(*target);
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::ModuleWithDefaults {
+                        target,
+                        default_provider,
+                        ..
+                    },
+                ..
+            } => {
+                callables.insert(*target);
+                if let crate::fir::ResolvedFunctionOverrideTarget::Module(default_provider) =
+                    default_provider
+                {
+                    callables.insert(*default_provider);
+                }
             }
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
             | IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. }) => {

@@ -3900,6 +3900,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names are exact roots; `$` characters in them are not parsed as evidence of source nesting. Tests:
   `tests/nested_class_ctor_scope_e2e.rs` and
   `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
+- **Local-class naming provenance is recorded by one walk that numbers every local node, as
+  kotlinc's `InventNamesForLocalClasses` does.** The common contract is an exact source classifier
+  owner, source declaration segments, and an optional ordinal. It contains no facade, `$`
+  separator, or physical class spelling. A node without a name takes the next ordinal of its chain. Lambdas,
+  function expressions and callable references take a position even when they compile to
+  `invokedynamic` and write no class, so an object after one lambda in `box` is `AKt$box$2`.
+  Ordinals are counted per upper-cased chain (`foo` overloads and `Foo` share one sequence) and run
+  across a file's declaration units. What the walk sees follows kotlinc's tree at that phase:
+  - A suspend function with a body reserves the first position of its own chain for its
+    continuation, before its body.
+  - A delegated property reserves one position before its delegate expression is walked, so
+    `val p by lazy { object {} }` gives `AKt$p$2$1`. Each accessor then takes one position: a member
+    accessor through the property reference passed to `getValue`/`setValue`, a local one as an
+    unnamed accessor function.
+  - Constructors, `init` blocks, fields (including `$$delegate_N`), value parameters and enum
+    entries add no name. What they declare is numbered in the class's chain, in source order
+    (`C$1`, `C$2`, then a secondary constructor's `C$3`).
+  - An anonymous object's super-constructor arguments are numbered in the outer chain, after the
+    object. A bodied enum entry's arguments are numbered in the entry's class (`E$B$1`).
+  - Temporaries add no name: destructuring containers, `for` iterators and local delegate storage.
+
+  Local and anonymous classifiers use opaque, stable declaration-derived identities in semantic
+  phases. A target backend owns physical spelling: the JVM pass combines the provenance with its
+  facade/class owner and `$` convention; its facade follows kotlinc's `PackagePartClassUtils`
+  rule (`a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`). JS/native may format the
+  same provenance differently.
+  Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
+  complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

@@ -245,19 +245,19 @@ fn parse_source_set(
     )
 }
 
-/// [`parse_source_set`] with per-source stems, so anonymous classes take their kotlinc names
-/// (`<Stem>Kt$fn$1` for a top-level enclosing) instead of the parse-time placeholder.
+/// [`parse_source_set`] with source labels retained by the caller's fixture table.
+/// Local classifier identities remain backend-neutral in this frontend-only helper.
 fn parse_source_set_named(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
     let files = sources
         .iter()
-        .map(|(stem, source)| {
+        .map(|(_, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
             let tokens = krusty::lexer::lex(source, diags);
             let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
-            krusty::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            krusty::frontend::record_local_class_name_provenance(&mut file);
             file
         })
         .collect::<Vec<_>>();

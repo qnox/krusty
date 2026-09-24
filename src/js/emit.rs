@@ -8,6 +8,19 @@ use crate::types::Ty;
 /// top-level function).
 pub fn emit_file(ir: &IrFile) -> String {
     let mut out = String::new();
+    let inherited_default_functions = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| {
+            let IrExpr::Call { callee, .. } = expression else {
+                return None;
+            };
+            let (target, provider) = callee.inherited_module_default_provider()?;
+            let target = ir.checked_callable_functions.get(&target).copied()?;
+            let provider = ir.checked_callable_functions.get(&provider).copied()?;
+            Some((target, provider))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let class_methods: std::collections::HashSet<u32> = ir
         .classes
         .iter()
@@ -55,7 +68,16 @@ pub fn emit_file(ir: &IrFile) -> String {
                 f.name,
                 params.join(", ")
             ));
-            emit_default_initializers(ir, fid, 2, !f.is_static, &mut out);
+            emit_default_initializers(
+                ir,
+                inherited_default_functions
+                    .get(&fid)
+                    .copied()
+                    .unwrap_or(fid),
+                2,
+                !f.is_static,
+                &mut out,
+            );
             emit_stmt(ir, body, 2, !f.is_static, &mut out);
             out.push_str("  }\n");
         }
@@ -78,7 +100,17 @@ pub fn emit_file(ir: &IrFile) -> String {
         let _ = i;
         let params: Vec<String> = (0..f.params.len()).map(|i| format!("v{i}")).collect();
         out.push_str(&format!("function {}({}) {{\n", f.name, params.join(", ")));
-        emit_default_initializers(ir, i as u32, 1, false, &mut out);
+        let function = i as u32;
+        emit_default_initializers(
+            ir,
+            inherited_default_functions
+                .get(&function)
+                .copied()
+                .unwrap_or(function),
+            1,
+            false,
+            &mut out,
+        );
         emit_stmt(ir, body, 1, false, &mut out);
         out.push_str("}\n");
     }

@@ -41,3 +41,35 @@ return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "DI");
 }
+
+#[test]
+fn inherited_defaults_keep_provider_signature_and_selected_result() {
+    const SRC: &str = "open class AnyBase {\n\
+open fun value(input: Any = \"OK\"): Any = input\n\
+}\n\
+class StringDerived : AnyBase() {\n\
+override fun value(input: Any): String = input as String\n\
+}\n\
+open class GenericBase<T> {\n\
+open fun value(input: T? = null): T? = input\n\
+}\n\
+class GenericDerived : GenericBase<String>() {\n\
+override fun value(input: String?): String = input ?: \"OK\"\n\
+}\n\
+fun box(): String {\n\
+val covariant: String = StringDerived().value()\n\
+val generic: String = GenericDerived().value()\n\
+return if (covariant == \"OK\" && generic == \"OK\") \"OK\" else \"FAIL\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "DPS");
+}
+
+#[test]
+fn source_override_keeps_external_default_provider_identity() {
+    const LIB: &str = "package dep\n\
+open class Base { open fun value(x: String = \"OK\"): String = x }\n";
+    const MAIN: &str = "import dep.Base\n\
+class Derived : Base() { override fun value(x: String): String = x }\n\
+fun box(): String = Derived().value()\n";
+    common::expect_box_ok_against_ref("external-inherited-default", LIB, MAIN);
+}

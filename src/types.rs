@@ -381,6 +381,12 @@ impl TypeNameList {
         self.iter_ids().map(TypeName::render)
     }
 
+    pub(crate) fn remap(&mut self, mut map: impl FnMut(TypeName) -> TypeName) {
+        for name in &mut self.names {
+            *name = map(*name);
+        }
+    }
+
     pub fn contains(&self, internal: &str) -> bool {
         self.names.iter().any(|name| name.matches(internal))
     }
