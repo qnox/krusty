@@ -104,15 +104,15 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
         vec![
             "S".to_string(),
             "ValueClassUnderlyingRefDumpKt".to_string(),
-            "ValueClassUnderlyingRefDumpKt$fir$property$2".to_string(),
-            "ValueClassUnderlyingRefDumpKt$fir$property$3".to_string(),
-            "ValueClassUnderlyingRefDumpKt$fir$property$4".to_string(),
+            "ValueClassUnderlyingRefDumpKt$box$1".to_string(),
+            "ValueClassUnderlyingRefDumpKt$box$2".to_string(),
+            "ValueClassUnderlyingRefDumpKt$box$3".to_string(),
             "Z".to_string(),
         ],
         "one reference class per `::x`, and nothing else",
     );
     assert_eq!(
-        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$2"),
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$box$1"),
         vec![
             "aload_1".to_string(),
             "checkcast class Z".to_string(),
@@ -123,7 +123,7 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
         "`Z::x` reads the box's own instance getter, never a static `getX-impl`",
     );
     assert_eq!(
-        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$3"),
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$box$2"),
         vec![
             "aload_1".to_string(),
             "checkcast class S".to_string(),
@@ -133,7 +133,7 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
         "the same for a REFERENCE carrier, whose box needs no valueOf",
     );
     assert_eq!(
-        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$4"),
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$box$3"),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
@@ -498,11 +498,11 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         emitted_classes(&dump),
         vec![
             "Ord".to_string(),
+            "Ord$bound$1".to_string(),
             "PrivateValueClassRefDumpKt".to_string(),
-            "PrivateValueClassRefDumpKt$fir$property$2".to_string(),
-            "PrivateValueClassRefDumpKt$fir$property$3".to_string(),
-            "PrivateValueClassRefDumpKt$fir$property$4".to_string(),
             "Z".to_string(),
+            "Z$bound$1".to_string(),
+            "Z$unbound$1".to_string(),
         ],
     );
     // The DECLARATION side, compared rather than pinned. kotlinc keeps a private member's accessor
@@ -539,7 +539,7 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         "spelled out in full, so a reference change is visible here"
     );
     assert_eq!(
-        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$2"),
+        reference_get(&dump, "Z$bound$1"),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
@@ -553,7 +553,7 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         "bound private value-class reference"
     );
     assert_eq!(
-        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$3"),
+        reference_get(&dump, "Z$unbound$1"),
         vec![
             "aload_1".to_string(),
             "checkcast class Z".to_string(),
@@ -567,7 +567,7 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
     // An ORDINARY class's private member keeps the `access$…$p` bridge it already had: the role is
     // recorded, not inferred, so naming the access-bridge case did not disturb it.
     assert_eq!(
-        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$4"),
+        reference_get(&dump, "Ord$bound$1"),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"

@@ -239,7 +239,9 @@ impl BodyFirChecker<'_> {
         } else {
             self.expression_type(source)?
         };
-        Ok(self.body.add_expr(FirExpr { origin, ty, kind }))
+        let expression = self.body.add_expr(FirExpr { origin, ty, kind });
+        self.record_generated_class_provenance(source, expression);
+        Ok(expression)
     }
 
     pub(super) fn add_expression_with_type(
@@ -251,7 +253,39 @@ impl BodyFirChecker<'_> {
         self.record_expression_suspension(source);
         self.finalize_inline_plan(source, &mut kind)?;
         let origin = self.expression_origin(source)?;
-        Ok(self.body.add_expr(FirExpr { origin, ty, kind }))
+        let expression = self.body.add_expr(FirExpr { origin, ty, kind });
+        self.record_generated_class_provenance(source, expression);
+        Ok(expression)
+    }
+
+    /// Carry the naming provenance the file's local-class walk gave `source` onto its FIR node,
+    /// with its lexical owner as a stable classifier declaration.
+    fn record_generated_class_provenance(&mut self, source: ExprId, expression: FirExprId) {
+        let Some(provenance) = self.file.callable_reference_provenance.get(&source.0) else {
+            return;
+        };
+        let lexical_owner = match provenance.lexical_owner {
+            Some(owner) => {
+                let Some(owner) = self
+                    .session
+                    .active_source
+                    .as_ref()
+                    .and_then(|active| active.classifier_declaration(owner))
+                else {
+                    return;
+                };
+                Some(owner)
+            }
+            None => None,
+        };
+        self.body.set_generated_class_provenance(
+            expression,
+            crate::fir::FirGeneratedClassProvenance {
+                lexical_owner,
+                segments: provenance.segments.clone().into_boxed_slice(),
+                ordinal: provenance.ordinal,
+            },
+        );
     }
 
     pub(super) fn checked_storage_read(

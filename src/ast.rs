@@ -1609,6 +1609,10 @@ pub struct File {
     /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
     /// in the body, while this count preserves the function type's context-receiver shape.
     pub anon_fun_context_count: std::collections::HashMap<u32, u32>,
+    /// Backend-neutral naming provenance of each callable reference, by expression id, from the
+    /// file's local-class naming walk. A backend that realizes the reference as a class of its own
+    /// names it from this.
+    pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
     /// Declared receiver type of an anonymous extension function (`fun R.(x: A) { … }`), keyed by
     /// the desugared lambda's `ExprId.0`.
     pub anon_fun_receivers: std::collections::HashMap<u32, TypeRef>,
@@ -1792,6 +1796,7 @@ impl File {
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();
+        self.callable_reference_provenance = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();

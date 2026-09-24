@@ -1852,6 +1852,16 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
+/// Exact lexical context a target needs to name the class it realizes for one expression: the
+/// stable source classifier that owns the executable context (`None` for the file), the source
+/// declaration names below it, and the shared generated-artifact ordinal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirGeneratedClassProvenance {
+    pub lexical_owner: Option<DeclarationId>,
+    pub segments: Box<[String]>,
+    pub ordinal: Option<u32>,
+}
+
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -1885,6 +1895,9 @@ pub struct FirBody {
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<FirStatementDebugLines>,
+    /// Naming provenance of each expression the reference compiler realizes as a class of its own
+    /// (a callable reference). A naming fact, not a lowering decision.
+    generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     parameters: Vec<FirValueParameter>,
@@ -1935,6 +1948,7 @@ impl FirBody {
             source_line_count: 0,
             expression_debug_lines: Vec::new(),
             statement_debug_lines: Vec::new(),
+            generated_class_provenance: HashMap::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
             parameters: Vec::new(),
@@ -2531,6 +2545,22 @@ impl FirBody {
         self.expressions.push(expression);
         self.expression_debug_lines.push(Default::default());
         id
+    }
+
+    pub(crate) fn set_generated_class_provenance(
+        &mut self,
+        expression: FirExprId,
+        provenance: FirGeneratedClassProvenance,
+    ) {
+        self.generated_class_provenance
+            .insert(expression, provenance);
+    }
+
+    pub fn generated_class_provenance(
+        &self,
+        expression: FirExprId,
+    ) -> Option<&FirGeneratedClassProvenance> {
+        self.generated_class_provenance.get(&expression)
     }
 
     pub fn expr(&self, id: FirExprId) -> Option<&FirExpr> {

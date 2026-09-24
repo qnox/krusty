@@ -3926,6 +3926,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   facade/class owner and `$` convention; its facade follows kotlinc's `PackagePartClassUtils`
   rule (`a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`). JS/native may format the
   same provenance differently.
+  A callable reference records the same provenance on its expression. The JVM names the function
+  or property reference class it realizes from it (`AKt$box$2`, `A$bound$1`, `RefsKt$box$r$1`); a
+  reference the walk never saw, one lowering synthesized or a second copy an inline splice made,
+  keeps an internal name (`tests/local_class_naming_e2e.rs`).
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry

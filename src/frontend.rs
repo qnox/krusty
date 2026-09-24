@@ -1507,6 +1507,12 @@ fn record_local_class_name_provenance_with_counters(
         .extend(invented.anonymous_enclosing_functions);
     file.suspend_continuation_ordinals
         .extend(invented.continuations);
+    file.callable_reference_provenance.extend(
+        invented
+            .references
+            .into_iter()
+            .map(|(expression, provenance)| (expression.0, provenance)),
+    );
 }
 
 #[cfg(test)]
