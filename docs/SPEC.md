@@ -1041,6 +1041,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
   and the `cross_file_*_value_class_return_*` cases in `tests/reference_adaptation_e2e.rs`.
+- **A value class over an `Object` carrier read out of a type-parameter slot is the BOX.**
+  `Iterator<Slot>.next()`, `List<Slot>.get` and a `for` over `Iterable<Slot>` for
+  `value class Slot(val raw: Any?)` return a bare `T`, so the slot holds `Slot`'s box and the read
+  `checkcast`s it and calls `unbox-impl`, exactly as for any other carrier. The descriptor alone
+  (`()Ljava/lang/Object;`) cannot distinguish that box from an `Object` carrier. The JVM result-
+  boundary/provider realization records the erased-top physical result, which decides before the
+  descriptor comparison; a declaration that returns the value class itself (`runCatching`, a same-
+  module `fun f(): Slot`) still hands back the carrier. Test:
+  `tests/object_carrier_generic_element_e2e.rs` (stdlib integration plus a repository-owned generic
+  slot, with the facade byte-compared against kotlinc).
 - **An `annotation class` that declares `@Target` carries THREE meta-annotations, and the Java one is
   a PROJECTION.** kotlinc writes, into `RuntimeVisibleAnnotations`: every annotation the source
   declares, in SOURCE order (`kotlin.annotation.Retention` and `kotlin.annotation.Target` among them);

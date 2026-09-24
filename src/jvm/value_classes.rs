@@ -5448,6 +5448,13 @@ fn repr(
                 }
                 _ => None,
             };
+            // FIR lowering records an erased-top physical result for a declaration whose result is a
+            // bare type parameter (`Iterator<X>.next`, `List<X>.get`): that slot holds the BOX. The
+            // descriptor comparison below cannot tell it from a carrier when `X`'s underlying erases
+            // to `Object` too, so the recorded fact decides first.
+            if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
+                return Repr::Boxed(x);
+            }
             let u_desc = desc(&erase(&under[&x], under));
             if phys_ret.as_deref() == Some(u_desc.as_str()) {
                 repr_of_ty(t, under)
