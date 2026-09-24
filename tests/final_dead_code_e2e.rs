@@ -4,10 +4,8 @@
 //! When the redundant-`goto` pass threads a jump through a `goto` — `if (…) return 1` as a loop
 //! body's last statement jumps to a `goto` back to the loop's head — that `goto` is left after the
 //! `return`, reached by nothing. kotlinc removes it; krusty kept it, and the class differed in the
-//! loop's code, its frames and every offset after it. The same transformer closes the gaps in the
-//! local slots: a `for` loop's iterable is stored to a temporary the temporaries pass folds away,
-//! and kotlinc then numbers the iterator and the element from the freed slot. Both are measured
-//! byte-for-byte against kotlinc 2.4.10.
+//! loop's code, its frames and every offset after it. The complete rewritten classes are measured
+//! byte-for-byte against kotlinc 2.4.10; slot-compaction edge cases live beside their owning module.
 
 use super::common;
 
@@ -45,30 +43,38 @@ fn a_goto_bypassed_by_threaded_jumps_is_removed() {
 }
 
 #[test]
-fn a_for_loop_numbers_its_locals_from_the_folded_temporarys_slot() {
+fn iterator_loops_with_early_returns_receive_final_dce() {
     assert_byte_identical(
-        "finalDceFor",
-        "fun contains(xs: Iterable<String>, s: String): Int {\n\
-         \x20   for (e in xs) {\n\
-         \x20       if (e == s) return 1\n\
-         \x20   }\n\
-         \x20   return 0\n\
+        "finalDceIterator",
+        "class Cursor(private val end: Int) {\n\
+         \x20   private var current = 0\n\
+         \x20   operator fun hasNext(): Boolean = current < end\n\
+         \x20   operator fun next(): Int = current++\n\
          }\n\
          \n\
-         fun firstLong(xs: List<String>, min: Int): String? {\n\
-         \x20   for (e in xs) {\n\
-         \x20       if (e.length > min) return e\n\
-         \x20   }\n\
-         \x20   return null\n\
+         class Values(private val end: Int) {\n\
+         \x20   operator fun iterator(): Cursor = Cursor(end)\n\
          }\n\
          \n\
-         fun total(xs: Iterable<String>): Int {\n\
+         fun contains(xs: Values, k: Int): Boolean {\n\
+         \x20   for (e in xs) {\n\
+         \x20       if (e == k) return true\n\
+         \x20   }\n\
+         \x20   return false\n\
+         }\n\
+         \n\
+         fun firstLarge(xs: Values, min: Int): Int {\n\
+         \x20   for (e in xs) {\n\
+         \x20       if (e > min) return e\n\
+         \x20   }\n\
+         \x20   return -1\n\
+         }\n\
+         \n\
+         fun total(xs: Values): Int {\n\
          \x20   var n = 0\n\
-         \x20   for (e in xs) {\n\
-         \x20       n = n + e.length\n\
-         \x20   }\n\
+         \x20   for (e in xs) n += e\n\
          \x20   return n\n\
          }\n",
-        "FinalDceForKt",
+        "FinalDceIteratorKt",
     );
 }

@@ -251,6 +251,14 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_named_local_releases_its_slot() {
+        // DCE removed the LVT entry at slot 1 before compaction. The surviving access at slot 2
+        // therefore moves into slot 1 instead of preserving a gap for dead debug metadata.
+        let insns = [op(0x2c, &[]), op(0xb0, &[])];
+        assert_eq!(run(&insns, &[0]), Some(vec![op(0x2b, &[]), op(0xb0, &[])]));
+    }
+
+    #[test]
     fn a_wide_access_narrows_when_its_slot_drops_below_256() {
         let insns = [
             op(WIDE, &[0x3a, 1, 0]),
