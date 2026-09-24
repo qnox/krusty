@@ -14,22 +14,22 @@
 //! value stays an oracle. Under CI (`CI` set) a missing value fails the test instead, so CI never
 //! blesses output nobody reviewed. `KRUSTY_RECORD=1` re-records every case the run reaches.
 //!
-//! A values file keys each value by a version range, and the newest range is open-ended, so a new
-//! Kotlin release inherits the latest value and the file changes only where kotlinc changed:
+//! A values file keys each value by a closed version range. Adding a supported Kotlin release
+//! therefore leaves every case missing until that release's kotlinc has actually recorded it:
 //!
 //! ```text
 //! [unresolved_member]
 //! 2.4.0..2.4.10:
 //!   Member.kt:1:27: unresolved reference 'missing'.
-//! 2.4.20..:
+//! 2.4.20:
 //!   Member.kt:1:27: unresolved reference 'missing' on receiver of type 'String'.
 //! ```
 //!
-//! A range is `lo..hi` (inclusive), `lo..` (open-ended), or a single version. Each value is a list
+//! A range is `lo..hi` (inclusive) or a single version. Each value is a list
 //! of lines, each indented by two spaces; a backslash and a line break inside one are written `\\`
 //! and `\n`. A range followed by no value lines records an empty list. Recording rewrites a case
 //! over the manifest's versions: adjacent versions with equal values merge into one range, and the
-//! range holding the newest version is left open.
+//! newest version is always explicit, so a future release cannot silently inherit stale output.
 
 use std::collections::BTreeMap;
 use std::os::fd::AsRawFd;
@@ -37,16 +37,16 @@ use std::path::{Path, PathBuf};
 
 use krusty::kotlin_version::{self, KotlinVersion};
 
-/// An inclusive version range; `hi: None` is open-ended.
+/// An inclusive version range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Range {
     lo: KotlinVersion,
-    hi: Option<KotlinVersion>,
+    hi: KotlinVersion,
 }
 
 impl Range {
     fn contains(self, version: KotlinVersion) -> bool {
-        self.lo <= version && self.hi.is_none_or(|hi| version <= hi)
+        self.lo <= version && version <= self.hi
     }
 }
 
@@ -166,29 +166,25 @@ fn store(path: &Path, case: &str, target: KotlinVersion, value: &[String]) {
     drop(lock);
 }
 
-/// Merge adjacent versions with equal values into ranges; the run holding the newest version stays
-/// open-ended so later releases inherit it.
+/// Merge adjacent supported versions with equal values into closed ranges.
 fn ranges(versions: &[KotlinVersion], values: &[Option<Vec<String>>]) -> Groups {
     let mut groups: Groups = Vec::new();
     let mut previous: Option<&Vec<String>> = None;
-    for (index, (&version, value)) in versions.iter().zip(values).enumerate() {
+    for (&version, value) in versions.iter().zip(values) {
         match value {
             Some(value) if previous == Some(value) => {
-                groups.last_mut().expect("an open run").0.hi = Some(version);
+                groups.last_mut().expect("an open run").0.hi = version;
             }
             Some(value) => groups.push((
                 Range {
                     lo: version,
-                    hi: Some(version),
+                    hi: version,
                 },
                 value.clone(),
             )),
             None => {}
         }
         previous = value.as_ref();
-        if index + 1 == versions.len() && value.is_some() {
-            groups.last_mut().expect("the newest run").0.hi = None;
-        }
     }
     groups
 }
@@ -213,17 +209,13 @@ fn parse(text: &str, path: &Path) -> BTreeMap<String, Groups> {
         } else if let Some(range) = line.strip_suffix(':') {
             let version = |text: &str| KotlinVersion::parse(text).unwrap_or_else(|| malformed());
             let range = match range.split_once("..") {
-                Some((lo, "")) => Range {
-                    lo: version(lo),
-                    hi: None,
-                },
                 Some((lo, hi)) => Range {
                     lo: version(lo),
-                    hi: Some(version(hi)),
+                    hi: version(hi),
                 },
                 None => Range {
                     lo: version(range),
-                    hi: Some(version(range)),
+                    hi: version(range),
                 },
             };
             match case.as_ref().and_then(|case| cases.get_mut(case)) {
@@ -246,9 +238,8 @@ fn render(cases: &BTreeMap<String, Groups>) -> String {
         text.push_str(&format!("\n[{case}]\n"));
         for (range, value) in groups {
             let range = match range.hi {
-                None => format!("{}..", range.lo),
-                Some(hi) if hi == range.lo => hi.to_string(),
-                Some(hi) => format!("{}..{hi}", range.lo),
+                hi if hi == range.lo => hi.to_string(),
+                hi => format!("{}..{hi}", range.lo),
             };
             text.push_str(&format!("{range}:\n"));
             for line in value {
@@ -280,7 +271,7 @@ fn unescape(line: &str) -> String {
 }
 
 #[test]
-fn a_values_file_round_trips_and_leaves_the_newest_range_open() {
+fn a_values_file_round_trips_and_keeps_the_newest_version_explicit() {
     let v = |text| KotlinVersion::parse(text).unwrap();
     let old = vec!["a\\b\nc".to_string()];
     let groups = ranges(
@@ -296,21 +287,25 @@ fn a_values_file_round_trips_and_leaves_the_newest_range_open() {
     cases.insert("case".to_string(), groups);
     let text = render(&cases);
     assert!(
-        text.contains("[case]\n2.4.0..2.4.10:\n  a\\\\b\\nc\n2.4.20..:\n"),
+        text.contains("[case]\n2.4.0..2.4.10:\n  a\\\\b\\nc\n2.4.20..2.4.30:\n"),
         "{text}"
     );
     let parsed = parse(&text, Path::new("test"));
     assert_eq!(parsed, cases);
     assert_eq!(lookup(&parsed, "case", v("2.4.10")), Some(old));
-    assert_eq!(lookup(&parsed, "case", v("2.5.0")), Some(Vec::new()));
+    assert_eq!(lookup(&parsed, "case", v("2.5.0")), None);
     assert_eq!(lookup(&parsed, "case", v("2.3.0")), None);
+    assert!(
+        std::panic::catch_unwind(|| { parse("[case]\n2.4.20..:\n", Path::new("open-ended")) })
+            .is_err()
+    );
     let gap = ranges(&[v("2.4.0"), v("2.4.10")], &[Some(Vec::new()), None]);
     assert_eq!(
         gap,
         [(
             Range {
                 lo: v("2.4.0"),
-                hi: Some(v("2.4.0"))
+                hi: v("2.4.0")
             },
             Vec::new()
         )]

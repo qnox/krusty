@@ -49,10 +49,21 @@ pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
 /// unnamed; that absence is preserved for class-file surfaces that support `name_index = 0` and
 /// omitted LVT rows.
 pub(super) fn function_locals(ir: &IrFile, function: u32) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let physical_types = &ir.functions[function as usize].params;
+    let semantic_types =
+        function_semantic_parameter_types(ir, function, identities, physical_types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
     Some(
-        ir.function_parameter_identities(function)?
+        identities
             .iter()
-            .map(|identity| function_local_variable(ir, function, identity))
+            .enumerate()
+            .map(|(index, identity)| {
+                local_anonymous_context_labels()
+                    .then(|| anonymous[index].clone())
+                    .flatten()
+                    .or_else(|| function_local_variable(ir, function, identity))
+            })
             .collect(),
     )
 }
@@ -153,10 +164,23 @@ fn disambiguated_anonymous_context_labels(
             } else {
                 let ordinal = seen.entry(base).or_default();
                 *ordinal += 1;
-                Some(format!("{base}#{ordinal}"))
+                let separator = if crate::kotlin_version::at_least(
+                    crate::kotlin_version::KotlinVersion::V2_4_20,
+                ) {
+                    '$'
+                } else {
+                    '#'
+                };
+                Some(format!("{base}{separator}{ordinal}"))
             }
         })
         .collect()
+}
+
+/// Kotlin 2.4.20 started publishing anonymous context parameters in local-variable tables. Older
+/// supported compilers leave the slot unnamed even though assertion/reflection surfaces label it.
+fn local_anonymous_context_labels() -> bool {
+    crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
 fn function_semantic_parameter_types(
@@ -269,9 +293,17 @@ pub(super) fn constructor_method_parameters(
 pub(super) fn constructor_local_variables(
     arguments: &[crate::ir::IrCtorArg],
 ) -> Vec<Option<String>> {
-    constructor_identities(arguments)
+    let identities = constructor_identities(arguments);
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
+    identities
         .iter()
-        .map(|identity| local_variable(identity, "<init>"))
+        .enumerate()
+        .map(|(index, identity)| {
+            local_anonymous_context_labels()
+                .then(|| anonymous[index].clone())
+                .flatten()
+                .or_else(|| local_variable(identity, "<init>"))
+        })
         .collect()
 }
 
@@ -360,6 +392,26 @@ pub(super) fn resolved_local_variable(
         crate::fir::ResolvedParameterIdentity::PropertySetterValue => Some("<set-?>".to_string()),
         crate::fir::ResolvedParameterIdentity::SuspendCompletion => Some("$completion".to_string()),
     }
+}
+
+/// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
+/// derived from the declaration's semantic types, never from erased bridge descriptors.
+pub(super) fn resolved_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
+    identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            local_anonymous_context_labels()
+                .then(|| anonymous[index].clone())
+                .flatten()
+                .or_else(|| resolved_local_variable(identity, function_name))
+        })
+        .collect()
 }
 
 fn resolved_anonymous_context_labels(
@@ -556,6 +608,15 @@ mod tests {
             ),
             Some(vec![
                 Some("$context-Wrapped".to_string()),
+                Some("value".to_string()),
+            ])
+        );
+        assert_eq!(
+            function_locals(&ir, function),
+            Some(vec![
+                local_anonymous_context_labels()
+                    .then(|| Some("$context-Wrapped".to_string()))
+                    .flatten(),
                 Some("value".to_string()),
             ])
         );

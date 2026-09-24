@@ -8,7 +8,7 @@
   First.kt:7:22: 'public final actual val Tally.tallied: Int' has no corresponding expected declaration
   Last.kt:3:14: 'public final actual class Trailing : Any' has no corresponding expected declaration
   Last.kt:4:16: 'public final actual fun trailed(): Int' has no corresponding expected declaration
-2.4.20..:
+2.4.20:
   First.kt:5:14: 'public final actual class Holder : Any' has no corresponding 'expect' declaration
   First.kt:6:16: 'public final actual fun held(): Int' has no corresponding 'expect' declaration
   First.kt:7:22: 'public final actual val Tally.tallied: Int' has no corresponding 'expect' declaration
@@ -19,7 +19,7 @@
 2.4.0..2.4.10:
   PlatformBody.kt:5:16: 'public final actual fun extra(): Int' has no corresponding expected declaration
   PlatformBody.kt:6:16: 'public final actual val spare: Int' has no corresponding expected declaration
-2.4.20..:
+2.4.20:
   PlatformBody.kt:5:16: 'public final actual fun extra(): Int' has no corresponding 'expect' declaration
   PlatformBody.kt:6:16: 'public final actual val spare: Int' has no corresponding 'expect' declaration
 
@@ -27,18 +27,18 @@
 2.4.0..2.4.10:
   Aliases.kt:7:1: aliased class cannot have type parameters with declaration-site variance.
   Aliases.kt:7:1: type arguments on the right-hand side of actual type alias must be its type parameters in the same order, e.g. 'actual typealias Foo<A, B> = Bar<A, B>'.
-2.4.20..:
+2.4.20:
   Aliases.kt:7:1: aliased class cannot have type parameters with declaration-site variance.
   Aliases.kt:7:1: type arguments on the right-hand side of 'actual' type alias must be its type parameters in the same order, e.g. 'actual typealias Foo<A, B> = Bar<A, B>'.
 
 [an_actual_matched_through_an_alias_is_silent]
 2.4.0..2.4.10:
   AliasMatchedPlatform.kt:6:12: 'public final actual fun stray(): Int' has no corresponding expected declaration
-2.4.20..:
+2.4.20:
   AliasMatchedPlatform.kt:6:12: 'public final actual fun stray(): Int' has no corresponding 'expect' declaration
 
 [the_expect_may_live_in_another_file]
 2.4.0..2.4.10:
   CrossFileMatchPlatform.kt:5:12: 'public final actual fun stray(): Int' has no corresponding expected declaration
-2.4.20..:
+2.4.20:
   CrossFileMatchPlatform.kt:5:12: 'public final actual fun stray(): Int' has no corresponding 'expect' declaration

@@ -4,41 +4,41 @@
 [class_receiver_unresolved_call_is_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExistAnywhere'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'C'.
 
 [classpath_less_string_overload_mismatch_is_not_called_unresolved]
-2.4.0..:
+2.4.0..2.4.20:
   none of the following candidates is applicable:
 
 [nothing_nullable_receiver_unresolved_call_is_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExistAnywhere'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Nothing'.
 
 [null_receiver_unresolved_call_is_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExistAnywhere'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Nothing'.
 
 [nullable_primitive_receiver_unresolved_call_is_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExistAnywhere'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'Int'.
 
 [nullable_string_receiver_unresolved_call_is_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExistAnywhere'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExistAnywhere' on receiver of type 'String'.
 
 [unresolved_property_behind_safe_call_still_reported]
 2.4.0..2.4.10:
   unresolved reference 'thisDoesNotExist'.
-2.4.20..:
+2.4.20:
   unresolved reference 'thisDoesNotExist' on receiver of type 'Nothing'.
 
 [unselectable_but_existing_members_are_not_called_unresolved#equals-arity]
@@ -48,13 +48,13 @@
 [unselectable_but_existing_members_are_not_called_unresolved#hash-code-arity]
 2.4.10:
   too many arguments for 'fun hashCode(): Int'.
-2.4.20..:
+2.4.20:
   none of the following candidates is applicable:
 
 [unselectable_but_existing_members_are_not_called_unresolved#let-argument]
-2.4.0..:
+2.4.0..2.4.20:
   argument type mismatch: actual type is 'Int', but '(String) -> Any?' was expected.
 
 [unselectable_but_existing_members_are_not_called_unresolved#substring-arity]
-2.4.10..:
+2.4.10..2.4.20:
   none of the following candidates is applicable:

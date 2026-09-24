@@ -4,5 +4,5 @@
 [continuation_uses_synthetic_kotlin_metadata]
 2.4.0..2.4.10:
   xi=48
-2.4.20..:
+2.4.20:
   xi=560

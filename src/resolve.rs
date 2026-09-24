@@ -51,6 +51,7 @@ pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
+mod diagnostic_selection;
 mod finalized_projection;
 mod generic_call_bindings;
 mod inspection_analysis;
@@ -123,6 +124,7 @@ use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
 pub(crate) use dependency_platform::DependencyPlatform;
+pub(crate) use diagnostic_selection::unresolved_member_message;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
@@ -484,29 +486,6 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                 })
         }) || self.libraries.package_exists(parent, name)
     }
-}
-
-/// `UNRESOLVED_REFERENCE` for a member looked up on an explicit receiver. Which receivers kotlinc
-/// names (from 2.4.20, see [`crate::diagnostic_wording::unresolved_reference_on`]) was measured
-/// against the reference compiler: a smart cast names the narrowed type, a safe call the non-null
-/// one, a platform type its Kotlin spelling, the `null` literal `Nothing?`; a receiver typed by a
-/// type parameter (nullable or not) is not named at all, and neither is one that failed to resolve.
-pub(crate) fn unresolved_member_message(
-    name: &str,
-    receiver: Ty,
-    hidden_deprecated: bool,
-) -> String {
-    if hidden_deprecated {
-        return crate::diagnostic_wording::unresolved_reference_on(name, None);
-    }
-    let rendered = match receiver {
-        Ty::Error | Ty::Pending | Ty::TyParam(..) => None,
-        Ty::Nullable(Ty::TyParam(..)) => None,
-        Ty::Null => Some("Nothing?".to_string()),
-        Ty::PlatformNullable(inner) => Some(inner.source_name()),
-        other => Some(other.source_name()),
-    };
-    crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
 }
 
 /// Validate an import from left to right and return its single source diagnostic, if any.
@@ -15343,34 +15322,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// `UNRESOLVED_REFERENCE` for `name` looked up on `receiver`. A classifier qualifier
-    /// (`Limits.MAX` through a companion, `Obj.x`) is not a receiver value, so kotlinc names no
-    /// receiver type for it.
-    fn unresolved_member_diagnostic(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: Option<ExprId>,
-        name: &str,
-        rt: Ty,
-    ) -> String {
-        let qualifier = receiver.is_some_and(|receiver| {
-            matches!(
-                self.qualifier(scope, QualifierInput::Expression(receiver)),
-                Ok(ResolvedQualifier::Classifier(_))
-            )
-        });
-        if qualifier {
-            crate::diagnostic_wording::unresolved_reference_on(name, None)
-        } else {
-            unresolved_member_message(
-                name,
-                rt,
-                self.resolver()
-                    .receiver_has_hidden_deprecated_member(rt, name),
-            )
-        }
-    }
-
     fn record_associated_property(
         &mut self,
         expr: Option<ExprId>,
@@ -27404,53 +27355,6 @@ mod tests {
             Err(QualifierError::UnresolvedSegment {
                 expression: None,
                 name: "Missing".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn a_later_classifier_miss_does_not_reinterpret_its_root_as_a_package() {
-        struct CollidingRoot;
-
-        impl SymbolSource for CollidingRoot {
-            fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-                parent == TypeName::ROOT && name == "Clash"
-            }
-
-            fn symbols(
-                &self,
-                namespace: crate::symbol_source::SymbolNamespace,
-                name: &str,
-            ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-                let package = crate::types::type_name("Clash");
-                if namespace == crate::symbol_source::SymbolNamespace::Package(package)
-                    && name == "Tail"
-                {
-                    return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                        classifier_name: Some(crate::types::type_name("Clash/Tail")),
-                        classifier: Some(std::sync::Arc::new(
-                            crate::libraries::LibraryType::declaration_header(),
-                        )),
-                        ..Default::default()
-                    });
-                }
-                std::rc::Rc::new(crate::libraries::ResolvedSymbols::default())
-            }
-        }
-
-        let result = walk_qualifier_namespace_facets(
-            &CollidingRoot,
-            Some(crate::types::type_name("scope/Clash")),
-            None,
-            "Clash",
-            &[(None, "Tail".to_string())],
-        );
-
-        assert_eq!(
-            result,
-            Err(QualifierError::UnresolvedSegment {
-                expression: None,
-                name: "Tail".to_string(),
             })
         );
     }
@@ -43087,6 +42991,14 @@ impl<'a> Checker<'a> {
         let Some((failure, index)) = take_unanimous_mapping_error(&mut failures) else {
             return false;
         };
+        if !crate::diagnostic_wording::specific_too_many_arguments_for_member()
+            && failure
+                .errors
+                .iter()
+                .any(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
+        {
+            return false;
+        }
         let candidate = &candidates[index];
         // A missing-argument diagnostic names the missing declaration parameter. Java bytecode may
         // expose the arity without exposing source parameter names; in that case kotlinc reports the
@@ -45943,7 +45855,17 @@ impl<'a> Checker<'a> {
         if !same_mapping_shape {
             return None;
         }
-        take_unanimous_mapping_error(&mut failures)
+        let retained = take_unanimous_mapping_error(&mut failures)?;
+        if !crate::diagnostic_wording::specific_too_many_arguments_for_member()
+            && retained
+                .0
+                .errors
+                .iter()
+                .any(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
+        {
+            return None;
+        }
+        Some(retained)
     }
 
     fn report_retained_member_mapping_failure(

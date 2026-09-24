@@ -368,12 +368,14 @@ fn attach_bridge_debug_tables(
         );
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
-        for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
+        let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
+            &bridge.parameter_identities,
+            &bridge.concrete_params,
+            &bridge.name,
+        );
+        for (parameter, spelling) in jvm_tys(&bridge.erased_params).iter().zip(parameter_names) {
             let descriptor = local_variable_desc(*parameter);
-            if let Some(spelling) = crate::jvm::parameter_names::resolved_local_variable(
-                &bridge.parameter_identities[index],
-                &bridge.name,
-            ) {
+            if let Some(spelling) = spelling {
                 locals.push((spelling, descriptor, slot));
             }
             slot += slot_words(*parameter);

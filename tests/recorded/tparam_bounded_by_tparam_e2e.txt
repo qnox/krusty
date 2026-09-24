@@ -10,7 +10,7 @@
   fun <R, T : R> Box<T>.orElse(fallback: () -> R): R
   fun explicitBad(): String = Box(1).orElse<String, Int> { "x" }
                                      ^^^^^^
-2.4.20..:
+2.4.20:
   Bad.kt:4:47: error: return type mismatch: expected 'String', actual 'U (of fun <U> bad)'.
   fun <U> bad(u: U): String = Box("x").orElse { u }
                                                 ^

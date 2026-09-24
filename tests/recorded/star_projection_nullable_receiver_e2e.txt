@@ -10,7 +10,7 @@
   fun <T : Any> Iterable<T>.only(): List<T>
   fun use(xs: List<*>): List<Any> = xs.only()
                                        ^^^^
-2.4.20..:
+2.4.20:
   Strict.kt:2:35: error: return type mismatch: expected 'List<Any>', actual 'List<Any?>'.
   fun use(xs: List<*>): List<Any> = xs.only()
                                     ^^^^^^^^^

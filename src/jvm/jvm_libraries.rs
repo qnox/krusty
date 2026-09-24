@@ -3,12 +3,16 @@
 //! `java/lang ↔ kotlin` name normalization live here — resolution and checked FIR see
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
+mod builtin_classifier_shapes;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
+use builtin_classifier_shapes::{
+    builtin_library_type, mapped_builtin_property, mapped_builtin_signature, BuiltinGenericShape,
+};
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_class_gsig, parse_field_gsig,
     suspend_return_from_gsig,
@@ -3343,138 +3347,6 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             materialize_omitted_vararg: false,
         }),
     })
-}
-
-/// Minimal classifier signature for a mapped builtin whose physical JVM class is absent. This is
-/// provider construction data: core still receives an ordinary `LibraryType` record and performs the
-/// same member/hierarchy selection as for every other classifier.
-fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
-    // Each tuple: Kotlin member name, JVM descriptor, logical return type. The owner is left implicit
-    // (the receiver's Kotlin internal, e.g. `kotlin/String`); the constant-pool boundary maps it to the
-    // JVM name, exactly as for a classpath-resolved member, without exposing `java/lang/*` to core.
-    let members: &[(&str, &str, Ty)] = match internal {
-        "kotlin/String" => &[("length", "()I", Ty::Int), ("hashCode", "()I", Ty::Int)],
-        _ => return None,
-    };
-    let members = members
-        .iter()
-        .map(|(name, desc, ret)| {
-            LibraryMember::new((*name).to_string(), vec![], *ret, (*desc).to_string())
-        })
-        .collect();
-    Some(LibraryType {
-        // A mapped builtin is a KOTLIN declaration; its physical class is merely absent.
-        is_kotlin: true,
-        access: crate::libraries::ClassifierAccess::Public,
-        source_file: None,
-        stable_declaration: None,
-        is_nested: false,
-        outer_instance: None,
-        kind: crate::libraries::TypeKind::Class,
-        inheritance: Default::default(),
-        supertypes: TypeNameList::new(),
-        supertype_templates: Vec::new(),
-        constructors: Vec::new(),
-        hidden_member_properties: Default::default(),
-        hidden_deprecated_callables: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members,
-        companion: Vec::new(),
-        constants: Default::default(),
-        sam_eligible: false,
-        callable_signature: None,
-        callable_signatures: Vec::new(),
-        companion_object: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        type_parameters: crate::types::TypeParameters::default(),
-        own_type_parameter_count: 0,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists: Vec::new(),
-        annotations: Vec::new(),
-        retention: None,
-        annotation_targets: None,
-    })
-}
-
-/// Property/function distinction from Kotlin's mapped built-in signature when no decoded
-/// `.kotlin_builtins` fragment is present. The JVM method alone cannot express that `String.length()`
-/// occupies Kotlin's property namespace. This fact is folded into `declared_callables` while the one
-/// classifier record is constructed; it is not a resolution-time special case.
-fn mapped_builtin_property(internal: TypeName, name: &str) -> bool {
-    internal.matches("kotlin/String") && name == "length"
-}
-
-struct BuiltinGenericShape {
-    type_params: Vec<String>,
-    type_param_variances: Vec<crate::types::TypeVariance>,
-    supertype_templates: Vec<Ty>,
-}
-
-/// The [`LibraryType`] of a classless Kotlin BUILTIN (`kotlin/Number`, `kotlin/collections/List`, …) whose
-/// JVM class is absent from the classpath (a no-JDK compile) — supertypes and members from the
-/// `.kotlin_builtins` data, kind from the metadata `is_interface` flag.
-fn builtin_library_type(
-    kind: crate::libraries::TypeKind,
-    access: crate::libraries::ClassifierAccess,
-    is_nested: bool,
-    supertypes: TypeNameList,
-    members: Vec<LibraryMember>,
-    constructors: Vec<LibraryMember>,
-    generic: BuiltinGenericShape,
-) -> LibraryType {
-    let callable_signatures = generic
-        .supertype_templates
-        .iter()
-        .copied()
-        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
-        .collect::<Vec<_>>();
-    let callable_signature = callable_signatures.first().copied();
-    LibraryType {
-        // Builtins are Kotlin declarations (`.kotlin_builtins` is compiled Kotlin metadata).
-        is_kotlin: true,
-        access,
-        source_file: None,
-        stable_declaration: None,
-        is_nested,
-        outer_instance: None,
-        kind,
-        inheritance: Default::default(),
-        supertypes,
-        supertype_templates: generic.supertype_templates,
-        constructors,
-        hidden_member_properties: Default::default(),
-        hidden_deprecated_callables: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members,
-        companion: Vec::new(),
-        constants: Default::default(),
-        sam_eligible: false,
-        callable_signature,
-        callable_signatures,
-        companion_object: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        own_type_parameter_count: generic.type_params.len(),
-        type_parameters: crate::types::TypeParameters::new(
-            generic.type_params.clone(),
-            vec![Vec::new(); generic.type_params.len()],
-            generic.type_param_variances,
-        ),
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists: Vec::new(),
-        annotations: Vec::new(),
-        retention: None,
-        annotation_targets: None,
-    }
 }
 
 fn function_interface_signature(

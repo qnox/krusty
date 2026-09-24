@@ -2925,8 +2925,8 @@ fn attach_synth_debug_tables(
             guard_slot += slot_size(argument.ty);
         }
     }
-    // Only physical constructor parameters are locals. Anonymous context parameters deliberately
-    // have no LVT row even though their MethodParameters/assertion surfaces have a generated label.
+    // Only physical constructor parameters are locals. The configured reference version decides
+    // whether anonymous context parameters publish their generated labels on this surface.
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
@@ -10035,6 +10035,7 @@ fn emit_default_impls_forwarders(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
+    use crate::jvm::parameter_names;
     if c.is_interface {
         return;
     }
@@ -10172,11 +10173,10 @@ fn emit_default_impls_forwarders(
         finish_code::<0x0041>(cw, name, &desc, &mut code, argument_words);
         let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
         let mut slot = 1u16;
-        for (index, parameter) in param_tys.iter().enumerate() {
-            if let Some(parameter_name) = crate::jvm::parameter_names::resolved_local_variable(
-                &parameter_identities[index],
-                name,
-            ) {
+        let parameter_names =
+            parameter_names::resolved_local_variables(parameter_identities, semantic_params, name);
+        for (parameter, parameter_name) in param_tys.iter().zip(parameter_names) {
+            if let Some(parameter_name) = parameter_name {
                 locals.push((parameter_name, local_variable_desc(*parameter), slot));
             }
             slot += slot_words(*parameter);

@@ -4,11 +4,11 @@
 [explicit_delegate_failure_reports_the_earliest_candidate_family]
 2.4.0..2.4.10:
   9:24: error: property delegate must have a 'getValue(Holder, KProperty1<Holder, Long>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long
-2.4.20..:
+2.4.20:
   9:24: error: property delegate must have a 'getValue(Holder, KProperty1<*, *>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long\nfun Cell.getValue(owner: Int, property: Any?): Long\nfun Cell.getValue(owner: Boolean, property: Any?): Long
 
 [inferred_delegate_failure_reports_the_earliest_candidate_family]
 2.4.0..2.4.10:
   9:18: error: property delegate must have a 'getValue(Holder, KProperty1<Holder, Long>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long
-2.4.20..:
+2.4.20:
   9:18: error: property delegate must have a 'getValue(Holder, KProperty1<*, *>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long\nfun Cell.getValue(owner: Int, property: Any?): Long\nfun Cell.getValue(owner: Boolean, property: Any?): Long

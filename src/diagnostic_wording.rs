@@ -103,3 +103,10 @@ pub fn no_value_for_parameter_anchor() -> Anchor {
         Anchor::ValueArguments
     }
 }
+
+/// Whether a member candidate rejected solely for excess arguments uses the declaration-specific
+/// `TOO_MANY_ARGUMENTS` diagnostic. Kotlin 2.4.20 keeps the candidate family and reports the
+/// ordinary inapplicable-overload diagnostic instead.
+pub fn specific_too_many_arguments_for_member() -> bool {
+    !since(KotlinVersion::V2_4_20)
+}

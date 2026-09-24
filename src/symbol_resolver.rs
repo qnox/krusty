@@ -43,10 +43,9 @@ use hierarchy_projection::{
 };
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
-    declared_member_callables, has_hidden_deprecated_member, imported_object_member_symbols,
-    inherited_nested_classifier_name, lexical_enclosing_classifier_names, members_in_hierarchy,
-    override_input_shapes_match, specialize_member_function, InheritedNestedClassifier,
-    OverrideInputShape,
+    declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
+    lexical_enclosing_classifier_names, members_in_hierarchy, override_input_shapes_match,
+    specialize_member_function, InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
@@ -2193,13 +2192,6 @@ impl<'a> SymbolResolver<'a> {
         self.fn_scope
             .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
             .unwrap_or_default()
-    }
-
-    /// A declaration-provider rejection fact for `receiver.name`. Hidden-deprecated declarations
-    /// never become candidates; this is consulted only after ordinary selection has failed so the
-    /// diagnostic can reproduce the selected Kotlin reference version.
-    pub(crate) fn receiver_has_hidden_deprecated_member(&self, receiver: Ty, name: &str) -> bool {
-        has_hidden_deprecated_member(&self.src, member_scope_receiver(receiver), name)
     }
 
     /// Collect the declarations denoted by `receiver.name` exactly once. Member declarations and
@@ -7536,42 +7528,11 @@ mod tests {
     }
 
     fn fake_library_type(supertypes: Vec<String>, constructors: Vec<LibraryMember>) -> LibraryType {
-        LibraryType {
-            is_kotlin: true,
-            access: crate::libraries::ClassifierAccess::Public,
-            source_file: None,
-            stable_declaration: None,
-            is_nested: false,
-            outer_instance: None,
-            kind: TypeKind::Class,
-            inheritance: Default::default(),
-            supertypes: supertypes.into(),
-            supertype_templates: Vec::new(),
-            constructors,
-            hidden_member_properties: Default::default(),
-            hidden_deprecated_callables: Default::default(),
-            declared_callables: std::collections::HashMap::new(),
-            declared_callable_order: Vec::new(),
-            members: vec![],
-            companion: vec![],
-            constants: std::collections::HashMap::new(),
-            sam_eligible: false,
-            callable_signature: None,
-            callable_signatures: Vec::new(),
-            companion_object: None,
-            value_underlying: None,
-            value_underlying_property: None,
-            alias_target: None,
-            type_parameters: crate::types::TypeParameters::default(),
-            own_type_parameter_count: 0,
-            sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: Vec::new(),
-            enum_entries_accessor: None,
-            named_parameter_lists: Vec::new(),
-            annotations: Vec::new(),
-            retention: None,
-            annotation_targets: None,
-        }
+        let mut classifier = LibraryType::declaration_header();
+        classifier.is_kotlin = true;
+        classifier.supertypes = supertypes.into();
+        classifier.constructors = constructors;
+        classifier
     }
 
     struct SamHierarchySource {

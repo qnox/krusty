@@ -167,3 +167,52 @@ pub(super) fn classifier_path<S: SymbolSource + ?Sized>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct CollidingRoot;
+
+    impl SymbolSource for CollidingRoot {
+        fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+            parent == TypeName::ROOT && name == "Clash"
+        }
+
+        fn symbols(
+            &self,
+            namespace: SymbolNamespace,
+            name: &str,
+        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+            let package = crate::types::type_name("Clash");
+            if namespace == SymbolNamespace::Package(package) && name == "Tail" {
+                return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    classifier_name: Some(crate::types::type_name("Clash/Tail")),
+                    classifier: Some(std::sync::Arc::new(
+                        crate::libraries::LibraryType::declaration_header(),
+                    )),
+                    ..Default::default()
+                });
+            }
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols::default())
+        }
+    }
+
+    #[test]
+    fn a_later_classifier_miss_does_not_reinterpret_its_root_as_a_package() {
+        let result = walk_qualifier_namespace_facets(
+            &CollidingRoot,
+            Some(crate::types::type_name("scope/Clash")),
+            None,
+            "Clash",
+            &[(None, "Tail".to_string())],
+        );
+        assert_eq!(
+            result,
+            Err(QualifierError::UnresolvedSegment {
+                expression: None,
+                name: "Tail".to_string(),
+            })
+        );
+    }
+}

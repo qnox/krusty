@@ -4,5 +4,5 @@
 [data_class_body_properties_do_not_declare_components]
 2.4.0..2.4.10:
   unresolved reference 'component2'.
-2.4.20..:
+2.4.20:
   unresolved reference 'component2' on receiver of type 'Box'.

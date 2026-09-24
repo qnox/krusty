@@ -274,6 +274,17 @@ pub(crate) fn has_hidden_deprecated_member(
     false
 }
 
+impl super::SymbolResolver<'_> {
+    /// A provider rejection fact consulted only after ordinary candidate selection has failed.
+    pub(crate) fn receiver_has_hidden_deprecated_member(&self, receiver: Ty, name: &str) -> bool {
+        has_hidden_deprecated_member(
+            &self.src,
+            super::hierarchy_projection::member_scope_receiver(receiver),
+            name,
+        )
+    }
+}
+
 pub(crate) fn members_in_hierarchy(
     source: &dyn SymbolSource,
     receiver: Ty,

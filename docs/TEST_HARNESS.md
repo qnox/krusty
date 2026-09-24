@@ -118,9 +118,10 @@ version range (`tests/common/recorded.rs`). `common::assert_errors_match_kotlinc
 (the frontend's messages) cover the usual shapes; `common::recorded(|| …)`,
 `common::recorded_named(label, || …)` and `common::recorded_line(|| …)` take any value computed from
 kotlinc's run. When the file has no value for the version under test, a local run computes it from
-that kotlinc, writes it and passes; commit the diff. Ranges are merged across adjacent versions and
-the newest one is open-ended (`2.4.20..:`), so a new release inherits the latest value and only a
-real change re-records. Under CI (`CI` set) a missing value fails instead of recording.
+that kotlinc, writes it and passes; commit the diff. Ranges are closed and merged across adjacent
+versions (`2.4.0..2.4.10:`), while the newest version remains explicit (`2.4.20:`). A newly supported
+release therefore has no value until its own kotlinc records one. Under CI (`CI` set) a missing value
+fails instead of recording.
 `KRUSTY_RECORD=1` re-records every value the run reaches, e.g. after a kotlinc patch update:
 `KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
 output is ever recorded, so a recorded value stays an oracle for krusty.
