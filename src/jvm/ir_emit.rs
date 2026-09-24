@@ -2891,6 +2891,10 @@ fn attach_synth_debug_tables(
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     param_assertions: bool,
+    // The primary constructor method emission actually produced and the source-mapped body offset
+    // it reached after any parameter guards. Neither the physical descriptor nor the bytecode
+    // position may be reconstructed later from fields or semantic constructor arguments.
+    primary_ctor_debug: Option<(&str, u16)>,
     // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
     // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
     ctor_lines: &[(u16, u32)],
@@ -2906,10 +2910,8 @@ fn attach_synth_debug_tables(
             _ => 1,
         }
     };
-    // A recorded `checkNotNullParameter` guard (`aload <slot>; ldc <name>; invokestatic`) precedes
-    // the body. The LineNumberTable starts after exactly those selected constructor-parameter
-    // guards; field types and field order are not an alternative source for that decision.
-    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
+    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2). Synthesized
+    // setter debug still uses this until those accessors carry their own emission provenance too.
     let aload_len = |slot: u16| -> u16 {
         if slot <= 3 {
             1
@@ -2920,15 +2922,14 @@ fn attach_synth_debug_tables(
         }
     };
     let this_desc = format!("L{};", c.fq_name());
+    // A data class's `copy` parameters are exactly its property-backed constructor parameters.
+    // This is not the primary constructor's physical descriptor (plain parameters may also exist
+    // there), so keep the two identities deliberately separate.
+    let data_copy_desc = format!("({})V", ctor_field_descs(c));
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
     // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
     // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
     let is_enum = !c.enum_entries.is_empty();
-    let ctor_desc = if is_enum {
-        format!("(Ljava/lang/String;I{})V", ctor_field_descs(c))
-    } else {
-        format!("({})V", ctor_field_descs(c))
-    };
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
     if is_enum {
@@ -2939,17 +2940,6 @@ fn attach_synth_debug_tables(
         ));
         ctor_locals.push(("$enum$ordinal".to_string(), "I".to_string(), slot + 1));
         slot += 2;
-    }
-    let mut ctor_pc = 0u16;
-    if param_assertions {
-        let mut guard_slot = slot;
-        for argument in &c.ctor_args {
-            if let Some(name) = &argument.check {
-                let ldc = cw.string_ldc_len(name).unwrap_or(2);
-                ctor_pc += aload_len(guard_slot) + ldc + 3;
-            }
-            guard_slot += slot_size(argument.ty);
-        }
     }
     // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
     // reflection/assertion label names the physical constructor local too.
@@ -2969,19 +2959,21 @@ fn attach_synth_debug_tables(
     } else {
         c.decl_start_line
     };
-    cw.set_method_debug(
-        "<init>",
-        &ctor_desc,
-        Some((ctor_pc, ctor_start_line)),
-        &ctor_locals,
-    );
-    if !ctor_lines.is_empty() {
-        let mut entries = vec![(ctor_pc, ctor_start_line)];
-        entries.extend_from_slice(ctor_lines);
-        // kotlinc never emits two consecutive entries for the same line — a run of stores on the
-        // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry.
-        entries.dedup_by_key(|(_, l)| *l);
-        cw.set_method_lines("<init>", &ctor_desc, &entries);
+    if let Some((ctor_desc, ctor_pc)) = primary_ctor_debug {
+        cw.set_method_debug(
+            "<init>",
+            ctor_desc,
+            Some((ctor_pc, ctor_start_line)),
+            &ctor_locals,
+        );
+        if !ctor_lines.is_empty() {
+            let mut entries = vec![(ctor_pc, ctor_start_line)];
+            entries.extend_from_slice(ctor_lines);
+            // kotlinc never emits two consecutive entries for the same line — a run of stores on the
+            // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry.
+            entries.dedup_by_key(|(_, l)| *l);
+            cw.set_method_lines("<init>", ctor_desc, &entries);
+        }
     }
     // A marker accessor gets the same locals as the primary constructor plus its synthetic marker.
     if has_ctor_marker_accessor(ir, c) {
@@ -3224,8 +3216,8 @@ fn attach_synth_debug_tables(
             cw.set_method_debug(
                 "copy",
                 &format!(
-                    "{ctor_desc_no_v}{self_ref}",
-                    ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
+                    "{copy_desc_no_v}{self_ref}",
+                    copy_desc_no_v = &data_copy_desc[..data_copy_desc.len() - 1]
                 ),
                 None,
                 &copy_locals,
@@ -6146,6 +6138,7 @@ fn emit_class(
     // `(start_pc, line)` for the ctor's LineNumberTable — one per body-property initializer, plus the
     // trailing `return`. Empty when the class has no body properties (kotlinc emits a single entry).
     let mut ctor_lines: Vec<(u16, u32)> = Vec::new();
+    let mut primary_ctor_debug = None;
     let param_tys = class_ctor_jvm_tys(c);
     crate::trace_compiler!(
         "lower",
@@ -6253,6 +6246,13 @@ fn emit_class(
                     }
                 }
             }
+            // Debug metadata consumes the position emission actually reached. Reconstructing this
+            // later from constructor parameters, constant-pool widths, or assertion policy makes a
+            // semantic description masquerade as bytecode layout and can point inside an opcode.
+            primary_ctor_debug = Some((
+                ctor_desc.clone(),
+                u16::try_from(ctor.bytes.len()).expect("a JVM method body fits in u16"),
+            ));
             let ctor_param_fields: Vec<Option<usize>> = if c.ctor_args.is_empty() {
                 (0..param_tys.len()).map(Some).collect()
             } else if c
@@ -6814,7 +6814,16 @@ fn emit_class(
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
     // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
     if computed.is_some() && !is_coroutine_state_machine(c) {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &ctor_lines);
+        attach_synth_debug_tables(
+            ir,
+            c,
+            &mut cw,
+            opts.param_assertions,
+            primary_ctor_debug
+                .as_ref()
+                .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
+            &ctor_lines,
+        );
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -9166,7 +9175,7 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &[]);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -9863,7 +9872,14 @@ fn emit_enum_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
     if class_metadata.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &[]);
+        attach_synth_debug_tables(
+            ir,
+            c,
+            &mut cw,
+            opts.param_assertions,
+            emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+            &[],
+        );
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
         // kotlinc's synthesized enum members: `valueOf` names its parameter `value` in a
@@ -19766,7 +19782,7 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
 }
 
 #[cfg(test)]
-mod fail_soft_tests {
+mod invariant_tests {
     use super::*;
     use crate::ir::{IrExpr, IrFile, IrFunction};
     use crate::jvm::classreader::MethodCode;
@@ -19992,11 +20008,12 @@ mod fail_soft_tests {
         );
     }
 
-    // A `GetValue` of a value slot that was never allocated is malformed IR (e.g. an unsupported
-    // suspend shape the lowering should have bailed on). The emitter must SKIP the file
-    // (checked emission returns `None`), never panic — a compiler must not crash on its own IR.
+    // A `GetValue` of a value slot that was never allocated is malformed IR. Letting emission
+    // silently skip it would preserve a second, fail-soft path around the authoritative final-body
+    // analysis; the backend must reject the broken phase contract at the method boundary.
     #[test]
-    fn getvalue_of_unallocated_slot_skips_not_panics() {
+    #[should_panic(expected = "cannot compute JVM frames for box()V: Unsteppable(0)")]
+    fn getvalue_of_unallocated_slot_is_an_explicit_backend_invariant_violation() {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
         ir.add_fun(IrFunction {
@@ -20008,7 +20025,7 @@ mod fail_soft_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
+        let _ = emit_for_test(&ir, "TestKt", &EmitRun::default());
     }
 
     // A machine recorded for a function with no `$completion` parameter cannot resolve the

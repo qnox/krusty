@@ -2580,7 +2580,10 @@ impl ClassWriter {
                     // source range were dropped even though `start_pc` now happens to index resumed
                     // code. This keeps debug metadata tied to emitted ranges, never offset coincidence.
                     .filter(|(start, len, ..)| {
-                        (*start as usize) < code.bytes.len() && *len != Some(0)
+                        let start = usize::from(*start);
+                        let end =
+                            len.map_or(code.bytes.len(), |length| start + usize::from(length));
+                        start < code.bytes.len() && start < end && end <= code.bytes.len()
                     })
                     .map(|(start, len, slot, nm, ds)| {
                         (

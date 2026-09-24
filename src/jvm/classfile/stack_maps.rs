@@ -244,8 +244,12 @@ pub(super) fn builder_labels(
 ) -> Vec<usize> {
     let mut labels: Vec<usize> = lines.iter().map(|&(pc, _)| usize::from(pc)).collect();
     for (start, length, ..) in locals {
-        labels.push(usize::from(*start));
-        labels.push(length.map_or(code_len, |length| usize::from(*start) + usize::from(length)));
+        let start = usize::from(*start);
+        let end = length.map_or(code_len, |length| start + usize::from(length));
+        if start < code_len && start < end && end <= code_len {
+            labels.push(start);
+            labels.push(end);
+        }
     }
     labels
 }
@@ -379,6 +383,17 @@ mod tests {
             writer.compute_frames(&body).err(),
             Some(Decline::UnsupportedControlFlow)
         );
+    }
+
+    #[test]
+    fn dead_local_ranges_do_not_create_frame_boundaries() {
+        let locals = [
+            (2, Some(3), 0, "live".to_string(), "I".to_string()),
+            (8, Some(1), 1, "past".to_string(), "I".to_string()),
+            (3, Some(0), 2, "empty".to_string(), "I".to_string()),
+            (4, Some(3), 3, "overrun".to_string(), "I".to_string()),
+        ];
+        assert_eq!(builder_labels(&[], &locals, 6), vec![2, 5]);
     }
 
     #[test]

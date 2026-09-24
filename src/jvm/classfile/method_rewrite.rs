@@ -367,7 +367,19 @@ impl ClassWriter {
         }
         let entry = expand_slots(&entry);
         let original_graph = ControlGraph::build(&insns, &handlers)?;
-        // The verifier's types before each original instruction, computed at most once.
+        // The verifier's types before each original instruction, computed at most once. Rewrite
+        // selection must follow the instruction graph itself: emitter-recorded frames are migration
+        // input and can be more precise than the state the final bytecode actually proves (for
+        // example, a smart-cast fact after the value has been stored in a broader local). Using
+        // those frames to remove a `checkcast` can therefore make a valid body unverifiable.
+        let flow_types_cell = std::cell::OnceCell::new();
+        let flow_types = || {
+            flow_types_cell
+                .get_or_init(|| FrameTypes::analyze(&insns, &original_graph, &entry, &[], self))
+                .as_ref()
+        };
+        // Recorded frames remain only as a compatibility certificate for accepting reference
+        // widenings while the rewrite-frame migration is completed by the next stack stage.
         let original_analysis_cell = std::cell::OnceCell::new();
         let original_analysis = || {
             original_analysis_cell
@@ -390,8 +402,7 @@ impl ClassWriter {
                 })
                 .as_ref()
         };
-        let original_types = || original_analysis().map(|(types, _)| types);
-        let redundant_casts = redundant_checkcasts::select(self, &insns, &original_types);
+        let redundant_casts = redundant_checkcasts::select(self, &insns, || flow_types());
         // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
         // nullability analysis proves non-null goes (see `null_checks`).
         let redundant_null_checks = self.redundant_null_checks(
@@ -707,7 +718,7 @@ impl ClassWriter {
         // that target's frame gains it, typed as the checked local was at each check.
         let mut pushed: Vec<(usize, VerifType)> = Vec::new();
         if !rewrite.stack_at_target.is_empty() {
-            let types = original_types()?;
+            let types = flow_types()?;
             for (target, loads) in &rewrite.stack_at_target {
                 let mut value: Option<VerificationType> = None;
                 for &load in loads {
