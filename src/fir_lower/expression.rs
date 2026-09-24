@@ -281,10 +281,15 @@ impl BodyLowering<'_> {
                     // A retained inline body has already crossed and removed the declaration ABI:
                     // its result slot is specialized to the call-site type. Ordinary calls still
                     // return through the declaration's erased slot before this checked coercion.
-                    if !self.ir.inline_regions.contains(&lowered) {
-                        self.ir
-                            .physical_types
-                            .insert(lowered, declared.erased_recv());
+                    // When the declaration's erasure is already the result's own erasure
+                    // (`fun <A> f(): Box<A>` read as `Box<Int>`), the slot adds no physical
+                    // boundary: only type arguments differ, and they have no representation.
+                    let physical = declared.erased_recv();
+                    let result = expression.ty.get();
+                    let same_erasure = physical == result.erased_recv()
+                        && declared.is_nullable() == result.is_nullable();
+                    if !same_erasure && !self.ir.inline_regions.contains(&lowered) {
+                        self.ir.physical_types.insert(lowered, physical);
                     }
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
