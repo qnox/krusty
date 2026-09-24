@@ -171,6 +171,8 @@ impl Emitter<'_> {
     /// materialized at its parameter's type, the cast kotlinc writes for an upcast.
     pub(super) fn emit_source_call_operands(
         &mut self,
+        call: u32,
+        leading_non_argument_operands: usize,
         ops: &[u32],
         physical: &[Ty],
         code: &mut CodeBuilder,
@@ -178,9 +180,18 @@ impl Emitter<'_> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let mut index = 0usize;
         self.emit_operands_adapted(None, ops, code, |this, source, code| {
+            let parameter_index = index;
             let target = physical[index];
             index += 1;
-            this.coerce_reference_on_stack(source, target, code);
+            let is_continuation = parameter_index
+                .checked_sub(leading_non_argument_operands)
+                .is_some_and(|argument_index| {
+                    this.default_call_operands
+                        .is_continuation(call, argument_index)
+                });
+            if !is_continuation {
+                this.coerce_reference_on_stack(source, target, code);
+            }
         });
         Ok(())
     }
@@ -200,9 +211,15 @@ impl Emitter<'_> {
         let origins = self.default_operand_origins(call, ops, true);
         let mut index = 0usize;
         self.emit_operands_adapted(Some((call, &origins)), ops, code, |this, source, code| {
+            let parameter_index = index;
             let target = physical[index];
             index += 1;
-            this.coerce_reference_on_stack(source, target, code);
+            if !this
+                .default_call_operands
+                .is_continuation(call, parameter_index)
+            {
+                this.coerce_reference_on_stack(source, target, code);
+            }
         });
         Ok(())
     }

@@ -67,9 +67,8 @@ fn a_value_widened_to_its_consumers_type_is_cast_like_kotlincs() {
 #[test]
 fn null_bottom_and_covariant_array_do_not_gain_spurious_casts() {
     const EXCEPTIONS: &str = "open class BoundaryTarget\n\
-        class BoundaryFailure : Throwable()\n\
         fun nullTarget(): BoundaryTarget? = null\n\
-        fun thrownTarget(): BoundaryTarget = throw BoundaryFailure()\n\
+        fun thrownTarget(failure: Throwable): BoundaryTarget = throw failure\n\
         fun objectArray(value: Array<out String>): Array<out Any> = value\n";
     let Some(built) = compare_with_kotlinc_plugin(
         "UpcastExceptions",

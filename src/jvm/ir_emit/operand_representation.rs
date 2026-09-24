@@ -184,6 +184,12 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) {
+        if self
+            .default_call_operands
+            .is_continuation(call_expression, parameter_index)
+        {
+            return;
+        }
         let semantic = self
             .ir
             .logical_types

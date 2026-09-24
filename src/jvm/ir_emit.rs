@@ -14624,7 +14624,7 @@ impl<'a> Emitter<'a> {
                 semantic_scalar_adapter(*operation.ty, target),
             );
         } else {
-            self.narrow_on_stack(source, target, code);
+            self.coerce_reference_on_stack(source, target, code);
         }
         match access {
             PropertyAccess::Field {
@@ -15800,7 +15800,9 @@ impl<'a> Emitter<'a> {
                     let args = args.clone();
                     // Same arity/descriptor contract as `MethodCall` above: an unthreaded suspend
                     // call must bail the file, never emit an unverifiable invocation.
-                    if let Err(mismatch) = self.emit_source_call_operands(&args, &param_tys, code) {
+                    if let Err(mismatch) =
+                        self.emit_source_call_operands(e, 0, &args, &param_tys, code)
+                    {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
@@ -15816,7 +15818,9 @@ impl<'a> Emitter<'a> {
                     let f = &self.ir.functions[*function as usize];
                     let param_tys = jvm_function_params(self.ir, *function);
                     let ret = jvm_declared_ty(&f.ret);
-                    if let Err(mismatch) = self.emit_source_call_operands(args, &param_tys, code) {
+                    if let Err(mismatch) =
+                        self.emit_source_call_operands(e, 0, args, &param_tys, code)
+                    {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
@@ -16404,7 +16408,8 @@ impl<'a> Emitter<'a> {
                         // are materialized at the parameter types.
                         let mut physical = vec![self.value_ty(recv)];
                         physical.extend(ptys.iter().copied());
-                        if let Err(mismatch) = self.emit_source_call_operands(&ops, &physical, code)
+                        if let Err(mismatch) =
+                            self.emit_source_call_operands(e, 1, &ops, &physical, code)
                         {
                             self.bail_descriptor_arity(&mismatch, ret, code);
                             return;
