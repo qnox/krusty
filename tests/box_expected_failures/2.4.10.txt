@@ -103,6 +103,7 @@ coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow_finally2.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
+coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/interfaceMethodWithBody.kt
@@ -134,6 +135,7 @@ coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
 coroutines/inlineClasses/resume/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/resume/invokeOperator.kt
+coroutines/inlineClasses/resumeWithException/boxReturnValueOfSuspendLambda.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -142,11 +144,13 @@ coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/inlineSuspendFunction.kt
 coroutines/inlineSuspendLambdaNonLocalReturn.kt
+coroutines/innerSuspensionCalls.kt
 coroutines/kt28844.kt
 coroutines/kt45377.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
+coroutines/simpleSuspendCallableReference.kt
 coroutines/stackUnwinding/inlineSuspendFunction.kt
 coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
@@ -158,6 +162,7 @@ coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/suspendFunctionTypeCall/simple.kt
 coroutines/tailCallOptimizations/crossinline.kt
+coroutines/varSpilling/fakeInlinerVariables.kt
 dataClasses/components/kt49812.kt
 defaultArguments/complexInheritance.kt
 defaultArguments/constructor/kt30517.kt
@@ -227,6 +232,7 @@ functions/bigArity/subclass.kt
 functions/delegatedPropertyWithMultipleOverriddens_generics.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
+functions/kt1199.kt
 functions/localFunctions/kt4777.kt
 ieee754/generic.kt
 ieee754/inline.kt
@@ -297,15 +303,8 @@ inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion.k
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion2.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion2Generic.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanionGeneric.kt
-inlineClasses/contextsAndAccessors/kt30780.kt
-inlineClasses/contextsAndAccessors/kt30780Generic.kt
-inlineClasses/crossinlineWithInlineClassInParameter.kt
-inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
-inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
 inlineClasses/defaultParameterValues/defaultConstructorParameterValuesOfInlineClassType.kt
 inlineClasses/defaultParameterValues/defaultConstructorParameterValuesOfInlineClassTypeGeneric.kt
-inlineClasses/defaultParameterValues/defaultValueOfInlineClassTypeInInlineFunInInlineClass.kt
-inlineClasses/defaultParameterValues/defaultValueOfInlineClassTypeInInlineFunInInlineClassGeneric.kt
 inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric.kt
 inlineClasses/defaultParameterValues/inlineClassSecondaryConstructor.kt
 inlineClasses/defaultParameterValues/inlineClassSecondaryConstructorGeneric.kt
@@ -431,7 +430,6 @@ objects/kt46136.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
 objects/substitutionFunctionFromSuper.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
-platformTypes/primitives/toShort.kt
 platformTypes/primitives/unaryMinus.kt
 primitiveTypes/equalityWithObject/generated/boxedEqPrimitiveByte.kt
 primitiveTypes/equalityWithObject/generated/boxedEqPrimitiveInt.kt
