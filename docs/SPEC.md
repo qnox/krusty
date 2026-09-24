@@ -7948,6 +7948,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and
   `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
 
+- **Every call infers fresh type variables, even a call to its enclosing declaration.**
+  Type-parameter identities are declaration-owned, so inside `class Tree<T>` the constructor's `T`
+  is the same symbol as the body's `T`, and inside `fun <V> f` a recursive `f(…)` names `f`'s own
+  `V`. Kotlin gives each call its own variable: `Tree(label)` with `label: T` constrains a fresh
+  `T'` from below by the enclosing, fixed `T` and solves `Tree<T>` with no expected type; a
+  recursive `f(v, "s")` joins `V` and `String` to `V' := Any?`. Reading the pair as `T` against
+  itself carried no evidence, so the call defaulted to `Tree<Any?>` (or ignored `V` and rejected
+  the argument). A callee formal that is lexically in scope at the call is renamed to a
+  call-owned identity for constraint solving and the solution is mapped back
+  (`CallSiteVariables`); the call's result template carries the same fresh variable, so a result
+  mentioning the enclosing `T` is complete rather than an open producer for an outer call to
+  solve, and the uninferred-parameter diagnostic accepts `V` resolved to the lexical `V`. A
+  formal not in scope keeps its identity, where `T` against `T` still marks a postponed
+  expression and contributes nothing. Tests: `tests/self_call_type_variables_e2e.rs`,
+  `symbol_resolver::generic_inference::call_site_variables::tests`.
+
 - **An anonymous function's `return` targets the anonymous function, everywhere.** `fun (…): T { …
   return e … }` is a LOCAL return — unlike a lambda's bare `return`, which is a non-local return from
   the enclosing function. Three seams each had to agree, and each was wrong in its own way:
