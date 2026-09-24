@@ -1822,6 +1822,193 @@ pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::H
     deleted
 }
 
+/// What an argument read in place does to the parameter load it replaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InPlaceLoad {
+    /// The first load of a parameter: the argument is already on the stack there.
+    Argument,
+    /// A load of the same parameter right after it: kotlinc duplicates the value instead.
+    Duplicate { wide: bool },
+}
+
+/// kotlinc's `canInlineArgumentsInPlace` (`codegen/inline/inlineArgumentsInPlace.kt`) over a body
+/// spliced as static over its descriptor's parameters, restricted to the case the splice can
+/// realize without moving code: the parameters are loaded in order before anything else runs,
+/// apart from the parameter null checks the splice deletes anyway. `None` when kotlinc would not
+/// read the arguments in place, or when the loads are not that leading run.
+///
+/// kotlinc's rule: every parameter is loaded exactly once, in order, before any branch, call,
+/// throwing or side-effecting instruction, a non-whitelisted `getstatic`, a write to a parameter,
+/// or the start of a protected range; and no parameter is read or written afterwards. A run of
+/// loads of one parameter becomes `dup`s of its argument.
+fn in_place_loads(
+    insns: &[Insn],
+    descriptor: &str,
+    body: &MethodCode,
+) -> Option<Vec<(usize, InPlaceLoad)>> {
+    let widths: Vec<u16> = {
+        let offsets = param_offsets(descriptor)?;
+        let end = param_store_ops(descriptor, 0)?
+            .last()
+            .map(|&(slot, op)| slot + if matches!(op, 0x37 | 0x39) { 2 } else { 1 })
+            .unwrap_or(0);
+        offsets
+            .iter()
+            .zip(offsets.iter().skip(1).copied().chain(std::iter::once(end)))
+            .map(|(&start, next)| next - start)
+            .collect()
+    };
+    let argument_end: u16 = widths.iter().sum();
+    if argument_end == 0 {
+        return None;
+    }
+    let offsets = old_offsets(&body.code)?;
+    let protected_starts: std::collections::HashSet<usize> = body
+        .handlers
+        .iter()
+        .filter_map(|handler| {
+            offsets
+                .iter()
+                .position(|&at| at == handler.start_pc as usize)
+        })
+        .collect();
+    let null_checks = null_check_deletions(insns, &body.source_cp);
+    let prohibited = |insn: &Insn| -> bool {
+        let op = match insn {
+            Insn::Plain { op, .. } => *op,
+            Insn::Branch { op, .. } | Insn::BranchW { op, .. } => *op,
+            Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => return true,
+        };
+        matches!(
+            op,
+            0x99..=0xb1
+                | 0xc6
+                | 0xc7
+                | 0xbf
+                | 0xb3
+                | 0xb5
+                | 0xb6..=0xba
+                | 0xc2
+                | 0xc3
+                | 0x6c
+                | 0x6d
+                | 0x70
+                | 0x71
+                | 0xc0
+                | 0xbc
+                | 0xbd
+                | 0xc5
+                | 0x2e..=0x35
+                | 0x4f..=0x56
+        )
+    };
+    let whitelisted_static = |insn: &Insn| -> bool {
+        let Insn::Plain { op: 0xb2, operands } = insn else {
+            return true;
+        };
+        let Some(index) = operands
+            .first()
+            .zip(operands.get(1))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low))
+        else {
+            return false;
+        };
+        let Some(C::Fieldref(class, names)) = body.source_cp.get(index as usize) else {
+            return false;
+        };
+        let owner = class_name(&body.source_cp, *class);
+        let named = name_and_type(&body.source_cp, *names);
+        matches!(
+            (owner, named),
+            (
+                Some("kotlin/Result"),
+                Some(("Companion", "Lkotlin/Result$Companion;"))
+            ) | (Some("kotlin/_Assertions"), Some(("ENABLED", "Z")))
+        )
+    };
+    let mut plan = Vec::new();
+    let mut expected: u16 = 0;
+    let mut parameter = 0usize;
+    let mut at = 0usize;
+    while expected < argument_end {
+        let insn = insns.get(at)?;
+        if protected_starts.contains(&at) || prohibited(insn) && !null_checks.contains(&at) {
+            return None;
+        }
+        if null_checks.contains(&at) {
+            at += 1;
+            continue;
+        }
+        if !whitelisted_static(insn) {
+            return None;
+        }
+        if stored_local(insn).is_some_and(|slot| slot < argument_end)
+            || incremented_local_slot(insn).is_some_and(|slot| slot < argument_end)
+        {
+            return None;
+        }
+        match loaded_local(insn) {
+            Some(slot) if slot == expected => {
+                plan.push((at, InPlaceLoad::Argument));
+                at += 1;
+                while insns.get(at).is_some_and(|next| {
+                    loaded_local(next) == Some(slot) && opcode_of(next) == opcode_of(insn)
+                }) {
+                    plan.push((
+                        at,
+                        InPlaceLoad::Duplicate {
+                            wide: widths[parameter] == 2,
+                        },
+                    ));
+                    at += 1;
+                }
+                expected += widths[parameter];
+                parameter += 1;
+            }
+            Some(slot) if slot < argument_end => return None,
+            // Anything else between the loads would have to move with its argument; the splice
+            // only realizes the leading run.
+            _ => return None,
+        }
+    }
+    // After the arguments are read, no parameter is touched again.
+    let touches = |insn: &Insn| {
+        loaded_local(insn)
+            .or_else(|| stored_local(insn))
+            .or_else(|| incremented_local_slot(insn))
+            .is_some_and(|slot| slot < argument_end)
+    };
+    if insns[at..]
+        .iter()
+        .enumerate()
+        .any(|(offset, insn)| !null_checks.contains(&(at + offset)) && touches(insn))
+    {
+        return None;
+    }
+    Some(plan)
+}
+
+fn opcode_of(insn: &Insn) -> Option<u8> {
+    match insn {
+        Insn::Plain { op, operands } if *op == 0xc4 => operands.first().copied(),
+        Insn::Plain { op, .. } => Some(match *op {
+            0x1a..=0x1d => 0x15,
+            0x1e..=0x21 => 0x16,
+            0x22..=0x25 => 0x17,
+            0x26..=0x29 => 0x18,
+            0x2a..=0x2d => 0x19,
+            other => other,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether kotlinc would read `body`'s arguments in place and the splice can realize it: the
+/// caller then pushes the arguments and the body reads them where they stand.
+pub fn reads_arguments_in_place(body: &MethodCode, descriptor: &str) -> bool {
+    disassemble(&body.code).is_some_and(|insns| in_place_loads(&insns, descriptor, body).is_some())
+}
+
 /// Pair each substituted lambda with the `FunctionN.invoke` its object load owns:
 /// `(lambda index, receiver-load index, invoke index)`, in body order.
 ///
@@ -1973,6 +2160,7 @@ pub fn spliced_frame(
     body: &MethodCode,
     descriptor: &str,
     lambda_params: &[usize],
+    in_place: bool,
     base: u16,
 ) -> Option<SplicedFrame> {
     let offsets_of_param = param_offsets(descriptor)?;
@@ -1988,7 +2176,11 @@ pub fn spliced_frame(
                 .map(|s| (lambda, s))
         })
         .collect::<Option<Vec<_>>>()?;
-    let removed: Vec<u16> = lambda_slots.iter().map(|&(_, slot)| slot).collect();
+    let removed: Vec<u16> = if in_place {
+        offsets_of_param.clone()
+    } else {
+        lambda_slots.iter().map(|&(_, slot)| slot).collect()
+    };
     let compact = |slot: u16| -> u16 {
         base + slot - removed.iter().filter(|&&gone| gone < slot).count() as u16
     };
@@ -2032,15 +2224,28 @@ pub fn spliced_frame(
     })
 }
 
+/// How a spliced body's parameters receive the caller's arguments, which the caller has pushed.
+#[derive(Clone, Copy)]
+pub(super) enum ParameterBinding<'a> {
+    /// Stored into the parameter slots; each listed lambda parameter is substituted at its invoke.
+    Stored(&'a [LambdaSplice]),
+    /// Read where the body loads them, kotlinc's in-place arguments: no slot is written.
+    InPlace,
+}
+
 pub(super) fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
     base: u16,
-    lambdas: &[LambdaSplice],
+    binding: ParameterBinding<'_>,
     start_offset: usize,
     cw: &mut ClassWriter,
     reified: &HashMap<String, ReifiedArgument>,
 ) -> Option<BranchySplice> {
+    let (lambdas, in_place): (&[LambdaSplice], bool) = match binding {
+        ParameterBinding::Stored(lambdas) => (lambdas, false),
+        ParameterBinding::InPlace => (&[], true),
+    };
     // A `reifiedOperationMarker` body specializes its reified type parameter at the call site. Without
     // the call's reified type arguments (`reified` empty) it can't be specialized — the marker THROWS at
     // runtime — so skip (the caller falls back / drops the file, never miscompiles). With them, the
@@ -2144,6 +2349,21 @@ pub(super) fn splice_unified(
                 }
             }
         }
+    }
+    // Arguments read in place: the caller has pushed them, so each parameter's first load goes and
+    // a load repeated right after it duplicates the argument, as kotlinc's transformer leaves it.
+    if in_place {
+        for (at, load) in in_place_loads(&insns, descriptor, body)? {
+            let repl = match load {
+                InPlaceLoad::Argument => Vec::new(),
+                InPlaceLoad::Duplicate { wide } => vec![Insn::Plain {
+                    op: if wide { 0x5c } else { 0x59 },
+                    operands: Vec::new(),
+                }],
+            };
+            edits.push(Edit { at, len: 1, repl });
+        }
+        edits.sort_by_key(|edit| edit.at);
     }
     // With NO literal lambdas to substitute (`t?.let(x)` — a passed `Function` value), invoke sites
     // remain ordinary interface calls on the parameter object.
@@ -2315,10 +2535,15 @@ pub(super) fn splice_unified(
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
     // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
     // body's locals through a map that both rebases and compacts.
-    let removed_slots: Vec<u16> = lambdas
-        .iter()
-        .filter_map(|lambda| offsets_of_param.get(lambda.param_index).copied())
-        .collect();
+    // Arguments read in place close their parameters' slots the same way: nothing is stored there.
+    let removed_slots: Vec<u16> = if in_place {
+        offsets_of_param.clone()
+    } else {
+        lambdas
+            .iter()
+            .filter_map(|lambda| offsets_of_param.get(lambda.param_index).copied())
+            .collect()
+    };
     let compact = |slot: u16| -> u16 {
         let closed = removed_slots.iter().filter(|&&gone| gone < slot).count() as u16;
         base + slot - closed
@@ -3125,10 +3350,89 @@ mod tests {
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let out =
-            splice_unified(&body, "(I)I", 1, &[], 0, &mut cw, &HashMap::new()).expect("splice");
+        let out = splice_unified(
+            &body,
+            "(I)I",
+            1,
+            ParameterBinding::Stored(&[]),
+            0,
+            &mut cw,
+            &HashMap::new(),
+        )
+        .expect("splice");
         assert!(out.join_required);
         assert!(!out.frames.is_empty());
+    }
+
+    fn in_place_body(code: Vec<u8>, max_locals: u16) -> MethodCode {
+        MethodCode {
+            max_stack: 2,
+            max_locals,
+            code,
+            source_cp: vec![C::Other],
+            stackmap: None,
+            handlers: vec![],
+            locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
+            bootstrap_methods: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_leading_run_of_parameter_loads_is_read_in_place() {
+        // `iload_0; iload_1; iadd; ireturn`, the shape of `maxOf(a, b)`'s body.
+        let body = in_place_body(vec![0x1a, 0x1b, 0x60, 0xac], 2);
+        assert!(reads_arguments_in_place(&body, "(II)I"));
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let out = splice_unified(
+            &body,
+            "(II)I",
+            3,
+            ParameterBinding::InPlace,
+            0,
+            &mut cw,
+            &HashMap::new(),
+        )
+        .expect("splice");
+        // Nothing is stored or reloaded: the two arguments on the stack are added directly.
+        assert_eq!(out.bytes, vec![0x60]);
+    }
+
+    #[test]
+    fn a_repeated_parameter_load_duplicates_its_argument() {
+        // `IntArray.copyOf` opens with `aload_0; aload_0; arraylength`, and kotlinc turns the second
+        // load into a `dup`. A stand-in with the same opening: `…; arraylength; pop; areturn`.
+        let body = in_place_body(vec![0x2a, 0x2a, 0xbe, 0x57, 0xb0], 1);
+        assert!(reads_arguments_in_place(&body, "([I)[I"));
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let out = splice_unified(
+            &body,
+            "([I)[I",
+            3,
+            ParameterBinding::InPlace,
+            0,
+            &mut cw,
+            &HashMap::new(),
+        )
+        .expect("splice");
+        assert_eq!(out.bytes, vec![0x59, 0xbe, 0x57]);
+    }
+
+    #[test]
+    fn a_parameter_read_again_later_is_not_read_in_place() {
+        // `iload_0; iload_0; iadd; iload_0; iadd; ireturn`: the third load comes after other code.
+        let body = in_place_body(vec![0x1a, 0x1a, 0x60, 0x1a, 0x60, 0xac], 1);
+        assert!(!reads_arguments_in_place(&body, "(I)I"));
+    }
+
+    #[test]
+    fn parameters_loaded_out_of_order_are_not_read_in_place() {
+        // `iload_1; iload_0; isub; ireturn`: moving the arguments would reorder their evaluation.
+        let body = in_place_body(vec![0x1b, 0x1a, 0x64, 0xac], 2);
+        assert!(!reads_arguments_in_place(&body, "(II)I"));
     }
 
     #[test]

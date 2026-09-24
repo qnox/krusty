@@ -13022,7 +13022,7 @@ impl<'a> Emitter<'a> {
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
         // compiler reuses slots belonging to host locals that are not written yet.
         let spliced_frame =
-            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, base);
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, false, base);
         let top_local = spliced_frame
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
@@ -13285,7 +13285,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            &lam_splices,
+            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
             0,
             self.cw,
             reified,
@@ -13359,7 +13359,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            &lam_splices,
+            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
             splice_start,
             self.cw,
             reified,
@@ -14035,14 +14035,47 @@ impl<'a> Emitter<'a> {
             return false;
         }
         let ret_words = descriptor_ret_words(descriptor);
-        let top_local = base + body.max_locals;
+        // kotlinc reads an `@InlineOnly` callee's arguments in place when its body passes
+        // `canInlineArgumentsInPlace` and no argument's code stores a local or jumps out of itself
+        // (`InplaceArgumentsMethodTransformer`): no parameter slot is written, and the slots close.
+        // An argument is only admitted when its code cannot contain either.
+        let in_place = inline_only
+            && !physical_params.is_empty()
+            && !physical_params.iter().any(|param| {
+                param
+                    .obj_internal()
+                    .is_some_and(|internal| internal.render().starts_with("kotlin/jvm/functions/"))
+            })
+            && args
+                .iter()
+                .all(|&argument| self.evaluates_without_local_writes(argument))
+            && crate::jvm::inline::reads_arguments_in_place(&body, splice_desc);
+        let binding = if in_place {
+            crate::jvm::inline::ParameterBinding::InPlace
+        } else {
+            crate::jvm::inline::ParameterBinding::Stored(&[])
+        };
+        let top_local = if in_place {
+            match crate::jvm::inline::spliced_frame(&body, splice_desc, &[], true, base) {
+                Some(frame) => frame.top_local,
+                None => return false,
+            }
+        } else {
+            base + body.max_locals
+        };
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
         // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
         // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
         // any `tableswitch`/`lookupswitch` pads correctly.
-        let Some(probe) =
-            crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw, reified)
-        else {
+        let Some(probe) = crate::jvm::inline::splice_unified(
+            &body,
+            splice_desc,
+            base,
+            binding,
+            0,
+            self.cw,
+            reified,
+        ) else {
             crate::trace_compiler!(
                 "splice",
                 "splice_unified probe failed for {owner}.{name}{descriptor} (splice_desc={splice_desc})"
@@ -14097,7 +14130,7 @@ impl<'a> Emitter<'a> {
             &body,
             splice_desc,
             base,
-            &[],
+            binding,
             splice_start,
             self.cw,
             reified,
@@ -14134,6 +14167,26 @@ impl<'a> Emitter<'a> {
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
         code.add_frame_if_new(join, prefix, join_stack);
         true
+    }
+
+    /// Whether `expression`'s code can neither store a local nor jump: kotlinc moves only such an
+    /// argument to where an `@InlineOnly` body reads it. Deliberately narrow — a shape left out keeps
+    /// the argument in its parameter slot, as before.
+    fn evaluates_without_local_writes(&self, expression: u32) -> bool {
+        match self.ir.expr(expression) {
+            IrExpr::GetValue(_)
+            | IrExpr::Const(_)
+            | IrExpr::GetStatic(_)
+            | IrExpr::ExternalStaticField { .. }
+            | IrExpr::ExternalStaticInstance { .. }
+            | IrExpr::EnclosingInstance { .. } => true,
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast | IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.evaluates_without_local_writes(*arg),
+            _ => false,
+        }
     }
 
     /// Caller-local verification types for slots `0..upto` (collapsing `long`/`double` to one entry),
