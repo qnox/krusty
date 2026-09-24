@@ -1140,104 +1140,7 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::When { subject, branches } => {
-                let mut prefix = Vec::new();
-                let subject = subject
-                    .map(|subject| {
-                        let subject_expression = self
-                            .body
-                            .expr(subject)
-                            .ok_or(FirLoweringFailure::MissingExpression(subject))?;
-                        let stable_local = match &subject_expression.kind {
-                            FirExprKind::ValueRead(value)
-                                if !self.local_value_is_mutable(*value) =>
-                            {
-                                Some(*value)
-                            }
-                            _ => None,
-                        };
-                        let subject_ty = subject_expression.ty.get();
-                        let value = self.expression(subject)?;
-                        // Only an immutable FIR value may replace the subject snapshot. An arbitrary
-                        // IR GetValue is not enough: a mutable `var` can change while earlier branch
-                        // conditions are evaluated, but every comparison must still see its original
-                        // subject value.
-                        if let Some(local) = stable_local {
-                            let slot = self.value_slot(local);
-                            if matches!(self.ir.expr(value), IrExpr::GetValue(read) if *read == slot) {
-                                return Ok::<_, FirLoweringFailure>(slot);
-                            }
-                        }
-                        let temporary = self.allocate_temporary();
-                        prefix.push(self.ir.add_expr(IrExpr::Variable {
-                            index: temporary,
-                            ty: subject_ty,
-                            init: Some(value),
-                            named: false,
-                        }));
-                        // A predicate condition (`is`, `in`) carries the subject expression itself.
-                        // From here on that expression is the temporary: lowering it again would
-                        // share the subject's IR node and evaluate it once more per test.
-                        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                        self.set_expression_state(subject, LoweringState::Lowered(read));
-                        Ok::<_, FirLoweringFailure>(temporary)
-                    })
-                    .transpose()?;
-                let mut lowered_branches = Vec::with_capacity(branches.len());
-                for branch in branches {
-                    let mut condition = None;
-                    for candidate in branch.conditions.iter().copied() {
-                        let candidate = match candidate {
-                            crate::fir::FirWhenCondition::SubjectEquals(candidate) => {
-                                let candidate = self.expression(candidate)?;
-                                let subject =
-                                    subject.ok_or(FirLoweringFailure::MissingWhenSubject {
-                                        origin: branch.origin,
-                                    })?;
-                                let subject = self.ir.add_expr(IrExpr::GetValue(subject));
-                                self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::Eq,
-                                    lhs: subject,
-                                    rhs: candidate,
-                                })
-                            }
-                            crate::fir::FirWhenCondition::Predicate(candidate) => {
-                                self.expression(candidate)?
-                            }
-                        };
-                        condition = Some(match condition {
-                            Some(previous) => self.short_circuit_or(previous, candidate),
-                            None => candidate,
-                        });
-                    }
-                    if let Some(guard) = branch.guard {
-                        let guard = self.expression(guard)?;
-                        condition = Some(match condition {
-                            Some(previous) => self.short_circuit_and(previous, guard),
-                            None => guard,
-                        });
-                    }
-                    lowered_branches.push((condition, self.expression(branch.result)?));
-                }
-                let when = self.ir.add_expr(IrExpr::When {
-                    branches: lowered_branches,
-                });
-                let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
-                // Carry the checker's result into common IR for every exhaustive `when`. An `else`
-                // is exhaustive even when the result is `Unit`; omitting that case made the JVM
-                // backend re-derive a physical type from the last branch (`Unit.INSTANCE`) and
-                // disagree with a sibling branch implemented by a void write. A no-else `Unit`
-                // `when` remains the one genuinely non-exhaustive statement form.
-                if has_else || expression.ty.get() != crate::types::Ty::Unit {
-                    self.ir.exhaustive_whens.insert(when, expression.ty.get());
-                }
-                if prefix.is_empty() {
-                    when
-                } else {
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: prefix,
-                        value: Some(when),
-                    })
-                }
+                self.when_expression(*subject, branches, expression.ty.get())?
             }
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
@@ -1702,14 +1605,14 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    pub(super) fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
         self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), rhs), (None, false_value)],
         })
     }
 
-    fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    pub(super) fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
         self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), true_value), (None, rhs)],

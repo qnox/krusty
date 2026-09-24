@@ -59,6 +59,7 @@ mod test_support;
 mod type_materialization;
 #[cfg(test)]
 mod type_operation_tests;
+mod when_expressions;
 
 pub(crate) use driver::check_and_dispatch_active_body_in_session;
 pub(crate) use driver::check_and_dispatch_signature_defaults_in_session;
@@ -98,10 +99,10 @@ use super::{
     FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
     FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
     FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
-    FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch, FirWhenCondition,
-    InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId,
-    OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
-    SyntheticOriginKind, UnpublishableType,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
+    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
+    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
+    UnpublishableType,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -2583,64 +2584,7 @@ impl BodyFirChecker<'_> {
                     }
                 }
                 Expr::Block { stmts, trailing } => self.block(expression, stmts, *trailing)?,
-                Expr::When { subject, arms } => {
-                    let has_subject = subject.is_some();
-                    let subject_syntax = *subject;
-                    let subject = subject
-                        .map(|subject| self.expression(subject))
-                        .transpose()?;
-                    // A predicate condition (`is`, `in`) is written over the subject expression
-                    // itself. Each one must read the subject's one checked value, not check (and so
-                    // evaluate) that expression again.
-                    let substituted = match (subject_syntax, subject) {
-                        (Some(syntax), Some(checked))
-                            if !self.expression_substitutions.contains_key(&syntax) =>
-                        {
-                            self.expression_substitutions.insert(syntax, checked);
-                            Some(syntax)
-                        }
-                        _ => None,
-                    };
-                    let branches = arms
-                        .iter()
-                        .map(|arm| {
-                            let origin = self.expression_origin(arm.body)?;
-                            let conditions = arm
-                                .conditions
-                                .iter()
-                                .map(|condition| {
-                                    let checked = if has_subject && !condition.is_predicate() {
-                                        self.expression(condition.expression())?
-                                    } else {
-                                        self.boolean_condition(condition.expression())?
-                                    };
-                                    Ok(if has_subject && !condition.is_predicate() {
-                                        FirWhenCondition::SubjectEquals(checked)
-                                    } else {
-                                        FirWhenCondition::Predicate(checked)
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            let guard = arm
-                                .guard
-                                .map(|guard| self.boolean_condition(guard))
-                                .transpose()?;
-                            Ok(FirWhenBranch {
-                                origin,
-                                conditions: conditions.into_boxed_slice(),
-                                guard,
-                                result: self.expression(arm.body)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, BodyCheckFailure>>();
-                    if let Some(syntax) = substituted {
-                        self.expression_substitutions.remove(&syntax);
-                    }
-                    FirExprKind::When {
-                        subject,
-                        branches: branches?.into_boxed_slice(),
-                    }
-                }
+                Expr::When { subject, arms } => self.when_expression(*subject, arms)?,
                 Expr::Try {
                     body,
                     catches,

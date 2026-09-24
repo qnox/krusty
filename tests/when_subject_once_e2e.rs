@@ -19,6 +19,20 @@ const SOURCE: &str = "sealed interface Shape\n\
     \x20   is Circle -> \"circle\"\n\
     \x20   else -> \"other\"\n\
     }\n\
+    fun negated(): String = when (next()) {\n\
+    \x20   !is Circle -> \"other\"\n\
+    \x20   else -> \"circle\"\n\
+    }\n\
+    var numberReads = 0\n\
+    fun number(): Int { numberReads++; return 2 }\n\
+    fun ranged(): Int = when (number()) {\n\
+    \x20   in 1..3 -> 7\n\
+    \x20   else -> 0\n\
+    }\n\
+    fun outside(): Int = when (number()) {\n\
+    \x20   !in 4..6 -> 8\n\
+    \x20   else -> 0\n\
+    }\n\
     class Holder {\n\
     \x20   var reads = 0\n\
     \x20   val shape: Shape get() { reads++; return Square(reads) }\n\
@@ -37,6 +51,14 @@ const SOURCE: &str = "sealed interface Shape\n\
     \x20   calls = 0\n\
     \x20   val second = named()\n\
     \x20   if (second != \"other\" || calls != 1) return \"named $second after $calls calls\"\n\
+    \x20   calls = 0\n\
+    \x20   val third = negated()\n\
+    \x20   if (third != \"other\" || calls != 1) return \"negated $third after $calls calls\"\n\
+    \x20   val ranged = ranged()\n\
+    \x20   if (ranged != 7 || numberReads != 1) return \"ranged $ranged after $numberReads reads\"\n\
+    \x20   numberReads = 0\n\
+    \x20   val outside = outside()\n\
+    \x20   if (outside != 8 || numberReads != 1) return \"outside $outside after $numberReads reads\"\n\
     \x20   val holder = Holder()\n\
     \x20   val side = holder.side()\n\
     \x20   if (side != 1 || holder.reads != 1) return \"side $side after ${holder.reads} reads\"\n\
@@ -47,5 +69,5 @@ const SOURCE: &str = "sealed interface Shape\n\
 
 #[test]
 fn a_when_subject_is_evaluated_once() {
-    common::expect_box_ok_with_stdlib(SOURCE, "WhenSubjectOnce");
+    common::expect_box_same_as_kotlinc(SOURCE, "WhenSubjectOnce");
 }
