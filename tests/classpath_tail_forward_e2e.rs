@@ -83,11 +83,11 @@ fn a_forwarded_suspension_still_resumes() {
          \x20   val forwarding = Forwarding(Parking())\n\
          \x20   val body: suspend () -> Unit = {{\n\
          \x20       val answer = forwarding.diff(\"x\")\n\
-         \x20       result = \"${{answer.count}}:${{forwarding.count()}}\"\n\
+         \x20       result = \"${{answer.count}}:${{forwarding.count()}}:${{forwarding.parcel().raw}}\"\n\
          \x20   }}\n\
          \x20   body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
          \x20   parked!!.resume(Answer(5))\n\
-         \x20   return if (result == \"5:7\") \"OK\" else \"result $result\"\n\
+         \x20   return if (result == \"5:7:9\") \"OK\" else \"result $result\"\n\
          }}\n"
     );
     assert_eq!(
