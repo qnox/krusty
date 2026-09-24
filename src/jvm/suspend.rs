@@ -4003,14 +4003,9 @@ impl Flat<'_> {
             *sc = Some(list);
         }
         self.set_label(out, resume);
-        let cont_arg = {
-            let c = self.gv(self.cont_v);
-            self.add(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: c,
-                type_operand: continuation_ty(),
-            })
-        };
+        // The machine's continuation is its own continuation class, already a `Continuation`:
+        // kotlinc passes it as it is (`aload $continuation; invoke…`), with no cast.
+        let cont_arg = self.gv(self.cont_v);
         // Callable points receive the CPS continuation argument. An intrinsic block already embeds
         // its continuation placeholder and is intentionally unchanged by `append_continuation`.
         if !append_continuation(self.ir, point, cont_arg, self.default_call_operands) {
