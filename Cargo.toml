@@ -2,8 +2,12 @@
 name = "krusty"
 version = "0.0.1"
 edition = "2021"
-description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
+description = "A Kotlin compiler written in Rust: compiles Kotlin to JVM bytecode that aims to match kotlinc byte for byte"
 license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+readme = "README.md"
+keywords = ["kotlin", "compiler", "jvm", "bytecode", "kotlinc"]
+categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
