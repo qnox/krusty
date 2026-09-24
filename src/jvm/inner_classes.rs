@@ -127,15 +127,18 @@ impl InnerClasses {
                 }
             };
 
-            // A class declared in a body (it has an enclosing scope) is not a member of the textual
-            // classifier prefix in its generated JVM name, and kotlinc lists it under its source
-            // name, the last segment of its naming provenance. A class nested in a local class is a
-            // member of that class. A coroutine state machine is anonymous in `InnerClasses` even
-            // though its own IR class is not a source anonymous-object declaration.
+            // A source local class is not a member of the textual classifier prefix in its generated
+            // JVM name, and kotlinc lists it under its source name from the checked naming
+            // provenance. A class nested in a local class is a member of that class. A coroutine
+            // state machine is anonymous in `InnerClasses` even though its own IR class is not a
+            // source anonymous-object declaration.
             let coroutine = is_coroutine_state_machine(class);
-            let local = class.enclosure.is_some();
-            let name = if local {
-                source_name(ir, class_id).unwrap_or(name)
+            let local = class.is_local_class;
+            let name = if local && !coroutine {
+                source_name(
+                    ir,
+                    u32::try_from(class_id).expect("too many classes for a packed class id"),
+                )
             } else {
                 name
             };
@@ -161,14 +164,21 @@ impl InnerClasses {
     }
 }
 
-/// The source name of a named local class: the last segment of its naming provenance.
-fn source_name(ir: &IrFile, class: usize) -> Option<String> {
-    let class = u32::try_from(class).expect("class id overflow");
-    let provenance = ir.local_class_name_provenance.get(&class)?;
-    if provenance.ordinal.is_some() {
-        return None;
-    }
-    provenance.segments.last().cloned()
+/// The source name of a named local class: the last segment of its checked naming provenance.
+fn source_name(ir: &IrFile, class: crate::ir::ClassId) -> String {
+    let provenance = ir
+        .local_class_name_provenance
+        .get(&class)
+        .expect("a named local class must carry checked naming provenance");
+    assert!(
+        provenance.ordinal.is_none(),
+        "a named local class cannot carry an anonymous-class ordinal"
+    );
+    provenance
+        .segments
+        .last()
+        .expect("a named local class must carry a source-name segment")
+        .clone()
 }
 
 fn is_coroutine_state_machine(class: &IrClass) -> bool {
@@ -215,7 +225,7 @@ pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::IrClass;
+    use crate::ir::{IrClass, IrEnclosure, IrLocalClassNameProvenance, IrModuleSource};
 
     #[test]
     fn prepares_identity_based_candidates_once_in_kotlinc_order() {
@@ -267,5 +277,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn named_local_and_its_member_use_checked_source_ownership() {
+        let mut ir = IrFile::default();
+        let owner = type_name("sample/Owner");
+        let local = type_name("sample/Owner$make$Local");
+        let member = type_name("sample/Owner$make$Local$Part");
+        let owner_id = ir.add_class(IrClass::synthetic(owner));
+
+        let mut local_class = IrClass::synthetic(local);
+        local_class.is_local_class = true;
+        local_class.enclosure = Some(IrEnclosure::File);
+        let local_id = ir.add_class(local_class);
+        ir.local_class_name_provenance.insert(
+            local_id,
+            IrLocalClassNameProvenance {
+                source: IrModuleSource {
+                    source: crate::fir::SourceFileId::from_raw(0),
+                    package: type_name("sample"),
+                },
+                lexical_owner: Some(crate::ir::IrLocalClassOwner::Class(owner_id)),
+                segments: vec!["make".to_string(), "Local".to_string()].into_boxed_slice(),
+                ordinal: None,
+            },
+        );
+        ir.add_class(IrClass::synthetic(member));
+
+        assert_eq!(
+            InnerClasses::new(&ir).specs,
+            [
+                InnerClassSpec {
+                    inner: "sample/Owner$make$Local".to_string(),
+                    outer: None,
+                    name: Some("Local".to_string()),
+                    access: 0x0019,
+                },
+                InnerClassSpec {
+                    inner: "sample/Owner$make$Local$Part".to_string(),
+                    outer: Some("sample/Owner$make$Local".to_string()),
+                    name: Some("Part".to_string()),
+                    access: 0x0019,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a named local class must carry checked naming provenance")]
+    fn named_local_without_provenance_is_rejected_instead_of_reparsed() {
+        let mut ir = IrFile::default();
+        let mut local = IrClass::synthetic(type_name("sample/Owner$make$Local"));
+        local.is_local_class = true;
+        local.enclosure = Some(IrEnclosure::File);
+        ir.add_class(local);
+
+        InnerClasses::new(&ir);
     }
 }
