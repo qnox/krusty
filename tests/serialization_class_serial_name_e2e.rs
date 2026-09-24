@@ -23,7 +23,7 @@ sealed class Event {\n\
 \n\
 @Serializable @SerialName(\"pt\") data class Point(val x: Int)\n\
 @Serializable @SerialName(\"lvl\") enum class Level { LOW, HIGH }\n\
-@Serializable @SerialName(\"box\") data class Box<T>(val v: T)\n";
+@Serializable @SerialName(\"envelope\") data class SerialEnvelope<T>(val v: T)\n";
 
 /// The observable contract: the discriminator each subclass writes, a round trip through it, and
 /// the `serialName` of each kind of generated descriptor.
@@ -43,7 +43,7 @@ fn a_class_serial_name_is_the_serial_form_under_both_compilers() {
          \x20       back.toString(),\n\
          \x20       Point.serializer().descriptor.serialName,\n\
          \x20       Level.serializer().descriptor.serialName,\n\
-         \x20       Box.serializer(Point.serializer()).descriptor.serialName,\n\
+         \x20       SerialEnvelope.serializer(Point.serializer()).descriptor.serialName,\n\
          \x20       Event.serializer().descriptor.serialName,\n\
          \x20   ).joinToString(\" | \")\n\
          }}\n"
@@ -52,7 +52,7 @@ fn a_class_serial_name_is_the_serial_form_under_both_compilers() {
     assert_eq!(
         outcome,
         "[{\"type\":\"created\",\"at\":1},{\"type\":\"moved\",\"to\":\"b\"}] | \
-         [Created(at=1), Moved(to=b)] | pt | lvl | box | ev"
+         [Created(at=1), Moved(to=b)] | pt | lvl | envelope | ev"
     );
 }
 
@@ -71,7 +71,7 @@ fn a_class_serial_name_is_the_constant_kotlinc_loads() {
         ("Point$$serializer", None, "pt"),
         ("Event$Created$$serializer", None, "created"),
         ("Level", None, "lvl"),
-        ("Box", Some("static {}"), "box"),
+        ("SerialEnvelope", Some("static {}"), "envelope"),
     ] {
         let Some(built) =
             compare_with_kotlinc_plugin("ClassSerialName", SOURCE, class, &cp, "25", &extra)

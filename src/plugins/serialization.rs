@@ -247,17 +247,6 @@ fn complete_frontend_serializer_accessor(
     Some(function)
 }
 
-/// The `@Serializable` serial name: the class's own `@SerialName` when it declares one, else the
-/// declaration's qualified Kotlin source name. Common lowering records the latter from stable
-/// declaration ownership while that information is available; the plugin must not reinterpret `$`
-/// in a JVM/internal name because it is also a legal identifier.
-fn serial_name(ir: &IrFile, class: ClassId) -> KtString {
-    annotations::class_serial_name_of(ir, class).unwrap_or_else(|| {
-        ir.class_source_qualified_name(class)
-            .expect("a serializable source classifier has a qualified declaration name")
-    })
-}
-
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
 /// companion, or synthesizing a `Foo$Companion` (`is_companion`: the emitter gives it a private ctor +
 /// a `(DefaultConstructorMarker)` accessor, and `companion_class` on the outer class emits the
@@ -1021,7 +1010,9 @@ impl SerializationPlugin {
         );
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(
+            annotations::class_serial_name(ir, class_id),
+        )));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: type_name(class_fq),
@@ -1270,7 +1261,9 @@ impl SerializationPlugin {
             })
             .collect();
 
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(
+            annotations::class_serial_name(ir, class_id),
+        )));
         let base_kclass = Self::kclass_literal(ir, class_fq);
         let sub_kclasses: Vec<ExprId> = subs
             .iter()
@@ -1807,7 +1800,9 @@ impl IrPlugin for SerializationPlugin {
             if is_value {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
                 // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
-                let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+                let name = ir.add_expr(IrExpr::Const(IrConst::String(
+                    annotations::class_serial_name(ir, class_id),
+                )));
                 let under_ser = foo_fields
                     .first()
                     .and_then(|(_, t)| element_serializer::always_available_builtin_serializer(t));
@@ -1837,8 +1832,9 @@ impl IrPlugin for SerializationPlugin {
                     named: false,
                 })];
             } else {
-                let pgsd_name =
-                    ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+                let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(
+                    annotations::class_serial_name(ir, class_id),
+                )));
                 // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
                 // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
                 //
@@ -2075,7 +2071,7 @@ impl IrPlugin for SerializationPlugin {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let descriptor_name = serial_name(ir, class_id);
+                    let descriptor_name = annotations::class_serial_name(ir, class_id);
                     let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
                     Some(add_cached_descriptor(
                         ir,

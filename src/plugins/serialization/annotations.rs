@@ -51,11 +51,19 @@ pub(super) fn serial_name_of(
     ctx.property_annotation_const_string(ir, class_id, property, type_name(SERIAL_NAME_FQ))
 }
 
-/// A class-level `@SerialName("…")`: the name the format uses for the class itself (a sealed
-/// subclass's discriminator value, a descriptor's `serialName`). `None` when the class declares
-/// none; an application whose value is not its `String` constant is a frontend defect, not a
-/// reason to fall back to the qualified name.
-pub(super) fn class_serial_name_of(ir: &IrFile, class_id: ClassId) -> Option<KtString> {
+/// The class name used in the serial form: a declared `@SerialName("…")`, or the stable qualified
+/// source name recorded by common lowering. The plugin must not reinterpret `$` in a JVM/internal
+/// name because it is also a legal source identifier.
+pub(super) fn class_serial_name(ir: &IrFile, class_id: ClassId) -> KtString {
+    class_serial_name_override(ir, class_id).unwrap_or_else(|| {
+        ir.class_source_qualified_name(class_id)
+            .expect("a serializable source classifier has a qualified declaration name")
+    })
+}
+
+/// A class-level `@SerialName("…")`. An application whose value is not its `String` constant is a
+/// frontend defect, not a reason to fall back to the qualified name.
+fn class_serial_name_override(ir: &IrFile, class_id: ClassId) -> Option<KtString> {
     let serial_name = type_name(SERIAL_NAME_FQ);
     let application = ir.classes[class_id as usize]
         .applied_annotations
