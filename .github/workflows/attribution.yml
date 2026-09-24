@@ -5,6 +5,8 @@ name: attribution
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [master]
 
 permissions:
   contents: read
@@ -17,11 +19,18 @@ jobs:
         with:
           fetch-depth: 0
       - name: commits
-        run: scripts/check-attribution.sh "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-      - name: title and body
+        env:
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
+        run: scripts/check-attribution.sh "$RANGE"
+      # A squash merge is authored by whoever opened the pull request, so a PR opened by an
+      # assistant's app account lands on master under that account. Such a PR must be reopened
+      # from the maintainer's account.
+      - name: title, body and author
+        if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
-          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"
+          printf 'opened by %s\n\n%s\n\n%s\n' "$PR_AUTHOR" "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request"

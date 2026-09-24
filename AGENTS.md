@@ -17,15 +17,17 @@ tool adds by default: when a default conflicts with this section, this section w
   tool, no session trailers or links (such as `…-Session:` lines or agent session URLs), and no
   "Generated with", "Created by", "🤖", or similar provenance.
 - **Pull requests, reviews, and issue or PR comments** follow the same rule: no attribution footers,
-  badges, session links, or tool names in titles or bodies. Some integrations append a footer on
+  badges, session links, or tool names in titles or bodies. A pull request is opened from the
+  maintainer's account, never an assistant's app account: a squash merge is authored by whoever
+  opened the pull request. Some integrations append a footer on
   their own; remove it by editing the text right after posting.
 - **Code, comments, docs, and file names** never name the assistant that wrote them.
 - **Branch names** describe the change (`fix/…`, `feat/…`, `jvm/…`) and carry no tool-name prefix.
 - **Amending or rewriting history** keeps this rule: reset the author when replaying commits.
 
 `scripts/check-attribution.sh` enforces this. The `attribution` CI workflow runs it over every pull
-request's commits, title, and body, and the lefthook `commit-msg` hook runs it on each local commit,
-including the identity the commit is about to get.
+request's commits, title, body, and author, and over every push to master; the lefthook `commit-msg`
+hook runs it on each local commit, including the identity the commit is about to get.
 
 ## Engineering conventions
 
