@@ -92,6 +92,18 @@ fn an_annotated_body_property_keeps_its_own_line() {
     );
 }
 
+/// A primary-constructor parameter that is no property (here the delegate of `by`) has no field,
+/// so the constructor's tables must be keyed by its parameters. Keyed by its first fields, the
+/// primary's line and local tables went to the all-defaults `<init>()` instead: the primary shipped
+/// with none, and `<init>()` got a line entry in the middle of its `invokespecial`.
+#[test]
+fn a_delegating_parameter_keeps_the_primary_constructor_table() {
+    let src = "interface Source { fun get(): String }\n\
+               class Impl : Source { override fun get() = \"x\" }\n\
+               class Wrapped(source: Source = Impl()) : Source by source\n";
+    assert_ctor_line_table_matches("DelegatingParameter", src, "Wrapped", &["3: 6"]);
+}
+
 /// Compare one class's primary-constructor `LineNumberTable` against kotlinc's, exactly.
 ///
 /// Fails CLOSED: an empty table on either side is a broken differential, not agreement.

@@ -2924,10 +2924,18 @@ fn attach_synth_debug_tables(
     // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
     // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
     let is_enum = !c.enum_entries.is_empty();
+    // The descriptor the primary was emitted under: its parameters, not its first fields. A
+    // parameter that is no property (`class C(p: T) : I by p`) has no field, so the first fields
+    // named a different constructor — the all-defaults `<init>()`, which then took this table.
+    let ctor_param_tys = class_ctor_jvm_tys(c);
+    let ctor_param_descs: String = ctor_param_tys
+        .iter()
+        .map(|&ty| crate::jvm::names::type_descriptor(ty))
+        .collect();
     let ctor_desc = if is_enum {
-        format!("(Ljava/lang/String;I{})V", ctor_field_descs(c))
+        format!("(Ljava/lang/String;I{ctor_param_descs})V")
     } else {
-        format!("({})V", ctor_field_descs(c))
+        format!("({ctor_param_descs})V")
     };
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
@@ -2987,19 +2995,13 @@ fn attach_synth_debug_tables(
     if has_ctor_marker_accessor(ir, c) {
         const MARKER: &str = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
         let mut acc_locals = ctor_locals.clone();
-        let marker_slot = c
-            .fields
-            .iter()
-            .take(c.ctor_param_count as usize)
-            .map(|f| slot_size(f.ty))
-            .sum::<u16>()
-            + 1;
+        let marker_slot = ctor_param_tys.iter().map(|&ty| slot_size(ty)).sum::<u16>() + 1;
         acc_locals.push((
             "$constructor_marker".to_string(),
             MARKER.to_string(),
             marker_slot,
         ));
-        let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
+        let acc_desc = format!("({ctor_param_descs}{MARKER})V");
         cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
     }
     // Synthesized property setters use the declaration's recorded nullability policy. This is
