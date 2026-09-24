@@ -1578,7 +1578,9 @@ impl BodyLowering<'_> {
         let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), rhs), (None, false_value)],
         });
-        self.ir.short_circuits.insert(when);
+        self.ir
+            .short_circuits
+            .insert(when, crate::ir::IrShortCircuitKind::And);
         when
     }
 
@@ -1587,7 +1589,9 @@ impl BodyLowering<'_> {
         let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), true_value), (None, rhs)],
         });
-        self.ir.short_circuits.insert(when);
+        self.ir
+            .short_circuits
+            .insert(when, crate::ir::IrShortCircuitKind::Or);
         when
     }
 

@@ -55,6 +55,32 @@ fn expression_dag_clone_preserves_checked_return_depth() {
 }
 
 #[test]
+fn expression_dag_clone_preserves_short_circuit_operator() {
+    let mut file = IrFile::default();
+    let left = file.add_expr(IrExpr::GetValue(0));
+    let right = file.add_expr(IrExpr::GetValue(1));
+    let false_value = file.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+    let short_circuit = file.add_expr(IrExpr::When {
+        branches: vec![(Some(left), right), (None, false_value)],
+    });
+    file.short_circuits
+        .insert(short_circuit, IrShortCircuitKind::And);
+
+    let (copy, identities) = clone_expression_dag(&mut file, short_circuit);
+
+    assert_ne!(copy, short_circuit);
+    assert_eq!(identities.get(&short_circuit), Some(&copy));
+    assert_eq!(
+        file.short_circuits.get(&short_circuit),
+        Some(&IrShortCircuitKind::And)
+    );
+    assert_eq!(
+        file.short_circuits.get(&copy),
+        Some(&IrShortCircuitKind::And)
+    );
+}
+
+#[test]
 fn expr_diverges_by_handles_branches_and_custom_leaves() {
     let mut f = IrFile::default();
     let condition = f.add_expr(IrExpr::Const(IrConst::Boolean(true)));
