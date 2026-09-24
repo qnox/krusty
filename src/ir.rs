@@ -1472,6 +1472,15 @@ pub enum IrEnclosure {
     /// A function body, or a local function's own function. A lambda is not a scope of its own:
     /// what it declares belongs to the function the lambda is written in.
     Function(FunId),
+    /// A source property accessor. The common IR keeps the property identity and accessor role;
+    /// each backend resolves that pair through its finalized property realization.
+    PropertyAccessor {
+        property: crate::fir::PropertyId,
+        setter: bool,
+    },
+    /// A source constructor. `ordinal == 0` is the primary declaration and later ordinals are
+    /// secondary declarations in source order. Its physical descriptor remains backend-owned.
+    Constructor { class: ClassId, ordinal: u32 },
     /// A top-level property initializer: the file itself.
     File,
     /// A classifier's property initializer or `init` block.
