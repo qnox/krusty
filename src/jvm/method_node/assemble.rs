@@ -133,6 +133,15 @@ pub struct AssembledCode {
     /// `(start_pc, line)` in node order.
     pub line_numbers: Vec<(u16, u16)>,
     pub local_variables: Vec<AssembledLocal>,
+    /// The offset each label stands at, by label id; `None` for a label no node places.
+    pub(super) label_offsets: Vec<Option<u16>>,
+}
+
+impl AssembledCode {
+    /// The offset `label` stands at, if a node places it.
+    pub fn offset_of(&self, label: LabelId) -> Option<u16> {
+        self.label_offsets.get(label.0 as usize).copied().flatten()
+    }
 }
 
 /// An instruction with its pool operands interned; only branch offsets are left to lay out.
@@ -239,6 +248,22 @@ fn inverse_condition(op: u8) -> Option<u8> {
         0xc7 => 0xc6,
         _ => return None,
     })
+}
+
+impl Insn {
+    /// The instruction's bytes, its operands interned into `sink`, when they do not depend on where
+    /// it stands; `None` for a jump or a switch, whose offsets and padding do.
+    pub fn encode_in_place(
+        &self,
+        sink: &mut impl ConstantSink,
+    ) -> Result<Option<Vec<u8>>, AssembleError> {
+        Ok(match encode(self, sink)? {
+            Encoded::Fixed(bytes) => Some(bytes),
+            Encoded::Jump { .. } | Encoded::TableSwitch { .. } | Encoded::LookupSwitch { .. } => {
+                None
+            }
+        })
+    }
 }
 
 fn encode(insn: &Insn, sink: &mut impl ConstantSink) -> Result<Encoded, AssembleError> {
@@ -567,6 +592,10 @@ impl MethodNode {
             exception_table,
             line_numbers,
             local_variables,
+            label_offsets: label_offsets
+                .into_iter()
+                .map(|offset| offset.map(|offset| offset as u16))
+                .collect(),
         })
     }
 }

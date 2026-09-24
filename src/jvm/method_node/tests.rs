@@ -410,6 +410,7 @@ fn a_branch_into_an_instruction_is_malformed() {
         exception_table: Vec::new(),
         line_numbers: Vec::new(),
         local_variables: Vec::new(),
+        label_offsets: Vec::new(),
     });
     assert_eq!(
         MethodNode::read(0x0009, "f", "()V", &body),
@@ -473,4 +474,185 @@ fn every_stdlib_method_round_trips() {
         }
     }
     assert!(methods > 10_000, "only {methods} stdlib methods were read");
+}
+
+/// The test pool seen as a pool a body is being written into, rather than as a class file's.
+impl ConstantPoolView for TestPool {
+    fn entry(&self, index: u16) -> Option<PoolEntry<'_>> {
+        super::pool::class_file_entry(self.cp.get(usize::from(index))?)
+    }
+
+    fn bootstrap_method(&self, index: u16) -> Option<(u16, &[u16])> {
+        self.bootstrap_methods
+            .get(usize::from(index))
+            .map(|(handle, arguments)| (*handle, arguments.as_slice()))
+    }
+}
+
+fn invoke_static(name: &str) -> Insn {
+    Insn::Method {
+        op: 0xb8,
+        owner: "fixture/Owner".to_string(),
+        name: name.to_string(),
+        desc: "()V".to_string(),
+        interface: false,
+    }
+}
+
+/// `try { call() } catch (e: Throwable) { throw e }` with `x` live to the end of the code, whose
+/// protected range and local both end at the code's last byte.
+fn guarded_body() -> MethodNode {
+    let mut node = MethodNode::new(0x0009, "f", "()V");
+    let [start, guarded_end, handler, end] = [(); 4].map(|_| node.new_label());
+    node.nodes = vec![
+        Node::Label(start),
+        Node::Line { line: 3, start },
+        Node::Insn(invoke_static("call")),
+        Node::Insn(Insn::Op(0xb1)),
+        Node::Label(handler),
+        Node::Insn(Insn::Op(0xbf)),
+        Node::Label(guarded_end),
+        Node::Label(end),
+    ];
+    node.try_catch_blocks = vec![TryCatchBlock {
+        start,
+        end: guarded_end,
+        handler,
+        catch_type: Some("java/lang/Throwable".to_string()),
+    }];
+    node.local_variables = vec![LocalVariable {
+        name: "x".to_string(),
+        desc: "I".to_string(),
+        start,
+        end,
+        slot: 0,
+    }];
+    node
+}
+
+#[test]
+fn a_body_reads_against_the_pool_it_was_written_into() {
+    let node = guarded_body();
+    let mut pool = TestPool::new();
+    let assembled = node.assemble(&mut pool).expect("assemble");
+    let body = pool.method_code(assembled);
+    let from_class_file = MethodNode::read(node.access, &node.name, &node.desc, &body)
+        .expect("read from the class file's pool");
+    let from_writer = MethodNode::read_code(
+        node.access,
+        &node.name,
+        &node.desc,
+        &CodeAttribute::from(&body),
+        &pool,
+    )
+    .expect("read from the writer's pool");
+    assert_eq!(from_writer, from_class_file);
+}
+
+#[test]
+fn a_range_may_end_at_the_end_of_the_code() {
+    let node = guarded_body();
+    let (assembled, reread) = round_trip(&node);
+    // invokestatic (3 bytes), return, athrow.
+    assert_eq!(assembled.code.len(), 5);
+    assert_eq!(assembled.exception_table.len(), 1);
+    assert_eq!(assembled.exception_table[0].1, 5);
+    assert_eq!(assembled.local_variables[0].length, 5);
+    // One label per distinct offset: the end of the protected range and of `x` are one label,
+    // which ends the node.
+    assert_eq!(
+        reread.nodes.last(),
+        Some(&Node::Label(reread.local_variables[0].end))
+    );
+    assert_eq!(
+        reread.try_catch_blocks[0].end,
+        reread.local_variables[0].end
+    );
+    let again = round_trip(&reread).0;
+    assert_eq!(again.code, assembled.code);
+    assert_eq!(again.exception_table, assembled.exception_table);
+    assert_eq!(again.local_variables, assembled.local_variables);
+}
+
+#[test]
+fn a_branch_or_line_at_the_end_of_the_code_is_malformed() {
+    let pool = TestPool::new();
+    let mut body = pool.method_code(AssembledCode {
+        max_stack: 0,
+        max_locals: 0,
+        // return; goto +0 is fine, goto +3 would leave the code.
+        code: vec![0xb1, 0xa7, 0x00, 0x03],
+        exception_table: Vec::new(),
+        line_numbers: Vec::new(),
+        local_variables: Vec::new(),
+        label_offsets: Vec::new(),
+    });
+    assert_eq!(
+        MethodNode::read(0x0009, "f", "()V", &body),
+        Err(MalformedCode {
+            offset: 1,
+            reason: "branch past the last instruction",
+        })
+    );
+    body.code = vec![0xb1];
+    body.lines = vec![(1, 7)];
+    assert_eq!(
+        MethodNode::read(0x0009, "f", "()V", &body),
+        Err(MalformedCode {
+            offset: 1,
+            reason: "line number past the last instruction",
+        })
+    );
+}
+
+#[test]
+fn label_offsets_account_for_a_widened_branch() {
+    let mut node = MethodNode::new(0x0009, "f", "()V");
+    let target = node.new_label();
+    node.nodes = vec![Node::Insn(Insn::Jump { op: 0xa7, target })];
+    node.nodes
+        .extend((0..32_764).map(|_| Node::Insn(Insn::Op(0x00))));
+    node.nodes.push(Node::Label(target));
+    node.nodes.push(Node::Insn(Insn::Op(0xb1)));
+    // `goto` at 0 reaches offset 32767, the farthest a two-byte delta can.
+    let reach = node.assemble(&mut TestPool::new()).expect("in range");
+    assert_eq!(reach.code[0], 0xa7);
+    assert_eq!(reach.offset_of(target), Some(32_767));
+    // One more byte widens it to the five-byte `goto_w`, moving the label by two.
+    node.nodes.insert(1, Node::Insn(Insn::Op(0x00)));
+    let widened = node.assemble(&mut TestPool::new()).expect("widened");
+    assert_eq!(widened.code[0], 0xc8);
+    assert_eq!(widened.offset_of(target), Some(32_770));
+}
+
+#[test]
+fn an_instruction_without_labels_encodes_and_decodes_alone() {
+    let mut pool = TestPool::new();
+    let call = invoke_static("call");
+    let bytes = call
+        .encode_in_place(&mut pool)
+        .expect("encode")
+        .expect("a call does not depend on where it stands");
+    assert_eq!(bytes[0], 0xb8);
+    assert_eq!(Insn::decode(&bytes, &pool), Ok(call));
+    let mut node = MethodNode::new(0x0009, "f", "()V");
+    let jump = Insn::Jump {
+        op: 0xa7,
+        target: node.new_label(),
+    };
+    assert_eq!(jump.encode_in_place(&mut pool), Ok(None));
+    assert_eq!(
+        Insn::decode(&[0xa7, 0x00, 0x00], &pool),
+        Err(MalformedCode {
+            offset: 0,
+            reason: "a jump or switch needs its labels",
+        })
+    );
+    assert_eq!(
+        Insn::decode(&[0xb1, 0xb1], &pool),
+        Err(MalformedCode {
+            offset: 0,
+            reason: "not exactly one instruction",
+        })
+    );
 }
