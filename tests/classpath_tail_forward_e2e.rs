@@ -13,10 +13,12 @@ use super::serialization_companion_byte_parity_e2e::{
 };
 
 const LIBRARY: &str = "package dependency\n\
+    @JvmInline value class ParcelId(val raw: Int)\n\
     class Answer(val count: Int)\n\
     interface Engine {\n\
     \x20   suspend fun diff(config: String): Answer\n\
     \x20   suspend fun count(): Int\n\
+    \x20   suspend fun parcel(): ParcelId\n\
     \x20   suspend fun forget(id: String)\n\
     }\n";
 
@@ -24,6 +26,7 @@ const SOURCE: &str = "import dependency.*\n\
     class Forwarding(private val delegate: Engine) : Engine {\n\
     \x20   override suspend fun diff(config: String): Answer = delegate.diff(config)\n\
     \x20   override suspend fun count(): Int = delegate.count()\n\
+    \x20   override suspend fun parcel(): ParcelId = delegate.parcel()\n\
     \x20   override suspend fun forget(id: String) = delegate.forget(id)\n\
     }\n";
 
@@ -48,6 +51,7 @@ fn a_tail_call_to_a_dependency_forwards_its_continuation_like_kotlinc() {
     for member in [
         "java.lang.Object diff(",
         "java.lang.Object count(",
+        "java.lang.Object parcel-",
         "java.lang.Object forget(",
     ] {
         let reference = method_instructions(&built.reference, member);
@@ -71,6 +75,7 @@ fn a_forwarded_suspension_still_resumes() {
          \x20   override suspend fun diff(config: String): Answer =\n\
          \x20       suspendCoroutineUninterceptedOrReturn {{ parked = it; COROUTINE_SUSPENDED }}\n\
          \x20   override suspend fun count(): Int = 7\n\
+         \x20   override suspend fun parcel(): ParcelId = ParcelId(9)\n\
          \x20   override suspend fun forget(id: String) {{}}\n\
          }}\n\
          fun box(): String {{\n\

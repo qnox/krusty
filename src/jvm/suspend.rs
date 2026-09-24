@@ -43,6 +43,7 @@ use spill_layout::{
     suspension_points_in_order, SpillLayout,
 };
 mod statement_normalization;
+mod tail_forward;
 mod value_liveness;
 
 use crate::ir::{
@@ -60,6 +61,7 @@ use statement_normalization::{
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
+use tail_forward::{make_forward_body, tail_forward_call};
 use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
@@ -2098,212 +2100,6 @@ fn when_has_non_direct_suspending_branch(
                 suspend_set,
             )
     })
-}
-
-/// Whether EXACTLY ONE suspension point is reachable from `e`. Iterative with a visited set (the expr arena
-/// can share/deeply-nest nodes — a recursive walk overflows the stack) and early-exits once a second is
-/// seen (the caller only needs the "== 1" answer).
-fn exactly_one_suspension_point(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool {
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![e];
-    let mut count = 0usize;
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        if is_suspension_point(ir, cur, set) {
-            count += 1;
-            if count > 1 {
-                return false;
-            }
-        }
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    count == 1
-}
-
-/// If the suspend body is a pure TAIL suspension — its result is one direct point in tail position and
-/// NOTHING else in the body suspends — return that point's `ExprId`. A callable point forwards its own
-/// `$completion` to the callee; an inlined intrinsic point already uses that completion internally. Both
-/// return the resulting `Object` directly without a continuation class. Detected before
-/// `desugar_tail_suspend`, which would otherwise bind the tail into a resume point and force a machine.
-/// Conservative: only a plain `return <point>` / trailing-value shape, never `if`/`when`/multi-return.
-fn tail_forward_call(
-    ir: &IrFile,
-    b: ExprId,
-    set: &HashSet<u32>,
-    declared_ret: Ty,
-    orig_rets: &[Ty],
-) -> Option<ExprId> {
-    let unit_ret = declared_ret == Ty::Unit;
-    if !exactly_one_suspension_point(ir, b, set) {
-        return None;
-    }
-    fn tail_expression(
-        ir: &IrFile,
-        expression: ExprId,
-        set: &HashSet<u32>,
-        unit_ret: bool,
-        orig_rets: &[Ty],
-    ) -> Option<ExprId> {
-        let tail = match &ir.exprs[expression as usize] {
-            IrExpr::Return(Some(e)) => *e,
-            IrExpr::Block { value: Some(v), .. }
-                if matches!(ir.exprs[*v as usize], IrExpr::Block { .. }) =>
-            {
-                return tail_expression(ir, *v, set, unit_ret, orig_rets);
-            }
-            IrExpr::Block { value: Some(v), .. } => *v,
-            IrExpr::Block {
-                value: None, stmts, ..
-            } => match stmts.last() {
-                Some(&last) => match ir.exprs[last as usize] {
-                    IrExpr::Return(Some(e)) => e,
-                    // A `Unit` fn written `= unitCall(…)` lowers to the call statement followed by
-                    // a bare `return`: the call is still the tail, as kotlinc forwards it.
-                    IrExpr::Return(None) if unit_ret && stmts.len() >= 2 => {
-                        let call = stmts[stmts.len() - 2];
-                        let peeled = match ir.exprs[call as usize] {
-                            IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg,
-                                type_operand: Ty::Unit,
-                            } => arg,
-                            _ => call,
-                        };
-                        if is_suspension_point(ir, peeled, set)
-                            && suspension_ret_unit(ir, peeled, set, orig_rets)
-                        {
-                            peeled
-                        } else {
-                            return None;
-                        }
-                    }
-                    // A `Unit` fn whose LAST statement is a BARE `Unit` suspend call
-                    // (`suspend fun delete(id) { repository.delete(id) }`) — kotlinc forwards it identically
-                    // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
-                    // on the CALLEE returning `Unit` too, so the forwarded value is what the caller expects.
-                    _ if unit_ret
-                        && is_suspension_point(ir, last, set)
-                        && suspension_ret_unit(ir, last, set, orig_rets) =>
-                    {
-                        last
-                    }
-                    // FIR preserves source grouping as nested statement-only blocks. They do not alter
-                    // control flow or evaluation order, so tail position passes through them exactly as
-                    // it does through the equivalent flattened block.
-                    _ if matches!(ir.exprs[last as usize], IrExpr::Block { .. }) => {
-                        return tail_expression(ir, last, set, unit_ret, orig_rets);
-                    }
-                    _ => return None,
-                },
-                None => return None,
-            },
-            _ => return None,
-        };
-        Some(tail)
-    }
-    let tail = tail_expression(ir, b, set, unit_ret, orig_rets)?;
-    // A dependency call's erased `Object` result is coerced to its declared type. When that is the
-    // function's own declared return, the callee's CPS `Object` is already what this function hands
-    // back, so kotlinc forwards it (`invoke…; areturn`). A value class or unsigned result is left
-    // alone: its carrier, not the declared type, travels through the `Object`.
-    let carried = |ty: Ty| {
-        let ty = ty.non_null();
-        ty.is_unsigned()
-            || ty.obj_internal().is_some_and(|name| {
-                ir.classes.iter().any(|c| c.is_value && c.fq_name == name)
-                    || ir.has_external_value_class_name(name)
-            })
-    };
-    let tail = match ir.exprs[tail as usize] {
-        IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
-        } if type_operand == declared_ret && !carried(type_operand) => arg,
-        _ => tail,
-    };
-    // A generic suspend call's erased result is cast to the declared type at the call site; a
-    // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
-    let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true).point;
-    is_suspension_point(ir, tail, set).then_some(tail)
-}
-
-/// Whether suspension point `e`'s LOGICAL result is `Unit` — a same-file callee via its declared return,
-/// or a recorded cross-unit/intrinsic point via its semantic side map.
-fn suspension_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[Ty]) -> bool {
-    if let Some(fid) = suspend_call_fid(ir, e, set) {
-        return orig_rets.get(fid as usize) == Some(&Ty::Unit);
-    }
-    recorded_suspension_result(ir, e).as_ref() == Some(&Ty::Unit)
-}
-
-/// Rewrite the body's tail so it `return`s the forwarded suspend call directly — the CPS `Object` result,
-/// unboxed and unwrapped (no state machine). A trailing VALUE is promoted to a `Return`; a BARE trailing
-/// call STATEMENT (the `Unit` forward) is replaced with `return <call>`; an existing return has its
-/// operand replaced too, because checked bottom completion may wrap the physical call.
-fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
-    match ir.exprs[b as usize].clone() {
-        // Before checked bottom completion was explicit, an existing tail return already held
-        // `call`. It may now hold `BottomValue(call)`: replace that semantic boundary just like a
-        // block value, because this frame forwards the physical CPS Object and its caller owns the
-        // resumed completion.
-        IrExpr::Return(Some(_)) => {
-            ir.exprs[b as usize] = IrExpr::Return(Some(call));
-        }
-        IrExpr::Block {
-            stmts,
-            value: Some(_),
-        } => {
-            // Return the PEELED `call`, not the block's value expr — the value is the callee call still
-            // wrapped in the redundant reference `Cast` that `tail_forward_call` stripped for detection.
-            // A tail-forward `areturn`s the callee's `Object` result verbatim (no `checkcast`); returning
-            // the wrapper would re-emit the cast that kotlinc omits.
-            let mut stmts = stmts;
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
-            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
-        }
-        IrExpr::Block { stmts, value: None }
-            if stmts.last().is_some_and(|last| {
-                matches!(ir.exprs[*last as usize], IrExpr::Return(Some(_)))
-            }) =>
-        {
-            let last = *stmts.last().expect("guard proved a trailing return");
-            ir.exprs[last as usize] = IrExpr::Return(Some(call));
-        }
-        IrExpr::Block {
-            mut stmts,
-            value: None,
-        } if stmts.last() == Some(&call) => {
-            stmts.pop();
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
-            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
-        }
-        // `= unitCall(…)`: the call statement (possibly coerced to `Unit`) and a bare `return`.
-        IrExpr::Block {
-            mut stmts,
-            value: None,
-        } if stmts.len() >= 2
-            && matches!(
-                ir.exprs[*stmts.last().expect("guard proved statements") as usize],
-                IrExpr::Return(None)
-            )
-            && {
-                let statement = stmts[stmts.len() - 2];
-                statement == call
-                    || matches!(
-                        ir.exprs[statement as usize],
-                        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, .. } if arg == call
-                    )
-            } =>
-        {
-            stmts.truncate(stmts.len() - 2);
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
-            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
-        }
-        _ => {}
-    }
 }
 
 /// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and erase
