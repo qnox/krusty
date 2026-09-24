@@ -33,7 +33,11 @@ pub(super) struct SerializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
     pub(super) serialized_class: ClassId,
+    /// Every backing field's name and type, by field index.
     pub(super) fields: &'a [(String, Ty)],
+    /// The backing field of each serial element, in element order. A `@Transient` property's
+    /// field is not among them and is never written.
+    pub(super) elements: &'a [usize],
     pub(super) field_defaults: &'a [Option<IrConst>],
     pub(super) nested_serializers: &'a [Option<ClassId>],
     /// The serializers of the class's type parameters, on the generic `$serializer`.
@@ -52,6 +56,7 @@ impl SerializeBody<'_> {
             serializer_class,
             serialized_class: foo_id,
             fields,
+            elements,
             field_defaults,
             nested_serializers: nested,
             type_parameter_serializers,
@@ -117,7 +122,7 @@ impl SerializeBody<'_> {
                 plan.as_ref(),
                 Some(cache_local),
                 i,
-                fields.len(),
+                elements.len(),
                 "kotlinx/serialization/SerializationStrategy",
             ) {
                 return Some(cached);
@@ -159,7 +164,9 @@ impl SerializeBody<'_> {
                     args: vec![],
                 }))
             };
-        for (i, (pname, ty)) in fields.iter().enumerate() {
+        // Element `i` is written from backing field `field`; they differ after a transient property.
+        for (i, &field) in elements.iter().enumerate() {
+            let (pname, ty) = &fields[field];
             let n_before = stmts.len();
             let d = if delegate {
                 ir.add_expr(IrExpr::GetValue(2))
@@ -167,7 +174,7 @@ impl SerializeBody<'_> {
                 this_desc(ir)
             };
             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-            let Some(v) = read_property(ir, i, pname, ty) else {
+            let Some(v) = read_property(ir, field, pname, ty) else {
                 bail = true;
                 break;
             };
@@ -218,7 +225,7 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, inst, v],
                 }));
-            } else if nested[i].is_some()
+            } else if nested[field].is_some()
                 || ty
                     .non_null()
                     .obj_internal()
@@ -312,9 +319,9 @@ impl SerializeBody<'_> {
             // A constant default is compared as that constant. Any other default is the property's
             // checked initializer, evaluated again here with an earlier property read off the
             // object being written, which is what kotlinc's `write$Self` does.
-            let constant_default = field_defaults.get(i).cloned().flatten();
+            let constant_default = field_defaults.get(field).cloned().flatten();
             let computed_default = constant_default.is_none()
-                && super::property_default::checked_default(ir, foo_id, i).is_some();
+                && super::property_default::checked_default(ir, foo_id, field).is_some();
             if (constant_default.is_some() || computed_default) && stmts.len() == n_before + 1 {
                 let enc_stmt = stmts.pop().unwrap();
                 let cd = if delegate {
@@ -334,7 +341,7 @@ impl SerializeBody<'_> {
                     args: vec![cd, ci],
                 });
                 // Re-read the property because one IR expression cannot occupy two tree nodes.
-                let Some(cur) = read_property(ir, i, pname, ty) else {
+                let Some(cur) = read_property(ir, field, pname, ty) else {
                     bail = true;
                     break;
                 };
@@ -367,7 +374,7 @@ impl SerializeBody<'_> {
                         let Some(def) = super::property_default::default_in_frame(
                             ir,
                             foo_id,
-                            i,
+                            field,
                             super::property_default::DefaultFrame {
                                 first_free_local: if delegate {
                                     cache_local + u32::from(plan.is_some())
@@ -599,6 +606,7 @@ mod tests {
             serializer_class,
             serialized_class,
             fields: &fields,
+            elements: &[0],
             field_defaults: &[None],
             nested_serializers: &[None],
             type_parameter_serializers:

@@ -1,7 +1,7 @@
 //! Shared test helpers.
 
 mod kotlin_metadata;
-mod source_set_compile;
+pub mod source_set_compile;
 
 pub use source_set_compile::compile_in_process_files;
 

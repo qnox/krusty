@@ -1465,6 +1465,10 @@ mod serialization_object_serializer_e2e;
 mod serialization_roundtrip_e2e;
 #[path = "common/serialization.rs"]
 mod serialization_test_support;
+#[path = "serialization_transient_diagnostics_e2e.rs"]
+mod serialization_transient_diagnostics_e2e;
+#[path = "serialization_transient_e2e.rs"]
+mod serialization_transient_e2e;
 #[path = "serialization_tuple_elements_e2e.rs"]
 mod serialization_tuple_elements_e2e;
 #[path = "serialization_type_parameter_elements_e2e.rs"]

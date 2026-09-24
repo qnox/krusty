@@ -247,7 +247,8 @@ told plainly that krusty substituted its own implementation for the original plu
 
 `resolve` returns the active native extensions as one `NativePlugins` value. The analysis carries it
 (`frontend::PlatformProvider::with_native_plugins`) into signature collection (generated
-declarations), body checking (expression plans such as `serializer<T>()`) and, through
+declarations), body checking (expression plans such as `serializer<T>()`, and class rules such as
+serialization's `@Transient` initializer check, `IrPlugin::check_frontend_class`) and, through
 `CheckedIrFile::native_plugins`, the backend's plugin pass; each phase builds its `PluginHost` from
 that one value, so they cannot disagree. Callers choose it explicitly:
 

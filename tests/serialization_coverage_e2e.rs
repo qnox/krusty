@@ -3,9 +3,11 @@
 //! kotlinc anywhere. Each test compiles a `@Serializable` program (plugin emits the `$serializer`, the
 //! `C.serializer()` accessor, and the `Json.encode/decode` calls), the JVM runs `box()` against the
 //! published kotlinx-serialization runtime, and we assert the JSON / descriptor shape. This complements
-//! `serialization_krusty_only_e2e.rs` with DIFFERENT scenarios (an all-primitives data class, an enum
-//! FIELD, `@Transient`, class-level `@SerialName`, a multi-class reference graph, a `List<T>` of a
-//! nested `@Serializable`, and descriptor element-index introspection).
+//! `serialization_krusty_only_e2e.rs` with DIFFERENT scenarios (an all-primitives data class, a
+//! multi-class reference graph, a `List<T>` of a nested `@Serializable`, descriptor element-index
+//! introspection, nullable nested properties, and a standalone enum). `@Transient` is covered against
+//! kotlinc instead, in `serialization_transient_e2e.rs` and
+//! `serialization_transient_diagnostics_e2e.rs`.
 //!
 //! Self-skips if the kotlinx-serialization runtime jars aren't locatable.
 
@@ -112,14 +114,14 @@ fun box(): String {
     eprintln!("pure-krusty all-primitives data class round-trip OK");
 }
 
-// NOTE: Three further scenarios were prototyped and DROPPED — they exercise plugin features krusty
-// does not yet implement (verified failing, compiler left unmodified):
+// NOTE: Two further scenarios were prototyped and DROPPED — they exercise plugin features krusty
+// did not implement when this suite was written (verified failing, compiler left unmodified):
 //   * an `@Serializable enum` used as a FIELD of another `@Serializable` class — encode produced empty
 //     JSON (the child EnumSerializer isn't wired for a nested enum element);
-//   * `@Transient` on a property — the field is still counted in the descriptor (`elementsCount`
-//     included it) and emitted, i.e. not skipped;
 //   * class-level `@SerialName` — `descriptor.serialName` stays the simple class name (rename not
 //     applied; only property-level `@SerialName` is honored, as covered in the sibling suite).
+// A third, `@Transient` on a property, is implemented: the property is left out of the descriptor and
+// the document, as `serialization_transient_e2e.rs` checks against kotlinc.
 
 #[test]
 fn multi_class_reference_graph_round_trips_in_krusty() {
