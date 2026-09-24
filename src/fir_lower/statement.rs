@@ -283,6 +283,7 @@ impl BodyLowering<'_> {
         if self.local_class_captures.contains_key(&classifier) {
             return Err(FirLoweringFailure::MissingLocalClass(declaration));
         }
+        self.ir.classes[class as usize].enclosure = self.enclosure;
         let mut values = Vec::with_capacity(captures.len());
         let mut fields = Vec::with_capacity(captures.len());
         let mut arguments = Vec::with_capacity(captures.len());

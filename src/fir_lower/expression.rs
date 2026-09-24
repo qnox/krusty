@@ -1378,9 +1378,6 @@ impl BodyLowering<'_> {
         expression_id: crate::fir::FirExprId,
         first_generated: usize,
     ) {
-        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
-            return;
-        };
         let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
             matches!(
                 self.ir.exprs[raw],
@@ -1392,6 +1389,14 @@ impl BodyLowering<'_> {
             )
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
+            return;
+        };
+        if let Some(enclosure) = self.enclosure {
+            self.ir
+                .callable_reference_enclosures
+                .insert(reference as u32, enclosure);
+        }
+        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
             return;
         };
         let lexical_owner = match provenance.lexical_owner {

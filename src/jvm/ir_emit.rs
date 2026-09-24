@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile, IrFunction,
-    IrTypeOp,
+    Callee, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile, IrTypeOp,
 };
 use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
@@ -5493,22 +5492,54 @@ fn property_annotation_marker_fids(
         .collect()
 }
 
-/// The checker/lowerer-bound callable that encloses an anonymous class, with its JVM owner. The
-/// callable identity is exact; only the final owner rendering is a backend boundary conversion.
-fn anonymous_scope<'a>(
-    ir: &'a IrFile,
+/// A local, anonymous or generated class's `EnclosingMethod`: the JVM class its scope belongs to,
+/// and the method when that scope is one, as `(name, descriptor)`. kotlinc's rule: a function (a
+/// local function being its own) names itself; a top-level property initializer names the file
+/// facade with no method; a classifier's initializer names its primary `<init>`, or no method when
+/// the classifier's storage is static (an object, or a companion whose fields its outer class
+/// holds, and so its outer class).
+fn class_enclosure(
+    ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
-) -> Option<(String, &'a IrFunction)> {
-    if !c.is_anonymous_object {
-        return None;
+) -> Option<(String, Option<(String, String)>)> {
+    match c.enclosure? {
+        crate::ir::IrEnclosure::Function(function) => {
+            let declaration = &ir.functions[function as usize];
+            let owner = declaration
+                .dispatch_receiver
+                .map(TypeName::render)
+                .unwrap_or_else(|| facade.to_string());
+            let descriptor = method_descriptor(
+                &jvm_function_params(ir, function),
+                jvm_declared_ty(&declaration.ret),
+            );
+            Some((owner, Some((declaration.name.clone(), descriptor))))
+        }
+        crate::ir::IrEnclosure::File => Some((facade.to_string(), None)),
+        crate::ir::IrEnclosure::ClassInitializer(class) => {
+            let class = &ir.classes[class as usize];
+            if class.is_companion {
+                let outer = ir
+                    .classes
+                    .iter()
+                    .find(|outer| outer.companion_class == Some(class.fq_name))?;
+                let holder = if is_jvm_interface(outer) {
+                    class
+                } else {
+                    outer
+                };
+                return Some((holder.fq_name(), None));
+            }
+            if static_storage(ir, class) {
+                return Some((class.fq_name(), None));
+            }
+            class.has_primary_ctor.then(|| {
+                let descriptor = method_descriptor(&class_ctor_jvm_tys(class), Ty::Unit);
+                (class.fq_name(), Some(("<init>".to_string(), descriptor)))
+            })
+        }
     }
-    let function = &ir.functions[c.enclosing_function? as usize];
-    let owner = function
-        .dispatch_receiver
-        .map(TypeName::render)
-        .unwrap_or_else(|| facade.to_string());
-    Some((owner, function))
 }
 
 /// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
@@ -5660,11 +5691,17 @@ fn emit_class(
     let superclass = c.superclass();
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let mut cw = new_classifier_writer(ir, c, &superclass, env, opts);
-    // A LOCAL class needs an `EnclosingMethod` attribute: without it reflection reads the class as
-    // top-level and `simpleName` reports the whole `owner$Local` name instead of `Local`. The
-    // enclosing class is the longest `$`-prefix of the name that is itself an emitted class (a local
-    // class inside a member) — otherwise the file facade, which is where a top-level function lives.
-    if c.is_local_class && !c.is_anonymous_object {
+    // A LOCAL or ANONYMOUS class carries kotlinc's `EnclosingMethod` attribute: without it
+    // reflection reads the class as top-level and `simpleName` reports the whole `owner$Local` name.
+    // The lowering records the exact scope; a class it has none for (a scope not yet recorded, such
+    // as an accessor or a constructor) names the longest `$`-prefix of its name that is an emitted
+    // class, or else the file facade, with no method.
+    if let Some((owner, method)) = class_enclosure(ir, c, facade) {
+        match method {
+            Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
+            None => cw.set_enclosing_class(&owner),
+        }
+    } else if c.is_local_class && !c.is_anonymous_object {
         let owner = fq_name
             .match_indices('$')
             .map(|(at, _)| &fq_name[..at])
@@ -5689,15 +5726,6 @@ fn emit_class(
         c,
         opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
     );
-    // An ANONYMOUS class carries kotlinc's enclosure record: the `EnclosingMethod` attribute
-    // (owner + the exact enclosing method's name/descriptor) and an INNER-ONLY `InnerClasses` entry
-    // (`outer_class_info_index = 0`, no simple name — the JVM's anonymous-class shape). Registered
-    // BEFORE the file-nest registration below: the first registration for a class wins, and the
-    // nest derives an outer+name shape kotlinc doesn't give anonymous classes.
-    if let Some((owner, function)) = anonymous_scope(ir, c, facade) {
-        let descriptor = ir_method_desc(&function.params, &function.ret);
-        cw.set_enclosing_method(&owner, &function.name, &descriptor);
-    }
     env.inner_classes.register(&mut cw);
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
@@ -7448,6 +7476,15 @@ fn emit_func_ref_class(
     } else {
         0x1000 | 0x0010 | 0x0020 // SYNTHETIC | FINAL | SUPER
     });
+    // kotlinc's enclosure record: the scope the reference is written in, and an inner-only
+    // `InnerClasses` entry for the class itself and each class it names.
+    if let Some((owner, method)) = class_enclosure(ir, c, facade) {
+        match method {
+            Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
+            None => cw.set_enclosing_class(&owner),
+        }
+    }
+    env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(physical_arity));
     if suspend {
         // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
@@ -19745,14 +19782,14 @@ mod fail_soft_tests {
         });
         let mut anonymous = crate::plugins::synthetic_class("demo/opaque_identity");
         anonymous.is_anonymous_object = true;
-        anonymous.enclosing_function = Some(selected);
+        anonymous.enclosure = Some(crate::ir::IrEnclosure::Function(selected));
 
-        let (resolved_owner, function) =
-            anonymous_scope(&ir, &anonymous, "IgnoredFacade").expect("bound enclosure");
+        let (resolved_owner, method) =
+            class_enclosure(&ir, &anonymous, "IgnoredFacade").expect("bound enclosure");
         assert_eq!(resolved_owner, "demo/Owner");
         assert_eq!(
-            ir_method_desc(&function.params, &function.ret),
-            "(Ljava/lang/String;)V"
+            method,
+            Some(("build".to_string(), "(Ljava/lang/String;)V".to_string()))
         );
     }
 

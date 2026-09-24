@@ -54,6 +54,17 @@ pub(super) fn reference_class_name(
         .unwrap_or_else(|| type_name(&format!("{current_facade}$fir${kind}${}", ir.classes.len())))
 }
 
+/// The scope the reference at `expression` is written in, which its class is enclosed by.
+pub(super) fn reference_enclosure(
+    ir: &IrFile,
+    expression: usize,
+) -> Option<crate::ir::IrEnclosure> {
+    u32::try_from(expression)
+        .ok()
+        .and_then(|raw| ir.callable_reference_enclosures.get(&raw))
+        .copied()
+}
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
     current_facade: &str,
@@ -138,6 +149,7 @@ fn realize_adapter_reference(
     }
     let internal = reference_class_name(ir, current_facade, expression, "function");
     let mut class = IrClass::synthetic(internal);
+    class.enclosure = reference_enclosure(ir, expression);
     class.superclass = type_name(if adapted {
         "kotlin/jvm/internal/AdaptedFunctionReference"
     } else {
@@ -736,6 +748,7 @@ pub(super) fn realize(
             .map_err(|_| FunctionReferenceRealizationTarget::External(declaration))?;
         let internal = reference_class_name(ir, current_facade, raw, "function");
         let mut class = IrClass::synthetic(internal);
+        class.enclosure = reference_enclosure(ir, raw);
         class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
         class.func_ref = Some(FuncRef {
             adapted: false,

@@ -5294,7 +5294,7 @@ fn build_continuation_class(
         fq_name: crate::types::type_name(internal),
         is_source_declared: false,
         is_anonymous_object: false,
-        enclosing_function: None,
+        enclosure: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,

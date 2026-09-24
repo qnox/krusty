@@ -178,6 +178,7 @@ pub(crate) fn lower_body_with_context(
         vec![HashMap::new()],
         local_callables.realizations.clone(),
     );
+    lowering.enclosure = root_enclosure(&body, index, lowering.ir, declaration);
     lowering.prepare_local_functions()?;
     lowering.realize_local_functions()?;
     let defaults = body
@@ -305,6 +306,43 @@ struct BodyLowering<'a> {
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
     expression_depth: u32,
+    /// The executable scope the classes this body declares or generates belong to.
+    enclosure: Option<crate::ir::IrEnclosure>,
+}
+
+/// The enclosure of a root body: its function, or the file or classifier whose initialization it
+/// is part of. A default-argument fragment, an accessor and a constructor have none recorded yet.
+fn root_enclosure(
+    body: &FirBody,
+    index: &ResolvedModuleIndex,
+    ir: &IrFile,
+    declaration: crate::fir::DeclarationId,
+) -> Option<crate::ir::IrEnclosure> {
+    use crate::fir::DeclarationKind;
+    if body.is_default_fragment() {
+        return None;
+    }
+    let classifier = || {
+        let classifier = index.enclosing_classifier(declaration)?.classifier;
+        let class = ir
+            .classes
+            .iter()
+            .position(|class| class.fq_name == classifier)?;
+        Some(crate::ir::ClassId::try_from(class).expect("too many classes"))
+    };
+    match index.declaration_anchor(declaration)?.kind {
+        DeclarationKind::Function => index
+            .callable_for_declaration(declaration)
+            .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
+            .map(|&function| crate::ir::IrEnclosure::Function(function)),
+        DeclarationKind::Property => Some(
+            classifier().map_or(crate::ir::IrEnclosure::File, |classifier| {
+                crate::ir::IrEnclosure::ClassInitializer(classifier)
+            }),
+        ),
+        DeclarationKind::Initializer => classifier().map(crate::ir::IrEnclosure::ClassInitializer),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -407,6 +445,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
             control_path: Vec::new(),
+            enclosure: None,
             expression_depth: 0,
         }
     }

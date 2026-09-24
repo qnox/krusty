@@ -101,7 +101,7 @@ fn annotation_implementation(
         fq_name,
         is_source_declared: false,
         is_anonymous_object: false,
-        enclosing_function: None,
+        enclosure: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,
