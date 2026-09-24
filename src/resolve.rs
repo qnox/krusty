@@ -437,66 +437,6 @@ fn order_primary_class_bounds(
     }
 }
 
-struct BootstrapSymbolSource<'a> {
-    declarations: &'a std::collections::HashSet<TypeName>,
-    aliases: &'a std::collections::HashSet<TypeName>,
-    libraries: &'a dyn SymbolSource,
-}
-
-impl SymbolSource for BootstrapSymbolSource<'_> {
-    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-        self.libraries.platform_flexible_upper_bound(lower)
-    }
-
-    fn symbols(
-        &self,
-        namespace: crate::symbol_source::SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        let library = self.libraries.symbols(namespace, name);
-        let declaration = match namespace {
-            crate::symbol_source::SymbolNamespace::Package(package) => {
-                crate::types::existing_type_name_child(package, name)
-            }
-            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
-                crate::types::existing_type_name_nested_child(owner, name)
-            }
-        };
-        if declaration.is_some_and(|declaration| {
-            self.declarations.contains(&declaration) || self.aliases.contains(&declaration)
-        }) {
-            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                classifier_name: declaration,
-                classifier: Some(std::sync::Arc::new(
-                    crate::libraries::LibraryType::declaration_header(),
-                )),
-                callables: library.callables.clone(),
-                importable_declaration: library.importable_declaration,
-            })
-        } else {
-            library
-        }
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        crate::types::existing_type_name_child(parent, name).is_some_and(|package| {
-            self.declarations
-                .iter()
-                .chain(self.aliases.iter())
-                .any(|declaration| {
-                    let mut owner = declaration.parent();
-                    while let Some(current) = owner {
-                        if current == package {
-                            return true;
-                        }
-                        owner = current.parent();
-                    }
-                    false
-                })
-        }) || self.libraries.package_exists(parent, name)
-    }
-}
-
 /// Validate an import from left to right and return its single source diagnostic, if any.
 fn import_path_diagnostic(
     import: &crate::ast::ImportPath,
