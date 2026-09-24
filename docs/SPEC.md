@@ -6182,6 +6182,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `try` or an inlined lambda, and only on a singly reached node.
   Tests: `tests/tailrec_e2e.rs` (`a_unit_tailrec_bare_return_loops_wherever_it_stands`,
   cross-checked against the reference compiler).
+- **A class-level `@SerialName` names the class in the serial form.** It is the `serialName` of the
+  class's generated descriptor, of an enum's serializer and of a sealed base's
+  `SealedClassSerializer`, and so the discriminator value a sealed hierarchy writes for each
+  subclass: `@SerialName("created") data class Created(…) : Event()` is written as
+  `{"type":"created",…}`. Only property and enum-entry `@SerialName`s were read, so the qualified
+  name `Event.Created` went out instead and a document kotlinc wrote could not be read back. The
+  class's own `@SerialName` now takes precedence over its qualified name wherever the plugin names
+  the class.
+  Tests: `tests/serialization_class_serial_name_e2e.rs` (the JSON and every descriptor's
+  `serialName` under both compilers, and the string constants each generated class loads).
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole
