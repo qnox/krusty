@@ -6441,6 +6441,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
   argument inferred as an intersection type, and a use-site projection written in a typealias
   (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
+  applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
+  or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the
+  constructor's `Map<? extends K, ? extends V>` parameter) exposes its members with the receiver
+  already applied: `get(Object): V` returns `Y!`. kotlinc types `shelf[probe]` and `out[key]` as
+  that `Y!`/`V!`. krusty recovers the owner variables a JVM member signature mentions without
+  declaring from the provider's receiver-specialized return, but that recovery stepped through
+  `Nullable` only, not the platform wrapper of a Java return, so the still-symbolic `Y` was left
+  unbound and the return specialization erased it to its `Any?` bound, typing the indexed read as
+  `Any!` ("return type mismatch: expected 'V?', actual 'Any!'"). The recovery now steps through
+  the flexible wrapper the same way. An ordinary `shelf.get(probe)` call was already right; only
+  the indexed operator reaches the member through this return binder. Tests:
+  `tests/java_member_flexible_return_e2e.rs` (`java_member_return_keeps_the_callers_type_arguments`
+  and `jdk_collection_index_keeps_the_callers_type_arguments`, both run against kotlinc, and
+  `java_member_return_callers_match_kotlinc_bytes`, byte-identical to kotlinc).
 
 ## 8. Success criteria for the PoC
 

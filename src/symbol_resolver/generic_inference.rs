@@ -1982,6 +1982,17 @@ pub(super) fn seed_undeclared_return_bindings(
                 seed_undeclared_return_bindings(*inner, actual, declared_formals, binds);
             }
         }
+        // A Java member returns a flexible type (`V!`): the variable sits under the platform
+        // wrapper exactly as a Kotlin `V?` sits under `Nullable`. Leaving it unseeded let the
+        // unbound-formal specialization erase a caller's still-symbolic `V` to its `Any?` bound, so
+        // `map[key]` on a Java `HashMap<K, V>` typed as `Any!` instead of `V!`.
+        Ty::PlatformNullable(inner) => {
+            if let Ty::PlatformNullable(actual_inner) = actual {
+                seed_undeclared_return_bindings(*inner, *actual_inner, declared_formals, binds);
+            } else {
+                seed_undeclared_return_bindings(*inner, actual, declared_formals, binds);
+            }
+        }
         Ty::Obj(_, args) => {
             if let Ty::Obj(_, actual_args) = actual {
                 for (s, a) in args.iter().zip(actual_args.iter()) {
