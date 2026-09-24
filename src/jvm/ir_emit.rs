@@ -49,6 +49,7 @@ mod interface_compatibility;
 mod local_updates;
 mod member_schedule;
 mod metadata_policy;
+mod non_null_operands;
 mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
@@ -6109,6 +6110,7 @@ fn emit_class(
             for (i, a) in c.ctor_args.iter().enumerate() {
                 if let Some(name) = &a.check {
                     if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
+                        e.checked_parameters.insert(i as u32 + 1);
                         ctor.aload(slot);
                         ctor.push_string(name, e.cw);
                         let m = e.cw.methodref(
@@ -10566,10 +10568,12 @@ fn emit_method_inner_with_holder(
             "Lorg/jetbrains/annotations/NotNull;"
         })
     };
-    // A bare type-parameter position erases to `Object` but is NOT a known-non-null reference —
-    // kotlinc annotates neither it nor a parameter in that position.
+    // A bare type parameter with a nullable upper bound has no fixed nullability annotation. A
+    // non-null bound (`T : Any`) is different: kotlinc publishes `@NotNull` on that occurrence.
     let gsig = ir.signatures.get(&fid);
     let member_sem = ir.member_semantic_sigs.get(&fid);
+    let unannotated_type_parameter =
+        |ty: Ty| matches!(ty, Ty::TyParam(_, bound) if bound.is_nullable());
     // A LAMBDA IMPL (`<fn>$lambda$N`) is a synthetic realization — kotlinc gives it debug tables
     // but NO nullability annotations.
     let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
@@ -10578,8 +10582,8 @@ fn emit_method_inner_with_holder(
         .is_some_and(|body| body_has_reified_markers(ir, body));
     let ret_ann = (!lambda_impl
         && !reified_body
-        && gsig.is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
-        && member_sem.is_none_or(|(_, r)| !matches!(r, Ty::TyParam(..))))
+        && gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
+        && member_sem.is_none_or(|(_, r)| !unannotated_type_parameter(*r)))
     .then(|| ann_of(f.ret))
     .flatten();
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
@@ -10590,10 +10594,16 @@ fn emit_method_inner_with_holder(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
-                || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
+            let is_unannotated_tparam = gsig
+                .and_then(|g| g.params.get(i))
+                .copied()
+                .is_some_and(unannotated_type_parameter)
+                || member_sem
+                    .and_then(|(ps, _)| ps.get(i))
+                    .copied()
+                    .is_some_and(unannotated_type_parameter);
             let carrier_receiver = i == 0 && ir.jvm_value_class_receiver_impls.contains(&fid);
-            if lambda_impl || reified_body || is_tparam || carrier_receiver {
+            if lambda_impl || reified_body || is_unannotated_tparam || carrier_receiver {
                 None
             } else if declared_nullable
                 .and_then(|v| v.get(i))
@@ -10701,6 +10711,7 @@ fn emit_method_inner_with_holder(
                 .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
+                e.checked_parameters.insert(vi);
                 code.aload(slot);
                 code.push_string(&name, e.cw);
                 let m = e.cw.methodref(
@@ -12509,6 +12520,10 @@ struct Emitter<'a> {
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
+    /// Values stored into semantic locals, used only for pre-emission semantic non-null facts.
+    value_stores: non_null_operands::ValueStores,
+    /// Parameters whose emitted entry assertion establishes a semantic non-null fact.
+    checked_parameters: HashSet<u32>,
     next_slot: u16,
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
@@ -12598,6 +12613,7 @@ impl<'a> Emitter<'a> {
         ret: Ty,
         roots: impl IntoIterator<Item = u32>,
     ) -> Self {
+        let roots: Vec<u32> = roots.into_iter().collect();
         Self {
             ir,
             cw,
@@ -12615,7 +12631,9 @@ impl<'a> Emitter<'a> {
             label_unassigned_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             safe_call_exit_temporaries: HashMap::new(),
-            var_types: collect_body_var_types(ir, roots),
+            var_types: collect_body_var_types(ir, roots.iter().copied()),
+            value_stores: non_null_operands::ValueStores::collect(ir, &roots),
+            checked_parameters: HashSet::new(),
             next_slot: 0,
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
@@ -18959,10 +18977,15 @@ impl<'a> Emitter<'a> {
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.
     fn assigned_semantic_slots(&self) -> Vec<(u16, Ty)> {
-        self.slots
+        let slots: Vec<(u32, u16, Ty)> = self
+            .slots
             .iter()
             .filter(|(value, _)| !self.unassigned_values.contains(value))
-            .map(|(_, slot)| *slot)
+            .map(|(value, (slot, ty))| (*value, *slot, *ty))
+            .collect();
+        slots
+            .into_iter()
+            .map(|(value, slot, ty)| (slot, self.semantic_local_frame_ty(value, ty)))
             .collect()
     }
 
