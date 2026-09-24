@@ -6304,6 +6304,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty kept them and reset what the override wrote.
   Tests: `tests/unsigned_default_store_e2e.rs` (cross-checked against the reference compiler) and
   `jvm::property_storage::tests::an_unsigned_zero_is_a_jvm_default`.
+- **A `@Serializable` classifier from another file or a dependency is reached through what its kind
+  generated.** Only a plain, non-generic, non-abstract class has a `$serializer` object; kotlinc
+  reads it as `getstatic X$$serializer.INSTANCE`. An object has no serializer class: kotlinc builds
+  `new ObjectSerializer(serialName, X.INSTANCE, new Annotation[0])` in place, the serial name being
+  the object's class-level `@SerialName` or its dotted qualified name. An enum, a sealed or abstract
+  class, an interface and a generic class publish their serializer through their companion's
+  generated `serializer(…)`, which kotlinc calls as `X.Companion.serializer(args…)` with one argument
+  serializer per type parameter, each narrowed to `KSerializer` (a nullable argument's inner
+  serializer too). All of these except the `$serializer` singleton go in the `$childSerializers`
+  cache. krusty assumed a `$serializer` for every `@Serializable` classifier it did not declare, so
+  an element of a dependency's or a sibling file's enum, sealed class or object failed with
+  `NoClassDefFoundError`, and one of a generic class was rejected as unsupported.
+  The decision reads the classifier's declaration facts (kind, abstract or sealed, own type
+  parameters, companion, qualified name), which a dependency's `@Metadata` and a source file's
+  declaration graph both provide. A dependency with no recorded companion or an object with no
+  readable name has no entry, so its element is reported as unsupported instead of guessed. A
+  source classifier without a declared companion gets the `Companion` this plugin generates for it.
+  Tests: `tests/serialization_external_kinds_e2e.rs` (a kotlinc-built dependency and a sibling file
+  under both compilers, and the cached child serializers compared with kotlinc's), and the kind
+  rules in `plugins::serialization::external_serializer::tests`.
 - **A `Unit` tailrec's `f(x); return` is a tail call in any block.** Nothing of the function runs
   after a `return`, so the statement right before one is in tail position whether the block ends
   the body or sits inside an `if`, a `when` arm or a loop. Only the body's own last block was

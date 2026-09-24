@@ -4,12 +4,14 @@ mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
+mod classifier_kind;
 mod compiler_intrinsic;
 mod core_builtins;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod platform_contract;
+pub use classifier_kind::TypeKind;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
@@ -2664,6 +2666,9 @@ pub struct LibraryType {
     /// Complete set of directly declared function-supertype shapes. Most classifiers have zero or
     /// one; intersection classifiers may implement several arities simultaneously.
     pub callable_signatures: Vec<Ty>,
+    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), from a dependency's
+    /// `@Metadata`. `None` for a Java classifier and wherever the provider does not record it.
+    pub qualified_name: Option<Box<str>>,
     /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
     /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
@@ -2759,19 +2764,6 @@ impl LibraryType {
     }
 }
 
-/// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
-/// also carries `ACC_INTERFACE`, which `is_interface()` reflects.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TypeKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-    /// A Kotlin `object` (singleton) — has a `public static final INSTANCE` field of its own type, read
-    /// as `getstatic <Type>.INSTANCE` when the object is referenced as a value.
-    Object,
-}
-
 impl LibraryType {
     /// Whether this declaration is one of Kotlin's function-type classifier representations.
     ///
@@ -2816,6 +2808,7 @@ impl LibraryType {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
@@ -3311,6 +3304,7 @@ mod tests {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

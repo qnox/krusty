@@ -10,7 +10,7 @@ use crate::types::{type_name, AnnotationRetention};
 
 use super::SERIALIZABLE_FQ;
 
-const SERIAL_NAME_FQ: &str = "kotlinx/serialization/SerialName";
+pub(super) const SERIAL_NAME_FQ: &str = "kotlinx/serialization/SerialName";
 const CONTEXTUAL_FQ: &str = "kotlinx/serialization/Contextual";
 const USE_CONTEXTUAL_SERIALIZATION_FQ: &str = "kotlinx/serialization/UseContextualSerialization";
 

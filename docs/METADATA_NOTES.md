@@ -57,6 +57,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 `Class` fields: `f3 = fq_name` (a string-table class-id), `f6 = supertype` (`Type`),
 `f8 = constructor` (repeated), `f10 = property` (repeated). Class flags (f1) omitted ⇒ default
 (public/final).
+- `fq_name` resolves to the Kotlin class name in metadata spelling: `/` between package segments
+  and `.` between classes (`lib/Outer.Nested`). Dotting the `/`s gives the qualified name
+  (`lib.Outer.Nested`), which a consumer cannot recover from the internal name because `$` is also
+  a legal identifier character. The serialization plugin names a dependency's `@Serializable object`
+  by it (`KotlinMeta::class_qualified_name`).
 - `Type.class_name = f6`.
 - `Constructor`: `f2 = value_parameter` (repeated `{f2=name, f3=Type}`), `f100 = JvmMethodSignature`
   ext (`f2 = desc`; name omitted ⇒ `<init>`).

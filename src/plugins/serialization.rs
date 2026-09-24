@@ -18,6 +18,9 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod external_serializer;
+pub(crate) use external_serializer::generated_external_serializer;
+pub use external_serializer::ExternalSerializer;
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
@@ -36,15 +39,18 @@ use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
 use crate::plugins::{
-    synthetic_class, FrontendCallable, FrontendCallableOwner, FrontendClassContext,
-    FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
+    synthetic_class, FrontendCallable, FrontendClassContext, FrontendExpressionContext, IrPlugin,
+    PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
 use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
-use generated_classifier::generated_serializer_classifier_fact;
+use generated_classifier::{
+    companion_fq, publish_generated_classifier_facts, publish_serializer_accessor_declaration,
+    serializer_fq, serializer_name, SERIALIZER_OBJECT_NAME,
+};
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
@@ -174,27 +180,6 @@ impl Default for SerializationPlugin {
     fn default() -> Self {
         Self::new(SerializationAbi::default(), "main")
     }
-}
-
-/// The FqName of the synthesized serializer object for a `@Serializable` class. The object is literally
-/// named `$serializer`, so its binary name is `Foo$$serializer` (the outer class + the nesting `$` +
-/// the object name `$serializer`) — matching kotlinc, which krusty previously emitted as `Foo$serializer`.
-fn serializer_fq(class_fq: &str) -> String {
-    serializer_name(type_name(class_fq)).render()
-}
-
-/// The Kotlin name of that object. It begins with `$`, so the JVM spelling `Foo$$serializer` cannot
-/// be split back into it — metadata records this name, not a segment derived from the binary one.
-const SERIALIZER_OBJECT_NAME: &str = "$serializer";
-
-fn serializer_name(classifier: TypeName) -> TypeName {
-    classifier.nested_child(SERIALIZER_OBJECT_NAME)
-}
-
-/// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
-/// the `serializer()` accessor (kotlinc puts it there, not as a static on the class itself).
-fn companion_fq(class_fq: &str) -> String {
-    crate::types::type_name_nested_child(type_name(class_fq), "Companion").render()
 }
 
 fn frontend_serializer_accessor(ir: &IrFile, owner: crate::types::TypeName) -> Option<u32> {
@@ -444,9 +429,12 @@ fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
 }
 
+/// `<classifier>.<field>.serializer(args…)`: the generated accessor on `classifier`'s companion
+/// object `owner`, stored in `classifier`'s static `field`.
 fn call_external_companion_serializer(
     ir: &mut IrFile,
     classifier: TypeName,
+    field: &str,
     owner: TypeName,
     args: Vec<ExprId>,
 ) -> Option<ExprId> {
@@ -456,7 +444,7 @@ fn call_external_companion_serializer(
     let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
         owner: classifier,
         ty: owner,
-        field: "Companion".to_string(),
+        field: field.to_string(),
     });
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
@@ -593,6 +581,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 let Some(call) = call_external_companion_serializer(
                     ir,
                     class_internal,
+                    "Companion",
                     selected_owner,
                     exprs.clone(),
                 ) else {
@@ -1200,61 +1189,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &FrontendClassContext<'_>,
         members: &mut Vec<FrontendCallable>,
     ) {
-        if !ctx
-            .annotations
-            .iter()
-            .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
-        {
-            return;
-        }
-        let serializer = type_name(KSERIALIZER_FQ);
-        let parameters = ctx
-            .type_parameters
-            .type_params()
-            .iter()
-            .zip(ctx.type_parameters.type_param_bounds())
-            .map(|(name, &bound)| Ty::ty_param(name, bound))
-            .collect::<Vec<_>>();
-        let class = Ty::obj_args_name(ctx.classifier, &parameters);
-        let params = parameters
-            .iter()
-            .map(|&parameter| Ty::obj_args_name(serializer, &[parameter]))
-            .collect::<Vec<_>>();
-        let param_names = (0..params.len())
-            .map(|index| format!("typeSerial{index}"))
-            .collect::<Vec<_>>();
-        let ret = Ty::obj_args_name(serializer, &[class]);
-        let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
-            formals: ctx.type_parameters.type_params().clone(),
-            formal_bounds: ctx
-                .type_parameters
-                .type_param_bounds()
-                .iter()
-                .map(|&bound| vec![bound])
-                .collect(),
-            receiver: None,
-            params: params.clone(),
-            ret,
-            return_policy: crate::libraries::GenericReturnPolicy::Exact,
-        });
-        members.push(FrontendCallable {
-            // A named object is already the singleton value through which its generated accessor is
-            // called. Ordinary classes expose the accessor through their companion value.
-            owner: if ctx.kind == crate::libraries::TypeKind::Object {
-                FrontendCallableOwner::Classifier
-            } else {
-                FrontendCallableOwner::Companion
-            },
-            name: "serializer".to_string(),
-            params,
-            param_names,
-            ret,
-            generic_sig,
-            plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
-                plugin: "serialization",
-                operation: "serializer",
-            }),
-        });
+        publish_serializer_accessor_declaration(ctx, members);
     }
 
     fn publish_frontend_generated_classifiers(
@@ -1262,7 +1197,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &FrontendClassContext<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
-        classifiers.extend(generated_serializer_classifier_fact(ctx));
+        publish_generated_classifier_facts(ctx, classifiers);
     }
 
     fn check_frontend_class(
@@ -2998,8 +2933,11 @@ mod tests {
             data: vec![classifier, type_name("demo/Row$Companion")],
             types: Vec::new(),
         });
-        let ctx = PluginContext::default()
-            .with_external_serializers([(classifier, serializer)].into_iter().collect());
+        let ctx = PluginContext::default().with_external_serializers(
+            [(classifier, ExternalSerializer::Singleton(serializer))]
+                .into_iter()
+                .collect(),
+        );
 
         specialize_expression_placeholders(&mut ir, &ctx);
 
