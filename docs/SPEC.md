@@ -6046,8 +6046,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lexical-prefix walk in the compiler already understands; nothing in the source is rewritten to
   match, because the SOURCE name is bound in `Ns::Classifier` and resolves where it was written.
   A local class is NOT a member class: its `InnerClasses` entry carries `outer_class_info_index = 0`
-  and it gets an `EnclosingMethod` attribute (class only — the JVM spec permits `method_index = 0`,
-  and a wrong descriptor would make `Class.getEnclosingMethod()` throw). The class that CONSTRUCTS
+  and it gets an `EnclosingMethod` attribute naming the scope it was LOWERED in, recorded on the
+  class (`IrClass::enclosure`) when lowering creates it rather than recovered from its binary name.
+  As kotlinc writes it: a class in a function (a lambda's class in the named function around the
+  lambda, a local function's in that function's own lowered method) names that function and its JVM
+  descriptor; one in a top-level property initializer names the file facade with no method; one in
+  an instance property initializer or `init` block names the primary constructor `<init>`; one in
+  an object's property names the object, and one in a companion's property the class that stores
+  it, both with no method. A callable-reference class carries the same attribute from the scope
+  its reference was written in (`IrFile::callable_reference_enclosures`), and lists only itself in
+  `InnerClasses` as a `static final synthetic` class with no outer class
+  (`tests/class_enclosure_e2e.rs`). The class-level attributes go out in kotlinc's order:
+  `InnerClasses`, `EnclosingMethod`, `Signature`, `SourceFile`. The class that CONSTRUCTS
   it must carry the same `InnerClasses` entry, including the file facade: reflection cross-checks
   the two sides and throws `IncompatibleClassChangeError` when only one has it.
   A class literal on a local class is rejected (the file skips): reflection reports `simpleName`

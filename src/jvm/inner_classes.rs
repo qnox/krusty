@@ -87,6 +87,22 @@ impl InnerClasses {
                 });
                 continue;
             }
+            // A function reference class is anonymous too, and synthetic; it is public only where
+            // spliced inline code constructs it from elsewhere.
+            if class.func_ref.is_some() {
+                let public = if ir.public_synthetics.contains(&identity) {
+                    0x0001
+                } else {
+                    0
+                };
+                specs.push(InnerClassSpec {
+                    inner: identity.render(),
+                    outer: None,
+                    name: None,
+                    access: 0x1000 | 0x0010 | 0x0008 | public,
+                });
+                continue;
+            }
 
             // Generated local names and source identifiers containing `$` make textual boundaries
             // ambiguous. Compare every already-interned candidate, deepest first, with the exact

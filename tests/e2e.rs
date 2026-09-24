@@ -176,6 +176,8 @@ mod checker_operator_methods_e2e;
 mod class_annotation_attributes_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
+#[path = "class_enclosure_e2e.rs"]
+mod class_enclosure_e2e;
 #[path = "class_header_newline_e2e.rs"]
 mod class_header_newline_e2e;
 #[path = "class_lambda_e2e.rs"]
