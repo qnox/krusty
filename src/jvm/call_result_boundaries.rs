@@ -1,17 +1,14 @@
-//! JVM result slots for checked generic calls.
+//! Erased JVM result slots for checked generic calls.
 //!
-//! Common lowering retains the declaration result, the substituted result, and their semantic
-//! coercion. Once JVM generic erasure has realized source function returns, this pass records the
-//! physical type only when the value produced by the selected call differs from that coercion's JVM
-//! target. Value-class representation remains owned by `jvm::value_classes`: a declaration that
-//! returns `Tagged<A>` and a call read as `Tagged<Int>` have the same pre-value-class JVM shape, so
-//! no physical override can hide the declaration identity from that pass. A bare `T` result, by
-//! contrast, is already realized as its erased bound here and keeps that physical boundary.
+//! Common lowering marks the exact coercion between a selected declaration result and its
+//! substituted semantic result. This JVM boundary realizes only those marked coercions: other
+//! coercions over the same call already consume a realized result. Value-class lowering later
+//! refines marked slots after its carrier inventory exists.
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
-fn terminal_call(exprs: &[IrExpr], mut expression: ExprId) -> Option<ExprId> {
+pub(super) fn terminal_call(exprs: &[IrExpr], mut expression: ExprId) -> Option<ExprId> {
     loop {
         match exprs.get(expression as usize)? {
             IrExpr::Call { .. } | IrExpr::MethodCall { .. } => return Some(expression),
@@ -60,10 +57,21 @@ fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
     }
 }
 
+/// The declaration's selected JVM erasure, retaining whether its erased reference slot admits
+/// null. Later boundary passes consume that representation fact even though nullability does not
+/// change the descriptor.
+pub(super) fn erased_result_slot(ir: &IrFile, call: ExprId, declared: Ty) -> Option<Ty> {
+    let erased = realized_call_result(ir, call)?;
+    let nullable = declared.is_nullable()
+        || matches!(declared.non_null(), Ty::TyParam(_, bound) if bound.is_nullable());
+    Some(if nullable {
+        Ty::nullable(erased.non_null())
+    } else {
+        erased
+    })
+}
+
 pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
-    // Only the coercion common lowering placed between a declaration's result and its call-site
-    // substitution is a result slot. Any other coercion over the same call (a reference adaptation
-    // widening `Id` to `Any`, a nullability widening) converts an already-realized result.
     let mut coercions = ir
         .declaration_result_coercions
         .iter()
@@ -81,19 +89,15 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
             _ => None,
         })
         .filter_map(|(coercion, expression, target)| {
-            // A retained inline body has already crossed and removed its declaration ABI; its
-            // result slot is specialized to the call-site type.
             if ir.inline_regions.contains(&expression) {
                 return None;
             }
             let call = terminal_call(&ir.exprs, expression)?;
-            // This semantic declaration fact distinguishes a checked generic call from unrelated
-            // coercions. It was recorded while the stable selected callable identity was live.
-            ir.call_declared_ret.get(&call)?;
-            let result = realized_call_result(ir, call)?;
-            let physical = crate::jvm::ir_emit::ir_ty_to_jvm(&result);
-            let jvm_target = crate::jvm::ir_emit::ir_ty_to_jvm(&target);
-            (physical != jvm_target).then_some((coercion, expression, target, physical))
+            let declared = *ir.call_declared_ret.get(&call)?;
+            let physical = erased_result_slot(ir, call, declared)?;
+            let physical_jvm = crate::jvm::ir_emit::ir_ty_to_jvm(&physical);
+            let target_jvm = crate::jvm::ir_emit::ir_ty_to_jvm(&target);
+            (physical_jvm != target_jvm).then_some((coercion, expression, target, physical))
         })
         .collect::<Vec<_>>();
 
@@ -103,9 +107,9 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
     fold_nullable_widenings(ir, &boundaries);
 }
 
-/// An erased reference slot read as a primitive and then widened to that primitive's nullable
-/// type (`Object -> Int -> Int?`) is one reference conversion: realizing both would unbox a
-/// possibly-null reference only to box it again. The widening is retargeted to the slot itself.
+/// An erased reference slot read as a primitive and then widened to that primitive's nullable type
+/// is one reference conversion. Retarget the widening to the slot so a null is not unboxed and
+/// immediately reboxed.
 fn fold_nullable_widenings(ir: &mut IrFile, boundaries: &[(ExprId, ExprId, Ty, Ty)]) {
     let carriers = boundaries
         .iter()

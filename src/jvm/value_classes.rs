@@ -12,11 +12,9 @@
 //! The value class's own synthesized members (`box-impl`/`unbox-impl`/`constructor-impl`/getter/`<init>`)
 //! genuinely operate on the boxed object, so they are NOT
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
-//!
-//! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
-//! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
 mod bridge_returns;
+mod call_result_boundaries;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
@@ -250,6 +248,7 @@ pub(crate) fn lower_value_classes(
     if under.is_empty() && callable_under.is_empty() {
         return true;
     }
+    call_result_boundaries::realize(ir, &callable_under);
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
     // resolved value classes belong to this source module. `IrFile::is_value_class_name` already
     // recognizes same-file and external/module declarations, so copying `under` into a second public

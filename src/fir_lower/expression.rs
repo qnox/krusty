@@ -1457,38 +1457,11 @@ impl BodyLowering<'_> {
             {
                 self.unit_value_after_effect(expression)
             }
-            FirConversionKind::NullabilityWidening { to } => {
-                let target = to.get();
-                // A generic declaration returns through an erased reference slot. FIR can then
-                // carry two already-checked conversions: that reference to a specialized primitive
-                // result, followed by the primitive's nullability widening (`Object -> Int ->
-                // Int?`). Realizing both would unbox a possibly-null reference only to box it again.
-                // Retarget the mechanical carrier coercion directly to the nullable wrapper; no
-                // assignability or declaration lookup is performed here.
-                let erased_nullable_carrier = match self.ir.exprs.get(expression as usize) {
-                    Some(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg,
-                        type_operand,
-                    }) if *type_operand == source_type
-                        && !source_type.is_reference()
-                        && target.nullable_primitive() == Some(source_type)
-                        && self
-                            .ir
-                            .physical_types
-                            .get(arg)
-                            .is_some_and(|physical| physical.is_reference()) =>
-                    {
-                        Some(*arg)
-                    }
-                    _ => None,
-                };
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: erased_nullable_carrier.unwrap_or(expression),
-                    type_operand: target,
-                })
-            }
+            FirConversionKind::NullabilityWidening { to } => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: expression,
+                type_operand: to.get(),
+            }),
             FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::TypeOp {
                 op: if to.get().is_reference() {
                     IrTypeOp::Cast

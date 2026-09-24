@@ -70,8 +70,8 @@ pub(crate) struct BackendPassFacts {
 /// 4. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization. Common IR retains them for targets without zero-initialized fields.
 ///
-/// 5. `realize_call_result_boundaries` — compare checked semantic call results after JVM generic
-///    erasure and record only the conversions whose physical result slot actually differs.
+/// 5. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
+///    and fold its marked conversion chain; later representation passes may refine the slot.
 ///
 /// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
@@ -153,9 +153,6 @@ fn run_backend_passes_after_plugins(
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
     crate::jvm::reified_operations::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
-    // The checked call and its semantic coercion remain target-neutral through common lowering.
-    // Now that source declarations have their JVM type-parameter erasure, record only real result
-    // slot boundaries; value-class realization below consumes the same declaration identities.
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
@@ -1518,10 +1515,6 @@ mod tests {
             (
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
-            ),
-            (
-                "realize_call_result_boundaries(",
-                &["src/jvm/call_result_boundaries.rs", "src/jvm/backend.rs"],
             ),
             ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
         ];
