@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use krusty::features::LangFeatures;
 use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
+use krusty::plugins::cli::PluginConfig;
+use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
@@ -63,6 +65,9 @@ pub struct Options {
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
+    /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
+    /// extension registry by [`Options::resolve_plugins`].
+    pub plugins: PluginConfig,
 }
 
 impl Default for Options {
@@ -89,6 +94,7 @@ impl Default for Options {
             lambda_modes: LambdaModes::default(),
             no_param_assertions: false,
             no_call_assertions: false,
+            plugins: PluginConfig::default(),
         }
     }
 }
@@ -115,7 +121,6 @@ const IGNORED_WITH_VALUE: &[&str] = &[
     "-kotlin-home",
     "-Xexplicit-api",
     "-opt-in",
-    "-P",
     "-script-templates",
     "-expression",
     "-e",
@@ -293,6 +298,10 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
             // flags keep falling through to `ignored` until each is measured.
             flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
+            // Compiler plugins, in kotlinc's syntax. They are resolved against the extension registry
+            // before compiling, never dropped: a plugin that changes the output must either run
+            // natively or fail the compile.
+            flag if opts.plugins.accept(flag, || it.next()) => {}
             "-java-parameters" => opts.java_parameters = true,
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
@@ -311,7 +320,77 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             other => collect_sources(other, &mut opts.sources, &mut opts.ignored),
         }
     }
+    opts.plugins.finish();
+    opts.errors.append(&mut opts.plugins.errors);
     opts
+}
+
+/// What krusty does with the compiler plugins a command line requests.
+pub struct PluginResolution {
+    /// The native extensions to run in place of the requested plugin jars.
+    pub native: NativePlugins,
+    /// Printed as `info:` — a plugin krusty substitutes with its own implementation.
+    pub notes: Vec<String>,
+    /// Printed as `error:` — any one fails the compilation before it starts.
+    pub errors: Vec<String>,
+}
+
+impl Options {
+    /// Resolve the requested compiler plugins against krusty's extension registry, which alone knows
+    /// which plugins krusty implements. A jar that does not exist is kotlinc's own error; a plugin
+    /// krusty can neither substitute nor host is an error too, because ignoring it would compile
+    /// silently wrong code. This driver runs no codegen host, so a KSP request is refused as well.
+    pub fn resolve_plugins(&self, classpath: &[PathBuf]) -> PluginResolution {
+        let missing = plugin_jar_problems(&self.plugins);
+        if !missing.is_empty() {
+            return PluginResolution {
+                native: NativePlugins::none(),
+                notes: Vec::new(),
+                errors: missing,
+            };
+        }
+        let classpath = classpath
+            .iter()
+            .map(|entry| entry.display().to_string())
+            .collect::<Vec<_>>();
+        let resolved = PluginRegistry::with_builtins().resolve(&Activation {
+            config: &self.plugins,
+            classpath: &classpath,
+            module_name: &self.module_name,
+            codegen_host: false,
+        });
+        let (errors, notes) = resolved
+            .diagnostics
+            .iter()
+            .partition::<Vec<_>, _>(|diagnostic| diagnostic.is_error());
+        PluginResolution {
+            native: resolved.native,
+            notes: notes.iter().map(|note| note.message()).collect(),
+            errors: errors.iter().map(|error| error.message()).collect(),
+        }
+    }
+}
+
+/// kotlinc refuses a plugin jar that does not exist, in these words (measured on 2.4.20): the legacy
+/// syntax per entry, the modern one per plugin classpath.
+fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
+    let exists = |jar: &String| std::path::Path::new(jar).exists();
+    let legacy = plugins
+        .plugin_jars
+        .iter()
+        .filter(|jar| !exists(jar))
+        .map(|jar| format!("plugin classpath entry points to a non-existent location: {jar}"));
+    let modern = plugins
+        .compiler_plugins
+        .iter()
+        .filter(|plugin| !plugin.classpath.iter().all(exists))
+        .map(|plugin| {
+            format!(
+                "no plugins found in given classpath: {}",
+                plugin.classpath.join(",")
+            )
+        });
+    legacy.chain(modern).collect()
 }
 
 impl Options {
@@ -464,6 +543,10 @@ Common options (kotlinc-compatible):
   -Xno-call-assertions  omit JVM assertions on platform-typed call results
   -Xlambdas=indy        emit lambdas through LambdaMetafactory (class is not supported)
   -Xsam-conversions=indy emit SAM conversions through LambdaMetafactory
+  -Xplugin=<jar>,<jar>  compiler plugins; kotlinx.serialization runs as krusty's native pass,
+                        any other plugin is an error (krusty cannot run FIR/IR plugin jars)
+  -P plugin:<id>:<key>=<value>
+                        pass an option to a plugin
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
@@ -473,6 +556,7 @@ an unemittable output shape are errors; krusty never substitutes a different art
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::plugins::registry::PluginDiagnostic;
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
@@ -903,6 +987,166 @@ mod tests {
             .effective_classpath()
             .unwrap()
             .is_empty());
+    }
+
+    /// Plugin switches are read in kotlinc's syntax, never reported as ignored, and `-P` consumes its
+    /// value rather than leaving it to be read as a source file.
+    #[test]
+    fn plugin_switches_are_read_not_ignored() {
+        let parsed = parse_args(&[
+            "-Xplugin=/k/a.jar,/k/b.jar",
+            "-P",
+            "plugin:org.example.widget:annotation=p.Open",
+            "-Xplugin=/k/c.jar",
+            "f.kt",
+        ]);
+        assert_eq!(parsed.ignored, Vec::<String>::new());
+        assert_eq!(parsed.errors, Vec::<String>::new());
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+        assert_eq!(
+            parsed.plugins.plugin_jars,
+            vec!["/k/a.jar", "/k/b.jar", "/k/c.jar"]
+        );
+        assert_eq!(
+            parsed.plugins.options,
+            vec![krusty::plugins::cli::PluginOption {
+                id: "org.example.widget".to_string(),
+                key: "annotation".to_string(),
+                value: "p.Open".to_string(),
+            }]
+        );
+    }
+
+    /// A plugin switch kotlinc rejects fails the invocation instead of compiling without the plugin.
+    #[test]
+    fn malformed_plugin_switches_are_errors() {
+        let parsed = parse_args(&["-P", "annotation=p.Open", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            vec!["wrong plugin option format: annotation=p.Open, should be \
+                 plugin:<pluginId>:<optionName>=<value>"
+                .to_string()]
+        );
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+
+        let parsed = parse_args(&["-Xplugin=/k/a.jar", "-Xcompiler-plugin=/k/b.jar", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            vec![
+                "mixing legacy and modern plugin arguments is prohibited. Please use only one \
+                 syntax"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// A jar named `name` declaring `registrars` in `service` (a `META-INF/services` file name).
+    fn jar_declaring(
+        dir: &std::path::Path,
+        name: &str,
+        service: &str,
+        registrars: &[&str],
+    ) -> String {
+        use std::io::Write;
+        let jar = dir.join(name);
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        archive
+            .start_file(
+                format!("META-INF/services/{service}"),
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(registrars.join("\n").as_bytes()).unwrap();
+        archive.finish().unwrap();
+        jar.display().to_string()
+    }
+
+    const REGISTRAR_SERVICE: &str = "org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar";
+
+    /// A jar declaring the registrar of the builtin extension `plugin_id`, as the registry records it.
+    fn builtin_plugin_jar(dir: &std::path::Path, name: &str, plugin_id: &str) -> String {
+        let registry = PluginRegistry::with_builtins();
+        let extension = registry
+            .extensions()
+            .iter()
+            .find(|extension| extension.plugin_id == plugin_id)
+            .unwrap();
+        jar_declaring(dir, name, REGISTRAR_SERVICE, &[extension.registrar])
+    }
+
+    #[test]
+    fn no_plugin_requested_runs_no_native_pass() {
+        let resolution = parse_args(&["f.kt"]).resolve_plugins(&[]);
+        assert!(resolution.native.is_empty());
+        assert_eq!(resolution.notes, Vec::<String>::new());
+        assert_eq!(resolution.errors, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_serialization_plugin_resolves_to_the_native_pass_with_a_note() {
+        let dir = scratch("serialization_plugin");
+        let jar = builtin_plugin_jar(
+            &dir,
+            "serialization-plugin.jar",
+            krusty::plugins::cli::SERIALIZATION_PLUGIN_ID,
+        );
+        let resolution = parse_args(&[&format!("-Xplugin={jar}"), "f.kt"]).resolve_plugins(&[]);
+        assert_eq!(
+            resolution.native.plugin_ids(),
+            vec![krusty::plugins::cli::SERIALIZATION_PLUGIN_ID]
+        );
+        assert_eq!(
+            resolution.notes,
+            vec![PluginDiagnostic::NativeSubstitution {
+                plugin_id: krusty::plugins::cli::SERIALIZATION_PLUGIN_ID.to_string(),
+                jar: Some(jar),
+            }
+            .message()]
+        );
+        assert_eq!(resolution.errors, Vec::<String>::new());
+    }
+
+    /// The command line runs no codegen host: a KSP request would otherwise be reported "hosted"
+    /// while its generated sources silently never appear.
+    #[test]
+    fn a_codegen_host_plugin_is_an_error_on_the_command_line() {
+        let dir = scratch("ksp_plugin");
+        let jar = builtin_plugin_jar(&dir, "ksp.jar", krusty::plugins::cli::KSP_PLUGIN_ID);
+        let resolution = parse_args(&[&format!("-Xplugin={jar}"), "f.kt"]).resolve_plugins(&[]);
+        assert!(resolution.native.is_empty());
+        assert_eq!(resolution.notes, Vec::<String>::new());
+        assert_eq!(
+            resolution.errors,
+            vec![PluginDiagnostic::HostUnavailable {
+                plugin_id: krusty::plugins::cli::KSP_PLUGIN_ID.to_string(),
+            }
+            .message()]
+        );
+    }
+
+    #[test]
+    fn an_unknown_plugin_and_a_missing_jar_are_errors() {
+        let dir = scratch("unknown_plugin");
+        let jar = jar_declaring(
+            &dir,
+            "widget-plugin.jar",
+            REGISTRAR_SERVICE,
+            &["org.example.widget.WidgetRegistrar"],
+        );
+        let resolution = parse_args(&[&format!("-Xplugin={jar}"), "f.kt"]).resolve_plugins(&[]);
+        assert_eq!(
+            resolution.errors,
+            vec![PluginDiagnostic::Unsupported { plugin: jar }.message()]
+        );
+
+        let missing = dir.join("absent-plugin.jar").display().to_string();
+        let resolution =
+            parse_args(&[&format!("-Xcompiler-plugin={missing}"), "f.kt"]).resolve_plugins(&[]);
+        assert_eq!(
+            resolution.errors,
+            vec![format!("no plugins found in given classpath: {missing}")]
+        );
     }
 
     #[test]

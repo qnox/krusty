@@ -16,11 +16,11 @@ use super::*;
 pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
+    frontend_plugins: &crate::plugins::PluginHost,
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
 ) -> SymbolTable {
-    let frontend_plugins = crate::plugins::enabled_plugins("main");
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,

@@ -350,6 +350,8 @@ mod classpath_value_class_param_e2e;
 mod classpath_valueclass_param_ext_e2e;
 #[path = "classreader_e2e.rs"]
 mod classreader_e2e;
+#[path = "cli_compiler_plugin_e2e.rs"]
+mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
 #[path = "closure_in_class_e2e.rs"]

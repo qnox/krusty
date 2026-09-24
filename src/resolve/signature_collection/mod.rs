@@ -8,6 +8,7 @@
 //!
 //! It does not own body checking, overload selection, or lowering.
 
+use crate::plugins::registry::NativePlugins;
 use crate::resolve::*;
 
 mod annotation_occurrences;
@@ -42,17 +43,33 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 }
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
-/// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
+/// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists. No native
+/// compiler plugin runs; see [`collect_signatures_with_cp_and_plugins`].
 pub fn collect_signatures_with_cp(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
+    diags: &mut DiagSink,
+) -> SymbolTable {
+    collect_signatures_with_cp_and_plugins(files, libraries, NativePlugins::none(), diags)
+}
+
+/// [`collect_signatures_with_cp`] with the native compiler plugins the compilation runs: they add
+/// their generated declarations (a `@Serializable` class's `serializer()`) to the collected table,
+/// which keeps the selection for every later phase.
+pub(crate) fn collect_signatures_with_cp_and_plugins(
+    files: &[File],
+    libraries: Box<dyn SemanticPlatform>,
+    native_plugins: NativePlugins,
     diags: &mut DiagSink,
 ) -> SymbolTable {
     // Signature collection structurally infers expression-body literal types (`infer_lit_ty_p`, a
     // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
     // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
     crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(files, libraries, diags, None, None)
+        let host = native_plugins.host("main");
+        let mut table = collect_signatures_with_cp_impl(files, libraries, &host, diags, None, None);
+        table.native_plugins = native_plugins;
+        table
     })
 }
 
@@ -67,7 +84,8 @@ pub(crate) fn collect_signatures_with_cp_headers(
     diags: &mut DiagSink,
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(files, libraries, diags, Some(headers), None)
+        let no_plugins = crate::plugins::PluginHost::new();
+        collect_signatures_with_cp_impl(files, libraries, &no_plugins, diags, Some(headers), None)
     })
 }
 
@@ -78,15 +96,20 @@ pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
     headers: &crate::fir::StreamedHeaderModule,
     local_contexts: &[PassOneLocalClassContext],
     libraries: Box<dyn SemanticPlatform>,
+    native_plugins: NativePlugins,
     diags: &mut DiagSink,
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(
+        let host = native_plugins.host("main");
+        let mut table = collect_signatures_with_cp_impl(
             files,
             libraries,
+            &host,
             diags,
             Some(headers),
             Some(local_contexts),
-        )
+        );
+        table.native_plugins = native_plugins;
+        table
     })
 }

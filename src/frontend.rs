@@ -8,6 +8,7 @@ use crate::features::LangFeatures;
 pub use crate::fir::DeclarationId as FrontendDeclarationId;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
+use crate::plugins::registry::NativePlugins;
 
 mod header_validation;
 mod inline_preparation;
@@ -629,16 +630,37 @@ pub fn analyze_source_set_with_features(
     )
 }
 
-/// A platform provider is either fully constructed or a terminal initialization diagnostic. The
-/// failed state does not implement symbol lookup and therefore cannot leak dependency corruption as
+/// What a source set is analyzed against: the semantic platform and the native compiler plugins the
+/// compilation runs.
+///
+/// The platform is either fully constructed or a terminal initialization diagnostic. The failed
+/// state does not implement symbol lookup and therefore cannot leak dependency corruption as
 /// ordinary absence before the frontend reports it.
-pub struct PlatformProvider(
-    Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
-);
+///
+/// No native plugin runs unless the driver selects one with [`PlatformProvider::with_native_plugins`]
+/// (the CLI from kotlinc's `-Xplugin`/`-P` switches): kotlinc synthesizes nothing for a plugin it was
+/// not given, so a `@Serializable` class gets no serializer without the serialization plugin.
+pub struct PlatformProvider {
+    platform: Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
+    native_plugins: NativePlugins,
+}
+
+impl PlatformProvider {
+    /// Run `native_plugins` in this analysis and in the emission that consumes it.
+    pub fn with_native_plugins(self, native_plugins: NativePlugins) -> Self {
+        Self {
+            native_plugins,
+            ..self
+        }
+    }
+}
 
 impl From<Box<dyn SemanticPlatform>> for PlatformProvider {
     fn from(platform: Box<dyn SemanticPlatform>) -> Self {
-        Self(Ok(platform))
+        Self {
+            platform: Ok(platform),
+            native_plugins: NativePlugins::none(),
+        }
     }
 }
 
@@ -647,7 +669,7 @@ where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Box<T>) -> Self {
-        Self(Ok(platform))
+        Self::from(platform as Box<dyn SemanticPlatform>)
     }
 }
 
@@ -656,7 +678,10 @@ where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Result<T, crate::libraries::PlatformInitializationError>) -> Self {
-        Self(platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>))
+        Self {
+            platform: platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>),
+            native_plugins: NativePlugins::none(),
+        }
     }
 }
 
@@ -978,7 +1003,11 @@ where
             },
         )
         .collect::<Vec<_>>();
-    let platform = match platform.0 {
+    let PlatformProvider {
+        platform,
+        native_plugins,
+    } = platform;
+    let platform = match platform {
         Ok(platform) => platform,
         Err(error) => {
             diags.set_file(0);
@@ -1092,8 +1121,12 @@ where
     };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
-        let mut dependency_symbols =
-            collect_signatures_with_cp(&files[inferred_count..], platform, &mut dependency_diags);
+        let mut dependency_symbols = crate::resolve::collect_signatures_with_cp_and_plugins(
+            &files[inferred_count..],
+            platform,
+            native_plugins.clone(),
+            &mut dependency_diags,
+        );
         dependency_symbols.offset_source_files(inferred_count as u32);
         let platform = std::mem::replace(
             &mut dependency_symbols.libraries,
@@ -1117,6 +1150,7 @@ where
         &pass1_headers,
         &local_class_contexts[..inferred_end],
         platform,
+        native_plugins,
         diags,
     );
     if multiplatform {

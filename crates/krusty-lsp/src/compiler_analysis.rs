@@ -158,6 +158,12 @@ where
     P: Into<frontend::PlatformProvider>,
 {
     let mut diags = DiagSink::new();
+    // The project model reports no compiler-plugin classpath, so the editor runs every native
+    // extension krusty ships: a `@Serializable` class's `serializer()` must resolve in a project that
+    // applies the plugin, and a project that does not has no reason to call it.
+    let platform = platform.into().with_native_plugins(
+        krusty::plugins::registry::PluginRegistry::with_builtins().every_native_extension(),
+    );
     let analysis = frontend::analyze_source_set_prefix_with_features_trimmed(
         inputs,
         checked_count,

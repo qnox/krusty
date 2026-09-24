@@ -22,6 +22,9 @@ pub struct CheckedIrFile<'a> {
     /// checked IR; exposing the frontend symbol table here would permit lookup and provisional
     /// local signatures to leak across the backend boundary.
     pub classifiers: CheckedBackendClassifiers<'a>,
+    /// The native compiler plugins the frontend ran for this compilation. A backend runs exactly
+    /// these, so a declaration the frontend published is realized and no unrequested one appears.
+    pub native_plugins: &'a crate::plugins::registry::NativePlugins,
     pub module_name: &'a str,
     pub stems: &'a [String],
 }
