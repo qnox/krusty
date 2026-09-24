@@ -16,7 +16,15 @@ pub(super) fn generated_serializer_classifier_fact(
         .annotation_class_arguments
         .iter()
         .any(|(ordinal, _)| *ordinal as usize == serializable_ordinal);
-    if custom_serializer || ctx.kind == crate::libraries::TypeKind::Enum || ctx.is_sealed {
+    // An enum, a sealed base and an object build their serializer at run time (`EnumSerializer`,
+    // `SealedClassSerializer`, `ObjectSerializer`); only an ordinary class gets a `$serializer`.
+    if custom_serializer
+        || matches!(
+            ctx.kind,
+            crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Object
+        )
+        || ctx.is_sealed
+    {
         return None;
     }
     Some(GeneratedClassifierFact {

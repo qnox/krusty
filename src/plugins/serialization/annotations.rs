@@ -61,6 +61,16 @@ pub(super) fn class_serial_name(ir: &IrFile, class_id: ClassId) -> KtString {
     })
 }
 
+/// Whether this declaration carries an annotation whose resolved classifier is marked
+/// `@SerialInfo`. The provider performs the meta-annotation lookup; this query never infers the
+/// role from an annotation's spelling.
+pub(super) fn class_has_serial_info(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> bool {
+    ir.classes[class_id as usize]
+        .applied_annotations
+        .applications()
+        .any(|application| ctx.is_serial_info_annotation(application.internal))
+}
+
 /// A class-level `@SerialName("…")`. An application whose value is not its `String` constant is a
 /// frontend defect, not a reason to fall back to the qualified name.
 fn class_serial_name_override(ir: &IrFile, class_id: ClassId) -> Option<KtString> {
