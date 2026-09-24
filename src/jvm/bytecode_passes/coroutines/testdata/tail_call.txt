@@ -1,0 +1,7 @@
+0: iload 0
+1: aload 1
+2: invokestatic BKt.one(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
+3: areturn
+line 2: 0
+local v I 0..4 slot 0
+local $completion Lkotlin/coroutines/Continuation; 0..4 slot 1
