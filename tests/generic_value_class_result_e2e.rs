@@ -3,7 +3,8 @@
 //! declaration returns the value class's carrier, exactly as a non-generic one does, so the call
 //! site reads the carrier directly. Only a bare type parameter (`fun <T> id(v: T): T`) crosses an
 //! erased slot and hands back a box. Treating the first like the second unboxed a carrier that was
-//! never boxed, and the JVM rejected the caller with a VerifyError.
+//! never boxed, and the JVM rejected the caller with a VerifyError. `Token`/`keep` below pins the
+//! opposite bare-`T` boundary with a repository-owned value class rather than a stdlib intrinsic.
 use super::common;
 
 const TAGS: &str = "\
@@ -12,6 +13,11 @@ value class Tagged<out A>(val label: String)
 
 @JvmInline
 value class Either<out L, out R> internal constructor(val slot: Any?)
+
+@JvmInline
+value class Token(val text: String)
+
+fun <T> keep(value: T): T = value
 
 object Tags {
     fun <A> of(value: A): Tagged<A> = Tagged(value.toString())
@@ -23,6 +29,8 @@ fun box(): String {
     if (tagged.label != \"7\") return \"FAIL 1\"
     val sided: Either<Int, String> = Tags.left(3)
     if (sided.slot != 3) return \"FAIL 2\"
+    val boxed = keep(Token(\"kept\"))
+    if (boxed.text != \"kept\") return \"FAIL 3\"
     val inferred = Tags.of(\"OK\")
     return inferred.label
 }

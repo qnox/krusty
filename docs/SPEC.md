@@ -1024,14 +1024,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A generic declaration whose result is a value class returns the carrier, whatever its type
   arguments.** `fun <A> of(v: A): Tagged<A>` read as `Tagged<Int>` is realized exactly like a
   non-generic `(): Tagged`: the declaration `areturn`s the carrier and the caller reads it directly.
-  Type arguments have no JVM representation, so a declared result whose erasure already equals the
-  call's own result erasure crosses no physical boundary, and FIR lowering records none for it. Only
-  a result that erases differently (a bare `T` instantiated with a value class, which comes back
-  through `Object` as a box) keeps the physical slot the value-class pass reads as `Boxed`. Recording
-  the erased `Tagged` as the physical slot made that pass `checkcast`+`unbox-impl` a carrier that was
-  never boxed, a VerifyError at the caller. Tests: `tests/generic_value_class_result_e2e.rs` (the
-  caller's facade byte-compared with kotlinc; `Ok`/`Err`-style factories over a two-parameter value
-  class with an `Any?` carrier).
+  Type arguments have no JVM representation, so a declared result whose JVM type already equals the
+  call's own result crosses no physical boundary. Common lowering records only the declaration and
+  substituted semantic types; JVM result-boundary realization compares their target representations
+  after generic erasure. Only a result that erases differently (a bare `T` instantiated with a value
+  class, which comes back through its erased bound as a box) keeps the physical slot the value-class
+  pass reads as `Boxed`. Recording the semantic `Tagged` classifier as that physical slot made the
+  pass `checkcast`+`unbox-impl` a carrier that was never boxed, a VerifyError at the caller. Tests:
+  `tests/generic_value_class_result_e2e.rs` (the caller's facade byte-compared with kotlinc, including
+  a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
+  value class with an `Any?` carrier).
 - **An `annotation class` that declares `@Target` carries THREE meta-annotations, and the Java one is
   a PROJECTION.** kotlinc writes, into `RuntimeVisibleAnnotations`: every annotation the source
   declares, in SOURCE order (`kotlin.annotation.Retention` and `kotlin.annotation.Target` among them);
