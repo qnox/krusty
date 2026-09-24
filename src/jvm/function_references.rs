@@ -600,7 +600,7 @@ pub(super) fn realize(
         let mut call_owner = Some(callable.owner);
         let mut call_name = callable.name.clone();
         let mut call_interface = callable.owner_is_interface;
-        let (bound, dispatch, owner_class, flags, mut target_parameters, reference_receiver) =
+        let (bound, dispatch, owner_class, flags, target_parameters, reference_receiver) =
             match (realization.kind, target_is_extension, binding) {
                 (ExternalCallableKind::TopLevel, false, FirCallableReferenceBinding::Static) => {
                     if receiver_ty.is_some() || capture.is_some() {
@@ -736,13 +736,15 @@ pub(super) fn realize(
         }
         let mut invoke_parameters = reference.params.clone();
         let mut invoke_result = reference.ret;
-        let mut target_result = callable.physical_ret;
+        let target_result = callable.physical_ret;
         if reference.suspend {
             let continuation = Ty::obj("kotlin/coroutines/Continuation");
+            // The function carrier realizes suspend calling convention from the semantic reference,
+            // so its `invoke` gains the continuation here. The provider's physical callable already
+            // includes its continuation parameter and erased result; extending that descriptor again
+            // would emit a call with one more parameter than the operand vector can supply.
             invoke_parameters.push(continuation);
-            target_parameters.push(continuation);
             invoke_result = Ty::obj("kotlin/Any");
-            target_result = Ty::obj("kotlin/Any");
         }
         let arity = u8::try_from(reference.params.len())
             .map_err(|_| FunctionReferenceRealizationTarget::External(declaration))?;

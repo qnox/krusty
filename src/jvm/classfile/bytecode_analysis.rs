@@ -10,6 +10,6 @@ mod frame_types;
 
 pub(crate) use control_graph::{ControlGraph, Handler};
 pub(crate) use frame_computer::{
-    entry_frame, ComputedFrame, Decline, FrameComputation, TypedHandler,
+    entry_frame, ComputedFrame, ComputedFrames, Decline, FrameComputation, TypedHandler,
 };
 pub(crate) use frame_types::{FrameTypes, PoolView, VerificationType};
