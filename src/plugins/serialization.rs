@@ -21,6 +21,7 @@ mod generated_classifier;
 mod generated_members;
 mod property_default;
 mod serialize_body;
+mod type_parameter_serializers;
 mod value_class_types;
 
 use crate::ir::{
@@ -42,6 +43,7 @@ use generated_members::{add_serializer_members, publish_write_self, GeneratedSer
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use type_parameter_serializers::TypeParameterSerializers;
 use value_class_types::{inline_prim_methods, value_class_underlying};
 
 mod child_serializer_cache;
@@ -679,6 +681,9 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
     let fq = ty.kotlin_class_internal()?;
     Some(if fq.matches("kotlin/Int") {
         (
@@ -729,6 +734,9 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
 fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
     let fq = ty.kotlin_class_internal()?;
     let d = "Lkotlinx/serialization/descriptors/SerialDescriptor;";
     Some(if fq.matches("kotlin/Int") {
@@ -2138,44 +2146,9 @@ impl IrPlugin for SerializationPlugin {
                     None => None,
                 })
                 .collect();
-            // The serializers this generic `$serializer` is constructed with, by the semantic
-            // identity of the class type parameter each one serves.
-            // Only a generic class records a signature; one that declares type parameters without
-            // it would leave its serializers unaddressable, which no fallback may paper over.
-            let declared_type_parameters = ir.classes[class_id as usize].type_params.len();
-            let type_parameter_identities: Vec<&'static str> = if declared_type_parameters == 0 {
-                Vec::new()
-            } else {
-                let signature = ir
-                    .class_signature(&ir.classes[class_id as usize].fq_name())
-                    .expect("a generic class records its generic signature");
-                assert_eq!(
-                    signature.type_params.len(),
-                    declared_type_parameters,
-                    "a generic class's signature declares each of its type parameters"
-                );
-                signature
-                    .type_params
-                    .iter()
-                    .map(|parameter| crate::types::intern(&parameter.semantic_name))
-                    .collect()
-            };
-            let type_parameter_serializers = element_serializer::TypeParameterSerializers {
-                serializer_class: ser_idx as u32,
-                identities: &type_parameter_identities,
-            };
-            // For each field: the `$serializer` field index (`1..=N`) holding its element serializer when
-            // the property's declared type IS a class type parameter (`val boxed: T` on a generic class).
-            // `None` for a concrete-typed field. Lets serialize/deserialize/childSerializers route a
-            // type-param element through the ctor-supplied `this.typeSerialK` instead of a fixed serializer.
-            let tp_field: Vec<Option<u32>> = fields
-                .iter()
-                .map(|(_, ty)| {
-                    ty.non_null()
-                        .ty_param_name()
-                        .and_then(|identity| type_parameter_serializers.field(identity))
-                })
-                .collect();
+            let type_parameter_identities = type_parameter_serializers::identities(ir, class_id);
+            let type_parameter_serializers =
+                TypeParameterSerializers::new(ser_idx as u32, &type_parameter_identities);
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
                     "getDescriptor" => {
@@ -2259,7 +2232,6 @@ impl IrPlugin for SerializationPlugin {
                             fields: &fields,
                             field_defaults: &field_defaults,
                             nested_serializers: &nested,
-                            type_parameter_serializer_fields: &tp_field,
                             type_parameter_serializers,
                             write_self: self
                                 .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
@@ -2275,7 +2247,6 @@ impl IrPlugin for SerializationPlugin {
                             serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
                             fields: &fields,
-                            type_parameter_serializer_fields: &tp_field,
                             type_parameter_serializers,
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
@@ -2285,12 +2256,10 @@ impl IrPlugin for SerializationPlugin {
                     "childSerializers" => {
                         ChildSerializersBody {
                             function: fid,
-                            serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
                             declaring_class: class_id,
                             fields: &fields,
                             serializer_field_types: &serializer_field_types,
-                            type_parameter_serializer_fields: &tp_field,
                             type_parameter_serializers,
                             plan: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
@@ -2300,27 +2269,7 @@ impl IrPlugin for SerializationPlugin {
                     // A serializer without type parameters keeps the semantic interface-default
                     // delegation installed when its member was declared.
                     "typeParametersSerializers" if !type_parameter_identities.is_empty() => {
-                        let elements: Vec<ExprId> = (1..=type_parameter_identities.len() as u32)
-                            .map(|fidx| {
-                                let this = ir.add_expr(IrExpr::GetValue(0));
-                                ir.add_expr(IrExpr::GetField {
-                                    receiver: this,
-                                    class: ser_idx as u32,
-                                    index: fidx,
-                                })
-                            })
-                            .collect();
-                        let arr = ir.add_expr(IrExpr::Vararg {
-                            array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
-                            spreads: vec![false; elements.len()],
-                            elements,
-                        });
-                        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![ret],
-                            value: None,
-                        });
-                        ir.functions[fid as usize].body = Some(body);
+                        type_parameter_serializers.install_member_body(ir, fid);
                     }
                     _ => {}
                 }

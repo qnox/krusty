@@ -1,5 +1,6 @@
 //! Select and emit one complete serializer for a property element type.
 
+use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
@@ -42,34 +43,6 @@ pub(super) enum ElementSerializerPlan {
         field: u32,
     },
     Builtin(TypeName),
-}
-
-/// The serializers a generic `$serializer` is constructed with, one per type parameter of the class
-/// it serves. An element whose type is, or contains, one of those parameters reads it off the
-/// `$serializer` (`this.typeSerial<k>`), so only code running on that instance can use it.
-#[derive(Clone, Copy)]
-pub(super) struct TypeParameterSerializers<'a> {
-    pub(super) serializer_class: ClassId,
-    /// The semantic identity of each type parameter, in declaration order. Parameter `k`'s
-    /// serializer is field `1 + k`; field 0 is the descriptor.
-    pub(super) identities: &'a [&'static str],
-}
-
-impl TypeParameterSerializers<'_> {
-    /// No type parameter has a serializer: a non-generic class, or code that is not on the
-    /// `$serializer` instance.
-    pub(super) const NONE: TypeParameterSerializers<'static> = TypeParameterSerializers {
-        serializer_class: 0,
-        identities: &[],
-    };
-
-    /// The `$serializer` field holding the serializer for the type parameter `identity`.
-    pub(super) fn field(&self, identity: &str) -> Option<u32> {
-        self.identities
-            .iter()
-            .position(|candidate| *candidate == identity)
-            .map(|k| 1 + k as u32)
-    }
 }
 
 /// The type requires a child-cache slot, but no complete serializer plan can be selected for it.
@@ -279,7 +252,7 @@ pub(super) fn element_serializer_plan_in(
         return scope
             .field(identity)
             .map(|field| ElementSerializerPlan::TypeParameter {
-                serializer_class: scope.serializer_class,
+                serializer_class: scope.serializer_class(),
                 field,
             });
     }
@@ -344,12 +317,7 @@ pub(super) fn element_serializer_plan_in(
                 // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
                 // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
                 // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                let element = element_serializer_plan_in(ir, ctx, a, scope)?;
-                arguments.push(if is_nullable(a) {
-                    ElementSerializerPlan::Nullable(Box::new(element))
-                } else {
-                    element
-                });
+                arguments.push(type_argument_serializer_plan(ir, ctx, a, scope)?);
             }
             return Some(ElementSerializerPlan::Collection { builder, arguments });
         }
@@ -404,12 +372,7 @@ pub(super) fn element_serializer_plan_in(
         // An in-projection has no readable element type from which a serializer can be derived.
         let mut arguments = Vec::with_capacity(n_tp);
         for argument in type_args.iter().take(n_tp) {
-            let readable = match argument {
-                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
-                Ty::InProjection(_) => return None,
-                _ => *argument,
-            };
-            arguments.push(element_serializer_plan_in(ir, ctx, &readable, scope)?);
+            arguments.push(type_argument_serializer_plan(ir, ctx, argument, scope)?);
         }
         if arguments.len() != n_tp {
             return None;
@@ -460,11 +423,7 @@ pub(super) fn element_serializer_plan_in(
                 let serializer = &ir.classes[serializer_id];
                 let readable_arguments = type_args
                     .iter()
-                    .map(|argument| match argument {
-                        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
-                        Ty::InProjection(_) => None,
-                        _ => Some(*argument),
-                    })
+                    .map(readable_type_argument)
                     .collect::<Option<Vec<_>>>()?;
                 // Each constructor parameter must be `KSerializer<P>` for a distinct DECLARED type
                 // parameter. Inspect the resolved `TyParam` identity carried by the type; the strings
@@ -489,7 +448,7 @@ pub(super) fn element_serializer_plan_in(
                 if parameters_match {
                     let arguments = readable_arguments
                         .iter()
-                        .map(|argument| element_serializer_plan_in(ir, ctx, argument, scope))
+                        .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
                         .collect::<Option<Vec<_>>>()?;
                     return Some(ElementSerializerPlan::LocalConstructed {
                         serializer: serializer_id as ClassId,
@@ -526,6 +485,34 @@ pub(super) fn element_serializer_plan_in(
         return Some(ElementSerializerPlan::Builtin(builtin.serializer));
     }
     None
+}
+
+/// Select a serializer passed as one generic serializer factory's type argument. A nullable
+/// argument needs its own `.nullable` wrapper; the nullable-element encode/decode methods apply to
+/// the containing property and cannot provide this nested argument's null semantics.
+fn type_argument_serializer_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    argument: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ElementSerializerPlan> {
+    let readable = readable_type_argument(argument)?;
+    let plan = element_serializer_plan_in(ir, ctx, &readable, scope)?;
+    Some(if is_nullable(&readable) {
+        ElementSerializerPlan::Nullable(Box::new(plan))
+    } else {
+        plan
+    })
+}
+
+/// The checked read type of one projected serializer argument. An `in` projection has no readable
+/// value type, so it cannot supply a serializer operand.
+fn readable_type_argument(argument: &Ty) -> Option<Ty> {
+    match argument {
+        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
+        Ty::InProjection(_) => None,
+        _ => Some(*argument),
+    }
 }
 
 fn emit_collection_serializer(

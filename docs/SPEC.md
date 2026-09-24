@@ -6168,7 +6168,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A generic `@Serializable` class builds each element that mentions a type parameter around
   that parameter's serializer.** A generic `$serializer` is constructed with one `typeSerialK`
   per type parameter. kotlinc builds each element whose type mentions a type parameter
-  (`List<T>`, `Map<String, T>`, `List<T?>`, `Box<T>`) in place, in `childSerializers` and
+  (`List<T>`, `Map<String, T>`, `List<T?>`, `Box<T>`, `Box<T?>`) in place, in `childSerializers` and
   `deserialize`, around `this.typeSerialK`. Only an element that mentions no type parameter comes
   from the class's static `$childSerializers` cache, whose slots for the others stay `null`.
   krusty resolved a type-parameter element only when it was the bare parameter and matched it by

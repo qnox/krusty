@@ -425,17 +425,15 @@ pub(super) fn add_child_serializer_cache(
 /// element's serializer IS sits in one module instead of straddling the plugin facade.
 pub(super) struct ChildSerializersBody<'a> {
     pub(super) function: u32,
-    /// The `$serializer` class index — the owner of a type-parameter serializer field.
-    pub(super) serializer_class: u32,
     pub(super) serialized_class: ClassId,
     /// The class the PROPERTIES are declared on, for the per-property annotation questions.
     pub(super) declaring_class: ClassId,
     pub(super) fields: &'a [(String, Ty)],
     /// Element types as the SERIALIZER sees them, which is not always the field's own type.
     pub(super) serializer_field_types: &'a [Ty],
-    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
     /// The serializers of the class's type parameters, on the generic `$serializer`.
-    pub(super) type_parameter_serializers: super::element_serializer::TypeParameterSerializers<'a>,
+    pub(super) type_parameter_serializers:
+        super::type_parameter_serializers::TypeParameterSerializers<'a>,
     /// The serialized class's cache plan, or `None` when it has no cache.
     pub(super) plan: Option<ChildSerializerCachePlan>,
 }
@@ -444,12 +442,10 @@ impl ChildSerializersBody<'_> {
     pub(super) fn generate(self, ir: &mut IrFile, ctx: &PluginContext) {
         let Self {
             function,
-            serializer_class,
             serialized_class,
             declaring_class,
             fields,
             serializer_field_types,
-            type_parameter_serializer_fields,
             type_parameter_serializers,
             plan,
         } = self;
@@ -491,14 +487,6 @@ impl ChildSerializersBody<'_> {
                 ) {
                     // `@Contextual` / file-level `@UseContextualSerialization` property.
                     inst
-                } else if let Some(fidx) = type_parameter_serializer_fields[i] {
-                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
-                    let this = ir.add_expr(IrExpr::GetValue(0));
-                    ir.add_expr(IrExpr::GetField {
-                        receiver: this,
-                        class: serializer_class,
-                        index: fidx,
-                    })
                 } else if let Some(internal) =
                     field_serializer_of(ctx, ir, declaring_class, &fields[i].0)
                 {

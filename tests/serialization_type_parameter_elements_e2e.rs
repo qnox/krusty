@@ -4,8 +4,9 @@
 //! kotlinc's generic `$serializer` holds one `typeSerialK` field per type parameter and builds every
 //! element that mentions one in place, around that field: `List<T>` is
 //! `new ArrayListSerializer(this.typeSerial0)`, `Map<String, T>` a `LinkedHashMapSerializer` over
-//! `StringSerializer` and the field, `Box<T>` the companion's `serializer(this.typeSerial0)`. Only an
-//! element that mentions no type parameter comes from the class's `$childSerializers` cache. krusty
+//! `StringSerializer` and the field, `Box<T>` the companion's `serializer(this.typeSerial0)`, and
+//! `Box<T?>` that call around `this.typeSerial0.nullable`. Only an element that mentions no type
+//! parameter comes from the class's `$childSerializers` cache. krusty
 //! resolved a type-parameter element only when it was the bare parameter, so `List<T>` and
 //! `Map<String, T>` were rejected as unsupported constructs.
 
@@ -22,11 +23,18 @@ data class Bag<T>(\n\
 \x20   val byKey: Map<String, T>,\n\
 \x20   val one: T,\n\
 \x20   val maybe: List<T?>,\n\
+\x20   val projected: MutableList<out T?>,\n\
+\x20   val nullableOne: T?,\n\
 \x20   val fixed: List<String>,\n\
 )\n\
 \n\
 @Serializable\n\
-data class Shelf<K, V>(val bags: List<Bag<V>>, val index: Map<Int, List<K>>, val first: Bag<K>?)\n\
+data class Shelf<K, V>(\n\
+\x20   val bags: List<Bag<V>>,\n\
+\x20   val index: Map<Int, List<K>>,\n\
+\x20   val first: Bag<K>?,\n\
+\x20   val nullableArgument: Bag<K?>,\n\
+)\n\
 \n\
 @Serializable\n\
 data class Grid(val cells: Map<String, List<Int?>>, val rows: List<List<String>>)\n";
@@ -34,12 +42,13 @@ data class Grid(val cells: Map<String, List<Int?>>, val rows: List<List<String>>
 const BOX: &str = "fun box(): String {\n\
 \x20   val bag = Bag(\n\
 \x20       listOf(Entry(1, \"a\")), mapOf(\"k\" to Entry(2, \"b\")), Entry(3, \"c\"),\n\
-\x20       listOf(null, Entry(4, \"d\")), listOf(\"x\"),\n\
+\x20       listOf(null, Entry(4, \"d\")), mutableListOf(null, Entry(5, \"e\")), null, listOf(\"x\"),\n\
 \x20   )\n\
 \x20   val bags = Bag.serializer(Entry.serializer())\n\
 \x20   val shelf = Shelf(\n\
 \x20       listOf(bag), mapOf(7 to listOf(\"s\")),\n\
-\x20       Bag(listOf(\"p\"), mapOf(\"q\" to \"r\"), \"o\", listOf(null), listOf()),\n\
+\x20       Bag(listOf(\"p\"), mapOf(\"q\" to \"r\"), \"o\", listOf(null), mutableListOf(\"u\", null), null, listOf()),\n\
+\x20       Bag<String?>(listOf(null), mapOf(\"z\" to null), null, listOf(null), mutableListOf(\"v\", null), null, listOf()),\n\
 \x20   )\n\
 \x20   val shelves = Shelf.serializer(String.serializer(), Entry.serializer())\n\
 \x20   val grid = Grid(mapOf(\"c\" to listOf(1, null)), listOf(listOf(\"r\")))\n\
@@ -57,12 +66,19 @@ const IMPORTS: &str = "import kotlinx.serialization.Serializable\n\
 import kotlinx.serialization.builtins.serializer\n\
 import kotlinx.serialization.json.Json\n";
 
-const EXPECTED: &str = "{\"items\":[{\"id\":1,\"label\":\"a\"}],\"byKey\":{\"k\":{\"id\":2,\"label\":\"b\"}},\
-\"one\":{\"id\":3,\"label\":\"c\"},\"maybe\":[null,{\"id\":4,\"label\":\"d\"}],\"fixed\":[\"x\"]} | true | \
+const EXPECTED: &str =
+    "{\"items\":[{\"id\":1,\"label\":\"a\"}],\"byKey\":{\"k\":{\"id\":2,\"label\":\"b\"}},\
+\"one\":{\"id\":3,\"label\":\"c\"},\"maybe\":[null,{\"id\":4,\"label\":\"d\"}],\
+\"projected\":[null,{\"id\":5,\"label\":\"e\"}],\"nullableOne\":null,\
+\"fixed\":[\"x\"]} | true | \
 {\"bags\":[{\"items\":[{\"id\":1,\"label\":\"a\"}],\"byKey\":{\"k\":{\"id\":2,\"label\":\"b\"}},\
-\"one\":{\"id\":3,\"label\":\"c\"},\"maybe\":[null,{\"id\":4,\"label\":\"d\"}],\"fixed\":[\"x\"]}],\
+\"one\":{\"id\":3,\"label\":\"c\"},\"maybe\":[null,{\"id\":4,\"label\":\"d\"}],\
+\"projected\":[null,{\"id\":5,\"label\":\"e\"}],\"nullableOne\":null,\
+\"fixed\":[\"x\"]}],\
 \"index\":{\"7\":[\"s\"]},\"first\":{\"items\":[\"p\"],\"byKey\":{\"q\":\"r\"},\"one\":\"o\",\
-\"maybe\":[null],\"fixed\":[]}} | true | \
+\"maybe\":[null],\"projected\":[\"u\",null],\"nullableOne\":null,\"fixed\":[]},\
+\"nullableArgument\":{\"items\":[null],\"byKey\":{\"z\":null},\"one\":null,\"maybe\":[null],\
+\"projected\":[\"v\",null],\"nullableOne\":null,\"fixed\":[]}} | true | \
 {\"cells\":{\"c\":[1,null]},\"rows\":[[\"r\"]]} | true";
 
 /// Every shape of type-parameter element round-trips under both compilers.
