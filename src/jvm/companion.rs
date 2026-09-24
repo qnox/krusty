@@ -393,7 +393,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 value: None,
             });
             let getter = ir.add_fun(IrFunction {
-                name: getter_name,
+                name: getter_name.clone(),
                 params: vec![],
                 ret: candidate.ty,
                 body: Some(getter_body),
@@ -401,6 +401,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
                 param_checks: vec![],
             });
+            ir.fn_source_names.insert(getter, getter_name);
+            ir.fn_params
+                .insert(getter, crate::ir::FnParamInfo::identities(Vec::new()));
             ir.fn_source_order.insert(getter, candidate.source_order);
             let setter = candidate.is_var.then(|| {
                 let value = ir.add_expr(IrExpr::GetValue(1));
@@ -427,8 +430,16 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                     param_checks: vec![(candidate.ty.is_reference()
                         && !candidate.ty.is_nullable()
                         && !candidate.ty.is_ty_param())
-                    .then(|| "<set-?>".to_string())],
+                    .then_some(crate::ir::IrParameterCheck::NonNull)],
                 });
+                ir.fn_source_names
+                    .insert(setter, property_setter_name(&candidate.name));
+                ir.fn_params.insert(
+                    setter,
+                    crate::ir::FnParamInfo::identities(vec![
+                        crate::ir::IrParameterIdentity::property_setter_value(),
+                    ]),
+                );
                 ir.fn_source_order.insert(setter, candidate.source_order);
                 setter
             });

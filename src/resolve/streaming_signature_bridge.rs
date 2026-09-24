@@ -3686,34 +3686,42 @@ fn compact_classifier_parents(
 /// Reapply a compact header's star-projection syntax to a provisionally resolved legacy type.
 ///
 /// The legacy collector has no classifier-shape input while resolving a `TypeRef`, so it represents
-/// every `*` as `out Any?`. The compact header still owns the exact star bit and the completed symbol
-/// table owns the target parameter bound. Combine those stable Pass-1 facts at publication time;
-/// an explicitly written `out Any?` has no star bit and is therefore never rewritten.
-fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: Ty) -> Ty {
-    match resolved {
-        Ty::Nullable(inner) => Ty::nullable(compact_header_star_bounds(table, syntax, *inner)),
+/// every `*` as `out Any?`. The compact header still owns the exact star bit and the
+/// provider-normalized classifier (module or classpath) owns the target parameter bound. Combine
+/// those stable Pass-1 facts at publication time; an explicitly written `out Any?` has no star bit
+/// and is therefore never rewritten.
+fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: Ty) -> Option<Ty> {
+    Some(match resolved {
+        Ty::Nullable(inner) => Ty::nullable(compact_header_star_bounds(table, syntax, *inner)?),
         Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(compact_header_star_bounds(table, syntax, *inner))
+            Ty::platform_nullable(compact_header_star_bounds(table, syntax, *inner)?)
         }
         Ty::InProjection(inner) if !syntax.is_star_projection() => {
-            Ty::in_projection(compact_header_star_bounds(table, syntax, *inner))
+            Ty::in_projection(compact_header_star_bounds(table, syntax, *inner)?)
         }
         Ty::OutProjection(inner) if !syntax.is_star_projection() => {
-            Ty::out_projection(compact_header_star_bounds(table, syntax, *inner))
+            Ty::out_projection(compact_header_star_bounds(table, syntax, *inner)?)
         }
         Ty::Obj(owner, resolved_arguments) if !syntax.targs.is_empty() => {
-            let classifier = table.class_by_type_name(owner);
+            // Read the formal bounds from the provider-normalized declaration, so a classpath
+            // classifier's `*` gets its declared bound exactly as a module classifier's does.
+            let module = crate::module_symbols::ModuleSymbols::new(table);
+            let source = crate::symbol_source::CompositeSource::new(vec![
+                &module as &dyn crate::symbol_source::SymbolSource,
+                &*table.libraries as &dyn crate::symbol_source::SymbolSource,
+            ]);
+            let classifier = crate::symbol_source::SymbolSource::classifier(&source, owner)?;
             let mut arguments = resolved_arguments.to_vec();
             for index in 0..syntax.targs.len().min(arguments.len()) {
                 let argument_syntax = &syntax.targs[index];
                 if !argument_syntax.is_star_projection() {
                     arguments[index] =
-                        compact_header_star_bounds(table, argument_syntax, arguments[index]);
+                        compact_header_star_bounds(table, argument_syntax, arguments[index])?;
                     continue;
                 }
                 let bindings = classifier
-                    .into_iter()
-                    .flat_map(|classifier| classifier.type_params.iter())
+                    .type_params()
+                    .iter()
                     .zip(arguments.iter())
                     .enumerate()
                     .filter_map(|(ordinal, (formal, actual))| {
@@ -3721,10 +3729,12 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
                     })
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 let upper_bound = classifier
-                    .and_then(|classifier| classifier.type_param_bounds.get(index))
+                    .type_param_bounds()
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
                     .copied()
                     .map(|bound| crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings))
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj_name(crate::types::wk::any())));
                 arguments[index] = Ty::star_projection(upper_bound);
             }
             Ty::obj_args_name(owner, &arguments)
@@ -3735,12 +3745,12 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
                 .iter()
                 .zip(function.params.iter())
                 .map(|(syntax, resolved)| compact_header_star_bounds(table, syntax, *resolved))
-                .collect::<Vec<_>>();
+                .collect::<Option<Vec<_>>>()?;
             let result = syntax
                 .arg
                 .as_deref()
                 .map(|syntax| compact_header_star_bounds(table, syntax, function.ret))
-                .unwrap_or(function.ret);
+                .unwrap_or(Some(function.ret))?;
             Ty::fun_with_shape(
                 parameters,
                 result,
@@ -3750,7 +3760,7 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
             )
         }
         other => other,
-    }
+    })
 }
 
 /// Reapply star bounds to one source value-parameter type without confusing the source element
@@ -3762,11 +3772,11 @@ fn compact_header_value_parameter_star_bounds(
     is_vararg: bool,
 ) -> Option<Ty> {
     if !is_vararg {
-        return Some(compact_header_star_bounds(table, syntax, resolved));
+        return compact_header_star_bounds(table, syntax, resolved);
     }
     let element = resolved.array_elem()?;
     Some(crate::types::semantic_value_parameter_ty(
-        compact_header_star_bounds(table, syntax, element),
+        compact_header_star_bounds(table, syntax, element)?,
         true,
     ))
 }
@@ -4976,7 +4986,11 @@ pub(crate) fn finalized_streamed_signature_index(
             })
             .zip(receiver)
         {
-            receiver = Some(compact_header_star_bounds(table, &syntax, resolved));
+            let Some(resolved) = compact_header_star_bounds(table, &syntax, resolved) else {
+                failed.push(stub.id);
+                continue;
+            };
+            receiver = Some(resolved);
         }
         let compact_explicit_types = stub
             .flags
@@ -5498,6 +5512,11 @@ pub(crate) fn finalized_streamed_signature_index(
             None,
             mutable,
         );
+        index.publish_property_parameter_identities(
+            crate::fir::PropertyId::from_raw(stub.id.raw()),
+            std::iter::empty(),
+            None,
+        );
     }
     // Publish classifier headers after the full declaration inventory so source order is irrelevant.
     'classifier_publication: for stub in &headers.stubs {
@@ -5633,8 +5652,11 @@ pub(crate) fn finalized_streamed_signature_index(
                     headers
                         .lookup_names
                         .get(parameter.name)
-                        .filter(|name| *name != "_")
+                        .filter(|_| {
+                            parameter.context_kind == crate::types::ContextParameterKind::Named
+                        })
                         .map(|name| Box::<str>::from(name)),
+                    parameter.context_kind,
                     semantics.resolve_compact_header_type(signature_scope, parameter.ty)?,
                 ))
             })
@@ -6068,12 +6090,7 @@ pub(crate) fn finalized_streamed_signature_index(
         let context_value_count = packed_parameters
             .iter()
             .take(context_count as usize)
-            .filter(|parameter| {
-                headers
-                    .lookup_names
-                    .get(parameter.name)
-                    .is_some_and(|name| name != "_")
-            })
+            .filter(|parameter| parameter.context_kind == crate::types::ContextParameterKind::Named)
             .count() as u32;
         let callable = crate::fir::CallableId::from_raw(stub.id.raw());
         index.publish_failed_function_shape(
@@ -6130,17 +6147,24 @@ pub(crate) fn finalized_streamed_signature_index(
                             Ok(receiver) => receiver,
                             Err(_) => stop_with_failure!(stub.id),
                         };
+                    let header_parameters =
+                        value_parameter_publication::header_parameters(headers, stub.id);
+                    let Some(context_parameters) = header_parameters.get(..signature.context_count)
+                    else {
+                        stop_with_failure!(stub.id);
+                    };
                     index.publish_function_shape(
                         callable,
                         stub.id,
                         name,
                         crate::fir::ResolvedCallableShape {
                             context_parameter_count: signature.context_count as u32,
-                            context_value_count: signature
-                                .param_names
+                            context_value_count: context_parameters
                                 .iter()
-                                .take(signature.context_count)
-                                .filter(|name| name.as_str() != "_")
+                                .filter(|parameter| {
+                                    parameter.context_kind
+                                        == crate::types::ContextParameterKind::Named
+                                })
                                 .count() as u32,
                             extension_receiver,
                         },
@@ -6165,6 +6189,10 @@ pub(crate) fn finalized_streamed_signature_index(
                                         false,
                                         false,
                                     )
+                                    .with_context_kind(header_parameters.get(ordinal).map_or(
+                                        crate::types::ContextParameterKind::None,
+                                        |parameter| parameter.context_kind,
+                                    ))
                                     .with_implicit_integer_coercion(
                                         signature
                                             .implicit_integer_coercion
@@ -6227,10 +6255,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     .iter()
                     .take(context_count as usize)
                     .filter(|parameter| {
-                        headers
-                            .lookup_names
-                            .get(parameter.name)
-                            .is_some_and(|name| name != "_")
+                        parameter.context_kind == crate::types::ContextParameterKind::Named
                     })
                     .count() as u32;
                 index.publish_function_shape(
@@ -6354,10 +6379,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     packed_context_parameters
                         .iter()
                         .filter(|parameter| {
-                            headers
-                                .lookup_names
-                                .get(parameter.name)
-                                .is_some_and(|name| name != "_")
+                            parameter.context_kind == crate::types::ContextParameterKind::Named
                         })
                         .count(),
                 )
@@ -6382,7 +6404,8 @@ pub(crate) fn finalized_streamed_signature_index(
                             name,
                             crate::fir::ResolvedValueParameterFlags::new(
                                 false, false, false, false,
-                            ),
+                            )
+                            .with_context_kind(parameter.context_kind),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -6492,17 +6515,21 @@ pub(crate) fn finalized_streamed_signature_index(
             Ok(receiver) => receiver,
             Err(_) => stop_with_failure!(stub.id),
         };
+        let header_parameters = value_parameter_publication::header_parameters(headers, stub.id);
+        let Some(context_parameters) = header_parameters.get(..signature.context_count) else {
+            stop_with_failure!(stub.id);
+        };
         index.publish_function_shape(
             callable,
             stub.id,
             name,
             crate::fir::ResolvedCallableShape {
                 context_parameter_count: signature.context_count as u32,
-                context_value_count: signature
-                    .param_names
+                context_value_count: context_parameters
                     .iter()
-                    .take(signature.context_count)
-                    .filter(|name| name.as_str() != "_")
+                    .filter(|parameter| {
+                        parameter.context_kind == crate::types::ContextParameterKind::Named
+                    })
                     .count() as u32,
                 extension_receiver,
             },
@@ -6513,7 +6540,6 @@ pub(crate) fn finalized_streamed_signature_index(
         // header is ordinal-parallel to `param_names` — both count the context parameters first and
         // neither carries the extension receiver — so the modifiers are read from there rather than
         // left unpublished on this path alone.
-        let header_parameters = value_parameter_publication::header_parameters(headers, stub.id);
         index.publish_callable_parameters(
             callable,
             signature
@@ -6532,6 +6558,13 @@ pub(crate) fn finalized_streamed_signature_index(
                                 .unwrap_or(false),
                             false,
                             false,
+                        )
+                        .with_context_kind(
+                            header_parameters
+                                .get(ordinal)
+                                .map_or(crate::types::ContextParameterKind::None, |parameter| {
+                                    parameter.context_kind
+                                }),
                         )
                         .with_materialized_lambda(
                             header_parameters
@@ -6588,6 +6621,7 @@ pub(crate) fn finalized_streamed_signature_index(
             receiver: _,
             context_parameters,
             mutable,
+            setter_parameter_name,
             ..
         } = declaration.kind
         else {
@@ -6603,10 +6637,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 context_parameters
                     .iter()
                     .filter(|parameter| {
-                        headers
-                            .lookup_names
-                            .get(parameter.name)
-                            .is_some_and(|name| name != "_")
+                        parameter.context_kind == crate::types::ContextParameterKind::Named
                     })
                     .count(),
             )
@@ -6614,15 +6645,18 @@ pub(crate) fn finalized_streamed_signature_index(
             resolved_receivers.get(&stub.id).copied(),
             mutable,
         );
-        index.publish_property_context_parameter_names(
+        index.publish_property_parameter_identities(
             property,
             context_parameters.iter().map(|parameter| {
-                headers
-                    .lookup_names
-                    .get(parameter.name)
-                    .unwrap_or("_")
-                    .into()
+                (
+                    headers
+                        .lookup_names
+                        .get(parameter.name)
+                        .expect("a property context parameter retains its source spelling"),
+                    parameter.context_kind,
+                )
             }),
+            setter_parameter_name.and_then(|name| headers.lookup_names.get(name)),
         );
         if let Some(storage) = backing_field_types.get(&stub.id).copied() {
             index.publish_property_storage_type(property, storage);
@@ -6701,31 +6735,19 @@ pub(crate) fn finalized_streamed_signature_index(
             .declaration(property_declaration)
             .expect("an accessor owner must retain compact property syntax");
         let crate::fir::HeaderDeclarationKind::Property {
-            context_parameters, ..
+            context_parameters,
+            setter_parameter_name,
+            ..
         } = declaration.kind
         else {
             unreachable!("an accessor owner must own a property header")
         };
-        let mut parameter_names = headers
-            .syntax
-            .parameters(context_parameters)
-            .iter()
-            .map(|parameter| {
-                (
-                    headers
-                        .lookup_names
-                        .get(parameter.name)
-                        .expect("an accessor context parameter must retain its spelling"),
-                    crate::fir::ResolvedValueParameterFlags::new(false, false, false, false),
-                )
-            })
-            .collect::<Vec<_>>();
-        if is_setter {
-            parameter_names.push((
-                "value",
-                crate::fir::ResolvedValueParameterFlags::new(false, false, false, false),
-            ));
-        }
+        let parameter_names = value_parameter_publication::property_accessor_parameters(
+            headers,
+            context_parameters,
+            setter_parameter_name,
+            is_setter,
+        );
         index.publish_callable_parameters(callable, parameter_names);
     }
     // The forwarding surface is a classifier-header fact, but its selected module targets are the

@@ -6361,7 +6361,10 @@ fn logical_call_params(
     let signature = overload.semantic_signature();
     let mut bindings = seeded_gsig_binds(&signature, type_arguments);
     if let Some(declared_receiver) = signature.receiver {
-        unify_ty(declared_receiver, receiver, &mut bindings);
+        // The receiver is matched through its supertypes: a `List<E>` receiver binds the `T` of
+        // `Collection<T>.plus`. A structural-only match leaves `T` open, so a collection argument
+        // alone would fix it and `plus(element: T)` would out-rank `plus(elements: Iterable<T>)`.
+        unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
     }
     // A receiver occurrence fixes the callable formal before value arguments are considered:
     // `String : Comparable<String>` makes the `T` in
@@ -6450,7 +6453,7 @@ fn indexed_call_shape(
 
     let mut bindings = seeded_gsig_binds(&signature, type_arguments);
     if let Some(declared_receiver) = signature.receiver {
-        unify_ty(declared_receiver, receiver, &mut bindings);
+        unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
     }
     let receiver_bindings = bindings.clone();
     let value_parameter = signature.params.len() - 1;

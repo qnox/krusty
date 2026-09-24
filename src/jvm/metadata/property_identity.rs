@@ -16,6 +16,45 @@ pub(super) fn inline_underlying_property_name_id(message: &[u8]) -> Option<u64> 
     None
 }
 
+/// Parse the getter and setter declaration identities from a `JvmPropertySignature` extension.
+/// Keeping this beside the property-name identity decoder makes the protobuf edges explicit before
+/// the main decoder normalizes them into semantic property facts.
+pub(super) fn parse_jvm_property_signature(
+    body: &[u8],
+) -> (
+    Option<super::ParsedJvmSignature>,
+    Option<super::ParsedJvmSignature>,
+) {
+    let mut pb = super::Pb::new(body);
+    let mut getter = None;
+    let mut setter = None;
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (3, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(signature) = pb.bytes(n as usize) {
+                        getter = super::parse_jvm_signature(signature);
+                    }
+                }
+            }
+            (4, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(signature) = pb.bytes(n as usize) {
+                        setter = super::parse_jvm_signature(signature);
+                    }
+                }
+            }
+            (_, wire) => {
+                if pb.skip(wire).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    (getter, setter)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
