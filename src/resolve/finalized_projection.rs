@@ -503,9 +503,8 @@ pub(crate) fn publish_stable_declaration_metadata(
         let Some(accessor) = generated_accessor else {
             continue;
         };
-        let field = companion_class
-            .stable_declaration
-            .and_then(|declaration| index.declaration_name(declaration))
+        let field = companion
+            .nested_segment_within(class.internal)
             .map(Box::<str>::from)
             .or_else(|| {
                 class

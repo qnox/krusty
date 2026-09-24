@@ -707,15 +707,19 @@ impl BackendModuleFacts {
     }
 }
 
-/// A declared source companion's exact field spelling and classifier identity. The declaration
-/// name is authoritative even when it contains a character that also appears in a JVM nested name.
+/// A declared source companion's exact field spelling and classifier identity. The stable name-tree
+/// edge from its enclosing classifier is authoritative even when the segment contains `$`.
 fn source_companion(
     index: &crate::fir::ResolvedModuleIndex,
     owner: crate::fir::DeclarationId,
 ) -> Option<(Box<str>, TypeName)> {
     let declaration = index.companion_declaration(owner)?;
     let classifier = index.classifier_header(declaration)?.classifier;
-    Some((Box::from(index.declaration_name(declaration)?), classifier))
+    let owner = index.classifier_header(owner)?.classifier;
+    Some((
+        Box::from(classifier.nested_segment_within(owner)?),
+        classifier,
+    ))
 }
 
 /// The dotted Kotlin declaration name of a source classifier. The stable declaration name already
@@ -1252,6 +1256,39 @@ mod tests {
         assert_eq!(
             source_qualified_name(index, inner).as_deref(),
             Some("demo.Outer.Inner")
+        );
+    }
+
+    #[test]
+    fn source_companion_retains_only_its_exact_field_segment() {
+        let source = r#"
+            package demo
+            class Outer { companion object Named }
+        "#;
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Companion")],
+            Box::new(crate::libraries::EmptySymbolSource),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let outer = index
+            .classifier_declaration(crate::types::type_name("demo/Outer"))
+            .expect("enclosing classifier declaration");
+
+        assert_eq!(
+            source_companion(index, outer),
+            Some((
+                Box::from("Named"),
+                crate::types::type_name("demo/Outer.Named")
+            ))
         );
     }
 }
