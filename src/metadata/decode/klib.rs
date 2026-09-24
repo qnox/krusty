@@ -133,7 +133,13 @@ impl<'a> Cursor<'a> {
         self.offset == self.bytes.len()
     }
 
-    pub(crate) fn varint(&mut self, context: &str) -> Result<u64, PackageFragmentDecodeError> {
+    /// Reads a varint. `context` names it in an error and is rendered only
+    /// when one is reported, so a caller can compose it with `format_args!`
+    /// without allocating on the success path.
+    pub(crate) fn varint(
+        &mut self,
+        context: impl std::fmt::Display,
+    ) -> Result<u64, PackageFragmentDecodeError> {
         let mut value = 0u64;
         for shift in (0..70).step_by(7) {
             let byte = *self
@@ -175,7 +181,7 @@ impl<'a> Cursor<'a> {
         &mut self,
         context: &str,
     ) -> Result<(&'a [u8], usize), PackageFragmentDecodeError> {
-        let length = self.varint(&format!("{context} length"))?;
+        let length = self.varint(format_args!("{context} length"))?;
         self.bytes(length, context)
     }
 
@@ -223,7 +229,7 @@ pub(crate) fn field(
     cursor: &mut Cursor<'_>,
     context: &str,
 ) -> Result<(u64, u64), PackageFragmentDecodeError> {
-    let tag = cursor.varint(&format!("{context} field tag"))?;
+    let tag = cursor.varint(format_args!("{context} field tag"))?;
     let number = tag >> 3;
     if number == 0 {
         return Err(cursor.error(format!("zero field number in {context}")));
@@ -704,4 +710,55 @@ pub fn parse_module_header(bytes: &[u8]) -> Result<KlibModuleHeader, PackageFrag
 pub(crate) fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
     let count = u32::from_be_bytes(*data.get(0..4)?.first_chunk::<4>()?) as usize;
     data.get(4 + 4 * count..)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{field, Cursor};
+
+    #[test]
+    fn a_varint_context_is_rendered_only_for_an_error() {
+        struct Counted<'a>(&'a std::cell::Cell<u32>);
+
+        impl std::fmt::Display for Counted<'_> {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.set(self.0.get() + 1);
+                formatter.write_str("counted context")
+            }
+        }
+
+        let renders = std::cell::Cell::new(0);
+        assert_eq!(Cursor::new(&[1], 0).varint(Counted(&renders)).unwrap(), 1);
+        assert_eq!(renders.get(), 0);
+
+        let error = Cursor::new(&[0x80], 0)
+            .varint(Counted(&renders))
+            .unwrap_err();
+        assert_eq!(error.into_parts(), (1, "truncated counted context".into()));
+        assert_eq!(renders.get(), 1);
+    }
+
+    #[test]
+    fn a_field_and_its_length_name_their_context_only_when_decoding_fails() {
+        // Field 2, wire type 2, length 3, then three payload bytes.
+        let bytes = [0x12, 0x03, b'a', b'b', b'c'];
+        let mut cursor = Cursor::new(&bytes, 10);
+        assert_eq!(field(&mut cursor, "Class").unwrap(), (2, 2));
+        let (payload, offset) = cursor.length_delimited("Class name").unwrap();
+        assert_eq!((payload, offset), (&b"abc"[..], 12));
+        assert!(cursor.at_end());
+
+        let truncated_tag = field(&mut Cursor::new(&[0x80], 4), "Class").unwrap_err();
+        assert_eq!(
+            truncated_tag.into_parts(),
+            (5, "truncated Class field tag".to_string())
+        );
+        let truncated_length = Cursor::new(&[], 7)
+            .length_delimited("Class name")
+            .unwrap_err();
+        assert_eq!(
+            truncated_length.into_parts(),
+            (7, "truncated Class name length".to_string())
+        );
+    }
 }
