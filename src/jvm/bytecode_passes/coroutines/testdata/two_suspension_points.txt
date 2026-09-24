@@ -1,0 +1,161 @@
+0: aload 1
+1: instanceof AKt$f$1
+2: ifeq @18
+3: aload 1
+4: checkcast AKt$f$1
+5: astore 6
+6: aload 6
+7: getfield AKt$f$1.label:I
+8: ldc -2147483648
+9: iand
+10: ifeq @18
+11: aload 6
+12: dup
+13: getfield AKt$f$1.label:I
+14: ldc -2147483648
+15: isub
+16: putfield AKt$f$1.label:I
+17: goto @23
+18: new AKt$f$1
+19: dup
+20: aload 1
+21: invokespecial AKt$f$1.<init>(Lkotlin/coroutines/Continuation;)V
+22: astore 6
+23: aload 6
+24: getfield AKt$f$1.result:Ljava/lang/Object;
+25: astore 5
+26: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+27: astore 7
+28: aload 6
+29: getfield AKt$f$1.label:I
+30: tableswitch 0..2 [@31, @69, @110] default @133
+31: aload 5
+32: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+33: aload 0
+34: invokevirtual java/lang/String.length()I
+35: istore 2
+36: new java/lang/StringBuilder
+37: dup
+38: invokespecial java/lang/StringBuilder.<init>()V
+39: bipush 120
+40: invokevirtual java/lang/StringBuilder.append(C)Ljava/lang/StringBuilder;
+41: aload 0
+42: invokevirtual java/lang/StringBuilder.append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+43: invokevirtual java/lang/StringBuilder.toString()Ljava/lang/String;
+44: astore 3
+45: getstatic java/lang/System.out:Ljava/io/PrintStream;
+46: aload 3
+47: invokevirtual java/io/PrintStream.println(Ljava/lang/Object;)V
+48: aload 6
+49: aload 6
+50: aload 0
+51: invokestatic kotlin/coroutines/jvm/internal/SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;
+52: putfield AKt$f$1.L$0:Ljava/lang/Object;
+53: aload 6
+54: aload 3
+55: invokestatic kotlin/coroutines/jvm/internal/SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;
+56: putfield AKt$f$1.L$1:Ljava/lang/Object;
+57: aload 6
+58: iload 2
+59: putfield AKt$f$1.I$0:I
+60: aload 6
+61: iconst_1
+62: putfield AKt$f$1.label:I
+63: invokestatic AKt.one(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+64: dup
+65: aload 7
+66: if_acmpne @83
+67: aload 7
+68: areturn
+69: aload 6
+70: getfield AKt$f$1.I$0:I
+71: istore 2
+72: aload 6
+73: getfield AKt$f$1.L$1:Ljava/lang/Object;
+74: checkcast java/lang/String
+75: astore 3
+76: aload 6
+77: getfield AKt$f$1.L$0:Ljava/lang/Object;
+78: checkcast java/lang/String
+79: astore 0
+80: aload 5
+81: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+82: aload 5
+83: checkcast java/lang/Number
+84: invokevirtual java/lang/Number.intValue()I
+85: istore 4
+86: aload 6
+87: aload 6
+88: aload 0
+89: invokestatic kotlin/coroutines/jvm/internal/SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;
+90: putfield AKt$f$1.L$0:Ljava/lang/Object;
+91: aload 6
+92: aload 3
+93: invokestatic kotlin/coroutines/jvm/internal/SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;
+94: putfield AKt$f$1.L$1:Ljava/lang/Object;
+95: aload 6
+96: iload 2
+97: putfield AKt$f$1.I$0:I
+98: aload 6
+99: iload 4
+100: putfield AKt$f$1.I$1:I
+101: aload 6
+102: iconst_2
+103: putfield AKt$f$1.label:I
+104: invokestatic AKt.unit(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+105: dup
+106: aload 7
+107: if_acmpne @127
+108: aload 7
+109: areturn
+110: aload 6
+111: getfield AKt$f$1.I$1:I
+112: istore 4
+113: aload 6
+114: getfield AKt$f$1.I$0:I
+115: istore 2
+116: aload 6
+117: getfield AKt$f$1.L$1:Ljava/lang/Object;
+118: checkcast java/lang/String
+119: astore 3
+120: aload 6
+121: getfield AKt$f$1.L$0:Ljava/lang/Object;
+122: checkcast java/lang/String
+123: astore 0
+124: aload 5
+125: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+126: aload 5
+127: pop
+128: iload 2
+129: iload 4
+130: iadd
+131: invokestatic kotlin/coroutines/jvm/internal/Boxing.boxInt(I)Ljava/lang/Integer;
+132: areturn
+133: new java/lang/IllegalStateException
+134: dup
+135: ldc "call to 'resume' before 'invoke' with coroutine"
+136: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+137: athrow
+line 3: 27
+line 4: 33
+line 5: 36
+line 6: 45
+line 7: 48
+line 3: 67
+line 7: 83
+line 8: 86
+line 3: 108
+line 9: 127
+line 3: 133
+local a I 36..69 slot 2
+local dead Ljava/lang/String; 45..69 slot 3
+local b I 86..110 slot 4
+local s Ljava/lang/String; 0..138 slot 0
+local $completion Lkotlin/coroutines/Continuation; 0..138 slot 1
+local $continuation Lkotlin/coroutines/Continuation; 23..133 slot 6
+local $result Ljava/lang/Object; 26..133 slot 5
+local dead Ljava/lang/String; 76..110 slot 3
+local a I 72..110 slot 2
+local dead Ljava/lang/String; 120..133 slot 3
+local a I 116..133 slot 2
+local b I 113..133 slot 4
