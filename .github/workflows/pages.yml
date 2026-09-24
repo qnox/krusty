@@ -1,4 +1,4 @@
-# Publishes the landing page in site/ to GitHub Pages (krustythecompiler.dev).
+# Builds the Astro landing page in site/ and publishes it to GitHub Pages (krustythecompiler.dev).
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
 
@@ -25,9 +25,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: build
+        working-directory: site
+        run: npm ci && npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: site/dist
       - id: deployment
         uses: actions/deploy-pages@v4
