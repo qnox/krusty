@@ -7,6 +7,8 @@ KR="$ROOT/target/release/krusty"
 CORPUS="$ROOT/target/cache/ser-corpus/2.4.0/plugins/kotlinx-serialization/testData/boxIr"
 STDLIB="$ROOT/target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar"
 KTEST="$ROOT/target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-test.jar"
+# krusty, like kotlinc, synthesizes serializers only when the plugin is requested.
+PLUGIN="$ROOT/target/cache/kotlinc/2.4.0/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar"
 GLIB="/opt/mise/installs/gradle/9.4.0/gradle-9.4.0/lib"
 CORE="$GLIB/kotlinx-serialization-core-jvm-1.9.0.jar"
 JSON="$GLIB/kotlinx-serialization-json-jvm-1.9.0.jar"
@@ -25,7 +27,7 @@ for f in "$CORPUS"/*.kt; do
   # skip multi-file corpus entries (separate harness)
   if grep -qE '^// (FILE|MODULE):' "$f"; then reasons[$base]="SKIP multi-file"; continue; fi
   out="$TMP/$base"; rm -rf "$out"; mkdir -p "$out"
-  cerr=$("$KR" -d "$out" -cp "$CP" "$f" 2>&1)
+  cerr=$("$KR" -Xplugin="$PLUGIN" -d "$out" -cp "$CP" "$f" 2>&1)
   if [ $? -ne 0 ]; then fail=$((fail+1)); reasons[$base]="FAIL:krusty $(echo "$cerr"|grep -m1 -iE 'error|panic|unsupported|unresolved'|sed 's#[^ ]*/##'|cut -c1-100)"; continue; fi
   printf 'public class Run{public static void main(String[] a)throws Exception{System.out.println(Class.forName("%s").getMethod("box").invoke(null));}}' "$Facade" > "$out/Run.java"
   jerr=$("$JH/bin/javac" -cp "$CP" -d "$out" "$out/Run.java" 2>&1)

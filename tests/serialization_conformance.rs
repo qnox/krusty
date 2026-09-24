@@ -156,6 +156,15 @@ fn krusty_binary() -> PathBuf {
     common::krusty_binary()
 }
 
+/// `-Xplugin=` naming the reference distribution's serialization plugin: krusty synthesizes
+/// serializers only when a build requests the plugin, as kotlinc does.
+fn serialization_plugin_switch() -> String {
+    let jar = common::kotlinc_lib_dir()
+        .expect("the reference kotlinc distribution is provisioned")
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    format!("-Xplugin={}", jar.display())
+}
+
 /// Compile `src` with the krusty binary against `cp`; returns (ok, stderr).
 fn krusty_compile(src: &str, cp: &str, out: &str) -> (bool, String) {
     let bin = krusty_binary();
@@ -163,7 +172,7 @@ fn krusty_compile(src: &str, cp: &str, out: &str) -> (bool, String) {
         return (false, "krusty binary not built".into());
     }
     let o = Command::new(bin)
-        .args(["-cp", cp, "-d", out, src])
+        .args([&serialization_plugin_switch(), "-cp", cp, "-d", out, src])
         .output()
         .expect("run krusty");
     (
@@ -212,7 +221,7 @@ fn binary_compiles_serializable_and_emits_serializer() {
         jimage.display()
     );
     let o = Command::new(&bin)
-        .args(["-cp", &cp, "-d"])
+        .args([&serialization_plugin_switch(), "-cp", &cp, "-d"])
         .arg(&out)
         .arg(&src)
         .output()

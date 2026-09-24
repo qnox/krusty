@@ -4,6 +4,22 @@ use super::{FunId, IrFile, IrParameterIdentity, IrParameterProvenance};
 use crate::types::{TypeName, Visibility};
 use std::num::NonZeroU32;
 
+/// Where an owner-static initializer belongs relative to the source declaration's initializer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum GeneratedStaticInitialization {
+    #[default]
+    BeforeSource,
+    AfterSource,
+}
+
+/// Independent facts about storage generated without a source declaration. Compiler-generated
+/// provenance controls field metadata; initialization placement controls only `<clinit>` order.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GeneratedStaticFacts {
+    compiler_generated: bool,
+    initialization: GeneratedStaticInitialization,
+}
+
 /// Source/debug representation explicitly owned by a generated declaration's producer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IrGeneratedDeclarationDebug {
@@ -166,11 +182,53 @@ impl IrFile {
             .flat_map(|publication| publication.functions.iter())
             .find(|member| member.function == function)
     }
+
+    /// Record generated provenance independently of initializer placement. The JVM backend maps
+    /// this semantic fact to `ACC_SYNTHETIC` and omission of declaration nullability annotations.
+    pub fn mark_compiler_generated_static(&mut self, index: u32) {
+        self.generated_static_facts
+            .entry(index)
+            .or_default()
+            .compiler_generated = true;
+    }
+
+    pub fn is_compiler_generated_static(&self, index: u32) -> bool {
+        self.generated_static_facts
+            .get(&index)
+            .is_some_and(|facts| facts.compiler_generated)
+    }
+
+    /// Place this initializer after the owner's source property/init sequence. This is an explicit
+    /// ordering fact, not a consequence of the field being compiler-generated.
+    pub fn place_static_initializer_after_source(&mut self, index: u32) {
+        self.generated_static_facts
+            .entry(index)
+            .or_default()
+            .initialization = GeneratedStaticInitialization::AfterSource;
+    }
+
+    pub fn static_initializer_is_after_source(&self, index: u32) -> bool {
+        self.generated_static_facts
+            .get(&index)
+            .is_some_and(|facts| facts.initialization == GeneratedStaticInitialization::AfterSource)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::IrGeneratedDeclarationDebug;
+    use super::{IrFile, IrGeneratedDeclarationDebug};
+
+    #[test]
+    fn generated_static_provenance_and_initializer_placement_are_independent() {
+        let mut ir = IrFile::default();
+        ir.mark_compiler_generated_static(2);
+        ir.place_static_initializer_after_source(7);
+
+        assert!(ir.is_compiler_generated_static(2));
+        assert!(!ir.static_initializer_is_after_source(2));
+        assert!(!ir.is_compiler_generated_static(7));
+        assert!(ir.static_initializer_is_after_source(7));
+    }
 
     #[test]
     fn unknown_declaration_line_is_an_explicit_locals_only_contract() {

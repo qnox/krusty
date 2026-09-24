@@ -939,6 +939,11 @@ struct Parser<'a> {
     /// Span of the `context` keyword introducing the buffered clause. Diagnostics about the clause
     /// itself are anchored here rather than on some later modifier, which is where kotlinc puts them.
     pending_context_span: Option<Span>,
+    /// Where the member declaration prefix most recently read by `parse_member_decl_prefix` began,
+    /// with the token index at which that prefix ended. A body property whose `val`/`var` sits at
+    /// exactly that index starts its declaration there, modifiers and annotations included; any
+    /// other declaration never reads a stale prefix, because its keyword is elsewhere.
+    member_declaration_prefix: Option<(u32, usize)>,
     /// Span of the identifier most recently read as a DECLARATION's name (every declaration head
     /// takes its name through `ident_or_error`). A declaration head reads this immediately after
     /// obtaining its name, before parsing anything that could read another one. Kotlin diagnostics
@@ -1057,6 +1062,7 @@ impl<'a> Parser<'a> {
             pending_annotation_args: Vec::new(),
             pending_context_params: Vec::new(),
             pending_context_span: None,
+            member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
             is_script,
             script_stmts: Vec::new(),
@@ -2087,6 +2093,10 @@ impl<'a> Parser<'a> {
         let annotation_args = self.take_pending_annotation_args();
         let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
+        let declaration_start = match self.member_declaration_prefix.take() {
+            Some((prefix_start, prefix_end)) if prefix_end == self.i => prefix_start,
+            _ => start.lo,
+        };
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
                      // Optional generic type parameters on an extension property (`val <T> T.foo: T`) —
@@ -2329,6 +2339,7 @@ impl<'a> Parser<'a> {
             explicit_backing_field,
             init,
             span: Span::new(start.lo, end.hi),
+            declaration_span: Span::new(declaration_start, end.hi),
             name_span,
         }
     }
@@ -2756,6 +2767,7 @@ impl<'a> Parser<'a> {
         if has_primary_ctor {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                let declaration_start = self.tok().span.lo;
                 let epmods = self.skip_decl_prefix();
                 let is_vararg = epmods.iter().any(|m| m == "vararg");
                 let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
@@ -2776,10 +2788,12 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
                 props.push(PropParam {
                     name: pname,
                     ty,
                     span: pspan,
+                    declaration_span: Span::new(declaration_start, declaration_end),
                     decl_line: 0,
                     decl_start_line: 0,
                     is_vararg,
@@ -3313,6 +3327,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_member_decl_prefix(&mut self) -> Vec<String> {
+        let start = self.tok().span.lo;
         self.pending_context_params.clear();
         let mut modifiers = if self.at(TokenKind::At) || self.at_modifier() {
             let modifiers = self.skip_decl_prefix();
@@ -3322,6 +3337,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         modifiers.extend(self.maybe_parse_context_receivers());
+        self.member_declaration_prefix = Some((start, self.i));
         modifiers
     }
 
@@ -3462,9 +3478,7 @@ impl<'a> Parser<'a> {
     ) {
         self.reprefix_hoisted(outer, start);
         nested.visibility = visibility_of(modifiers);
-        nested.name = format!("{outer}.{}", nested.name);
-        let id = self.file.add_decl(Decl::Class(nested));
-        self.file.decls.insert(start, id);
+        let id = self.file.add_hoisted_classifier(nested, outer, start);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
     }
 
@@ -3677,6 +3691,7 @@ impl<'a> Parser<'a> {
         if has_primary_ctor_parens {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                let declaration_start = self.tok().span.lo;
                 let mut pannos = Vec::new();
                 let mut pannos_args = Vec::new();
                 let mut cpmods = Vec::new();
@@ -3710,10 +3725,12 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
                 props.push(PropParam {
                     name: pname,
                     ty,
                     span: pspan,
+                    declaration_span: Span::new(declaration_start, declaration_end),
                     decl_line: 0,
                     decl_start_line: 0,
                     is_vararg,

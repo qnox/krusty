@@ -18,20 +18,18 @@
 
 mod bridge_returns;
 mod declaration_inventory;
+mod default_calls;
+mod descriptor_parameters;
+mod operation_relocation;
 mod property_references;
 mod synth_members;
-
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
-use std::collections::{HashMap, HashSet};
-
-mod descriptor_parameters;
-mod operation_relocation;
-
 use operation_relocation::clone_below_representation_wrapper;
+use std::collections::{HashMap, HashSet};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -1409,6 +1407,7 @@ pub(crate) fn lower_value_classes(
                     ),
                     Callee::ModuleWithDefaults {
                         target,
+                        default_provider,
                         name,
                         params,
                         ret,
@@ -1418,7 +1417,8 @@ pub(crate) fn lower_value_classes(
                         if let Some(receiver) = dispatch_receiver_ty {
                             *receiver = erase(receiver, &under);
                         }
-                        (name, params, ret, Some(*target), true, true)
+                        let provider = default_calls::module_provider(*target, *default_provider);
+                        (name, params, ret, Some(provider), true, true)
                     }
                     _ => continue,
                 };
@@ -3949,34 +3949,33 @@ pub(crate) fn lower_value_classes(
                         .collect()
                 }
                 // A semantic sibling-source default call still carries only supplied arguments.
-                // Adapt each one against the selected declaration parameter that remains after
+                // Adapt each one against the provider declaration parameter that remains after
                 // removing omitted ordinals; JVM placeholders are created only after this pass.
                 IrExpr::Call {
                     callee:
                         Callee::ModuleWithDefaults {
-                            target, defaults, ..
+                            target,
+                            default_provider,
+                            defaults,
+                            ..
                         },
                     args,
                     ..
-                } => ir
-                    .referenced_module_callables
-                    .get(target)
-                    .map(|callable| {
-                        args.iter()
-                            .zip(callable.parameters.iter().enumerate().filter_map(
-                                |(parameter, ty)| {
-                                    (!defaults.contains(&(parameter as u32))).then_some(*ty)
-                                },
-                            ))
-                            .map(|(argument, parameter)| {
-                                (
-                                    repr_ctx.through_erased_generic_coercion(*argument).0,
-                                    parameter,
-                                )
-                            })
-                            .collect()
+                } => args
+                    .iter()
+                    .zip(default_calls::supplied_provider_parameters(
+                        ir,
+                        *target,
+                        *default_provider,
+                        defaults,
+                    ))
+                    .map(|(argument, parameter)| {
+                        (
+                            repr_ctx.through_erased_generic_coercion(*argument).0,
+                            parameter,
+                        )
                     })
-                    .unwrap_or_default(),
+                    .collect(),
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected
@@ -4212,6 +4211,10 @@ pub(crate) fn lower_value_classes(
         + 1;
     let mut unique_ops = HashSet::new();
     ops.retain(|operation| unique_ops.insert(*operation));
+    // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
+    // recorded for that exact call. A suspend function returning the same box hands that value
+    // back as it is (see `restore_boxed_suspension_tails`).
+    let mut boxed_suspension_unboxes = HashSet::new();
     for (id, op) in ops {
         crate::trace_compiler!(
             "value_classes",
@@ -4248,7 +4251,16 @@ pub(crate) fn lower_value_classes(
                 // already-unboxed representation recorded for this exact call. A boundary collected
                 // from the pre-CPS descriptor must not insert a value-class `unbox-impl` around it.
             }
-            BoxOp::Unbox(x) => unbox_wrap(ir, id, x, &under),
+            BoxOp::Unbox(x) => {
+                if matches!(
+                    ir.value_class_suspend_calls.get(&id),
+                    Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. })
+                        if *classifier == x
+                ) {
+                    boxed_suspension_unboxes.insert(id);
+                }
+                unbox_wrap(ir, id, x, &under);
+            }
             BoxOp::UnboxNull(x) => {
                 unbox_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
@@ -4398,6 +4410,7 @@ pub(crate) fn lower_value_classes(
                     ) {
                         Some(crate::ir::IrValueClassSuspendResult::Boxed { .. }) => {
                             ir.functions[fid].ret = boxed_value_ty(x);
+                            restore_boxed_suspension_tails(ir, body, &boxed_suspension_unboxes);
                             box_ref_tail(
                                 ir,
                                 body,
@@ -5937,6 +5950,49 @@ fn box_tail(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
                 box_wrap(ir, id, x, under);
             }
         }
+    }
+}
+
+/// In a suspend function whose CPS result is the box of its value class, return a tail that unboxes
+/// a suspend call with that same boxed result (`= delegate.parcel()`) as the box it already is,
+/// before [`box_ref_tail`] would box it again: kotlinc returns the callee's `Object` untouched, so
+/// the call stays a tail call. `unboxes` holds the exact `unbox-impl` nodes realized over such calls.
+fn restore_boxed_suspension_tails(ir: &mut IrFile, id: ExprId, unboxes: &HashSet<ExprId>) {
+    match &ir.exprs[id as usize] {
+        IrExpr::When { branches } => {
+            let tails: Vec<ExprId> = branches.iter().map(|(_, tail)| *tail).collect();
+            for tail in tails {
+                restore_boxed_suspension_tails(ir, tail, unboxes);
+            }
+        }
+        IrExpr::Block {
+            value: Some(tail), ..
+        }
+        | IrExpr::Return(Some(tail)) => {
+            let tail = *tail;
+            restore_boxed_suspension_tails(ir, tail, unboxes);
+        }
+        IrExpr::Block { value: None, stmts } => {
+            if let Some(&last) = stmts.last() {
+                restore_boxed_suspension_tails(ir, last, unboxes);
+            }
+        }
+        // The checked coercion to the value class, realized as its carrier over the unbox.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } if unboxes.contains(arg) => {
+            let IrExpr::Call {
+                dispatch_receiver: Some(boxed),
+                ..
+            } = ir.exprs[*arg as usize]
+            else {
+                return;
+            };
+            ir.exprs[id as usize] = ir.exprs[boxed as usize].clone();
+        }
+        _ => {}
     }
 }
 
