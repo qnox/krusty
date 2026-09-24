@@ -12,6 +12,7 @@
 //! deserialize bodies.
 
 mod cached_serializer;
+mod constructed_standard_serializers;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
@@ -35,6 +36,7 @@ use crate::plugins::{
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
+use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
@@ -501,8 +503,9 @@ fn call_external_companion_serializer(
 }
 
 /// The serialized type a reified round-trip call names, flattened into the placeholder's name
-/// payload. A `@Serializable` classifier is one name; a supported collection over `@Serializable`
-/// arguments is its own classifier followed by them. That is as much shape as `Vec<TypeName>`
+/// payload. A `@Serializable` classifier is one name; a supported constructed standard type over
+/// `@Serializable` arguments is its own classifier followed by them. That is as much shape as
+/// `Vec<TypeName>`
 /// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
 /// inline path.
 fn serialized_type_spelling(
@@ -514,14 +517,16 @@ fn serialized_type_spelling(
     if ctx.has_classifier_annotation(classifier, serializable) {
         return Some(vec![classifier]);
     }
-    // Only a collection whose every argument is itself annotated is planned. A wider gate would
-    // capture calls the generic path already compiles correctly and turn a working file into a
-    // declined placeholder.
-    let (_, arity) = collection_serializer_builder(classifier)?;
+    // Only a constructed standard type whose every argument is itself annotated is planned. A
+    // wider gate would capture calls the generic path already compiles correctly and turn a working
+    // file into a declined placeholder.
+    constructed_standard_serializer(classifier)?;
     let Ty::Obj(_, arguments) = ty.non_null() else {
         return None;
     };
-    if arguments.len() != arity {
+    // Every currently mapped serializer is constructed over at least one checked type argument.
+    // The argument count comes from this selected semantic type, never from the classifier's name.
+    if arguments.is_empty() {
         return None;
     }
     let mut spelling = vec![classifier];
@@ -818,53 +823,6 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
         dispatch_receiver: None,
         args: vec![base],
     })
-}
-
-/// The kotlinx collection serializer CLASS for a standard collection type, and its type-argument
-/// count.
-///
-/// kotlinc's plugin CONSTRUCTS these directly rather than calling the `BuiltinSerializersKt`
-/// factory that returns the same thing — `ListSerializer(x)` is an inline stdlib function over
-/// `ArrayListSerializer(x)`. The two serialize identically and differ in every byte of the method
-/// that builds them.
-fn collection_serializer_builder(classifier: TypeName) -> Option<(TypeName, usize)> {
-    if [
-        "kotlin/collections/List",
-        "kotlin/collections/MutableList",
-        "kotlin/collections/Collection",
-        "kotlin/collections/MutableCollection",
-        "kotlin/collections/Iterable",
-        "kotlin/collections/MutableIterable",
-    ]
-    .into_iter()
-    .map(type_name)
-    .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/ArrayListSerializer"),
-            1,
-        ))
-    } else if ["kotlin/collections/Set", "kotlin/collections/MutableSet"]
-        .into_iter()
-        .map(type_name)
-        .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/LinkedHashSetSerializer"),
-            1,
-        ))
-    } else if ["kotlin/collections/Map", "kotlin/collections/MutableMap"]
-        .into_iter()
-        .map(type_name)
-        .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/LinkedHashMapSerializer"),
-            2,
-        ))
-    } else {
-        None
-    }
 }
 
 /// The element serializer for property `name` of type `ty` IF it is contextual (`name` ∈ `contextual`):

@@ -6316,6 +6316,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
   `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
+  them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
+  as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
+  `Triple` becomes `TripleSerializer` and `Map.Entry` becomes `MapEntrySerializer`. Each is built
+  over its argument serializers and cached in `$childSerializers` like a collection's. krusty knew
+  only the collection serializers, so a property of any of these types was rejected as an
+  unsupported construct. They now share the constructed-standard serializer registry, which also
+  gives a reified `encodeToString`/`decodeFromString` over a tuple of `@Serializable` arguments the
+  planned path.
+  Tests: `tests/serialization_tuple_elements_e2e.rs` (runtime for each tuple as a property, nested,
+  nullable, over a class type parameter and through a reified call, plus the cached factories,
+  cross-checked against the reference compiler).
 - **An override of a Java member matches the platform type, and a Java class merges its members by
   erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
   bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
