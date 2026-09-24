@@ -1,3 +1,5 @@
+<p align="center"><img src="site/public/krusty.png" alt="krusty, a crab mascot" width="240"></p>
+
 # krusty: a Kotlin compiler written in Rust
 
 <p align="center">

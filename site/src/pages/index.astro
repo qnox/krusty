@@ -26,14 +26,20 @@ const jsonLd = {
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={Astro.site?.href} />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={Astro.site?.href} />
+    <meta property="og:image" content={new URL("/krusty.png", Astro.site).href} />
     <script type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)} />
   </head>
   <body>
     <main>
+      <picture>
+        <source srcset="/krusty.avif" type="image/avif" />
+        <img class="mascot" src="/krusty.png" alt="krusty, a crab mascot" width="240" height="156" fetchpriority="high" />
+      </picture>
       <h1>krusty</h1>
       <p class="tag">A Kotlin compiler written in Rust.</p>
       <p>
@@ -75,6 +81,7 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
     :root { --fg: #ecebf0; --muted: #a09cab; --bg: #131217; --code: #201e27; --accent: #a78bff; }
   }
   body { margin: 0 auto; max-width: 720px; padding: 32px 16px; background: var(--bg); color: var(--fg); font: 17px/1.6 system-ui, sans-serif; }
+  .mascot { display: block; width: 240px; height: auto; margin: 0 0 8px -8px; }
   h1 { font-size: 40px; margin: 0; }
   .tag { font-size: 22px; margin: 0 0 16px; color: var(--muted); }
   h2 { margin-top: 36px; font-size: 22px; }
