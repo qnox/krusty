@@ -18,6 +18,7 @@ mod debug_local_names;
 mod declaration_collisions;
 mod default_call_operands;
 mod external_calls;
+pub mod frame_audit;
 mod function_classifiers;
 mod function_references;
 mod generated_member_metadata;
