@@ -14,7 +14,18 @@ use super::temporary_elimination_e2e::stack_map;
 const SOURCE: &str = "fun larger(first: Int, second: Int): Int = maxOf(first, second)\n\
     fun smaller(first: Long, second: Long): Long = minOf(first, second)\n\
     fun remember(table: MutableMap<String, String>, key: String) { table[key] = key }\n\
-    fun checked(ready: Boolean, count: Int): Int { require(ready); return count }\n";
+    fun checked(ready: Boolean, count: Int): Int { require(ready); return count }\n\
+    fun invokeStored(block: () -> Int): Int = run(block)\n\
+    private var events = 0\n\
+    private fun mark(expected: Int, value: Int): Int {\n\
+    \x20   if (events != expected) return -100\n\
+    \x20   events += 1\n\
+    \x20   return value\n\
+    }\n\
+    fun orderedOnce(): Int {\n\
+    \x20   events = 0\n\
+    \x20   return maxOf(mark(0, 1), mark(1, 2)) * 10 + events\n\
+    }\n";
 
 #[test]
 fn inline_only_arguments_are_read_where_the_body_loads_them_like_kotlinc() {
@@ -29,7 +40,12 @@ fn inline_only_arguments_are_read_where_the_body_loads_them_like_kotlinc() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    for member in ["int larger(", "long smaller(", "void remember("] {
+    for member in [
+        "int larger(",
+        "long smaller(",
+        "void remember(",
+        "int invokeStored(",
+    ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
         assert_eq!(
@@ -55,6 +71,8 @@ fn inline_only_arguments_read_in_place_still_run() {
              \x20   val table = mutableMapOf<String, String>()\n\
              \x20   remember(table, \"k\")\n\
              \x20   if (table[\"k\"] != \"k\") return \"table\"\n\
+             \x20   if (invokeStored {{ 9 }} != 9) return \"function parameter\"\n\
+             \x20   if (orderedOnce() != 22) return \"evaluation order\"\n\
              \x20   return if (checked(true, 4) == 4) \"OK\" else \"checked\"\n\
              }}\n"
         ),

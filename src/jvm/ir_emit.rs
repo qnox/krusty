@@ -39,7 +39,9 @@ mod enum_metadata;
 mod field_write;
 mod function_debug;
 mod implicit_reference_coercion;
+mod in_place_arguments;
 mod inline_body_emission;
+mod inline_call;
 mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
@@ -57,22 +59,14 @@ mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
 use inline_body_emission::collect_body_var_types;
+use inline_call::{
+    bind_inline_handlers, parse_descriptor_params, vtype_to_verif, InlineStaticTarget,
+};
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
-
-struct InlineStaticTarget<'a> {
-    owner: &'a str,
-    name: &'a str,
-    descriptor: &'a str,
-    splice_desc: &'a str,
-    /// An `@InlineOnly` callee, which contributes NO debug information to the caller: the reference
-    /// compiler gives such a body no inline-depth marker, no locals, no line entries and no source
-    /// map, so that it is invisible in a stack trace. Splicing one must be equally invisible.
-    inline_only: bool,
-}
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
 /// object class: accessors read/write `getstatic`/`putstatic`, initializers run in `<clinit>` after
@@ -4900,10 +4894,6 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     })
 }
 
-/// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
-/// their initializers in declaration order.
-/// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
-/// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_unified` bails on them).
 /// A method's `StackMapTable` frames resolved to byte offsets: `(offset, locals, stack)` each.
 type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
 
@@ -4917,34 +4907,6 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
             Some(crate::jvm::names::classfile_internal_name(&n.render()))
         }
         _ => None,
-    }
-}
-
-fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
-    use crate::jvm::inline::VType;
-    match v {
-        VType::Top => VerifType::Top,
-        VType::Int => VerifType::Integer,
-        VType::Float => VerifType::Float,
-        VType::Long => VerifType::Long,
-        VType::Double => VerifType::Double,
-        VType::Null => VerifType::Null,
-        VType::Object(idx) => VerifType::Object(*idx),
-        VType::UninitThis | VType::Uninit(_) => VerifType::Top,
-    }
-}
-
-/// Attach exception-table entries returned by the bytecode inliner. The offsets are already
-/// absolute in the caller's code buffer; labels are needed only because `CodeBuilder` owns the
-/// eventual exception-table serialization.
-fn bind_inline_handlers(code: &mut CodeBuilder, handlers: &[(usize, usize, usize, u16)]) {
-    for &(start, end, handler, catch_type) in handlers {
-        let (start_label, end_label, handler_label) =
-            (code.new_label(), code.new_label(), code.new_label());
-        code.bind_at(start_label, start);
-        code.bind_at(end_label, end);
-        code.bind_at(handler_label, handler);
-        code.add_exception(start_label, end_label, handler_label, catch_type);
     }
 }
 
@@ -12885,10 +12847,6 @@ struct Emitter<'a> {
     generated_initializer: bool,
 }
 
-fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
-    parse_physical_method_desc(desc).map(|(params, _)| params)
-}
-
 impl<'a> Emitter<'a> {
     fn new(
         ir: &'a IrFile,
@@ -13022,7 +12980,7 @@ impl<'a> Emitter<'a> {
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
         // compiler reuses slots belonging to host locals that are not written yet.
         let spliced_frame =
-            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, false, base);
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, None, base);
         let top_local = spliced_frame
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
@@ -14039,30 +13997,20 @@ impl<'a> Emitter<'a> {
         // `canInlineArgumentsInPlace` and no argument's code stores a local or jumps out of itself
         // (`InplaceArgumentsMethodTransformer`): no parameter slot is written, and the slots close.
         // An argument is only admitted when its code cannot contain either.
-        let in_place = inline_only
-            && !physical_params.is_empty()
-            && !physical_params.iter().any(|param| {
-                param
-                    .obj_internal()
-                    .is_some_and(|internal| internal.render().starts_with("kotlin/jvm/functions/"))
-            })
-            && args
-                .iter()
-                .all(|&argument| self.evaluates_without_local_writes(argument))
-            && crate::jvm::inline::reads_arguments_in_place(&body, splice_desc);
-        let binding = if in_place {
-            crate::jvm::inline::ParameterBinding::InPlace
-        } else {
-            crate::jvm::inline::ParameterBinding::Stored(&[])
+        let in_place = match in_place_arguments::Selection::for_call(
+            self.ir,
+            call_expression,
+            args,
+            inline_only,
+            &body,
+            splice_desc,
+            base,
+        ) {
+            Some(selection) => selection,
+            None => return false,
         };
-        let top_local = if in_place {
-            match crate::jvm::inline::spliced_frame(&body, splice_desc, &[], true, base) {
-                Some(frame) => frame.top_local,
-                None => return false,
-            }
-        } else {
-            base + body.max_locals
-        };
+        let binding = in_place.binding();
+        let top_local = in_place.top_local();
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
         // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
         // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
@@ -14167,26 +14115,6 @@ impl<'a> Emitter<'a> {
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
         code.add_frame_if_new(join, prefix, join_stack);
         true
-    }
-
-    /// Whether `expression`'s code can neither store a local nor jump: kotlinc moves only such an
-    /// argument to where an `@InlineOnly` body reads it. Deliberately narrow — a shape left out keeps
-    /// the argument in its parameter slot, as before.
-    fn evaluates_without_local_writes(&self, expression: u32) -> bool {
-        match self.ir.expr(expression) {
-            IrExpr::GetValue(_)
-            | IrExpr::Const(_)
-            | IrExpr::GetStatic(_)
-            | IrExpr::ExternalStaticField { .. }
-            | IrExpr::ExternalStaticInstance { .. }
-            | IrExpr::EnclosingInstance { .. } => true,
-            IrExpr::TypeOp {
-                op: IrTypeOp::Cast | IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => self.evaluates_without_local_writes(*arg),
-            _ => false,
-        }
     }
 
     /// Caller-local verification types for slots `0..upto` (collapsing `long`/`double` to one entry),
