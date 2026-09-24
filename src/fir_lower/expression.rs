@@ -1174,6 +1174,11 @@ impl BodyLowering<'_> {
                             init: Some(value),
                             named: false,
                         }));
+                        // A predicate condition (`is`, `in`) carries the subject expression itself.
+                        // From here on that expression is the temporary: lowering it again would
+                        // share the subject's IR node and evaluate it once more per test.
+                        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                        self.set_expression_state(subject, LoweringState::Lowered(read));
                         Ok::<_, FirLoweringFailure>(temporary)
                     })
                     .transpose()?;
