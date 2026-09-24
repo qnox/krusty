@@ -2664,6 +2664,9 @@ pub struct LibraryType {
     /// Complete set of directly declared function-supertype shapes. Most classifiers have zero or
     /// one; intersection classifiers may implement several arities simultaneously.
     pub callable_signatures: Vec<Ty>,
+    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), from a dependency's
+    /// `@Metadata`. `None` for a Java classifier and wherever the provider does not record it.
+    pub qualified_name: Option<Box<str>>,
     /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
     /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
@@ -2772,6 +2775,18 @@ pub enum TypeKind {
     Object,
 }
 
+impl From<TypeKind> for crate::types::ClassifierDeclarationKind {
+    fn from(kind: TypeKind) -> Self {
+        match kind {
+            TypeKind::Class => Self::Class,
+            TypeKind::Interface => Self::Interface,
+            TypeKind::Annotation => Self::Annotation,
+            TypeKind::Enum => Self::Enum,
+            TypeKind::Object => Self::Object,
+        }
+    }
+}
+
 impl LibraryType {
     /// Whether this declaration is one of Kotlin's function-type classifier representations.
     ///
@@ -2816,6 +2831,7 @@ impl LibraryType {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
@@ -3311,6 +3327,7 @@ mod tests {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

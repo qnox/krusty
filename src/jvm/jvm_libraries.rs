@@ -2739,6 +2739,7 @@ impl JvmLibraries {
                 callable_signature,
                 callable_signatures,
                 companion_object,
+                qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
                 value_underlying_property: value_class.and_then(|declaration| declaration.property),
                 alias_target: None,
@@ -5061,6 +5062,24 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
         SymbolSource::classifier(self, classifier)
             .map(|shape| shape.kind == crate::libraries::TypeKind::Object)
+    }
+
+    fn classifier_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::ClassifierDeclarationFacts> {
+        let shape = SymbolSource::classifier(self, classifier)?;
+        Some(crate::types::ClassifierDeclarationFacts {
+            kind: shape.kind.into(),
+            is_abstract: shape.inheritance.is_abstract || !shape.sealed_subclasses.is_empty(),
+            own_type_parameter_count: shape.own_type_parameter_count,
+            companion: shape
+                .companion_object
+                .as_ref()
+                .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
+            qualified_name: shape.qualified_name.clone(),
+            source: shape.source_file.is_some(),
+        })
     }
 
     fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {

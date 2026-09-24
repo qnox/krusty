@@ -425,6 +425,9 @@ impl<'a> ModuleSymbols<'a> {
             companion_object: c
                 .companion_internal
                 .map(|companion| (companion.nested_segment_ref().to_string(), companion)),
+            // The dotted qualified name is a dependency fact read from `@Metadata`; a source
+            // classifier's own module derives it from the declaration graph instead.
+            qualified_name: None,
             // `LibraryType` is the provider-neutral classifier shape consumed by the federated
             // resolver. Preserve source value-class metadata here just as a classpath provider
             // does, so every downstream query (identity diagnostics included) can use the common

@@ -64,6 +64,20 @@ pub struct BackendClassifierFact {
     pub value_underlying_property: Option<Box<str>>,
 }
 
+/// Declaration facts of a current-module classifier that a dependency's classifier record carries
+/// in its own form (modality, companion, qualified name) or that its annotation record keeps apart
+/// from the class-valued arguments (string-valued arguments).
+#[derive(Clone, Debug, PartialEq)]
+struct SourceDeclaration {
+    is_sealed: bool,
+    /// The declared companion object: its static field's name and its classifier.
+    companion: Option<(Box<str>, TypeName)>,
+    /// The Kotlin qualified name with every boundary dotted (`pkg.Outer.Nested`).
+    qualified_name: Option<Box<str>>,
+    /// String-valued annotation arguments, by the annotation's ordinal among the declaration's.
+    annotation_strings: Box<[Box<[Box<str>]>]>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendMemberFact {
     pub name: BackendMemberName,
@@ -295,6 +309,7 @@ pub struct BackendModuleFacts {
     body_local_classifiers: HashSet<TypeName>,
     source_value_classes: HashMap<TypeName, Ty>,
     metadata_readable_value_classes: HashSet<TypeName>,
+    source_declarations: HashMap<TypeName, SourceDeclaration>,
 }
 
 impl BackendModuleFacts {
@@ -307,6 +322,7 @@ impl BackendModuleFacts {
         let mut body_local_classifiers = HashSet::new();
         let mut source_value_classes = HashMap::new();
         let mut metadata_readable_value_classes = HashSet::new();
+        let mut source_declarations = HashMap::new();
         let mut generated_classifiers = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
@@ -571,6 +587,37 @@ impl BackendModuleFacts {
                 }
             }
             surface.sort_by_key(|(order, _)| *order);
+            // The companion's static field is named after the companion itself: its declared
+            // name below the owner's, which a nested declaration's name extends with a dot.
+            let companion = index
+                .companion_declaration(declaration)
+                .and_then(|companion| {
+                    let owner = index.declaration_name(declaration)?;
+                    let field = index
+                        .declaration_name(companion)?
+                        .strip_prefix(owner)?
+                        .strip_prefix('.')?;
+                    let classifier = index.classifier_header(companion)?.classifier;
+                    Some((Box::from(field), classifier))
+                });
+            // Package and lexical-class boundaries are both dots, the spelling lowering records
+            // for this file's own classes.
+            let qualified_name = match (
+                index.declaration_name(declaration),
+                index
+                    .declaration_anchor(declaration)
+                    .and_then(|anchor| index.source_package(anchor.source)),
+            ) {
+                (Some(name), Some(package)) => {
+                    let package = package.render().replace('/', ".");
+                    Some(if package.is_empty() {
+                        Box::from(name)
+                    } else {
+                        format!("{package}.{name}").into_boxed_str()
+                    })
+                }
+                _ => None,
+            };
             let fact = BackendClassifierFact {
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
@@ -614,6 +661,25 @@ impl BackendModuleFacts {
                 value_underlying,
                 value_underlying_property,
             };
+            source_declarations.insert(
+                classifier.classifier,
+                SourceDeclaration {
+                    is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
+                    companion,
+                    qualified_name,
+                    annotation_strings: (0..index.declaration_annotations(declaration).len())
+                        .map(|ordinal| {
+                            index
+                                .declaration_annotation_string_arguments(
+                                    declaration,
+                                    ordinal as u32,
+                                )
+                                .to_vec()
+                                .into_boxed_slice()
+                        })
+                        .collect(),
+                },
+            );
             if let Some(underlying) = value_underlying {
                 source_value_classes.insert(classifier.classifier, underlying);
                 let has_secondary_constructor = (0..index.declaration_count()).any(|raw| {
@@ -636,6 +702,7 @@ impl BackendModuleFacts {
             body_local_classifiers,
             source_value_classes,
             metadata_readable_value_classes,
+            source_declarations,
         })
     }
 
@@ -667,6 +734,7 @@ impl BackendModuleFacts {
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
+            source_declarations: HashMap::new(),
         })
     }
 
@@ -741,12 +809,65 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         &self,
         classifier: TypeName,
     ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
+        let mut annotations = BackendClassifierSource::classifier(self, classifier)?
+            .annotations
+            .to_vec();
+        // A dependency's annotations carry every argument. A source declaration's backend record
+        // carries the class-valued ones; its string-valued ones are kept beside it, and join here
+        // so the two answer the same question the same way.
+        if let Some(source) = self.module.source_declarations.get(&classifier) {
+            for (annotation, strings) in
+                annotations.iter_mut().zip(source.annotation_strings.iter())
+            {
+                annotation.arguments.extend(
+                    strings
+                        .iter()
+                        .map(|value| (String::new(), crate::types::AnnotationValue::string(value))),
+                );
+            }
+        }
+        Some(annotations)
     }
 
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
         BackendClassifierSource::classifier(self, classifier)
             .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
+    }
+
+    fn classifier_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::ClassifierDeclarationFacts> {
+        let fact = BackendClassifierSource::classifier(self, classifier)?;
+        let (is_sealed, companion, qualified_name) =
+            match self.module.source_declarations.get(&classifier) {
+                Some(source) => (
+                    source.is_sealed,
+                    source.companion.clone(),
+                    source.qualified_name.clone(),
+                ),
+                None => {
+                    let shape = self.dependencies.classifier(classifier)?;
+                    (
+                        // Only a sealed class records its subclasses; one without any is still
+                        // abstract in its class file.
+                        !shape.sealed_subclasses.is_empty(),
+                        shape
+                            .companion_object
+                            .as_ref()
+                            .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
+                        shape.qualified_name.clone(),
+                    )
+                }
+            };
+        Some(crate::types::ClassifierDeclarationFacts {
+            kind: fact.kind.into(),
+            is_abstract: fact.is_abstract || is_sealed,
+            own_type_parameter_count: fact.own_type_parameter_count,
+            companion,
+            qualified_name,
+            source: fact.source,
+        })
     }
 
     fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {

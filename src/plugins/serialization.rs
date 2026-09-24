@@ -18,6 +18,9 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod external_serializer;
+pub(crate) use external_serializer::generated_external_serializer;
+pub use external_serializer::ExternalSerializer;
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
@@ -444,9 +447,12 @@ fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
 }
 
+/// `<classifier>.<field>.serializer(args…)`: the generated accessor on `classifier`'s companion
+/// object `owner`, stored in `classifier`'s static `field`.
 fn call_external_companion_serializer(
     ir: &mut IrFile,
     classifier: TypeName,
+    field: &str,
     owner: TypeName,
     args: Vec<ExprId>,
 ) -> Option<ExprId> {
@@ -456,7 +462,7 @@ fn call_external_companion_serializer(
     let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
         owner: classifier,
         ty: owner,
-        field: "Companion".to_string(),
+        field: field.to_string(),
     });
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
@@ -593,6 +599,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 let Some(call) = call_external_companion_serializer(
                     ir,
                     class_internal,
+                    "Companion",
                     selected_owner,
                     exprs.clone(),
                 ) else {
@@ -2998,8 +3005,11 @@ mod tests {
             data: vec![classifier, type_name("demo/Row$Companion")],
             types: Vec::new(),
         });
-        let ctx = PluginContext::default()
-            .with_external_serializers([(classifier, serializer)].into_iter().collect());
+        let ctx = PluginContext::default().with_external_serializers(
+            [(classifier, ExternalSerializer::Class(serializer))]
+                .into_iter()
+                .collect(),
+        );
 
         specialize_expression_placeholders(&mut ir, &ctx);
 

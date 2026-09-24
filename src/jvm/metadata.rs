@@ -2042,6 +2042,9 @@ pub struct KotlinMeta {
     pub type_aliases: Vec<MetaTypeAlias>,
     /// `Class.constructor` (field 8): named-parameter lists in declaration order.
     pub constructors: std::sync::Arc<[MetaConstructor]>,
+    /// `Class.fq_name` (field 3), the class's Kotlin qualified name with every boundary dotted
+    /// (`lib.Outer.Nested`). Present only for class metadata.
+    pub class_qualified_name: Option<String>,
     /// `Class.companionObjectName` (field 4).
     pub companion_name: Option<String>,
     /// `Class.sealedSubclassFqName` (field 16), as JVM internal names.
@@ -2073,6 +2076,7 @@ impl Default for KotlinMeta {
             package_properties: std::sync::Arc::from([]),
             type_aliases: Vec::new(),
             constructors: std::sync::Arc::from([]),
+            class_qualified_name: None,
             companion_name: None,
             sealed_subclasses: Vec::new(),
             inline: None,
@@ -2253,6 +2257,11 @@ pub fn decode_metadata(
         package_properties: decode_properties(&ctx, 4, &[], &[])?.into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
+        class_qualified_name: if k == Some(1) {
+            class_qualified_name(&ctx)
+        } else {
+            None
+        },
         companion_name: companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
         inline: inline_class(&ctx),
@@ -3395,6 +3404,29 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
 
 /// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
 /// `None` if the class has no companion.
+/// `Class.fq_name` (field 3) as a Kotlin qualified name. Metadata spells a class name with `/`
+/// between package segments and `.` between classes (`lib/Outer.Nested`); the qualified name dots
+/// both, and neither character can occur inside a JVM identifier.
+fn class_qualified_name(ctx: &MetaCtx) -> Option<String> {
+    let mut pb = Pb::new(ctx.msg);
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (3, 0) => {
+                let id = pb.varint()?;
+                return resolve_class_name(ctx.records, ctx.d2, id as usize)
+                    .map(|name| name.replace('/', "."));
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
 fn companion_name(ctx: &MetaCtx) -> Option<String> {
     let records = ctx.records;
     let d2 = ctx.d2;

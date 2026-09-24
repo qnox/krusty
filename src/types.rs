@@ -2057,6 +2057,13 @@ pub enum AnnotationValue {
     Array(Vec<AnnotationValue>),
 }
 
+impl AnnotationValue {
+    /// A `String` element holding `value`.
+    pub fn string(value: &str) -> Self {
+        Self::String(crate::kt_string::KtString::from(value))
+    }
+}
+
 /// One resolved annotation application published as part of a classifier record. This is the
 /// provider-neutral semantic payload consumers may inspect: the annotation and every class-valued
 /// argument are stable identities, never descriptors or source spellings.
@@ -2090,6 +2097,35 @@ pub enum GeneratedClassifierKind {
     Enum,
 }
 
+/// Declaration facts of a classifier, as its declaring compilation fixed them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassifierDeclarationFacts {
+    pub kind: ClassifierDeclarationKind,
+    /// `abstract` or `sealed`: no instance has exactly this class. An interface is always abstract.
+    pub is_abstract: bool,
+    /// Type parameters the classifier declares itself, not the ones it captures lexically.
+    pub own_type_parameter_count: usize,
+    /// The companion object: the name of the static field holding it and its classifier. A source
+    /// classifier of this module reports only a DECLARED companion; one a compiler plugin adds is
+    /// that plugin's to name.
+    pub companion: Option<(Box<str>, TypeName)>,
+    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), as metadata and
+    /// source declare it. It is not derivable from the internal name, where `$` is also a legal
+    /// identifier character.
+    pub qualified_name: Option<Box<str>>,
+    /// Declared in a source file of this module rather than read from a dependency.
+    pub source: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassifierDeclarationKind {
+    Class,
+    Interface,
+    Annotation,
+    Enum,
+    Object,
+}
+
 /// Provider-neutral checked facts for a classifier. Consumers receive stable identities and typed
 /// declaration facts without gaining name lookup, callable selection, or backend access.
 pub trait ClassifierFactSource {
@@ -2099,6 +2135,13 @@ pub trait ClassifierFactSource {
     /// names a classifier it does not declare must not infer this from its name or type arity:
     /// reading `INSTANCE` off an ordinary class is a link-time failure.
     fn classifier_is_object(&self, _classifier: TypeName) -> Option<bool> {
+        None
+    }
+
+    /// The declaration shape of a classifier this compilation unit does not declare: what a plugin
+    /// needs to name the members the classifier's own compilation generated for it. `None` when the
+    /// provider does not know the classifier.
+    fn classifier_declaration(&self, _classifier: TypeName) -> Option<ClassifierDeclarationFacts> {
         None
     }
 

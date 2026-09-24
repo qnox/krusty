@@ -160,10 +160,11 @@ pub struct PluginContext {
     serial_info_annotations: std::collections::HashSet<TypeName>,
     target_type_descriptor: fn(Ty) -> Option<String>,
     /// Types this compilation does NOT declare, mapped to the serializer that already exists for
-    /// them: another file's or a dependency's generated `$serializer`, or the one a class names for
-    /// itself with `@Serializable(with = …)`. A plugin can only DERIVE a serializer for what this
-    /// file declares; for everything else only the target knows where the serializer is.
-    external_serializers: std::collections::HashMap<TypeName, TypeName>,
+    /// them: the one a class names for itself with `@Serializable(with = …)`, or the one another
+    /// file's or a dependency's compilation generated for its kind. A plugin can only DERIVE a
+    /// serializer for what this file declares; for everything else only the declaration's facts
+    /// say where the serializer is.
+    external_serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
     /// Serializer classes the ACTIVE runtime actually provides. A builtin mapping is only usable
     /// when the artifact on the classpath carries that class: `InstantSerializer` ships in newer
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
@@ -226,7 +227,7 @@ impl PluginContext {
     /// Record the serializer that exists outside this compilation for each type that has one.
     pub fn with_external_serializers(
         mut self,
-        serializers: std::collections::HashMap<TypeName, TypeName>,
+        serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
     ) -> Self {
         self.external_serializers = serializers;
         self
@@ -248,10 +249,12 @@ impl PluginContext {
         self.runtime_serializers.contains(&serializer)
     }
 
-    /// The serializer class (a JVM internal name) the target can reference for `internal`, when one
-    /// already exists outside this file.
-    pub fn external_serializer(&self, classifier: TypeName) -> Option<TypeName> {
-        self.external_serializers.get(&classifier).copied()
+    /// The serializer that exists outside this file for `classifier`, when there is one.
+    pub fn external_serializer(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&serialization::ExternalSerializer> {
+        self.external_serializers.get(&classifier)
     }
 
     /// Record which external serializers have a provider-confirmed singleton value.
@@ -533,7 +536,10 @@ pub fn run_enabled(
     // exactly the failure this plugin path exists to prevent.
     let external_singletons = external
         .values()
-        .copied()
+        .filter_map(|serializer| match serializer {
+            serialization::ExternalSerializer::Class(serializer) => Some(*serializer),
+            _ => None,
+        })
         .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
         .collect();
     let ctx = ctx
@@ -666,7 +672,7 @@ fn runtime_serializers(
 fn external_serializers(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashMap<TypeName, TypeName> {
+) -> std::collections::HashMap<TypeName, serialization::ExternalSerializer> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     external_classifier_candidates(ir)
         .filter_map(|classifier| {
@@ -689,15 +695,22 @@ fn external_serializers(
                         _ => None,
                     })
             });
-            custom
-                .or_else(|| application.map(|_| classifier.nested_child("$serializer")))
-                .or_else(|| {
+            let serializer = match (custom, application) {
+                (Some(custom), _) => serialization::ExternalSerializer::Class(custom),
+                // What the declaration's compilation generated depends on its kind; a classifier
+                // whose facts cannot name it has no entry, and an element of it is underivable.
+                (None, Some(_)) => serialization::generated_external_serializer(
+                    classifier,
+                    &classifiers.classifier_declaration(classifier)?,
+                    &annotations,
+                )?,
+                (None, None) => {
                     let generated = classifier.nested_child("$serializer");
-                    classifiers
-                        .classifier_annotations(generated)
-                        .map(|_| generated)
-                })
-                .map(|serializer| (classifier, serializer))
+                    classifiers.classifier_annotations(generated)?;
+                    serialization::ExternalSerializer::Class(generated)
+                }
+            };
+            Some((classifier, serializer))
         })
         .collect()
 }
@@ -1098,10 +1111,16 @@ mod tests {
 
         assert_eq!(
             resolved,
-            std::collections::HashMap::from([(payload, serializer)])
+            std::collections::HashMap::from([(
+                payload,
+                serialization::ExternalSerializer::Class(serializer)
+            )])
         );
         let context = PluginContext::default().with_external_serializers(resolved);
-        assert_eq!(context.external_serializer(payload), Some(serializer));
+        assert_eq!(
+            context.external_serializer(payload),
+            Some(&serialization::ExternalSerializer::Class(serializer))
+        );
         assert_eq!(
             context.external_serializer(crate::types::type_name("fixtures/Envelope")),
             None
