@@ -2385,6 +2385,11 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: std::collections::HashSet<ExprId>,
+    /// The `when` of every lowered `&&` and `||` (`a && b` is `when { a -> b; else -> false }`,
+    /// `a || b` is `when { a -> true; else -> b }`). A backend lays these out as short-circuit
+    /// jumps where the platform compiler does, which it does NOT do for the same `if` written by
+    /// hand, so the provenance is recorded here rather than recognized from the shape.
+    pub short_circuits: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
