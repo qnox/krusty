@@ -28,6 +28,7 @@ mod qualified_classifiers;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+mod source_view;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -1495,7 +1496,7 @@ pub struct SymbolResolver<'a> {
     /// Source-level library facts used during resolution.
     lib: &'a dyn SemanticPlatform,
     /// The aggregated resolution source: module declarations shadow library declarations of the same name.
-    src: crate::symbol_source::CompositeSource<'a>,
+    src: source_view::ResolverSource<'a>,
     /// The current compilation module, when present.
     module: Option<&'a dyn SymbolSource>,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
@@ -1970,64 +1971,6 @@ impl<'a> SymbolResolver<'a> {
             }
             InheritedNestedClassifier::Ambiguous => CandidateSelection::Ambiguous,
             InheritedNestedClassifier::NotFound => CandidateSelection::None,
-        }
-    }
-
-    pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
-            module: None,
-            fn_scope: None,
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
-    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [TypeName]) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
-            module: None,
-            fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    /// The primary resolver: symbol resolution federates the current `module` over the classpath `lib`.
-    pub fn new_scoped_with_module(
-        lib: &'a dyn SemanticPlatform,
-        module: &'a dyn SymbolSource,
-        fn_scope: &'a [TypeName],
-    ) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
-            module: Some(module),
-            fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    pub(crate) fn new_import_scoped_with_module(
-        lib: &'a dyn SemanticPlatform,
-        module: &'a dyn SymbolSource,
-        fn_scope: &'a FunctionImportScope,
-    ) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
-            module: Some(module),
-            fn_scope: Some(FunctionScopeRef::Imports(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
         }
     }
 
