@@ -63,3 +63,27 @@ fn constructor_reference_wins_over_same_named_classpath_function() {
         None => eprintln!("skipping: box runner unavailable"),
     }
 }
+
+/// A bound reference to a dependency's SUSPEND member calls it with one continuation. The call
+/// takes the member's physical parameters, which already end in `$completion`; appending another
+/// called `SequenceScope.yield(Object, Continuation, Continuation)`, a body no verifier accepts.
+#[test]
+fn a_bound_suspend_member_reference_passes_one_continuation() {
+    let main = "fun f() = sequence {\n\
+        \x20 yield(1)\n\
+        \x20 ::`yield`\n\
+        }\n";
+    let classes = common::compile_in_process(main, "Main", &[common::stdlib_jar()], None)
+        .expect("krusty failed to compile a bound suspend member reference");
+    let doubled = b"Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)";
+    let calls: Vec<&str> = classes
+        .iter()
+        .filter(|(_, bytes)| bytes.windows(doubled.len()).any(|window| window == doubled))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        calls,
+        Vec::<&str>::new(),
+        "a descriptor with two continuations"
+    );
+}

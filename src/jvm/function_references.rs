@@ -740,7 +740,12 @@ pub(super) fn realize(
         if reference.suspend {
             let continuation = Ty::obj("kotlin/coroutines/Continuation");
             invoke_parameters.push(continuation);
-            target_parameters.push(continuation);
+            // A direct call's parameters are the callable's physical ones, which already end in
+            // the suspend function's `$completion`. Only a synthesized adapter takes the semantic
+            // parameters, and so still needs the continuation added.
+            if local_target.is_some() {
+                target_parameters.push(continuation);
+            }
             invoke_result = Ty::obj("kotlin/Any");
             target_result = Ty::obj("kotlin/Any");
         }
