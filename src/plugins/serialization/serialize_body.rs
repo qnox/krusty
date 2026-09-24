@@ -2,8 +2,8 @@
 
 use super::{
     build_field_serializer_instance, class_ty, collection_serializer_builder,
-    contextual_serializer_for, element_serializer_expr, encode_element_method, field_serializer_of,
-    is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
+    contextual_serializer_for, encode_element_method, field_serializer_of, is_nullable,
+    property_is_contextual, ty_descriptor, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -36,7 +36,9 @@ pub(super) struct SerializeBody<'a> {
     pub(super) fields: &'a [(String, Ty)],
     pub(super) field_defaults: &'a [Option<IrConst>],
     pub(super) nested_serializers: &'a [Option<ClassId>],
-    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serializers of the class's type parameters, on the generic `$serializer`.
+    pub(super) type_parameter_serializers:
+        super::type_parameter_serializers::TypeParameterSerializers<'a>,
     pub(super) write_self: Option<u32>,
     pub(super) write_self_name: String,
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache.
@@ -52,7 +54,7 @@ impl SerializeBody<'_> {
             fields,
             field_defaults,
             nested_serializers: nested,
-            type_parameter_serializer_fields: tp_field,
+            type_parameter_serializers,
             write_self,
             write_self_name,
             cache: cache_plan,
@@ -120,7 +122,14 @@ impl SerializeBody<'_> {
             ) {
                 return Some(cached);
             }
-            element_serializer_expr(ir, ctx, ty)
+            // A delegating `write$Self` is a static helper with no `$serializer` to read a
+            // type-parameter serializer off; only the inlined generic shape has one.
+            let scope = if delegate {
+                super::type_parameter_serializers::TypeParameterSerializers::NONE
+            } else {
+                type_parameter_serializers
+            };
+            super::element_serializer::element_serializer_expr_in(ir, ctx, ty, scope)
         };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
@@ -168,34 +177,6 @@ impl SerializeBody<'_> {
             {
                 // Contextual element: encode[Nullable]SerializableElement(desc, i,
                 // ContextualSerializer(<type>::class), value.getX()).
-                let method = if is_nullable(ty) {
-                    "encodeNullableSerializableElement"
-                } else {
-                    "encodeSerializableElement"
-                };
-                let inst = super::deserialize_body::narrowed(
-                    ir,
-                    inst,
-                    "kotlinx/serialization/SerializationStrategy",
-                );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
-            } else if let Some(fidx) = tp_field[i] {
-                // Type-parameter element: encode[Nullable]SerializableElement(desc, i,
-                // this.typeSerialK, value.getX()) — the serializer is the ctor-supplied one.
-                let this_s = ir.add_expr(IrExpr::GetValue(0));
-                let inst = ir.add_expr(IrExpr::GetField {
-                    receiver: this_s,
-                    class: ser_idx as u32,
-                    index: fidx,
-                });
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {
@@ -619,7 +600,8 @@ mod tests {
             fields: &fields,
             field_defaults: &[None],
             nested_serializers: &[None],
-            type_parameter_serializer_fields: &[None],
+            type_parameter_serializers:
+                super::super::type_parameter_serializers::TypeParameterSerializers::NONE,
             write_self: Some(write_self),
             write_self_name: "write$Self".to_owned(),
             // This fixture's property has no derivable serializer at all, so its class has no
