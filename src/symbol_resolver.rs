@@ -8,7 +8,6 @@
 //! it selects the right overload and binds generic receiver/parameter/return types. It uses
 //! [`crate::libraries::SemanticPlatform`] for source-level library facts; backend descriptors and runtime
 //! ABI are not part of resolution.
-
 use crate::libraries::{
     CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable,
     LibraryMember, Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform, SourceMember,
@@ -45,7 +44,8 @@ use hierarchy_projection::{
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
     declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
-    lexical_enclosing_classifier_names, members_in_hierarchy, InheritedNestedClassifier,
+    lexical_enclosing_classifier_names, members_in_hierarchy, override_input_shapes_match,
+    InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,

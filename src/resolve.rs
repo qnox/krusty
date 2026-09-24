@@ -131,10 +131,8 @@ pub(crate) use inspection_analysis::{
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
 pub use lambda_returns::ReturnTarget;
 use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
-use local_class_scope::{
-    local_class_enclosing_tparams, local_class_sibling_declarations, local_class_sibling_names,
-    EnclosingTypeParameterDeclaration,
-};
+use local_class_scope::EnclosingTypeParameterDeclaration;
+pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
 pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
@@ -25029,13 +25027,14 @@ impl<'a> Checker<'a> {
                 // under, in the scope holding this statement — so it stays visible to the rest of
                 // the block AND to the class's own body (a member may name its own class).
                 if let Stmt::LocalClass(source) = self.file.stmt(s) {
-                    if let Some(internal) = self.active_classifier_internal(d, &cl) {
-                        scope.rebind(
-                            &source.name,
-                            Ns::Classifier,
-                            ScopeBinding::LocalClass(internal),
-                        );
-                    }
+                    let internal = self.active_classifier_internal(d, &cl).expect(
+                        "a hoisted local classifier must bind its stable semantic identity",
+                    );
+                    scope.rebind(
+                        &source.name,
+                        Ns::Classifier,
+                        ScopeBinding::LocalClass(internal),
+                    );
                 }
                 // A local class captures its enclosing instance, so its rung carries the outer
                 // `this` — and with it the enclosing class's type parameters (kotlinc 2.4.10
@@ -37876,6 +37875,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_member_ext_fun_rets: HashMap::new(),
         checked_local_properties: HashMap::new(),
         checked_local_methods: HashMap::new(),
+        body_local_default_providers: HashMap::new(),
         checked_local_constructors: HashMap::new(),
         local_method_dependencies: HashMap::new(),
         checking_local_method_dependencies: std::collections::HashSet::new(),
@@ -38841,124 +38841,6 @@ struct AnonymousLexicalClassScope {
     declarations: std::collections::HashSet<DeclId>,
 }
 
-/// Bounded lexical classifier facts extracted from one active Pass-1 source. These are the parts
-/// of local/anonymous signature publication that genuinely depend on body containment; copying them
-/// here lets the ordinary parser arenas die before whole-module signature collection begins.
-#[derive(Default, Clone)]
-pub(crate) struct PassOneLocalClassContext {
-    enclosing_type_parameters:
-        HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
-    sibling_classifiers:
-        HashMap<crate::fir::DeclarationId, Vec<(String, crate::fir::DeclarationId)>>,
-    anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
-    anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
-}
-
-impl PassOneLocalClassContext {
-    /// Local classifiers lexically visible from `declaration`'s body, as source spelling and
-    /// stable module identity. Siblings are recorded by declaration so their identity is the same
-    /// one every other compact consumer derives from the stub.
-    fn sibling_classifiers(
-        &self,
-        headers: &crate::fir::StreamedHeaderModule,
-        declaration: crate::fir::DeclarationId,
-    ) -> Vec<(String, TypeName)> {
-        self.sibling_classifiers
-            .get(&declaration)
-            .into_iter()
-            .flatten()
-            .filter_map(|(name, sibling)| {
-                let (_, identity) = compact_classifier_identity(headers, headers.stub(*sibling)?)?;
-                Some((name.clone(), identity))
-            })
-            .collect()
-    }
-}
-
-pub(crate) fn pass_one_local_class_context(
-    file: &File,
-    stubs: &[crate::fir::DeclarationStub],
-) -> PassOneLocalClassContext {
-    let stable_by_transient = file
-        .decl_arena
-        .iter()
-        .enumerate()
-        .filter_map(|(raw, declaration)| {
-            let Decl::Class(class) = declaration else {
-                return None;
-            };
-            stubs
-                .iter()
-                .find(|stub| {
-                    stub.kind == crate::fir::DeclarationKind::Classifier && stub.range == class.span
-                })
-                .map(|stub| (DeclId(raw as u32), stub.id))
-        })
-        .collect::<HashMap<_, _>>();
-    let transient_tparams = local_class_enclosing_tparams(file);
-    let transient_siblings = local_class_sibling_declarations(file);
-    let transient_anonymous = anonymous_lexical_class_scope(file);
-    crate::trace_compiler!(
-        "fir",
-        "Pass 1 local classifier context stable={} type-parameter-scopes={:?}",
-        stable_by_transient.len(),
-        transient_tparams
-            .iter()
-            .map(|(declaration, parameters)| {
-                let name = match file.decl(*declaration) {
-                    Decl::Class(class) => class.name.as_str(),
-                    Decl::Fun(_) | Decl::Property(_) => "<non-classifier>",
-                };
-                (
-                    name,
-                    stable_by_transient.get(declaration),
-                    parameters
-                        .iter()
-                        .flat_map(|parameter| parameter.names.iter())
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
-    PassOneLocalClassContext {
-        enclosing_type_parameters: transient_tparams
-            .into_iter()
-            .filter_map(|(declaration, parameters)| {
-                stable_by_transient
-                    .get(&declaration)
-                    .copied()
-                    .map(|stable| (stable, parameters))
-            })
-            .collect(),
-        sibling_classifiers: transient_siblings
-            .into_iter()
-            .filter_map(|(declaration, siblings)| {
-                let stable = *stable_by_transient.get(&declaration)?;
-                let siblings = siblings
-                    .into_iter()
-                    .filter_map(|(name, sibling)| Some((name, *stable_by_transient.get(&sibling)?)))
-                    .collect();
-                Some((stable, siblings))
-            })
-            .collect(),
-        anonymous_owners: transient_anonymous
-            .owners
-            .into_iter()
-            .filter_map(|(declaration, owner)| {
-                Some((
-                    *stable_by_transient.get(&declaration)?,
-                    *stable_by_transient.get(&owner)?,
-                ))
-            })
-            .collect(),
-        anonymous_declarations: transient_anonymous
-            .declarations
-            .into_iter()
-            .filter_map(|declaration| stable_by_transient.get(&declaration).copied())
-            .collect(),
-    }
-}
-
 impl AnonymousLexicalClassScope {
     /// The declaration followed by its structurally recorded anonymous-object owners, nearest first.
     /// This is the single graph walk used by signature collection, pre-inference, and the main checker;
@@ -39745,6 +39627,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_member_ext_fun_rets,
         checked_local_properties: _,
         checked_local_methods: _,
+        body_local_default_providers: _,
         resolved_body_local_supertypes,
         checked_local_supertypes,
         stmt_lowers,
@@ -40917,6 +40800,9 @@ struct Checker<'a> {
     /// ordinary overload selection can choose it and the local dependency scheduler can check its
     /// body on demand. It is discarded with the checker and never reaches FIR.
     checked_local_methods: HashMap<TypeName, HashMap<String, Vec<crate::libraries::FunctionInfo>>>,
+    /// Effective provider for defaults inherited by one checked body-local method.
+    body_local_default_providers:
+        HashMap<crate::fir::DeclarationId, crate::fir::ResolvedFunctionOverrideTarget>,
     /// Constructor headers of classifiers declared in the active bounded Pass-2 body. Their
     /// parameter types may depend on statement-local aliases and therefore cannot be required from
     /// the finalized Pass-1 module provider. They participate in the same provider-neutral

@@ -312,6 +312,7 @@ pub(super) fn realize_default_calls(
                 callee:
                     Callee::ModuleWithDefaults {
                         target,
+                        default_provider,
                         name,
                         params,
                         ret,
@@ -328,16 +329,26 @@ pub(super) fn realize_default_calls(
                     .get(&target)
                     .cloned()
                     .ok_or(failure)?;
+                let crate::fir::ResolvedFunctionOverrideTarget::Module(default_provider) =
+                    default_provider
+                else {
+                    return Err(failure);
+                };
+                let provider = ir
+                    .referenced_module_callables
+                    .get(&default_provider)
+                    .cloned()
+                    .ok_or(ModuleRealizationTarget::Callable(default_provider))?;
                 if callable.flags.has(crate::fir::DeclarationFlags::INLINE) {
                     ir.module_inline_calls.insert(raw as ExprId);
                 }
-                let physical_name = header_jvm_name(&callable.annotations)
+                let physical_name = header_jvm_name(&provider.annotations)
                     .map_err(|()| failure)?
                     .unwrap_or(&name)
                     .to_owned();
-                let owner = callable
+                let owner = provider
                     .owner
-                    .or_else(|| facade_for(callable.source, stems))
+                    .or_else(|| facade_for(provider.source, stems))
                     .ok_or(failure)?;
                 let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
@@ -361,7 +372,7 @@ pub(super) fn realize_default_calls(
                             name: format!("{physical_name}$default"),
                             params,
                             ret,
-                            module_target: Some(target),
+                            module_target: Some(default_provider),
                             module_default_call: true,
                         },
                         dispatch_receiver: None,
@@ -579,6 +590,7 @@ pub(super) fn realize(
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
     realize_super_calls(ir)?;
+    prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
@@ -719,6 +731,88 @@ pub(super) fn realize(
         };
         if let Some(replacement) = replacement {
             ir.exprs[raw] = replacement;
+        }
+    }
+    Ok(())
+}
+
+/// Bind an inherited default call to its exact provider before value-class lowering changes any
+/// physical carrier. Module providers retain the backend-neutral default-call node for the later
+/// mask pass, but its declaration signature becomes the provider's; an external provider enters
+/// the ordinary dependency realization path with the selected module result kept as its semantic
+/// result. Neither path performs lookup or overload selection.
+fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
+    let expression_count = ir.exprs.len();
+    for raw in 0..expression_count {
+        let expression = raw as ExprId;
+        let IrExpr::Call {
+            callee:
+                Callee::ModuleWithDefaults {
+                    target,
+                    default_provider,
+                    name,
+                    params,
+                    ret,
+                    defaults,
+                    dispatch_receiver_ty,
+                    extension_receiver_parameter,
+                },
+            dispatch_receiver,
+            args,
+        } = ir.exprs[raw].clone()
+        else {
+            continue;
+        };
+        match default_provider {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(provider) => {
+                if provider == target {
+                    continue;
+                }
+                let provider_header = ir
+                    .referenced_module_callables
+                    .get(&provider)
+                    .cloned()
+                    .ok_or(ModuleRealizationTarget::Callable(provider))?;
+                let provider_params = provider_header.parameters.into_vec();
+                let provider_ret = provider_header.result;
+                ir.exprs[raw] = IrExpr::Call {
+                    callee: Callee::ModuleWithDefaults {
+                        target,
+                        default_provider,
+                        name,
+                        params: provider_params.clone(),
+                        ret: provider_ret,
+                        defaults,
+                        dispatch_receiver_ty: provider_header.owner.map(crate::types::Ty::obj_name),
+                        extension_receiver_parameter,
+                    },
+                    dispatch_receiver,
+                    args,
+                };
+                ir.call_declared_params
+                    .insert(expression, provider_params.into_boxed_slice());
+                let call =
+                    super::external_calls::bridge_external_result(ir, raw, provider_ret, ret);
+                ir.call_declared_ret.insert(call, provider_ret);
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(provider) => {
+                ir.exprs[raw] = IrExpr::Call {
+                    callee: Callee::External {
+                        target: provider,
+                        default_provider: Some(provider),
+                        params,
+                        ret,
+                        substitutions: Vec::new(),
+                        defaults: defaults.into_vec(),
+                        extension_receiver_parameter,
+                    },
+                    dispatch_receiver,
+                    args,
+                };
+                if let Some(receiver) = dispatch_receiver_ty {
+                    ir.ext_call_source_receiver.insert(expression, receiver);
+                }
+            }
         }
     }
     Ok(())

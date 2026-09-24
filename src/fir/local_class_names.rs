@@ -2,6 +2,17 @@
 
 use super::{DeclarationId, SourceFileId};
 use crate::ast::{DeclId, File};
+use crate::types::{type_name_child, TypeName};
+
+/// Root semantic identity for a classifier declared in executable code.
+///
+/// This identity is deliberately opaque: source segments are lookup input and the root
+/// declaration's target spelling belongs to a backend. Semantic member classifiers may be nested
+/// under this identity, while the stable declaration id keeps sibling executable scopes distinct
+/// without embedding a JVM nesting convention in common resolution.
+pub(crate) fn classifier_identity(package: TypeName, declaration: DeclarationId) -> TypeName {
+    type_name_child(package, &format!("__krusty_local_{}", declaration.raw()))
+}
 
 /// Exact lexical context needed by a target to invent a physical local-class name.
 ///
@@ -16,18 +27,35 @@ pub struct LocalClassNameProvenance {
     pub ordinal: Option<u32>,
 }
 
+impl super::ResolvedModuleIndex {
+    pub fn local_class_name_provenance(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&LocalClassNameProvenance> {
+        self.local_class_name_provenance.get(&declaration)
+    }
+
+    pub fn publish_local_class_name_provenance(
+        &mut self,
+        declaration: DeclarationId,
+        provenance: LocalClassNameProvenance,
+    ) {
+        assert!(
+            self.local_class_name_provenance
+                .insert(declaration, provenance.clone())
+                .is_none_or(|existing| existing == provenance),
+            "a local classifier has exactly one lexical naming provenance"
+        );
+    }
+}
+
 pub(super) fn stabilize_local_class_names(
     file: &File,
     source: SourceFileId,
-    source_declarations: &[Option<DeclarationId>],
+    stable_by_transient: &std::collections::HashMap<DeclId, DeclarationId>,
     nested_owners: &std::collections::HashMap<DeclId, DeclarationId>,
 ) -> Vec<(DeclarationId, LocalClassNameProvenance)> {
-    let stable = |declaration: DeclId| {
-        file.decls
-            .iter()
-            .position(|candidate| *candidate == declaration)
-            .and_then(|position| source_declarations.get(position).copied().flatten())
-    };
+    let stable = |declaration: DeclId| stable_by_transient.get(&declaration).copied();
     let mut plans = file
         .local_class_name_provenance
         .iter()

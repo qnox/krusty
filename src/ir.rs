@@ -22,17 +22,6 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// Whether a source-language binding read may observe a later assignment to that binding.
-///
-/// This is a semantic property of the binding, not of any backend storage chosen for it. Function
-/// parameters, `val` locals, destructuring `val`s, loop variables, and catch parameters are stable;
-/// a source `var` is mutable even when the current backend happens to keep it in an ordinary local.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrBindingStability {
-    Stable,
-    Mutable,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrNodeOrigin {
     Fir(crate::fir::OriginId),
@@ -42,6 +31,7 @@ pub enum IrNodeOrigin {
     },
 }
 
+mod bindings;
 mod bottom_values;
 mod bridges;
 mod constants;
@@ -51,6 +41,7 @@ mod local_class_names;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
+pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
@@ -132,6 +123,7 @@ pub enum Callee {
     /// The argument vector contains supplied values in declaration order; defaults identifies holes.
     ModuleWithDefaults {
         target: crate::fir::CallableId,
+        default_provider: crate::fir::ResolvedFunctionOverrideTarget,
         name: String,
         params: Vec<Ty>,
         ret: Ty,

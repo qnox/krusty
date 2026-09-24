@@ -6,6 +6,7 @@
 //! a classifier declared in another and the walk must not reopen that question per declaration.
 
 use super::*;
+use crate::resolve::local_class_scope::{local_class_enclosing_tparams, local_class_sibling_names};
 
 /// Enclosing type parameters of one file's local classes, by declaration.
 type LocalClassEnclosingTParams = HashMap<DeclId, Vec<EnclosingTypeParameterDeclaration>>;

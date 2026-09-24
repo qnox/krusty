@@ -7,6 +7,17 @@
 
 use super::*;
 
+pub(super) fn bind_parser_identity(
+    identities: &mut ParserDeclarationIdentities,
+    parser: DeclId,
+    stable: DeclarationId,
+) {
+    assert!(
+        identities.insert(parser, stable).is_none(),
+        "one parser declaration binds one stable declaration"
+    );
+}
+
 pub(super) fn companion_declarations(file: &File) -> std::collections::HashSet<DeclId> {
     file.decls
         .iter()

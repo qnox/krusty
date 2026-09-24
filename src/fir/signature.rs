@@ -14,6 +14,9 @@ use super::header::{
 };
 use super::ResolvedParameterIdentity;
 
+mod selections;
+pub use selections::*;
+
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OperandRange {
@@ -94,34 +97,6 @@ pub struct SigSubstitution {
 pub struct SignatureScope {
     pub owner: DeclarationId,
     pub source: SourceFileId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredCallableSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
-    pub type_arguments: OperandRange,
-    pub trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredMemberSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
-    pub type_arguments: OperandRange,
-    pub trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeferredValueSelection {
-    pub scope: SignatureScopeId,
-    pub spelling: SigNameId,
-    pub origin: OriginId,
-    pub expected: Option<SigExprId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -941,6 +916,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         spelling: &str,
+        classifier: Option<DeclarationId>,
         origin: OriginId,
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
@@ -953,6 +929,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         spelling: &str,
+        classifier: Option<DeclarationId>,
         origin: OriginId,
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
@@ -1583,7 +1560,7 @@ pub struct ResolvedModuleIndex {
     /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
     /// sequence; every consumer reads it rather than deriving a second answer.
     continuation_ordinals: HashMap<DeclarationId, u32>,
-    local_class_name_provenance: HashMap<DeclarationId, super::LocalClassNameProvenance>,
+    pub(super) local_class_name_provenance: HashMap<DeclarationId, super::LocalClassNameProvenance>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
@@ -1648,6 +1625,9 @@ pub struct ResolvedModuleIndex {
     compile_time_constants: HashMap<DeclarationId, crate::libraries::LibraryConst>,
     callables: HashMap<CallableId, ResolvedCallableHeader>,
     callable_by_declaration: HashMap<DeclarationId, CallableId>,
+    /// Provider identity for defaults inherited through a resolved override edge.
+    pub(super) callable_default_providers:
+        HashMap<CallableId, super::ResolvedFunctionOverrideTarget>,
     /// Compiler-generated callable stubs that Kotlin suppresses after resolving the enclosing
     /// classifier hierarchy. The motivating case is a data-class `toString`/`hashCode`/`equals`
     /// whose nearest inherited declaration is final: the stable inventory still owns the generated
@@ -2213,26 +2193,6 @@ impl ResolvedModuleIndex {
                 .insert(declaration, ordinal)
                 .is_none_or(|existing| existing == ordinal),
             "a suspend declaration holds exactly one continuation ordinal"
-        );
-    }
-
-    pub fn local_class_name_provenance(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<&super::LocalClassNameProvenance> {
-        self.local_class_name_provenance.get(&declaration)
-    }
-
-    pub fn publish_local_class_name_provenance(
-        &mut self,
-        declaration: DeclarationId,
-        provenance: super::LocalClassNameProvenance,
-    ) {
-        assert!(
-            self.local_class_name_provenance
-                .insert(declaration, provenance.clone())
-                .is_none_or(|existing| existing == provenance),
-            "a local classifier has exactly one lexical naming provenance"
         );
     }
 
@@ -3105,6 +3065,7 @@ impl ResolvedModuleIndex {
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
+            && self.callable_default_providers.is_empty()
             && self.callable_equality_bounds.is_empty()
             && self.properties.is_empty()
     }
@@ -3652,6 +3613,8 @@ impl ResolvedModuleIndex {
                     + std::mem::size_of::<ResolvedCallableHeader>())
             + self.callable_by_declaration.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<CallableId>())
+            + self.callable_default_providers.len()
+                * std::mem::size_of::<(CallableId, super::ResolvedFunctionOverrideTarget)>()
             + self.diagnostic_callables.len() * std::mem::size_of::<CallableId>()
             + self.classifier_type_arguments.len()
                 * (std::mem::size_of::<DeclarationId>()

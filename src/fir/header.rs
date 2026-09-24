@@ -18,7 +18,9 @@ mod flags;
 mod nested_classifiers;
 
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
-use nested_classifiers::{classifier_identity, companion_declarations, nested_classifier_owners};
+use nested_classifiers::{
+    bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
+};
 
 mod actualization;
 
@@ -1098,6 +1100,7 @@ impl HeaderSyntaxArena {
 
 struct ExtractedFileStubs {
     stubs: Vec<DeclarationStub>,
+    stable_by_transient: ParserDeclarationIdentities,
     /// Stable identity parallel to every entry of the transient parser's `File::decls` array.
     source_declarations: Vec<DeclarationId>,
     /// The `expect` keyword each header declaration of this file was introduced by, recorded while
@@ -1396,6 +1399,7 @@ fn extract_file_stub_inventory(
         names: &mut LookupNames,
         class: &ClassDecl,
         is_companion: bool,
+        classifier_member: bool,
         owner: Option<DeclarationId>,
         sibling: u32,
         out: &mut Vec<DeclarationStub>,
@@ -1430,7 +1434,8 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::FINAL, class.is_final())
                 .with(DeclarationFlags::ANNOTATION_CLASS, class.is_annotation())
                 .with(DeclarationFlags::INNER, class.inner_of.is_some())
-                .with(DeclarationFlags::COMPANION, is_companion),
+                .with(DeclarationFlags::COMPANION, is_companion)
+                .with(DeclarationFlags::CLASSIFIER_MEMBER, classifier_member),
         });
 
         if class.primary_ctor_annotations.is_some() && !class.is_interface() {
@@ -1464,6 +1469,7 @@ fn extract_file_stub_inventory(
                 ids,
                 names,
                 companion,
+                true,
                 true,
                 Some(class_id),
                 0,
@@ -1772,6 +1778,7 @@ fn extract_file_stub_inventory(
     let companion_declarations = companion_declarations(file);
     let mut stubs = Vec::new();
     let mut source_declarations = vec![None; file.decls.len()];
+    let mut stable_by_transient = std::collections::HashMap::new();
     let mut declaration_blocks = Vec::new();
     let mut expect_keywords = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
@@ -1800,19 +1807,33 @@ fn extract_file_stub_inventory(
                 None,
                 &mut stubs,
             ),
-            Decl::Class(class) => class_stubs(
-                file,
-                source,
-                ids,
-                names,
-                class,
-                false,
-                nested_owners.get(declaration).copied(),
-                u32::try_from(index).expect("too many file declarations"),
-                &mut stubs,
-            ),
+            Decl::Class(class) => {
+                let executable_root = file
+                    .local_class_decls
+                    .values()
+                    .any(|candidate| candidate == declaration);
+                let classifier_member = !executable_root
+                    && !file.is_anonymous_object_class(*declaration)
+                    && (file
+                        .hoisted_classifier_source_names
+                        .contains_key(declaration)
+                        || companion_declarations.contains(declaration));
+                class_stubs(
+                    file,
+                    source,
+                    ids,
+                    names,
+                    class,
+                    false,
+                    classifier_member,
+                    nested_owners.get(declaration).copied(),
+                    u32::try_from(index).expect("too many file declarations"),
+                    &mut stubs,
+                )
+            }
         }
         source_declarations[index] = Some(stubs[first_stub].id);
+        bind_parser_identity(&mut stable_by_transient, *declaration, stubs[first_stub].id);
         if file.is_local_declaration(*declaration) {
             for stub in &mut stubs[first_stub..] {
                 stub.flags = stub.flags.with(DeclarationFlags::LOCAL_CLASS, true);
@@ -1854,6 +1875,9 @@ fn extract_file_stub_inventory(
     for (index, declaration) in file.decls.iter().copied().enumerate() {
         if companion_declarations.contains(&declaration) {
             source_declarations[index] = classifier_identity(file, source, ids, declaration);
+            if let Some(stable) = source_declarations[index] {
+                bind_parser_identity(&mut stable_by_transient, declaration, stable);
+            }
         }
     }
     if !file.local_class_enclosing_declarations.is_empty() {
@@ -1977,26 +2001,19 @@ fn extract_file_stub_inventory(
     // The reservation the anonymous-object naming pass made for each suspend function, bound to the
     // identity its own stub already interned. Look the anchor up, never intern one: a second anchor
     // for a declaration that has one is a second identity for it.
-    let position = |wanted: DeclId| file.decls.iter().position(|decl| *decl == wanted);
     let mut continuation_ordinals = file
         .suspend_continuation_ordinals
         .iter()
         .filter_map(|(&function, &ordinal)| {
             let declaration = match function {
                 crate::ast::AnonymousEnclosingFunction::TopLevel(declaration) => {
-                    let Decl::Fun(function) = file.decl(declaration) else {
+                    let Decl::Fun(_) = file.decl(declaration) else {
                         return None;
                     };
-                    ids.get(DeclarationAnchor {
-                        source,
-                        range: function.span,
-                        owner: None,
-                        kind: DeclarationKind::Function,
-                        sibling: u32::try_from(position(declaration)?).ok()?,
-                    })?
+                    stable_by_transient.get(&declaration).copied()?
                 }
                 crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
-                    let owner = source_declarations[position(class)?]?;
+                    let owner = stable_by_transient.get(&class).copied()?;
                     let Decl::Class(class) = file.decl(class) else {
                         return None;
                     };
@@ -2017,11 +2034,24 @@ fn extract_file_stub_inventory(
     let local_class_name_provenance = super::local_class_names::stabilize_local_class_names(
         file,
         source,
-        &source_declarations,
+        &stable_by_transient,
         &nested_owners,
     );
+    let named_local_classifiers = local_class_name_provenance
+        .iter()
+        .map(|(declaration, _)| *declaration)
+        .collect::<std::collections::HashSet<_>>();
+    for stub in stubs.iter().filter(|stub| {
+        stub.kind == DeclarationKind::Classifier && stub.flags.has(DeclarationFlags::LOCAL_CLASS)
+    }) {
+        assert!(
+            named_local_classifiers.contains(&stub.id),
+            "every local classifier declaration must carry backend-neutral naming provenance"
+        );
+    }
     ExtractedFileStubs {
         stubs,
+        stable_by_transient,
         source_declarations: source_declarations
             .into_iter()
             .map(|declaration| {
@@ -3552,7 +3582,7 @@ pub fn stream_file_stub_inventory(
         if source.kind == SourceKind::Kotlin {
             crate::frontend::record_local_class_name_provenance(&mut file);
         }
-        let (source_id, stubs) = builder
+        let (source_id, stubs, _) = builder
             .add_source(index, source, Some(&file))
             .expect("Kotlin source must produce compact headers");
         visit(source_id, &file, &stubs);
@@ -3597,7 +3627,11 @@ impl HeaderInventoryBuilder {
         index: usize,
         source: &SourceInput<'_>,
         file: Option<&File>,
-    ) -> Option<(SourceFileId, Vec<DeclarationStub>)> {
+    ) -> Option<(
+        SourceFileId,
+        Vec<DeclarationStub>,
+        ParserDeclarationIdentities,
+    )> {
         let extension = match source.kind {
             SourceKind::Kotlin => "kt",
             SourceKind::KotlinScript => "kts",
@@ -3622,7 +3656,8 @@ impl HeaderInventoryBuilder {
         let file = file?;
         self.sources.set_package(source_id, file.package.as_deref());
         self.inventoried[raw] = true;
-        Some((source_id, self.add_file(source_id, file, source.is_common)))
+        let (stubs, stable_by_transient) = self.add_file(source_id, file, source.is_common);
+        Some((source_id, stubs, stable_by_transient))
     }
 
     fn add_file(
@@ -3630,7 +3665,7 @@ impl HeaderInventoryBuilder {
         source: SourceFileId,
         file: &File,
         is_common: bool,
-    ) -> Vec<DeclarationStub> {
+    ) -> (Vec<DeclarationStub>, ParserDeclarationIdentities) {
         let first_source_type = self.syntax.type_count();
         self.scopes
             .add_file(source, file, is_common, &mut self.lookup_names);
@@ -3645,6 +3680,7 @@ impl HeaderInventoryBuilder {
             &mut self.lookup_names,
         );
         let mut stubs = extracted.stubs;
+        let stable_by_transient = extracted.stable_by_transient;
         order_file_stubs(&mut stubs, &self.declarations);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.expect_keywords.extend(extracted.expect_keywords);
@@ -3653,19 +3689,11 @@ impl HeaderInventoryBuilder {
         self.local_class_name_provenance
             .extend(extracted.local_class_name_provenance);
         self.visibility_suppressions.add_file(source, file, &stubs);
-        let primary_stub = |declaration: DeclId| {
-            let (kind, range) = match file.decl(declaration) {
-                Decl::Fun(function) => (DeclarationKind::Function, function.span),
-                Decl::Property(property) => (DeclarationKind::Property, property.span),
-                Decl::Class(class) => (DeclarationKind::Classifier, class.span),
-            };
-            stubs
-                .iter()
-                .find(|stub| stub.kind == kind && stub.range == range)
-                .map(|stub| stub.id)
-        };
         for (&local, &root) in &file.local_class_enclosing_declarations {
-            if let (Some(local), Some(root)) = (primary_stub(local), primary_stub(root)) {
+            if let (Some(&local), Some(&root)) = (
+                stable_by_transient.get(&local),
+                stable_by_transient.get(&root),
+            ) {
                 self.local_classifier_lexical_roots.insert(local, root);
             }
         }
@@ -3682,22 +3710,11 @@ impl HeaderInventoryBuilder {
             &mut self.lookup_names,
         );
         for &declaration in &file.decls {
+            let Some(&stable) = stable_by_transient.get(&declaration) else {
+                continue;
+            };
             match file.decl(declaration) {
                 Decl::Fun(function) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Function
-                                && stub.range == function.span
-                                && self
-                                    .declarations
-                                    .anchor(stub.id)
-                                    .is_some_and(|anchor| anchor.owner.is_none())
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3706,15 +3723,6 @@ impl HeaderInventoryBuilder {
                     );
                 }
                 Decl::Class(class) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Classifier && stub.range == class.span
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3725,15 +3733,6 @@ impl HeaderInventoryBuilder {
                         .add_class(stable, class, file, &mut self.lookup_names);
                 }
                 Decl::Property(property) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Property && stub.range == property.span
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3745,7 +3744,7 @@ impl HeaderInventoryBuilder {
         }
         self.stubs.extend(stubs.iter().copied());
         self.inventory.extend(stubs.iter().map(|stub| stub.id));
-        stubs
+        (stubs, stable_by_transient)
     }
 
     pub fn finish(self) -> StreamedHeaderModule {

@@ -1856,6 +1856,20 @@ impl File {
         id
     }
 
+    pub(crate) fn add_hoisted_classifier(
+        &mut self,
+        mut classifier: ClassDecl,
+        owner: &str,
+        position: usize,
+    ) -> DeclId {
+        let source_name = std::mem::take(&mut classifier.name);
+        classifier.name = format!("{owner}.{source_name}");
+        let id = self.add_decl(Decl::Class(classifier));
+        self.decls.insert(position, id);
+        self.hoisted_classifier_source_names.insert(id, source_name);
+        id
+    }
+
     /// Evaluate the narrow AST-only string-constant language shared by lowering and native plugins.
     ///
     /// Keeping this traversal on [`File`] gives both consumers one definition of which syntax is

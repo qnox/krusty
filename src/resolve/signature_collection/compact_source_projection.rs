@@ -5,6 +5,153 @@
 //! re-walking the transient parse, and disappears with the rest of the legacy publisher.
 
 use super::*;
+use std::collections::HashSet;
+
+pub(in crate::resolve) fn publish_compact_parser_classifier_identities(
+    contexts: Option<&[PassOneLocalClassContext]>,
+    source_count: usize,
+    table: &mut SymbolTable,
+) {
+    let contexts =
+        contexts.expect("compact headers require declaration-bound local-class contexts");
+    assert_eq!(
+        contexts.len(),
+        source_count,
+        "every compact source must publish one local-class context"
+    );
+    for (source, context) in contexts.iter().enumerate() {
+        for (&parser, &identity) in &context.parser_classifier_identities {
+            assert!(
+                table
+                    .stable_parser_classifier_identities
+                    .insert(
+                        (
+                            u32::try_from(source).expect("too many source files"),
+                            parser
+                        ),
+                        identity
+                    )
+                    .is_none(),
+                "one parser classifier coordinate binds one stable semantic identity"
+            );
+        }
+    }
+}
+
+pub(in crate::resolve) fn compact_parser_classifier_identity(
+    contexts: Option<&[PassOneLocalClassContext]>,
+    source: usize,
+    parser: DeclId,
+) -> Option<TypeName> {
+    contexts?
+        .get(source)?
+        .parser_classifier_identities
+        .get(&parser)
+        .copied()
+}
+
+pub(in crate::resolve) fn compact_parser_declaration_stub<'a>(
+    headers: &'a crate::fir::StreamedHeaderModule,
+    contexts: Option<&[PassOneLocalClassContext]>,
+    source: usize,
+    parser: DeclId,
+) -> Option<&'a crate::fir::DeclarationStub> {
+    let declaration = contexts?
+        .get(source)?
+        .parser_declaration_identities
+        .get(&parser)?;
+    headers.stub(*declaration)
+}
+
+pub(in crate::resolve) fn projected_parser_classifier_identity(
+    file: &File,
+    headers: Option<&crate::fir::StreamedHeaderModule>,
+    contexts: Option<&[PassOneLocalClassContext]>,
+    source: usize,
+    parser: DeclId,
+) -> Option<TypeName> {
+    match headers {
+        Some(_) => compact_parser_classifier_identity(contexts, source, parser),
+        None => match file.decl(parser) {
+            Decl::Class(class) => Some(type_name(&class_internal(file, &class.name))),
+            Decl::Fun(_) | Decl::Property(_) => None,
+        },
+    }
+}
+
+pub(in crate::resolve) fn projected_sibling_classifiers(
+    headers: Option<&crate::fir::StreamedHeaderModule>,
+    contexts: Option<&[PassOneLocalClassContext]>,
+    source: usize,
+    stub: Option<&crate::fir::DeclarationStub>,
+) -> Option<Vec<(String, TypeName)>> {
+    let (headers, stub) = headers.zip(stub)?;
+    contexts
+        .and_then(|contexts| contexts.get(source))
+        .map(|context| context.sibling_classifiers(headers, stub.id))
+}
+
+pub(in crate::resolve) fn compact_enclosing_classifier_identity(
+    headers: &crate::fir::StreamedHeaderModule,
+    classifier: &crate::fir::DeclarationStub,
+) -> Option<TypeName> {
+    let owner = headers
+        .declarations
+        .anchor(classifier.id)?
+        .owner
+        .and_then(|owner| headers.stub(owner))?;
+    if owner.kind != crate::fir::DeclarationKind::Classifier {
+        return None;
+    }
+    compact_classifier_identity(headers, owner).map(|(_, identity)| identity)
+}
+
+pub(in crate::resolve) fn projected_classifier_identity(
+    file: &File,
+    headers: Option<&crate::fir::StreamedHeaderModule>,
+    stub: Option<&crate::fir::DeclarationStub>,
+    source_name: &str,
+    user_defined: &HashSet<TypeName>,
+    class_names: &ClassNames,
+) -> TypeName {
+    match headers {
+        Some(headers) => {
+            compact_classifier_identity(
+                headers,
+                stub.expect("compact class declaration must retain its stub"),
+            )
+            .expect("compact classifier stub must retain its stable identity")
+            .1
+        }
+        None => {
+            let own = class_internal(file, source_name);
+            let identity = if user_defined.contains(&type_name(&own)) {
+                own
+            } else {
+                class_names
+                    .get(source_name)
+                    .map(TypeName::render)
+                    .unwrap_or_else(|| class_internal(file, source_name))
+            };
+            type_name(&identity)
+        }
+    }
+}
+
+pub(in crate::resolve) fn projected_enclosing_classifier_identity(
+    file: &File,
+    headers: Option<&crate::fir::StreamedHeaderModule>,
+    stub: Option<&crate::fir::DeclarationStub>,
+    legacy_owner: &str,
+) -> Option<TypeName> {
+    match headers {
+        Some(headers) => compact_enclosing_classifier_identity(
+            headers,
+            stub.expect("compact class declaration must retain its stub"),
+        ),
+        None => Some(type_name(&class_internal(file, legacy_owner))),
+    }
+}
 
 pub(in crate::resolve) fn resolve_source_alias_expansion(
     target: &TypeRef,
@@ -39,48 +186,45 @@ pub(in crate::resolve) fn compact_classifier_identity(
 ) -> Option<(String, TypeName)> {
     let source_name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
     let package = headers.sources.get(stub.source)?.package;
-    // A local classifier's source path is lookup input, not a target class name. Give it an opaque
-    // module-stable semantic identity; a backend consumes its declaration-keyed lexical provenance
-    // and chooses the physical spelling later.
-    let runtime_name = if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
-        // Only a member of a local classifier's own body is nested in it. A classifier declared
-        // in executable code of a member or class header (`Owner.f { object {} }`,
-        // `class A(x: Any = run { class B })`) has that classifier as its lexical naming owner
-        // too, but it is not a nested member and must keep its own opaque identity.
-        let nested = headers
-            .local_class_name_provenance
-            .get(&stub.id)
-            .and_then(|provenance| provenance.lexical_owner)
-            .filter(|owner| {
-                headers
-                    .declarations
-                    .anchor(stub.id)
-                    .is_some_and(|anchor| anchor.owner == Some(*owner))
-            })
-            .and_then(|owner| headers.stub(owner))
-            .filter(|owner| {
-                owner.kind == crate::fir::DeclarationKind::Classifier
-                    && owner.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-            })
-            .and_then(|owner| compact_classifier_identity(headers, owner))
-            .and_then(|(_, owner)| {
-                headers
-                    .local_class_name_provenance
-                    .get(&stub.id)?
-                    .segments
-                    .last()
-                    .map(|segment| crate::types::type_name_nested_child(owner, segment))
-            });
-        if let Some(nested) = nested {
-            return Some((source_name, nested));
+    // A root local classifier's source path is lookup input, not a target class name. Give it an
+    // opaque module-stable semantic identity. A classifier MEMBER declared by that local class
+    // keeps ordinary semantic ownership beneath the opaque root; the backend independently consumes
+    // declaration-keyed lexical provenance and chooses the physical spelling later.
+    if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
+        let nested_member = stub
+            .flags
+            .has(crate::fir::DeclarationFlags::CLASSIFIER_MEMBER);
+        let nested = nested_member.then_some(()).and_then(|()| {
+            let owner = headers
+                .declarations
+                .anchor(stub.id)?
+                .owner
+                .and_then(|owner| headers.stub(owner))?;
+            if !owner.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
+                return None;
+            }
+            let (_, owner_identity) = compact_classifier_identity(headers, owner)?;
+            let segment = headers
+                .local_class_name_provenance
+                .get(&stub.id)?
+                .segments
+                .last()?;
+            Some((owner_identity, segment))
+        });
+        if let Some((owner, segment)) = nested {
+            return Some((
+                source_name,
+                crate::types::type_name_nested_child(owner, segment),
+            ));
         }
-        format!("__krusty_local_{}", stub.id.raw())
-    } else {
-        source_name.replace('.', "$")
-    };
+        return Some((
+            source_name,
+            crate::fir::classifier_identity(package, stub.id),
+        ));
+    }
     Some((
-        source_name,
-        crate::types::type_name_child(package, &runtime_name),
+        source_name.clone(),
+        crate::types::type_name_child(package, &source_name.replace('.', "$")),
     ))
 }
 

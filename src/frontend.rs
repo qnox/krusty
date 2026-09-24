@@ -446,84 +446,87 @@ fn inherit_override_default_work(
         .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
         .map(|stub| stub.id)
         .collect::<Vec<_>>();
+    let overrides = classifiers
+        .iter()
+        .flat_map(|classifier| index.function_overrides(*classifier))
+        .cloned()
+        .collect::<Vec<_>>();
     loop {
         let providers = work
             .iter()
             .map(|item| (item.target, item.provider))
             .collect::<std::collections::HashMap<_, _>>();
         let mut additions = Vec::new();
-        for classifier in &classifiers {
-            for edge in index.function_overrides(*classifier) {
-                let (
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(overridden),
-                ) = (edge.implementation, edge.overridden)
-                else {
-                    continue;
-                };
-                let Some(target) = index
-                    .callable(implementation)
-                    .map(|callable| callable.declaration)
-                else {
-                    continue;
-                };
-                if providers.contains_key(&target)
-                    || additions
-                        .iter()
-                        .any(|item: &crate::fir::DefaultArgumentProvider| item.target == target)
-                {
-                    continue;
-                }
-                let Some(overridden) = index
-                    .callable(overridden)
-                    .map(|callable| callable.declaration)
-                else {
-                    continue;
-                };
-                let Some(provider) = providers.get(&overridden).copied() else {
-                    continue;
-                };
-                let defaults = match headers
-                    .syntax
-                    .declaration(provider)
-                    .map(|declaration| declaration.kind)
-                {
-                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                        headers
-                            .syntax
-                            .parameters(parameters)
-                            .iter()
-                            .map(|parameter| parameter.flags.has_default())
-                            .collect::<Vec<_>>()
-                    }
-                    _ => continue,
-                };
-                let target_parameters = match headers
-                    .syntax
-                    .declaration(target)
-                    .map(|declaration| declaration.kind)
-                {
-                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                        parameters
-                    }
-                    _ => continue,
-                };
-                if defaults.len() != headers.syntax.parameters(target_parameters).len()
-                    || !defaults.iter().any(|default| *default)
-                {
-                    continue;
-                }
-                headers
-                    .syntax
-                    .set_parameter_defaults(target_parameters, &defaults);
-                additions.push(crate::fir::DefaultArgumentProvider {
-                    target,
-                    provider,
-                    relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
-                });
+        for edge in &overrides {
+            let (
+                crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(overridden),
+            ) = (edge.implementation, edge.overridden)
+            else {
+                continue;
+            };
+            let Some(target) = index
+                .callable(implementation)
+                .map(|callable| callable.declaration)
+            else {
+                continue;
+            };
+            if providers.contains_key(&target)
+                || additions
+                    .iter()
+                    .any(|item: &crate::fir::DefaultArgumentProvider| item.target == target)
+            {
+                continue;
             }
+            let Some(overridden) = index
+                .callable(overridden)
+                .map(|callable| callable.declaration)
+            else {
+                continue;
+            };
+            let Some(provider) = providers.get(&overridden).copied() else {
+                continue;
+            };
+            let defaults = match headers
+                .syntax
+                .declaration(provider)
+                .map(|declaration| declaration.kind)
+            {
+                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                    headers
+                        .syntax
+                        .parameters(parameters)
+                        .iter()
+                        .map(|parameter| parameter.flags.has_default())
+                        .collect::<Vec<_>>()
+                }
+                _ => continue,
+            };
+            let target_parameters = match headers
+                .syntax
+                .declaration(target)
+                .map(|declaration| declaration.kind)
+            {
+                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                    parameters
+                }
+                _ => continue,
+            };
+            if defaults.len() != headers.syntax.parameters(target_parameters).len()
+                || !defaults.iter().any(|default| *default)
+            {
+                continue;
+            }
+            headers
+                .syntax
+                .set_parameter_defaults(target_parameters, &defaults);
+            additions.push(crate::fir::DefaultArgumentProvider {
+                target,
+                provider,
+                relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
+            });
         }
         if additions.is_empty() {
             break;
@@ -923,7 +926,7 @@ where
             (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
                 .then_some(&file),
         );
-        if let Some((source, stubs)) = extracted {
+        if let Some((source, stubs, stable_by_transient)) = extracted {
             source_contracts.extend(crate::resolve::extract_source_contract_candidates(
                 &file, source, &stubs,
             ));
@@ -941,7 +944,11 @@ where
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(
+                &file,
+                &stubs,
+                &stable_by_transient,
+            ));
             if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
@@ -957,7 +964,11 @@ where
                 }
             }
         } else {
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &[]));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(
+                &file,
+                &[],
+                &std::collections::HashMap::new(),
+            ));
         }
         files.push(file);
     }
@@ -1263,6 +1274,7 @@ where
             &mut index,
             std::mem::take(&mut signature_default_work_items),
             &files[..inferred_end],
+            &local_class_contexts[..inferred_end],
             &parse_errors,
             checked_count,
             &mut symbols,
@@ -1356,6 +1368,7 @@ where
                 bodies,
                 default_arguments,
                 &mut files,
+                &local_class_contexts,
                 &parse_errors,
                 checked_count,
                 &mut symbols,

@@ -13,6 +13,107 @@ use crate::types::{type_name, TypeName};
 
 use super::class_internal;
 
+/// Bounded body-containment facts retained after one Pass-1 parser arena is released.
+#[derive(Default, Clone)]
+pub(crate) struct PassOneLocalClassContext {
+    pub(super) parser_declaration_identities: crate::fir::ParserDeclarationIdentities,
+    pub(super) parser_classifier_identities: HashMap<DeclId, TypeName>,
+    pub(super) enclosing_type_parameters:
+        HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
+    pub(super) sibling_classifiers: HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>>,
+    pub(super) anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
+    pub(super) anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
+}
+
+impl PassOneLocalClassContext {
+    pub(crate) fn parser_classifier_identities(&self) -> &HashMap<DeclId, TypeName> {
+        &self.parser_classifier_identities
+    }
+
+    /// Local classifiers visible from `declaration`, already paired with the stable identities
+    /// assigned while the source parser arena was live.
+    pub(in crate::resolve) fn sibling_classifiers(
+        &self,
+        _headers: &crate::fir::StreamedHeaderModule,
+        declaration: crate::fir::DeclarationId,
+    ) -> Vec<(String, TypeName)> {
+        self.sibling_classifiers
+            .get(&declaration)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+pub(crate) fn pass_one_local_class_context(
+    file: &File,
+    stubs: &[crate::fir::DeclarationStub],
+    stable_by_transient: &crate::fir::ParserDeclarationIdentities,
+) -> PassOneLocalClassContext {
+    let transient_tparams = local_class_enclosing_tparams(file);
+    let parser_classifier_identities =
+        stable_local_classifier_identities(file, stubs, stable_by_transient);
+    for declaration in file.local_class_decls.values() {
+        assert!(
+            parser_classifier_identities.contains_key(declaration),
+            "every parser-hoisted local classifier must bind a stable semantic identity"
+        );
+    }
+    let stable_siblings =
+        stable_local_class_sibling_names(file, stable_by_transient, &parser_classifier_identities);
+    let transient_anonymous = super::anonymous_lexical_class_scope(file);
+    crate::trace_compiler!(
+        "fir",
+        "Pass 1 local classifier context stable={} type-parameter-scopes={:?}",
+        stable_by_transient.len(),
+        transient_tparams
+            .iter()
+            .map(|(declaration, parameters)| {
+                let name = match file.decl(*declaration) {
+                    Decl::Class(class) => class.name.as_str(),
+                    Decl::Fun(_) | Decl::Property(_) => "<non-classifier>",
+                };
+                (
+                    name,
+                    stable_by_transient.get(declaration),
+                    parameters
+                        .iter()
+                        .flat_map(|parameter| parameter.names.iter())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    PassOneLocalClassContext {
+        parser_declaration_identities: stable_by_transient.clone(),
+        parser_classifier_identities,
+        enclosing_type_parameters: transient_tparams
+            .into_iter()
+            .filter_map(|(declaration, parameters)| {
+                stable_by_transient
+                    .get(&declaration)
+                    .copied()
+                    .map(|stable| (stable, parameters))
+            })
+            .collect(),
+        sibling_classifiers: stable_siblings,
+        anonymous_owners: transient_anonymous
+            .owners
+            .into_iter()
+            .filter_map(|(declaration, owner)| {
+                Some((
+                    *stable_by_transient.get(&declaration)?,
+                    *stable_by_transient.get(&owner)?,
+                ))
+            })
+            .collect(),
+        anonymous_declarations: transient_anonymous
+            .declarations
+            .into_iter()
+            .filter_map(|declaration| stable_by_transient.get(&declaration).copied())
+            .collect(),
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct EnclosingTypeParameterDeclaration {
     pub(super) declaration_start: u32,
@@ -426,24 +527,6 @@ pub(super) fn local_class_enclosing_tparams(
     result
 }
 
-pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
-    local_class_sibling_declarations(file)
-        .into_iter()
-        .map(|(declaration, siblings)| {
-            let siblings = siblings
-                .into_iter()
-                .filter_map(|(name, sibling)| {
-                    let Decl::Class(hoisted) = file.decl(sibling) else {
-                        return None;
-                    };
-                    Some((name, type_name(&class_internal(file, &hoisted.name))))
-                })
-                .collect();
-            (declaration, siblings)
-        })
-        .collect()
-}
-
 /// Local classifiers visible from each local or anonymous classifier's lexical body, as their
 /// source spelling paired with the hoisted declaration. Callers choose the identity: the legacy
 /// path spells the hoisted name, while compact signature collection maps the declaration to its
@@ -467,6 +550,9 @@ pub(super) fn local_class_sibling_declarations(
                 continue;
             };
             let Stmt::LocalClass(class) = file.stmt(statement) else {
+                continue;
+            };
+            let Decl::Class(_) = file.decl(declaration) else {
                 continue;
             };
             visible.push((class.name.clone(), declaration));
@@ -532,4 +618,142 @@ pub(super) fn local_class_sibling_declarations(
         }
     }
     result
+}
+
+pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
+    local_class_sibling_declarations(file)
+        .into_iter()
+        .map(|(owner, siblings)| {
+            let siblings = siblings
+                .into_iter()
+                .filter_map(|(name, declaration)| {
+                    let Decl::Class(class) = file.decl(declaration) else {
+                        return None;
+                    };
+                    Some((name, type_name(&class_internal(file, &class.name))))
+                })
+                .collect();
+            (owner, siblings)
+        })
+        .collect()
+}
+
+pub(super) fn stable_local_classifier_identities(
+    file: &File,
+    stubs: &[crate::fir::DeclarationStub],
+    stable_by_transient: &HashMap<DeclId, crate::fir::DeclarationId>,
+) -> HashMap<DeclId, TypeName> {
+    let package = type_name(
+        &file
+            .package
+            .as_deref()
+            .unwrap_or_default()
+            .replace('.', "/"),
+    );
+    let classifiers = stable_by_transient
+        .iter()
+        .filter_map(|(&parser, &stable)| {
+            stubs
+                .iter()
+                .find(|stub| {
+                    stub.id == stable && stub.kind == crate::fir::DeclarationKind::Classifier
+                })
+                .map(|stub| (parser, stable, stub.flags))
+        })
+        .collect::<Vec<_>>();
+    let local_member_owners = classifiers
+        .iter()
+        .filter(|(_, _, flags)| flags.has(crate::fir::DeclarationFlags::CLASSIFIER_MEMBER))
+        .filter_map(|(member, _, _)| {
+            let member = *member;
+            let Decl::Class(member_class) = file.decl(member) else {
+                return None;
+            };
+            let owner = classifiers
+                .iter()
+                .map(|(parser, _, _)| *parser)
+                .filter(|candidate| *candidate != member)
+                .filter_map(|candidate| {
+                    let Decl::Class(candidate_class) = file.decl(candidate) else {
+                        return None;
+                    };
+                    (candidate_class.span.lo <= member_class.span.lo
+                        && member_class.span.hi <= candidate_class.span.hi)
+                        .then_some((candidate_class.span.hi - candidate_class.span.lo, candidate))
+                })
+                .min_by_key(|(length, _)| *length)
+                .map(|(_, owner)| owner)?;
+            Some((member, owner))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut identities = classifiers
+        .iter()
+        .filter(|(_, _, flags)| !flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+        .filter_map(|(parser, _, _)| {
+            let Decl::Class(class) = file.decl(*parser) else {
+                return None;
+            };
+            Some((*parser, type_name(&class_internal(file, &class.name))))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut pending = classifiers
+        .into_iter()
+        .filter(|(_, _, flags)| flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+        .collect::<Vec<_>>();
+    loop {
+        let before = pending.len();
+        pending.retain(|(parser, stable, _)| {
+            let identity = if let Some(owner) = local_member_owners.get(parser) {
+                identities.get(owner).and_then(|owner| {
+                    let segment = file
+                        .hoisted_classifier_source_names
+                        .get(parser)?
+                        .rsplit('.')
+                        .next()?;
+                    Some(crate::types::type_name_nested_child(*owner, segment))
+                })
+            } else {
+                Some(crate::fir::classifier_identity(package, *stable))
+            };
+            let Some(identity) = identity else {
+                return true;
+            };
+            assert!(
+                identities.insert(*parser, identity).is_none(),
+                "one parser classifier binds one semantic identity"
+            );
+            false
+        });
+        if pending.is_empty() || pending.len() == before {
+            break;
+        }
+    }
+    assert!(
+        pending.is_empty(),
+        "every local classifier member must bind its stable semantic owner"
+    );
+    identities
+}
+
+pub(super) fn stable_local_class_sibling_names(
+    file: &File,
+    stable_by_transient: &HashMap<DeclId, crate::fir::DeclarationId>,
+    identities: &HashMap<DeclId, TypeName>,
+) -> HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>> {
+    local_class_sibling_declarations(file)
+        .into_iter()
+        .filter_map(|(owner, siblings)| {
+            let owner = stable_by_transient.get(&owner).copied()?;
+            let siblings = siblings
+                .into_iter()
+                .filter_map(|(name, sibling)| {
+                    identities
+                        .get(&sibling)
+                        .copied()
+                        .map(|identity| (name, identity))
+                })
+                .collect();
+            Some((owner, siblings))
+        })
+        .collect()
 }

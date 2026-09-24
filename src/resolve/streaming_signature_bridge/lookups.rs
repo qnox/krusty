@@ -3,6 +3,32 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    pub(super) fn bound_or_nested_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        bound: Option<crate::fir::DeclarationId>,
+    ) -> Option<crate::types::TypeName> {
+        match bound {
+            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
+            None => self.lexically_nested_classifier(scope, spelling),
+        }
+    }
+
+    pub(super) fn bound_or_scoped_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        bound: Option<crate::fir::DeclarationId>,
+    ) -> Option<crate::types::TypeName> {
+        match bound {
+            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
+            None => self
+                .qualified_classifier(scope, spelling)
+                .or_else(|| self.lexically_nested_classifier(scope, spelling)),
+        }
+    }
+
     /// The classifier that owns a declaration whose syntax is physically duplicated from the
     /// primary constructor header. Its nested declarations and type parameters are lexically
     /// visible there even though no dispatch receiver exists yet. Nested classifiers inherited by
@@ -1153,6 +1179,16 @@ impl ProductionSignatureSemantics<'_> {
             .and_then(|declaration| self.headers.stub(declaration))
             .and_then(|stub| self.headers.source_simple_name(stub))
             .unwrap_or_else(|| classifier.nested_segment_ref())
+    }
+
+    pub(super) fn bound_classifier_identity(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> crate::types::TypeName {
+        *self
+            .classifier_types
+            .get(&declaration)
+            .expect("a bound local classifier call must retain its semantic identity")
     }
 
     fn lexically_nested_classifier_at(

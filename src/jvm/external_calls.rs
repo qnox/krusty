@@ -982,7 +982,7 @@ fn publish_reified_substitutions(
 
 /// The provider owns physical erasure; checked FIR owns the final semantic result. Preserve both by
 /// wrapping the realized physical call at its original expression identity.
-fn bridge_external_result(
+pub(super) fn bridge_external_result(
     ir: &mut IrFile,
     index: usize,
     physical: crate::types::Ty,

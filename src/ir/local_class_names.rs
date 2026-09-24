@@ -532,7 +532,7 @@ impl super::IrFile {
             }
             tys(&mut class.supertypes, names);
             for property in &mut class.properties {
-                for (_, parameter) in &mut property.context_params {
+                for (_, _, parameter) in &mut property.context_params {
                     *parameter = ty(*parameter, names);
                 }
                 property.ty = ty(property.ty, names);

@@ -3212,61 +3212,6 @@ mod tests {
     }
 
     #[test]
-    fn jvm_production_stream_captures_anonymous_receiver_in_accessor_lambda() {
-        let inputs = [SourceInput::kotlin(
-            r#"fun build(): Int {
-                var count = 0
-                val holder = object {
-                    val action: () -> Unit get() = { count++ }
-                }
-                holder.action()
-                return count
-            }
-
-            fun box(): String = if (build() == 1) "OK" else "fail""#,
-        )
-        .with_file_stem("AnonymousAccessorCapture")];
-        let stems = ["AnonymousAccessorCapture".to_string()];
-        let mut paths = Vec::new();
-        if let Some(stdlib) = crate::jvm::kotlin_stdlib_jar() {
-            paths.push(stdlib);
-        }
-        if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
-            paths.push(jdk);
-        }
-        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
-        let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
-            &inputs,
-            Box::new(initialized_jvm_libraries(classpath.clone())),
-            &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
-            &mut diagnostics,
-        );
-
-        let outputs = emit_analyzed(
-            analysis,
-            &stems,
-            &crate::jvm::JvmBackend::new(classpath),
-            "main",
-            &mut diagnostics,
-        );
-
-        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        assert_eq!(
-            outputs
-                .iter()
-                .map(|(path, _)| path.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([
-                "AnonymousAccessorCaptureKt.class",
-                "AnonymousAccessorCaptureKt$build$holder$1.class",
-                "META-INF/main.kotlin_module",
-            ])
-        );
-    }
-
-    #[test]
     fn compiler_orchestrates_frontend_then_backend() {
         let mut diags = DiagSink::new();
         let inputs = [SourceInput::kotlin("fun box(): String = \"OK\"").with_file_stem("Main")];

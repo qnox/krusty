@@ -331,9 +331,7 @@ impl Inventor<'_> {
                 self.expr(*body, &own);
             }
             // A bound receiver is walked inside the reference, like the lambda body it becomes.
-            Expr::CallableRef { receiver, .. }
-                if !file.class_literal_references.contains(&expression.0) =>
-            {
+            Expr::CallableRef { receiver, .. } => {
                 let own = self.next(chain);
                 if let Some(receiver) = receiver {
                     self.expr(*receiver, &own);

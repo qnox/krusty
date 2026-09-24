@@ -9,6 +9,74 @@ use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, P
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
 
+/// Whether an overriding declaration's value-parameter types match one inherited declaration.
+/// Both sides are compared after replacing their declaration-owned formal identities with the
+/// same canonical coordinates. The subtype-equivalence check preserves flexible/provider types
+/// without weakening the invariant position of override inputs.
+pub(crate) fn override_parameter_types_match(
+    source: &dyn SymbolSource,
+    inherited: &[Ty],
+    inherited_formals: &[String],
+    implementation: &[Ty],
+    implementation_formals: &[String],
+) -> bool {
+    inherited.len() == implementation.len()
+        && inherited
+            .iter()
+            .copied()
+            .zip(implementation.iter().copied())
+            .all(|(inherited, implementation)| {
+                let inherited = crate::types::ty_canonicalize_params(inherited, inherited_formals);
+                let implementation =
+                    crate::types::ty_canonicalize_params(implementation, implementation_formals);
+                inherited == implementation
+                    || resolution_subtype(source, inherited, implementation)
+                        && resolution_subtype(source, implementation, inherited)
+            })
+}
+
+pub(crate) struct OverrideInputShape<'a> {
+    pub params: &'a [Ty],
+    pub receiver: Option<Ty>,
+    pub formals: &'a [String],
+    pub context_count: usize,
+    pub suspend: bool,
+}
+
+/// Compare the complete invariant input shape of an override edge. Context and suspension are
+/// declaration semantics just like value and extension-receiver inputs; keeping them in this one
+/// predicate prevents transient body-local selection and the frozen override graph from accepting
+/// different edges.
+pub(crate) fn override_input_shapes_match(
+    source: &dyn SymbolSource,
+    inherited: OverrideInputShape<'_>,
+    implementation: OverrideInputShape<'_>,
+) -> bool {
+    inherited.formals.len() == implementation.formals.len()
+        && inherited.context_count == implementation.context_count
+        && inherited.suspend == implementation.suspend
+        && override_parameter_types_match(
+            source,
+            inherited.params,
+            inherited.formals,
+            implementation.params,
+            implementation.formals,
+        )
+        && match (inherited.receiver, implementation.receiver) {
+            (None, None) => true,
+            (Some(inherited_receiver), Some(implementation_receiver)) => {
+                override_parameter_types_match(
+                    source,
+                    &[inherited_receiver],
+                    inherited.formals,
+                    &[implementation_receiver],
+                    implementation.formals,
+                )
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        }
+}
+
 pub(super) fn declared_callables(
     source: &dyn SymbolSource,
     classifier: &crate::libraries::LibraryType,
@@ -712,4 +780,37 @@ pub(crate) fn inherited_nested_classifier_name(
         }
     }
     InheritedNestedClassifier::NotFound
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_input_shape_includes_context_and_suspend() {
+        let source = crate::libraries::EmptySymbolSource;
+        let shape = |context_count, suspend| OverrideInputShape {
+            params: &[],
+            receiver: None,
+            formals: &[],
+            context_count,
+            suspend,
+        };
+
+        assert!(override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(1, true),
+        ));
+        assert!(!override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(0, true),
+        ));
+        assert!(!override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(1, false),
+        ));
+    }
 }

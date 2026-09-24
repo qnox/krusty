@@ -13,6 +13,7 @@ use crate::types::{Ty, TypeName};
 use super::{ClassSig, Signature, SymbolTable};
 
 mod callable_references;
+mod classifier_identities;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
@@ -4532,15 +4533,7 @@ pub(crate) fn finalized_streamed_signature_index(
             failure.declaration
         })
         .collect::<Vec<_>>();
-    let classifier_types = table
-        .classes
-        .values()
-        .filter_map(|signature| {
-            signature
-                .stable_declaration
-                .map(|declaration| (declaration, signature.internal))
-        })
-        .collect::<HashMap<_, _>>();
+    let classifier_types = classifier_identities::compact_classifier_identities(headers);
     let suppressed_generated_callables = headers
         .stubs
         .iter()
@@ -5395,6 +5388,9 @@ pub(crate) fn finalized_streamed_signature_index(
             stub.lookup_name
                 .and_then(|name| headers.lookup_names.get(name)),
         );
+        if stub.kind == DeclarationKind::Classifier {
+            index.publish_classifier_identity(stub.id, classifier_types[&stub.id]);
+        }
         if let Some(&ordinal) = headers.continuation_ordinals.get(&stub.id) {
             index.publish_continuation_ordinal(stub.id, ordinal);
         }

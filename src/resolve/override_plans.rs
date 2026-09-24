@@ -146,6 +146,46 @@ fn function_target(
         })
 }
 
+fn function_default_provider(
+    index: &ResolvedModuleIndex,
+    function: &FunctionInfo,
+    target: ResolvedFunctionOverrideTarget,
+) -> Option<ResolvedFunctionOverrideTarget> {
+    if !function
+        .call_sig
+        .param_defaults
+        .iter()
+        .any(|default| *default)
+    {
+        return None;
+    }
+    if let Some(provider) = function.callable.external_default_provider {
+        return Some(ResolvedFunctionOverrideTarget::External(provider));
+    }
+    Some(match target {
+        ResolvedFunctionOverrideTarget::Module(callable) => index
+            .callable_default_provider(callable)
+            .unwrap_or(ResolvedFunctionOverrideTarget::Module(callable)),
+        ResolvedFunctionOverrideTarget::External(callable) => {
+            ResolvedFunctionOverrideTarget::External(callable)
+        }
+    })
+}
+
+fn function_default_bitmap(function: &FunctionInfo) -> Box<[bool]> {
+    let count = function.semantic_params().len();
+    (0..count)
+        .map(|parameter| {
+            function
+                .call_sig
+                .param_defaults
+                .get(parameter)
+                .copied()
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn declared_properties(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
@@ -378,6 +418,10 @@ fn publish_inherited_interface_function_plans(
                             .ret
                             .apply(implementation_declared.callable.ret),
                         "inherited implementation result",
+                    ),
+                    overridden_parameter_defaults: function_default_bitmap(&applied),
+                    overridden_default_provider: function_default_provider(
+                        index, &applied, overridden,
                     ),
                     suspend: implementation.flags.suspend,
                     has_kotlin_superclass_override: false,
@@ -631,6 +675,8 @@ fn append_function_override_edges(
     implementation_callable: crate::fir::CallableId,
     implementation_formals: &[String],
     implementation_parameters: &[Ty],
+    implementation_receiver: Option<Ty>,
+    implementation_context_count: usize,
     implementation_result: Ty,
     suspend: bool,
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
@@ -638,6 +684,14 @@ fn append_function_override_edges(
     overrides: &mut Vec<ResolvedFunctionOverride>,
 ) {
     let first = overrides.len();
+    let mut implementation_inputs = implementation_parameters.to_vec();
+    if implementation_receiver.is_some() {
+        assert!(
+            implementation_context_count < implementation_inputs.len(),
+            "an extension override must retain its declared receiver parameter"
+        );
+        implementation_inputs.remove(implementation_context_count);
+    }
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
             .classifier(supertype.classifier)
@@ -654,37 +708,36 @@ fn append_function_override_edges(
                 continue;
             };
             let applied_parameters = applied_parameters_with_receiver(&applied);
+            let applied_inputs = applied.semantic_params();
             let applied_formals = applied
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice())
                 .unwrap_or_default();
-            if applied_parameters.len() != implementation_parameters.len()
-                || !applied_parameters
-                    .iter()
-                    .zip(implementation_parameters)
-                    .all(|(&base, &implementation)| {
-                        equivalent(
-                            source,
-                            crate::types::ty_canonicalize_params(base, applied_formals),
-                            crate::types::ty_canonicalize_params(
-                                implementation,
-                                implementation_formals,
-                            ),
-                        )
-                    })
-                || !crate::symbol_resolver::resolution_subtype(
-                    source,
-                    crate::types::ty_canonicalize_params(
-                        implementation_result,
-                        implementation_formals,
-                    ),
-                    crate::types::ty_canonicalize_params(
-                        applied.ret.apply(applied.callable.ret).canonical_semantic(),
-                        applied_formals,
-                    ),
-                )
-                || !seen.insert(overridden)
+            if !crate::symbol_resolver::override_input_shapes_match(
+                source,
+                crate::symbol_resolver::OverrideInputShape {
+                    params: &applied_inputs,
+                    receiver: applied.callable.source_receiver,
+                    formals: applied_formals,
+                    context_count: applied.context_count,
+                    suspend: applied.flags.suspend,
+                },
+                crate::symbol_resolver::OverrideInputShape {
+                    params: &implementation_inputs,
+                    receiver: implementation_receiver,
+                    formals: implementation_formals,
+                    context_count: implementation_context_count,
+                    suspend,
+                },
+            ) || !crate::symbol_resolver::resolution_subtype(
+                source,
+                crate::types::ty_canonicalize_params(implementation_result, implementation_formals),
+                crate::types::ty_canonicalize_params(
+                    applied.ret.apply(applied.callable.ret).canonical_semantic(),
+                    applied_formals,
+                ),
+            ) || !seen.insert(overridden)
             {
                 continue;
             }
@@ -725,6 +778,8 @@ fn append_function_override_edges(
                     implementation_result,
                     "overriding function result",
                 ),
+                overridden_parameter_defaults: function_default_bitmap(&applied),
+                overridden_default_provider: function_default_provider(index, &applied, overridden),
                 suspend,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
@@ -786,6 +841,11 @@ fn function_override_plans(
             implementation_callable.id,
             &implementation_formals,
             &implementation_parameters,
+            implementation_callable
+                .shape
+                .extension_receiver
+                .map(crate::fir::ResolvedTy::get),
+            implementation_callable.shape.context_parameter_count as usize,
             implementation_result,
             implementation.is_suspend(),
             hierarchy,
@@ -923,6 +983,11 @@ fn enum_entry_override_plans(
                         callable.id,
                         &formals,
                         &parameters,
+                        callable
+                            .shape
+                            .extension_receiver
+                            .map(crate::fir::ResolvedTy::get),
+                        callable.shape.context_parameter_count as usize,
                         signature.result.get().canonical_semantic(),
                         header.flags.has(DeclarationFlags::SUSPEND),
                         &hierarchy,
@@ -1039,6 +1104,11 @@ pub(crate) fn publish_checked_local_override_plans(
                                 callable.id,
                                 &implementation_formals,
                                 &parameters,
+                                callable
+                                    .shape
+                                    .extension_receiver
+                                    .map(crate::fir::ResolvedTy::get),
+                                callable.shape.context_parameter_count as usize,
                                 signature.result.get().canonical_semantic(),
                                 member.flags.has(DeclarationFlags::SUSPEND),
                                 &hierarchy,
@@ -1075,6 +1145,12 @@ pub(crate) fn publish_checked_local_override_plans(
             })
             .collect::<Vec<_>>()
     };
+    let function_edges = plans
+        .iter()
+        .flat_map(|(_, _, functions)| functions.iter().cloned())
+        .collect::<Vec<_>>();
+    publish_inherited_function_defaults(index, &function_edges);
+
     for (classifier, properties, functions) in plans {
         if !index.has_property_override_plan(classifier) {
             index.publish_property_overrides(classifier, properties);
@@ -1085,42 +1161,188 @@ pub(crate) fn publish_checked_local_override_plans(
     }
 }
 
-pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
-    let module = ModuleSymbols::new(table);
-    let source = CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
-    let classifiers = table
-        .classes
-        .values()
-        .filter_map(|class| {
-            class.stable_declaration.and_then(|declaration| {
-                // A body-local classifier whose semantic header is deferred to Pass 2 cannot own
-                // a Pass-1 override plan. Its checked lexical publication must supply the hierarchy
-                // and override identities together; publishing an empty provisional plan here would
-                // falsely make that absence final.
-                index
-                    .classifier_header(declaration)
-                    .filter(|_| {
-                        !index
-                            .declaration_header(declaration)
-                            .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
-                    })
-                    .map(|_| (declaration, class))
-            })
+/// Freeze every override edge before publishing an inherited default. Declaration and classifier
+/// source order are not topological: a derived classifier may be visited before its base. Resolve
+/// the complete graph to a deterministic fixpoint, comparing final provider identity so a diamond
+/// through two intermediates that both inherit the same declaration remains unambiguous.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InheritedDefaultState {
+    Absent,
+    Unique(Vec<bool>, ResolvedFunctionOverrideTarget),
+    Ambiguous,
+}
+
+fn publish_inherited_function_defaults(
+    index: &mut ResolvedModuleIndex,
+    function_edges: &[ResolvedFunctionOverride],
+) {
+    let mut implementations = function_edges
+        .iter()
+        .filter_map(|edge| match edge.implementation {
+            ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
+            ResolvedFunctionOverrideTarget::External(_) => None,
         })
         .collect::<Vec<_>>();
+    implementations.sort_unstable_by_key(|callable| callable.raw());
+    implementations.dedup();
+    let implementation_set = implementations.iter().copied().collect::<HashSet<_>>();
+    let module_state = |callable| {
+        let defaults = index
+            .callable_default_bitmap(callable)
+            .expect("an override target must retain its callable parameter inventory");
+        if defaults.iter().any(|default| *default) {
+            InheritedDefaultState::Unique(
+                defaults,
+                index
+                    .callable_default_provider(callable)
+                    .unwrap_or(ResolvedFunctionOverrideTarget::Module(callable)),
+            )
+        } else {
+            InheritedDefaultState::Absent
+        }
+    };
+    let mut states = implementations
+        .iter()
+        .filter_map(|&callable| match module_state(callable) {
+            state @ InheritedDefaultState::Unique(..) => Some((callable, state)),
+            InheritedDefaultState::Absent => None,
+            InheritedDefaultState::Ambiguous => unreachable!(),
+        })
+        .collect::<HashMap<_, _>>();
+    loop {
+        let mut additions = Vec::new();
+        for &implementation in &implementations {
+            if states.contains_key(&implementation) {
+                continue;
+            }
+            let edges = function_edges
+                .iter()
+                .filter(|edge| {
+                    edge.implementation == ResolvedFunctionOverrideTarget::Module(implementation)
+                })
+                .collect::<Vec<_>>();
+            let Some(nearest) = edges.iter().map(|edge| edge.depth).min() else {
+                continue;
+            };
+            let mut candidates = Vec::new();
+            let mut unresolved = false;
+            for edge in edges.into_iter().filter(|edge| edge.depth == nearest) {
+                let state = match edge.overridden {
+                    ResolvedFunctionOverrideTarget::Module(overridden) => {
+                        if let Some(state) = states.get(&overridden) {
+                            state.clone()
+                        } else if implementation_set.contains(&overridden) {
+                            unresolved = true;
+                            break;
+                        } else {
+                            module_state(overridden)
+                        }
+                    }
+                    ResolvedFunctionOverrideTarget::External(_) => {
+                        if edge
+                            .overridden_parameter_defaults
+                            .iter()
+                            .any(|default| *default)
+                        {
+                            InheritedDefaultState::Unique(
+                                edge.overridden_parameter_defaults.iter().copied().collect(),
+                                edge.overridden_default_provider.expect(
+                                    "an external callable with defaults must retain its provider identity",
+                                ),
+                            )
+                        } else {
+                            InheritedDefaultState::Absent
+                        }
+                    }
+                };
+                candidates.push(state);
+            }
+            if unresolved {
+                continue;
+            }
+            let mut unique = candidates.iter().filter_map(|state| match state {
+                InheritedDefaultState::Unique(defaults, provider) => {
+                    Some((defaults.clone(), *provider))
+                }
+                InheritedDefaultState::Absent | InheritedDefaultState::Ambiguous => None,
+            });
+            let first = unique.next();
+            let state = if candidates.contains(&InheritedDefaultState::Ambiguous) {
+                InheritedDefaultState::Ambiguous
+            } else if let Some(first) = first {
+                if unique.all(|candidate| candidate == first) {
+                    InheritedDefaultState::Unique(first.0, first.1)
+                } else {
+                    InheritedDefaultState::Ambiguous
+                }
+            } else {
+                InheritedDefaultState::Absent
+            };
+            additions.push((implementation, state));
+        }
+        if additions.is_empty() {
+            break;
+        }
+        for (implementation, state) in additions {
+            states.insert(implementation, state);
+        }
+    }
+    let mut inherited_defaults = states.into_iter().collect::<Vec<_>>();
+    inherited_defaults.sort_by_key(|(callable, _)| callable.raw());
+    for (callable, state) in inherited_defaults {
+        let InheritedDefaultState::Unique(defaults, provider) = state else {
+            continue;
+        };
+        if provider != ResolvedFunctionOverrideTarget::Module(callable) {
+            index.publish_inherited_callable_defaults(callable, &defaults, provider);
+        }
+    }
+}
 
-    for (classifier, class) in classifiers {
-        let hierarchy = index
-            .classifier_hierarchy(classifier)
-            .unwrap_or_default()
-            .to_vec();
-        let properties = property_override_plans(index, &source, class, &hierarchy);
-        let functions = function_override_plans(index, &source, class, &hierarchy);
+pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
+    let plans = {
+        let module = ModuleSymbols::new(table);
+        let source =
+            CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
+        table
+            .classes
+            .values()
+            .filter_map(|class| {
+                class.stable_declaration.and_then(|declaration| {
+                    // A body-local classifier whose semantic header is deferred to Pass 2 cannot
+                    // own a Pass-1 override plan. Its checked lexical publication must supply the
+                    // hierarchy and override identities together.
+                    index
+                        .classifier_header(declaration)
+                        .filter(|_| {
+                            !index.declaration_header(declaration).is_some_and(|header| {
+                                header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                            })
+                        })
+                        .map(|_| (declaration, class))
+                })
+            })
+            .map(|(classifier, class)| {
+                let hierarchy = index
+                    .classifier_hierarchy(classifier)
+                    .unwrap_or_default()
+                    .to_vec();
+                (
+                    classifier,
+                    property_override_plans(index, &source, class, &hierarchy),
+                    function_override_plans(index, &source, class, &hierarchy),
+                )
+            })
+            .chain(enum_entry_override_plans(index, &source))
+            .collect::<Vec<_>>()
+    };
+    let function_edges = plans
+        .iter()
+        .flat_map(|(_, _, functions)| functions.iter().cloned())
+        .collect::<Vec<_>>();
+    publish_inherited_function_defaults(index, &function_edges);
+    for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);
-    }
-    for (entry, properties, functions) in enum_entry_override_plans(index, &source) {
-        index.publish_property_overrides(entry, properties);
-        index.publish_function_overrides(entry, functions);
     }
 }
