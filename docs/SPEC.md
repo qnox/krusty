@@ -2619,6 +2619,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `throw KotlinNothingValueException()` re-declares that word before discarding it, or `max_stack` is
   undercounted by whatever sits beneath it (`VerifyError: Operand stack overflow` on `println(boom())`).
   (`tests/diverging_value_position_e2e.rs`.)
+- **kotlinc's final `DeadCodeEliminationMethodTransformer` runs after the bytecode passes.** The
+  emitter's reachability tracking cannot see code a later rewrite strands: when the redundant-`goto`
+  pass threads a jump through a `goto` (`if (i == k) return 1` as a loop body's last statement), the
+  bypassed `goto` is left after the `return`, reached by nothing. kotlinc always ends its method
+  pipeline with this transformer, so `src/jvm/classfile/dead_code.rs` runs last in the method rewrite:
+  liveness from the entry through fall-through, jump and switch targets, and the handler of every
+  protected range holding a live instruction; every unreached instruction goes, with its frame. A line
+  number goes when its forward scan (skipping labels and entries of the same line) reaches the end of
+  the method, or a different line having passed only dead instructions; a live instruction keeps it,
+  and so does a different line reached with nothing in between. A protected range left empty goes
+  (`removeEmptyCatchBlocks`), and so does a local variable the removal empties (`prepareForEmitting`).
+  The transformer's `removeUnusedLocalVariables` then closes every gap in the used slots (`this`, the
+  parameters, loads, stores, `iinc`, named locals — a wide load/store and a wide named local both
+  words), renumbering accesses in ASM's shortest form (`src/jvm/classfile/local_slots.rs`): a `for`
+  loop's iterable temporary, folded away, leaves its slot to the iterator and the element. All of it is
+  read off kotlinc 2.4.10's `DeadCodeEliminationMethodTransformer`, `InstructionLivenessAnalyzer` and
+  `optimization.common.UtilKt` bytecode. (`tests/final_dead_code_e2e.rs`; unit tests in both modules.)
 - **A `for`-range `step` is evaluated exactly once** (hoisted to a temp before the loop), not per
   iteration — a side-effecting `step` (`a until b step sideEffect()`) must run a single time, matching
   kotlinc's evaluation order. `DeadCodeAndStep` in `tests/feature_box_e2e.rs`.
