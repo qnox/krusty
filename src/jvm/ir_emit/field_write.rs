@@ -60,7 +60,7 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             self.emit_value(value, code);
         }
-        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
+        self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
         // the property's line stays in effect over everything that follows the store.
@@ -93,7 +93,7 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
-        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
+        self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
         code.putstatic(field_ref, slot_words(field_ty) as i32);
     }
