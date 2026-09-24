@@ -4368,7 +4368,8 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
 - ✅ 2.4.20 backend deltas gated on the target: `@Metadata.xi` visibility bits for synthetic
   classes, no nullability annotations on annotation implementation classes, anonymous context
   parameters named in the `LocalVariableTable` and numbered `$1` rather than `#1`
-  (`src/jvm/parameter_names.rs`).
+  (`src/jvm/parameter_names.rs`), and a forwarded `Unit` suspend tail call answering `Unit` unless
+  the callee suspended (`classpath_tail_forward_e2e`).
 - ⬜ CI runs the full suite on the newest version only; older versions run box conformance in CI
   and the full suite locally through `just test-all`.
 - ⬜ A deferred builder-inference member error names no receiver; kotlinc 2.4.20 renders the

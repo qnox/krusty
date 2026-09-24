@@ -522,7 +522,15 @@ pub(crate) fn lower_suspend(
             // made; the call ids remain stable and `rewrite_forward_body` can rewrite the function's
             // physical tails in one place.
             splice_return_blocks(ir, b);
-            rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
+            let returned =
+                rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
+            // Kotlin 2.4.20 answers a forwarded `Unit` function's result with `Unit` unless the
+            // callee suspended; earlier releases return whatever the callee returned.
+            if orig_rets[fid as usize] == Ty::Unit
+                && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
+            {
+                ir.unit_result_tail_forwards.extend(returned);
+            }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
             // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail

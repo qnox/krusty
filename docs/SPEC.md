@@ -202,7 +202,9 @@ lists every rung's candidates in a failed `getValue`, drops `@NotNull`/`@Nullabl
 implementation classes, packs a synthetic class's visibility into bits 8–10 of `@Metadata.xi`, and
 names an anonymous context parameter by its label in the IR: it gains a `LocalVariableTable` row,
 and repeated labels are numbered `$context-String$1` where earlier releases wrote
-`$context-String#1`.
+`$context-String#1`. A `Unit` suspend function whose body is a tail call still forwards its
+continuation, but 2.4.20 returns the callee's result only when it is `COROUTINE_SUSPENDED` and
+`Unit.INSTANCE` otherwise, where earlier releases return the callee's result unchanged.
 krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
 it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
 part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The
