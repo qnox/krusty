@@ -5,6 +5,7 @@ name: attribution
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  merge_group:
   push:
     branches: [master]
 
@@ -21,7 +22,7 @@ jobs:
           fetch-depth: 0
       - name: commits
         env:
-          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
         run: scripts/check-attribution.sh "$RANGE"
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
