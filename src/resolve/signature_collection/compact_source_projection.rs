@@ -235,7 +235,8 @@ pub(in crate::resolve) fn compact_classifier_identity(
         .filter(|owner| owner.kind == crate::fir::DeclarationKind::Classifier)
         .and_then(|owner| compact_classifier_identity(headers, owner));
     if let Some((_, owner)) = enclosing_classifier {
-        let segment = source_name.rsplit(['.', '$']).next()?;
+        // The source path is dotted; a `$` belongs to a backticked name (`Dollar$Point`).
+        let segment = source_name.rsplit('.').next()?;
         let identity = crate::types::type_name_nested_child(owner, segment);
         return Some((source_name, identity));
     }
