@@ -73,6 +73,8 @@ struct SourceDeclaration {
     companion: Option<(Box<str>, TypeName)>,
     /// The Kotlin qualified name with every boundary dotted (`pkg.Outer.Nested`).
     qualified_name: Option<Box<str>>,
+    /// Exact accessor owner and arity published by the serialization frontend plugin.
+    serialization_companion_accessor: Option<(Box<str>, TypeName, usize)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -625,18 +627,8 @@ impl BackendModuleFacts {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 annotations: index
-                    .declaration_annotations(declaration)
-                    .iter()
-                    .copied()
-                    .map(|annotation| crate::types::ResolvedAnnotation {
-                        annotation,
-                        // Stable headers currently publish only the checked annotation identity.
-                        // Do not turn ordinal side tables into a counterfeit applied annotation;
-                        // consumers that require values fail closed until the checked application
-                        // itself is retained in the stable index.
-                        arguments: Vec::new(),
-                    })
-                    .collect::<Vec<_>>()
+                    .declaration_applied_annotations(declaration)
+                    .to_vec()
                     .into_boxed_slice(),
                 own_type_parameter_count,
                 type_param_variances,
@@ -649,6 +641,9 @@ impl BackendModuleFacts {
                     is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
                     companion,
                     qualified_name,
+                    serialization_companion_accessor: index
+                        .serialization_companion_accessor(declaration)
+                        .map(|(field, companion, arity)| (Box::from(field), companion, arity)),
                 },
             );
             if let Some(underlying) = value_underlying {
@@ -848,6 +843,14 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         companion: TypeName,
         type_parameters: usize,
     ) -> bool {
+        if self.module.source_declarations.values().any(|source| {
+            source
+                .serialization_companion_accessor
+                .as_ref()
+                .is_some_and(|(_, owner, arity)| *owner == companion && *arity == type_parameters)
+        }) {
+            return true;
+        }
         if let Some(generated) = self
             .module
             .generated_classifiers()
@@ -871,7 +874,13 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         self.module
             .source_declarations
             .get(&classifier)
-            .and_then(|source| source.companion.clone())
+            .and_then(|source| {
+                source
+                    .serialization_companion_accessor
+                    .as_ref()
+                    .map(|(field, companion, _)| (field.clone(), *companion))
+                    .or_else(|| source.companion.clone())
+            })
             .or_else(|| {
                 self.module
                     .generated_classifiers()

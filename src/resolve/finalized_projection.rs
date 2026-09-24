@@ -473,6 +473,43 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (&declaration, spellings) in &table.stable_declared_spellings {
         index.publish_declaration_spellings(declaration, spellings.clone());
     }
+    for class in table.classes.values() {
+        if let Some(declaration) = class.stable_declaration {
+            index.publish_declaration_applied_annotations(
+                declaration,
+                class.applied_annotations.iter().cloned(),
+            );
+        }
+        let (Some(declaration), Some(companion)) =
+            (class.stable_declaration, class.companion_internal)
+        else {
+            continue;
+        };
+        let Some(companion_class) = table.classes.get(&companion) else {
+            continue;
+        };
+        let generated_accessor = companion_class
+            .methods
+            .values()
+            .flatten()
+            .find(|signature| {
+                signature
+                    .plugin_expression
+                    .as_ref()
+                    .is_some_and(|expression| {
+                        expression.plugin == "serialization" && expression.operation == "serializer"
+                    })
+            });
+        let Some(accessor) = generated_accessor else {
+            continue;
+        };
+        index.publish_serialization_companion_accessor(
+            declaration,
+            companion.nested_segment_ref().into(),
+            companion,
+            accessor.params.len(),
+        );
+    }
     for (declaration, suppressions) in table.visibility_suppressed_declarations() {
         index.publish_visibility_suppression(
             declaration,

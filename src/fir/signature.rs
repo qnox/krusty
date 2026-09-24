@@ -1572,6 +1572,11 @@ pub struct ResolvedModuleIndex {
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// Fully checked declaration annotation applications. Values are folded against the selected
+    /// annotation constructor and keyed by stable declaration identity; consumers never join them
+    /// back to the identity-only header list by ordinal.
+    declaration_applied_annotations:
+        HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -1587,6 +1592,10 @@ pub struct ResolvedModuleIndex {
     /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
     /// generated name conventions.
     generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
+    /// Exact companion accessor contributed by the serialization frontend plugin for a source
+    /// classifier. The callable was selected while the generated symbol table was authoritative;
+    /// later consumers receive its owner and arity without recognizing a generated spelling.
+    serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2213,6 +2222,16 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub fn declaration_applied_annotations(
+        &self,
+        declaration: DeclarationId,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.declaration_applied_annotations
+            .get(&declaration)
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
     pub fn declaration_annotation_string_arguments(
         &self,
         declaration: DeclarationId,
@@ -2243,6 +2262,15 @@ impl ResolvedModuleIndex {
             .get(&declaration)
             .map(Box::as_ref)
             .unwrap_or_default()
+    }
+
+    pub fn serialization_companion_accessor(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<(&str, TypeName, usize)> {
+        self.serialization_companion_accessors
+            .get(&declaration)
+            .map(|(field, companion, arity)| (field.as_ref(), *companion, *arity))
     }
 
     pub(crate) fn declaration_suppresses_invisible_reference(
@@ -2739,6 +2767,26 @@ impl ResolvedModuleIndex {
         );
     }
 
+    pub fn publish_declaration_applied_annotations(
+        &mut self,
+        declaration: DeclarationId,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if annotations.is_empty() {
+            return;
+        }
+        assert!(
+            self.declaration_applied_annotations
+                .insert(declaration, annotations)
+                .is_none(),
+            "a stable declaration may publish checked annotation applications only once"
+        );
+    }
+
     pub fn publish_declaration_annotation_string_arguments(
         &mut self,
         declaration: DeclarationId,
@@ -2792,6 +2840,21 @@ impl ResolvedModuleIndex {
                 .insert(declaration, classifiers)
                 .is_none(),
             "a stable declaration may publish generated classifiers only once"
+        );
+    }
+
+    pub fn publish_serialization_companion_accessor(
+        &mut self,
+        declaration: DeclarationId,
+        field: Box<str>,
+        companion: TypeName,
+        type_parameters: usize,
+    ) {
+        assert!(
+            self.serialization_companion_accessors
+                .insert(declaration, (field, companion, type_parameters))
+                .is_none(),
+            "a source classifier may publish only one serialization companion accessor"
         );
     }
 
@@ -3080,11 +3143,13 @@ impl ResolvedModuleIndex {
         self.declarations.is_empty()
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
+            && self.declaration_applied_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
+            && self.serialization_companion_accessors.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3504,6 +3569,16 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|annotations| annotations.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
+            + self.declaration_applied_annotations.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>())
+            + self
+                .declaration_applied_annotations
+                .values()
+                .map(|annotations| {
+                    annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+                })
+                .sum::<usize>()
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
@@ -3539,6 +3614,14 @@ impl ResolvedModuleIndex {
                             .map(|classifier| classifier.source_name.len())
                             .sum::<usize>()
                 })
+                .sum::<usize>()
+            + self.serialization_companion_accessors.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<(Box<str>, TypeName, usize)>())
+            + self
+                .serialization_companion_accessors
+                .values()
+                .map(|(field, _, _)| field.len())
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()

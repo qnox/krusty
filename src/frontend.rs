@@ -1213,18 +1213,6 @@ where
             &mut symbols,
         );
     }
-    if !retain_inspection_analysis {
-        // Signature collection, target preparation, and inline-capture projection are the last
-        // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
-        // only when it still owns executable syntax that Pass 1 must turn into checked FIR
-        // (inline/default/const work). The compact headers and signature graph are authoritative for
-        // every declaration fact used by finalization, including enum-entry member signatures.
-        for file in files.iter_mut().take(inferred_end) {
-            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
-                *file = File::default();
-            }
-        }
-    }
     let streamed_index = crate::resolve::finalized_streamed_signature_index(
         &pass1_headers,
         &mut symbols,
@@ -1240,6 +1228,11 @@ where
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        crate::resolve::publish_checked_classifier_annotations(
+            &files[..inferred_end],
+            &mut symbols,
+            diags,
+        );
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
         // An `actual` that actualizes nothing is named by the reference compiler's declaration
         // renderer over its RESOLVED signature, so it is reported only once finalization has
@@ -1330,6 +1323,16 @@ where
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None
     };
+    if !retain_inspection_analysis {
+        // Typed classifier annotations are the final consumers of declaration-only legacy `File`
+        // views. Once folded, retain a parser fragment only when it still owns executable syntax
+        // that Pass 1 must turn into checked FIR (inline/default/const work).
+        for file in files.iter_mut().take(inferred_end) {
+            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
+                *file = File::default();
+            }
+        }
+    }
     if trim_support_bodies {
         for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
             file.release_body_arenas();
