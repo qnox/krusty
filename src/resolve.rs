@@ -58177,7 +58177,14 @@ impl<'a> Checker<'a> {
             self.push_declaration_suppressions(scope, &cl.annotations, &cl.annotation_args);
         if self.fragment.is_classifier_annotations() {
             for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-                self.check_annotation_application(scope, annotation, arguments);
+                if self
+                    .module
+                    .legacy_symbols()
+                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
+                    .is_some()
+                {
+                    self.check_annotation_application(scope, annotation, arguments);
+                }
             }
             self.active_statement_suppressions
                 .truncate(class_suppression_depth);
@@ -77698,6 +77705,12 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
     ) -> Option<TypeName> {
+        if self.fragment.is_classifier_annotations() {
+            return self
+                .module
+                .legacy_symbols()?
+                .resolved_annotation(self.file_index, annotation);
+        }
         self.applied_annotations
             .get(&(annotation.span.lo, annotation.span.hi))
             .map(|applied| applied.internal)

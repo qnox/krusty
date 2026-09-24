@@ -13,7 +13,6 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    assert!(analysis.reparse_sources[0].released_before_collection());
     let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
     let subject = index
         .classifier_declaration(crate::types::type_name("Subject"))

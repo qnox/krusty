@@ -1231,6 +1231,7 @@ where
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         crate::resolve::publish_checked_classifier_annotations(
             &files[..inferred_end],
+            &index,
             &mut symbols,
             diags,
         );

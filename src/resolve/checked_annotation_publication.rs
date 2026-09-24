@@ -7,6 +7,7 @@ use super::*;
 /// selected; this is declaration metadata needed across source files before backend facts freeze.
 pub(crate) fn publish_checked_classifier_annotations(
     files: &[File],
+    index: &crate::fir::ResolvedModuleIndex,
     table: &mut SymbolTable,
     diags: &mut DiagSink,
 ) {
@@ -15,9 +16,15 @@ pub(crate) fn publish_checked_classifier_annotations(
             .classes
             .values()
             .filter(|class| class.source_file == file_index as u32)
-            .filter_map(|class| Some((class.stable_declaration?, class.source_decl?)))
+            .filter_map(|class| {
+                let stable = class.stable_declaration?;
+                index.classifier_header(stable)?;
+                Some((class.internal, class.source_decl?))
+            })
             .filter(|(_, declaration)| {
-                matches!(file.decl(*declaration), Decl::Class(class) if !class.annotations.is_empty())
+                matches!(file.decl(*declaration), Decl::Class(class) if class.annotations.iter().any(
+                    |annotation| table.resolved_annotation(file_index as u32, annotation).is_some()
+                ))
             })
             .collect::<Vec<_>>();
         let selected = declarations
@@ -50,27 +57,35 @@ pub(crate) fn publish_checked_classifier_annotations(
             None,
         );
         let mut checked = Vec::new();
-        for (_, declaration) in declarations {
+        for (internal, declaration) in declarations {
             let Decl::Class(class) = file.decl(declaration) else {
                 continue;
             };
             let applications = class
                 .annotations
                 .iter()
+                .filter(|annotation| {
+                    table
+                        .resolved_annotation(file_index as u32, annotation)
+                        .is_some()
+                })
                 .filter_map(|annotation| info.applied_annotation(annotation))
                 .map(|annotation| crate::types::ResolvedAnnotation {
                     annotation: annotation.internal,
                     arguments: annotation.values.clone(),
                 })
                 .collect::<Vec<_>>();
-            if applications.len() == class.annotations.len() {
-                if let Some(internal) = table.classes.values().find_map(|signature| {
-                    (signature.source_file == file_index as u32
-                        && signature.source_decl == Some(declaration))
-                    .then_some(signature.internal)
-                }) {
-                    checked.push((internal, applications));
-                }
+            let expected = class
+                .annotations
+                .iter()
+                .filter(|annotation| {
+                    table
+                        .resolved_annotation(file_index as u32, annotation)
+                        .is_some()
+                })
+                .count();
+            if applications.len() == expected {
+                checked.push((internal, applications));
             } else if !diags.has_errors() {
                 diags.error(
                     class.span,
