@@ -517,7 +517,7 @@ impl Emitter<'_> {
 #[cfg(test)]
 mod tests {
     use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
-    use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
+    use crate::jvm::ir_emit::invariant_tests::emit_for_test;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
 

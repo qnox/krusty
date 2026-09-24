@@ -20,6 +20,7 @@ mod negated_jumps;
 mod null_checks;
 mod redundant_checkcasts;
 mod redundant_gotos;
+mod stack_maps;
 mod stack_peephole;
 mod temporaries;
 
@@ -2500,7 +2501,28 @@ impl ClassWriter {
         // computed when the method actually has frames — `append_param_verif_types` interns the
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
         let mut stackmap_baseline = None;
-        let stackmap = if code.has_frames() {
+        // The table the instructions imply: its classes intern now, where kotlinc's writer interns
+        // them, and `finish` writes it computed over the final body. A non-empty emitted body must
+        // be understood by the one authoritative frame computation; recorded emitter frames are
+        // retained temporarily only for the rewrite migration below, never as output fallback.
+        let body = stack_maps::Body {
+            access,
+            name,
+            descriptor: desc,
+            code: &code.bytes,
+            exceptions: &code.resolved_exceptions(),
+            labels: stack_maps::builder_labels(
+                code.line_marks(),
+                code.local_entries(),
+                code.bytes.len(),
+            ),
+        };
+        let computed = (!code.bytes.is_empty()).then(|| {
+            self.compute_frames(&body).unwrap_or_else(|decline| {
+                panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
+            })
+        });
+        if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
             let mut initial_locals: Vec<VerifType> = Vec::new();
             if access & ACC_STATIC == 0 {
@@ -2510,14 +2532,9 @@ impl ClassWriter {
                     VerifType::ObjectName(self.internal_name.clone())
                 });
             }
-            let baseline =
+            stackmap_baseline =
                 Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
-            let stackmap = code.build_stackmap(baseline.as_deref(), &mut self.cp);
-            stackmap_baseline = baseline;
-            stackmap
-        } else {
-            None
-        };
+        }
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -2538,7 +2555,7 @@ impl ClassWriter {
                 })
             }),
             exceptions: code.resolved_exceptions(),
-            stackmap,
+            stackmap: None,
             signature: sig,
             // `<init>`/`<clinit>` line tables are CURATED after the fact (`set_method_debug` /
             // `set_method_lines` — the class-decl-line super-call entry, per-initializer entries,
@@ -2563,7 +2580,10 @@ impl ClassWriter {
                     // source range were dropped even though `start_pc` now happens to index resumed
                     // code. This keeps debug metadata tied to emitted ranges, never offset coincidence.
                     .filter(|(start, len, ..)| {
-                        (*start as usize) < code.bytes.len() && *len != Some(0)
+                        let start = usize::from(*start);
+                        let end =
+                            len.map_or(code.bytes.len(), |length| start + usize::from(length));
+                        start < code.bytes.len() && start < end && end <= code.bytes.len()
                     })
                     .map(|(start, len, slot, nm, ds)| {
                         (
@@ -2584,6 +2604,9 @@ impl ClassWriter {
             annotation_default: false,
             method_parameters: Vec::new(),
         });
+        if let Some(computed) = &computed {
+            self.intern_frame_classes(&body, computed);
+        }
     }
 
     /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
@@ -2768,6 +2791,8 @@ impl ClassWriter {
     pub fn finish(mut self) -> Vec<u8> {
         // Every method's tables are final now; kotlinc's bytecode rewrites run over them.
         self.rewrite_methods();
+        // Every body is final now: write the frames it implies.
+        self.compute_stack_maps();
         // A class that never attached `@Metadata` still realizes its deferred fields first —
         // kotlinc's field visit precedes every class-attribute window.
         self.intern_late_fields();
