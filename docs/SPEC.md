@@ -1045,10 +1045,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Iterator<Slot>.next()`, `List<Slot>.get` and a `for` over `Iterable<Slot>` for
   `value class Slot(val raw: Any?)` return a bare `T`, so the slot holds `Slot`'s box and the read
   `checkcast`s it and calls `unbox-impl`, exactly as for any other carrier. The descriptor alone
-  (`()Ljava/lang/Object;`) cannot distinguish that box from an `Object` carrier. The JVM result-
-  boundary/provider realization records the erased-top physical result, which decides before the
+  (`()Ljava/lang/Object;`) cannot distinguish that box from an `Object` carrier. The JVM
+  `call_result_boundaries` pass records the erased-top physical result, which decides before the
   descriptor comparison; a declaration that returns the value class itself (`runCatching`, a same-
-  module `fun f(): Slot`) still hands back the carrier. Test:
+  module `fun f(): Slot`) still hands back the carrier. The repository-owned `keep<T>` path also
+  pins the matching input boundary: `Slot` boxes into the bare-`T` parameter before that box returns
+  through the generic result slot; `Container<T>` pins the same declared-parameter fact at a
+  constructor boundary. A public parameter declared as non-null `Slot` keeps `@NotNull` even though
+  its physical `Any?` carrier accepts null; carrier nullability suppresses the runtime parameter
+  guard, but does not rewrite the declaration's Java nullability annotation. Test:
   `tests/object_carrier_generic_element_e2e.rs` (stdlib integration plus a repository-owned generic
   slot, with the facade byte-compared against kotlinc).
 - **An `annotation class` that declares `@Target` carries THREE meta-annotations, and the Java one is

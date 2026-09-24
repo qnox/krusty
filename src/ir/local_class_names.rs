@@ -899,6 +899,9 @@ impl super::IrFile {
         for values in self.call_declared_params.values_mut() {
             tys(values, names);
         }
+        for values in self.construction_declared_params.values_mut() {
+            tys(values, names);
+        }
         for (_, value) in self.property_selected_accessors.values_mut() {
             *value = ty(*value, names);
         }
