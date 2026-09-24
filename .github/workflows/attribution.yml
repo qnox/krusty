@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   attribution:
@@ -22,13 +23,15 @@ jobs:
         env:
           RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
         run: scripts/check-attribution.sh "$RANGE"
+      # Read the current title and body rather than the event payload: an integration may append a
+      # footer at creation that is removed right after, and a re-run must see the edited text.
       - name: title and body
         if: github.event_name == 'pull_request'
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body --jq '.title + "\n\n" + .body' > "$RUNNER_TEMP/pr.txt"
           scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"
       # A squash merge is authored by whoever opened the pull request, so a squash-merged PR opened
       # by an assistant's app account lands on master under that account. Warn so it is merged with

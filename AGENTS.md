@@ -25,6 +25,11 @@ tool adds by default: when a default conflicts with this section, this section w
 - **Code, comments, docs, and file names** never name the assistant that wrote them.
 - **Branch names** describe the change (`fix/…`, `feat/…`, `jvm/…`) and carry no tool-name prefix.
 - **Amending or rewriting history** keeps this rule: reset the author when replaying commits.
+- **Squashing keeps the squashed commits' author.** A local squash (`git merge --squash`,
+  `git rebase -i` fixups, `git reset --soft`) commits with the author of the commits it combines,
+  not the agent's identity. A squash merge through GitHub passes that author's email explicitly
+  (`gh pr merge <N> --squash --author-email <author email>`, or `authorEmail` in the GraphQL
+  `mergePullRequest` call); without it GitHub credits whoever opened the pull request.
 
 `scripts/check-attribution.sh` enforces this. The `attribution` CI workflow runs it over every pull
 request's commits, title, and body (and warns on a PR opened by an assistant's app account), and
