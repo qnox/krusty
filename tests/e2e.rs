@@ -692,6 +692,8 @@ mod floating_remainder_e2e;
 mod fn_typed_default_e2e;
 #[path = "for_destructuring_components_e2e.rs"]
 mod for_destructuring_components_e2e;
+#[path = "for_in_iterator_slot_e2e.rs"]
+mod for_in_iterator_slot_e2e;
 #[path = "for_iterable_elvis_e2e.rs"]
 mod for_iterable_elvis_e2e;
 #[path = "for_typed_loop_var_e2e.rs"]
