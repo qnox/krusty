@@ -59,6 +59,7 @@ fn realize_adapter_reference(
     current_facade: &str,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
+    own_invoke: bool,
     reference: crate::ir::IrCallableReference,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let function = ir
@@ -174,11 +175,24 @@ fn realize_adapter_reference(
         unbox_param_nullable: vec![false; function_type.params.len()],
         box_ret: None,
         staticbound_recv_unbox: None,
+        invoke: None,
+        function_type: reference.function_type.non_null(),
     });
     let class = ir.add_class(class);
+    if own_invoke {
+        realize_own_invoke(
+            ir,
+            expression,
+            class,
+            reference.adapter,
+            bound,
+            function_type,
+            adapter_owner,
+        );
+    }
     let mut constructor_arguments = reference.captures;
     constructor_arguments.extend(reference.bound_receiver);
-    ir.exprs[expression] = match constructor_arguments.as_slice() {
+    let carrier = match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
@@ -201,7 +215,224 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
+    install_carrier(ir, expression, carrier, reference.function_type);
     Ok(())
+}
+
+/// Replace the reference expression with its carrier, cast to the reference's function type.
+/// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
+/// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
+fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function_type: Ty) {
+    let carrier = ir.add_expr(carrier);
+    ir.exprs[expression] = IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::Cast,
+        arg: carrier,
+        type_operand: function_type.non_null(),
+    };
+}
+
+/// Whether a structural reference's adapter can become the carrier's own `invoke`. The remaining
+/// shapes keep the synthesized dispatching `invoke`: suspend references (their `invoke` is a
+/// coroutine entry point), `FunctionN` arities past the numbered interfaces, field captures of a
+/// local function, and value-class signatures (their bridge boxes through `box-impl`).
+fn own_invoke_realizable(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+    reference: &crate::ir::IrCallableReference,
+) -> bool {
+    let Ty::Fun(function_type) = reference.function_type.non_null() else {
+        return false;
+    };
+    // A value class declared in another file of the module, or in a dependency, is not in this
+    // file's IR; the checked classifier facts answer for it.
+    let value_class = |ty: &Ty| {
+        let ty = ty.non_null();
+        ty.is_unsigned()
+            || ty.obj_internal().is_some_and(|internal| {
+                ir.is_value_class_name(internal)
+                    || classifiers.classifier_value_underlying(internal).is_some()
+            })
+    };
+    reference.captures.is_empty()
+        && !function_type.suspend
+        && !reference.declaration_suspend
+        && !ir.suspend_funs.contains(&reference.adapter)
+        && function_type.params.len() <= 22
+        && !function_type.params.iter().any(value_class)
+        && !value_class(&function_type.ret)
+        && ir
+            .functions
+            .get(reference.adapter as usize)
+            .is_some_and(|adapter| {
+                adapter.body.is_some()
+                    && !adapter.params.iter().any(value_class)
+                    && !value_class(&adapter.ret)
+            })
+}
+
+/// Turn the reference's generated adapter into the carrier's specialized `invoke`, the method
+/// kotlinc's `FunctionReferenceLowering` writes: an instance method over the function type's own
+/// parameters that returns its result, boxed where it overrides the generic `R`. The adapter's
+/// static layout (bound receiver, then parameters) becomes the instance layout: `this` takes value
+/// 0, and the bound receiver is read from the inherited `receiver` field and cast to its type.
+fn realize_own_invoke(
+    ir: &mut IrFile,
+    expression: usize,
+    class: crate::ir::ClassId,
+    adapter: crate::ir::FunId,
+    bound: bool,
+    function_type: &crate::types::FnSig,
+    adapter_owner: Option<crate::types::TypeName>,
+) {
+    let internal = ir.classes[class as usize].fq_name;
+    let Some(body) = ir.functions[adapter as usize].body else {
+        return;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![body];
+    let mut expressions = Vec::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, current, &mut |child| pending.push(child));
+        expressions.push(current);
+    }
+    let receiver_ty = bound.then(|| ir.functions[adapter as usize].params[0]);
+    if let Some(receiver_ty) = receiver_ty {
+        let field = u32::try_from(ir.classes[class as usize].fields.len())
+            .expect("a reference carrier has few fields");
+        // The runtime base class stores the bound receiver; the carrier reads it as its own field.
+        ir.classes[class as usize].fields.push(crate::ir::IrField {
+            name: "receiver".to_string(),
+            ty: Ty::nullable(Ty::obj("kotlin/Any")),
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: crate::ir::IrfFlags::default(),
+        });
+        for &current in &expressions {
+            if matches!(ir.exprs[current as usize], IrExpr::GetValue(0)) {
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                let stored = ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class,
+                    index: field,
+                });
+                ir.exprs[current as usize] = IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: stored,
+                    type_operand: receiver_ty,
+                };
+            }
+        }
+    } else {
+        let shift = |value: &mut u32| *value += 1;
+        for &current in &expressions {
+            match &mut ir.exprs[current as usize] {
+                IrExpr::Variable { index, .. } | IrExpr::GetValue(index) => shift(index),
+                IrExpr::SetValue { var, .. } => shift(var),
+                IrExpr::Try { catches, .. } => {
+                    for catch in catches {
+                        shift(&mut catch.var);
+                    }
+                }
+                IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => shift(variable),
+                _ => {}
+            }
+        }
+    }
+    // kotlinc attributes the whole body to the reference's line, entered where the call's own
+    // operands begin: at each parameter read, or at a constructed object's `new`.
+    if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
+        // The bridge maps its whole body to the same line.
+        ir.fn_decl_lines.insert(adapter, line);
+        let parameter_count = function_type.params.len() as u32;
+        for &current in &expressions {
+            let marks = match &ir.exprs[current as usize] {
+                IrExpr::GetValue(value) => (1..=parameter_count).contains(value),
+                IrExpr::New { .. } => true,
+                _ => false,
+            };
+            if marks {
+                ir.expr_source_lines.insert(current, line);
+            }
+        }
+    }
+    let parameters = function_type.params.clone();
+    let result = match function_type.ret {
+        ret if ret.is_jvm_scalar() => Ty::nullable(ret),
+        ret => ret,
+    };
+    // The adapter returns the `FunctionN` result value; the specialized `invoke` returns its own
+    // declared result instead: nothing for `Unit` (a `void` method), and the boxed value where a
+    // scalar result overrides the generic `R`.
+    for &current in &expressions {
+        let IrExpr::Return(Some(value)) = ir.exprs[current as usize] else {
+            continue;
+        };
+        if result == Ty::Unit && matches!(ir.exprs[value as usize], IrExpr::UnitInstance) {
+            ir.exprs[current as usize] = IrExpr::Return(None);
+        } else if result != function_type.ret {
+            let boxed = ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: value,
+                type_operand: result,
+            });
+            ir.exprs[current as usize] = IrExpr::Return(Some(boxed));
+        }
+    }
+    let param_checks = parameters
+        .iter()
+        .map(|ty| {
+            (ty.is_reference() && !ty.upper_bound_admits_null())
+                .then_some(crate::ir::IrParameterCheck::NonNull)
+        })
+        .collect();
+    // kotlinc's reference lowering declares the `invoke` parameters itself.
+    let identities = (0..parameters.len())
+        .map(|ordinal| {
+            crate::ir::IrParameterIdentity::generated(
+                crate::ir::IrGeneratedParameterRole::ReferenceInvokeValue {
+                    ordinal: u32::try_from(ordinal).expect("too many reference parameters"),
+                },
+                None,
+            )
+        })
+        .collect();
+    ir.fn_params
+        .insert(adapter, crate::ir::FnParamInfo::identities(identities));
+    let function = &mut ir.functions[adapter as usize];
+    function.name = "invoke".to_string();
+    function.params = parameters;
+    function.ret = result;
+    function.is_static = false;
+    function.dispatch_receiver = Some(internal);
+    function.param_checks = param_checks;
+    ir.private_methods.remove(&adapter);
+    ir.synthetic_methods.remove(&adapter);
+    ir.class_static_local_functions.remove(&adapter);
+    ir.lambda_own_params_from.remove(&adapter);
+    ir.fn_debug_locals.insert(adapter);
+    // kotlinc writes no nullability annotations on a reference carrier's `invoke`.
+    ir.jvm_nullability_unannotated_methods.insert(adapter);
+    if let Some(owner) = adapter_owner {
+        if let Some(owner) = ir
+            .classes
+            .iter_mut()
+            .find(|candidate| candidate.fq_name == owner)
+        {
+            owner.methods.retain(|&method| method != adapter);
+        }
+    }
+    let carrier = &mut ir.classes[class as usize];
+    carrier.methods.push(adapter);
+    let reference = carrier
+        .func_ref
+        .as_mut()
+        .expect("the carrier was just built as a function reference");
+    reference.local_target = None;
+    reference.invoke = Some(adapter);
 }
 
 /// Materialize the physical target for an exact provider-selected member intrinsic that has no JVM
@@ -274,6 +505,7 @@ fn intrinsic_member_adapter(
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
+    classifiers: &dyn crate::types::ClassifierFactSource,
     current_facade: &str,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
@@ -287,11 +519,28 @@ pub(super) fn realize(
                 .map(|function| (function, class.fq_name_id()))
         })
         .collect::<std::collections::HashMap<_, _>>();
+    // An adapter several reference nodes share (an inline splice copies the node, not its
+    // adapter) stays one static method every carrier calls; only a sole reference owns it.
+    let mut adapter_uses = std::collections::HashMap::<crate::ir::FunId, usize>::new();
+    for expression in &ir.exprs {
+        if let IrExpr::CallableReference(reference) = expression {
+            *adapter_uses.entry(reference.adapter).or_default() += 1;
+        }
+    }
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
         if let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() {
             let adapter_owner = adapter_owners.get(&reference.adapter).copied();
-            realize_adapter_reference(ir, current_facade, raw, adapter_owner, reference)?;
+            let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+            let own_invoke = sole && own_invoke_realizable(ir, classifiers, &reference);
+            realize_adapter_reference(
+                ir,
+                current_facade,
+                raw,
+                adapter_owner,
+                own_invoke,
+                reference,
+            )?;
             continue;
         }
         let IrExpr::Checked(IrCheckedOperation::CallableReference {
@@ -524,9 +773,11 @@ pub(super) fn realize(
             unbox_param_nullable: vec![false; arity as usize],
             box_ret: None,
             staticbound_recv_unbox: None,
+            invoke: None,
+            function_type: function_type.non_null(),
         });
         let class = ir.add_class(class);
-        ir.exprs[raw] = match capture {
+        let carrier = match capture {
             Some(capture) => IrExpr::New {
                 internal,
                 args: vec![capture],
@@ -542,6 +793,7 @@ pub(super) fn realize(
                 field: "INSTANCE",
             },
         };
+        install_carrier(ir, raw, carrier, function_type);
     }
     Ok(())
 }

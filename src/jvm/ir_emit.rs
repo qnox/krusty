@@ -3584,6 +3584,9 @@ fn add_singleton_instance_field(cw: &mut ClassWriter, class: &str) {
 }
 
 fn emit_singleton_instance_clinit(cw: &mut ClassWriter, class: &str) {
+    // The method header interns before its code, as a writer visiting the method first does.
+    cw.seed_utf8("<clinit>");
+    cw.seed_utf8("()V");
     let descriptor = format!("L{class};");
     let classifier = cw.class_ref(class);
     let constructor = cw.methodref(class, "<init>", "()V");
@@ -5672,7 +5675,7 @@ fn emit_class(
         return emit_prop_ref_class(c, facade, env, opts);
     }
     if c.func_ref.is_some() {
-        return emit_func_ref_class(ir, c, facade, opts);
+        return emit_func_ref_class(ir, c, facade, env, opts);
     }
     let fq_name = c.fq_name();
     let superclass = c.superclass();
@@ -7400,6 +7403,7 @@ fn emit_func_ref_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
+    env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Vec<u8> {
     use crate::ir::FrDispatch;
@@ -7433,7 +7437,23 @@ fn emit_func_ref_class(
     } else {
         c.superclass()
     };
-    let mut cw = new_writer(&fq, &superclass, opts);
+    // The carrier's generic header: its runtime base class, then the Kotlin function type it
+    // implements (and the suspend marker interface), written as a supertype, without wildcards.
+    let suspend = fr.is_suspend || matches!(fr.dispatch, FrDispatch::SuspendConvert);
+    let signature = JvmSignatureFormatter::new(ir, env)
+        .ty_at(&fr.function_type, Wildcards::Suppressed)
+        .map(|function| {
+            let marker = if suspend {
+                "Lkotlin/coroutines/jvm/internal/SuspendFunction;"
+            } else {
+                ""
+            };
+            format!("L{superclass};{function}{marker}")
+        });
+    let mut cw = new_writer_generic(&fq, signature.as_deref(), &superclass, opts);
+    if let Some(signature) = &signature {
+        cw.set_signature(signature);
+    }
     // Package-private, kotlinc's shape — EXCEPT when the class lands cross-package (an
     // INLINE-SPLICED reference regenerates the callee module's adapter under the callee's package
     // while the caller lives elsewhere) or is referenced from a PUBLIC INLINE body
@@ -7442,13 +7462,14 @@ fn emit_func_ref_class(
     let cross_package =
         fq.rsplit_once('/').map(|(p, _)| p) != facade.rsplit_once('/').map(|(p, _)| p);
     let inline_reachable = ir.public_synthetics.contains(&c.fq_name_id());
+    // kotlinc marks every callable-reference carrier ACC_SYNTHETIC.
     cw.set_access(if cross_package || inline_reachable {
-        0x0001 | 0x0010 | 0x0020 // PUBLIC | FINAL | SUPER
+        0x1000 | 0x0001 | 0x0010 | 0x0020 // SYNTHETIC | PUBLIC | FINAL | SUPER
     } else {
-        0x0010 | 0x0020 // FINAL | SUPER
+        0x1000 | 0x0010 | 0x0020 // SYNTHETIC | FINAL | SUPER
     });
     cw.add_interface(&jvm_function_interface(physical_arity));
-    if fr.is_suspend || matches!(fr.dispatch, FrDispatch::SuspendConvert) {
+    if suspend {
         // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
         cw.add_interface("kotlin/coroutines/jvm/internal/SuspendFunction");
     }
@@ -7574,6 +7595,8 @@ fn emit_func_ref_class(
         }
     } else if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
+        cw.seed_utf8("<init>");
+        cw.seed_utf8("(Ljava/lang/Object;)V");
         let mut ctor = CodeBuilder::new(2);
         ctor.aload(0);
         ctor.push_int(physical_arity as i32, &mut cw);
@@ -7589,6 +7612,7 @@ fn emit_func_ref_class(
         );
         ctor.invokespecial(sup, 6, 0);
         ctor.ret_void();
+        let locals = reference_constructor_locals(&mut cw, &fq, &["receiver0"]);
         // The ctor's access mirrors the class's: a PUBLIC synthetic is constructed from other
         // packages by spliced code.
         if cross_package || inline_reachable {
@@ -7596,9 +7620,11 @@ fn emit_func_ref_class(
         } else {
             finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
         }
+        cw.set_method_debug("<init>", "(Ljava/lang/Object;)V", None, &locals);
     } else {
-        add_singleton_instance_field(&mut cw, &fq);
         // `<init>()V`: super(arity, owner.class, name, sig, flags).
+        cw.seed_utf8("<init>");
+        cw.seed_utf8("()V");
         let mut ctor = CodeBuilder::new(1);
         ctor.aload(0);
         ctor.push_int(physical_arity as i32, &mut cw);
@@ -7613,12 +7639,25 @@ fn emit_func_ref_class(
         );
         ctor.invokespecial(sup, 5, 0);
         ctor.ret_void();
+        let locals = reference_constructor_locals(&mut cw, &fq, &[]);
         if cross_package || inline_reachable {
             finish_code::<0x0001>(&mut cw, "<init>", "()V", &mut ctor, 1);
         } else {
             finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
         }
-        emit_singleton_instance_clinit(&mut cw, &fq);
+        cw.set_method_debug("<init>", "()V", None, &locals);
+    }
+    // A singleton carrier's `<clinit>` follows its methods, as kotlinc orders them.
+    let singleton = field_capture_tys.is_empty() && !fr.bound;
+    if let Some(invoke) = fr.invoke {
+        emit_method(ir, invoke, &fq, facade, &mut cw, true, env);
+        emit_reference_invoke_bridge(ir, &mut cw, &fq, fr, invoke, physical_arity);
+        if singleton {
+            emit_singleton_instance_clinit(&mut cw, &fq);
+            add_singleton_instance_field(&mut cw, &fq);
+        }
+        cw.set_kotlin_metadata(3, &[2, 4, 0], 48, &[], &[]);
+        return cw.finish();
     }
 
     // Numbered JVM function interfaces stop at arity 22. Larger Kotlin function types use the
@@ -7831,7 +7870,99 @@ fn emit_func_ref_class(
     }
     inv.areturn();
     finish_code::<0x0001>(&mut cw, "invoke", &invoke_desc, &mut inv, invoke_locals);
+    // kotlinc visits a carrier's fields after its methods.
+    if singleton {
+        emit_singleton_instance_clinit(&mut cw, &fq);
+        add_singleton_instance_field(&mut cw, &fq);
+    }
     cw.finish()
+}
+
+/// kotlinc's `LocalVariableTable` for a callable-reference constructor: `this`, then each
+/// constructor parameter under its generated name. The entries intern after the constructor's
+/// code, where a writer visits them, and attach to the finished `<init>`.
+fn reference_constructor_locals(
+    cw: &mut ClassWriter,
+    class: &str,
+    parameters: &[&str],
+) -> Vec<(String, String, u16)> {
+    let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
+    for (index, name) in parameters.iter().enumerate() {
+        locals.push((
+            name.to_string(),
+            "Ljava/lang/Object;".to_string(),
+            index as u16 + 1,
+        ));
+    }
+    cw.reserve_method_lvt(&locals);
+    locals
+}
+
+/// The erased `FunctionN.invoke(Object…)Object` bridge to a carrier's own specialized `invoke`:
+/// each argument is cast or unboxed to the specialized parameter, and the result is returned as
+/// an object (`Unit` for a `void` specialization). Flagged, lined and tabled as kotlinc's bridge.
+fn emit_reference_invoke_bridge(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    class: &str,
+    fr: &crate::ir::FuncRef,
+    invoke: u32,
+    arity: u8,
+) {
+    let function = &ir.functions[invoke as usize];
+    let parameters = jvm_function_params(ir, invoke);
+    let result = jvm_declared_ty(&function.ret);
+    let specialized = method_descriptor(&parameters, result);
+    let erased = jvm_function_invoke_descriptor(arity);
+    // A specialization that already erases to `FunctionN.invoke` is that method; nothing bridges.
+    if specialized == erased {
+        return;
+    }
+    cw.seed_utf8("invoke");
+    cw.seed_utf8(&erased);
+    let mut code = CodeBuilder::new(1 + u16::from(arity));
+    code.aload(0);
+    for (index, parameter) in parameters.iter().enumerate() {
+        code.aload(1 + index as u16);
+        if parameter.is_jvm_scalar() {
+            let semantic = fr.param_tys.get(index).copied().unwrap_or(*parameter);
+            unbox_prim(cw, &mut code, semantic_scalar_adapter(semantic, *parameter));
+        } else if let Some(internal) = checkcast_internal(*parameter) {
+            let class_ref = cw.class_ref(&internal);
+            code.checkcast(class_ref);
+        }
+    }
+    let argument_words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
+    let method = cw.methodref(class, &function.name, &specialized);
+    let result_words = if matches!(result, Ty::Unit | Ty::Nothing) {
+        0
+    } else {
+        slot_words(result) as i32
+    };
+    code.invokevirtual(method, argument_words as i32, result_words);
+    if matches!(result, Ty::Unit | Ty::Nothing) {
+        let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+    } else if result.is_jvm_scalar() {
+        box_prim_free(cw, &mut code, semantic_scalar_adapter(fr.ret_ty, result));
+    }
+    code.areturn();
+    finish_code::<0x1041>(cw, "invoke", &erased, &mut code, 1 + u16::from(arity));
+    let this_desc = format!("L{class};");
+    let mut locals = vec![("this".to_string(), this_desc, 0u16)];
+    for index in 0..arity as u16 {
+        locals.push((
+            crate::jvm::parameter_names::reference_invoke_bridge_parameter(index),
+            "Ljava/lang/Object;".to_string(),
+            index + 1,
+        ));
+    }
+    let line = ir
+        .fn_decl_lines
+        .get(&invoke)
+        .copied()
+        .filter(|&line| line != 0);
+    cw.set_method_debug("invoke", &erased, line.map(|line| (0, line)), &locals);
 }
 
 fn load_erased_function_argument(
