@@ -269,10 +269,11 @@ pub(crate) struct CachedCompositeSource<'a> {
 
 impl<'a> CachedCompositeSource<'a> {
     pub(crate) fn new(children: Vec<&'a dyn SymbolSource>, cache: &'a SymbolQueryCache) -> Self {
-        Self {
-            source: CompositeSource::new(children),
-            cache,
-        }
+        Self::from_composite(CompositeSource::new(children), cache)
+    }
+
+    pub(crate) fn from_composite(source: CompositeSource<'a>, cache: &'a SymbolQueryCache) -> Self {
+        Self { source, cache }
     }
 }
 
