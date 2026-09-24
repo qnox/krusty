@@ -257,7 +257,7 @@ fn own_invoke_realizable(
         && !function_type.suspend
         && !reference.declaration_suspend
         && !ir.suspend_funs.contains(&reference.adapter)
-        && function_type.params.len() <= 22
+        && function_type.params.len() <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY
         && !function_type.params.iter().any(value_class)
         && !value_class(&function_type.ret)
         && ir
@@ -268,6 +268,26 @@ fn own_invoke_realizable(
                     && !adapter.params.iter().any(value_class)
                     && !value_class(&adapter.ret)
             })
+}
+
+/// Expressions in one function body's value namespace. A lambda's captures read this namespace,
+/// while its `inline_body` uses the lambda function's own slots and return boundary; never carry a
+/// callable-reference adapter rewrite through that boundary.
+fn adapter_body_expressions(ir: &IrFile, body: crate::ir::ExprId) -> Vec<crate::ir::ExprId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![body];
+    let mut expressions = Vec::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        match &ir.exprs[current as usize] {
+            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+            _ => crate::ir::for_each_child(&ir.exprs, current, &mut |child| pending.push(child)),
+        }
+        expressions.push(current);
+    }
+    expressions
 }
 
 /// Turn the reference's generated adapter into the carrier's specialized `invoke`, the method
@@ -288,16 +308,7 @@ fn realize_own_invoke(
     let Some(body) = ir.functions[adapter as usize].body else {
         return;
     };
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![body];
-    let mut expressions = Vec::new();
-    while let Some(current) = pending.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, current, &mut |child| pending.push(child));
-        expressions.push(current);
-    }
+    let expressions = adapter_body_expressions(ir, body);
     let receiver_ty = bound.then(|| ir.functions[adapter as usize].params[0]);
     if let Some(receiver_ty) = receiver_ty {
         let field = u32::try_from(ir.classes[class as usize].fields.len())
@@ -327,20 +338,7 @@ fn realize_own_invoke(
             }
         }
     } else {
-        let shift = |value: &mut u32| *value += 1;
-        for &current in &expressions {
-            match &mut ir.exprs[current as usize] {
-                IrExpr::Variable { index, .. } | IrExpr::GetValue(index) => shift(index),
-                IrExpr::SetValue { var, .. } => shift(var),
-                IrExpr::Try { catches, .. } => {
-                    for catch in catches {
-                        shift(&mut catch.var);
-                    }
-                }
-                IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => shift(variable),
-                _ => {}
-            }
-        }
+        crate::ir::shift_value_indices(ir, body, 0, 1);
     }
     // kotlinc attributes the whole body to the reference's line, entered where the call's own
     // operands begin: at each parameter read, or at a constructed object's `new`.
@@ -796,4 +794,119 @@ pub(super) fn realize(
         install_carrier(ir, raw, carrier, function_type);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn own_invoke_plan(function_type: Ty, declaration_suspend: bool, captured: bool) -> bool {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        let Ty::Fun(signature) = function_type.non_null() else {
+            unreachable!("test function type")
+        };
+        let adapter = ir.add_fun(IrFunction {
+            name: "selected".to_string(),
+            params: signature.params.clone(),
+            ret: signature.ret,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let capture = captured.then(|| ir.add_expr(IrExpr::UnitInstance));
+        let reference = crate::ir::IrCallableReference {
+            target: crate::ir::IrCallableReferenceTarget::Local {
+                owner: None,
+                name: "selected".into(),
+            },
+            adapter,
+            captures: capture.into_iter().collect(),
+            bound_receiver: None,
+            function_type,
+            declaration_parameters: signature.params.clone().into_boxed_slice(),
+            declaration_result: signature.ret,
+            declaration_suspend,
+            adaptation: None,
+        };
+        own_invoke_realizable(&ir, &crate::libraries::EmptySymbolSource, &reference)
+    }
+
+    #[test]
+    fn own_invoke_plan_excludes_only_unrealized_carrier_shapes() {
+        let plans = [
+            (
+                "ordinary",
+                own_invoke_plan(Ty::fun(vec![Ty::Int], Ty::Int), false, false),
+            ),
+            (
+                "captured",
+                own_invoke_plan(Ty::fun(vec![Ty::String], Ty::String), false, true),
+            ),
+            (
+                "suspend",
+                own_invoke_plan(Ty::fun_suspend(vec![Ty::Int], Ty::Int), true, false),
+            ),
+            (
+                "high arity",
+                own_invoke_plan(Ty::fun(vec![Ty::Int; 23], Ty::Int), false, false),
+            ),
+            (
+                "value class",
+                own_invoke_plan(Ty::fun(vec![Ty::UInt], Ty::String), false, false),
+            ),
+        ];
+
+        assert_eq!(
+            plans,
+            [
+                ("ordinary", true),
+                ("captured", false),
+                ("suspend", false),
+                ("high arity", false),
+                ("value class", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_body_walk_keeps_nested_lambda_value_and_return_namespaces_separate() {
+        let mut ir = IrFile::default();
+        let capture = ir.add_expr(IrExpr::GetValue(2));
+        let nested_value = ir.add_expr(IrExpr::GetValue(0));
+        let nested_return = ir.add_expr(IrExpr::Return(Some(nested_value)));
+        let nested_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![nested_return],
+            value: None,
+        });
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 1,
+            captures: vec![capture],
+            sam: None,
+            inline_body: Some(nested_body),
+        });
+        let outer_value = ir.add_expr(IrExpr::GetValue(0));
+        let outer_return = ir.add_expr(IrExpr::Return(Some(outer_value)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![lambda, outer_return],
+            value: None,
+        });
+
+        let expressions = adapter_body_expressions(&ir, body);
+
+        for expected in [body, lambda, capture, outer_return, outer_value] {
+            assert!(
+                expressions.contains(&expected),
+                "missing outer expression {expected}"
+            );
+        }
+        for nested in [nested_body, nested_return, nested_value] {
+            assert!(
+                !expressions.contains(&nested),
+                "nested lambda expression {nested} crossed its value namespace"
+            );
+        }
+    }
 }

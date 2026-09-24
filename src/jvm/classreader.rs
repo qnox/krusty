@@ -565,6 +565,51 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     })
 }
 
+/// Return one class-level attribute body exactly as stored, including its original constant-pool
+/// indices. This is intentionally lower-level than [`parse_class`]: byte-parity tests use it to pin
+/// an owned attribute without normalizing or reordering unrelated class attributes.
+pub fn read_class_attribute(bytes: &[u8], attribute: &str) -> Option<Vec<u8>> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4().ok()? != 0xCAFEBABE {
+        return None;
+    }
+    r.u2().ok()?; // minor
+    r.u2().ok()?; // major
+    let cp = parse_constant_pool(&mut r).ok()?;
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    r.u2().ok()?; // access_flags
+    r.u2().ok()?; // this_class
+    r.u2().ok()?; // super_class
+    let interfaces = r.u2().ok()?;
+    for _ in 0..interfaces {
+        r.u2().ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        r.u2().ok()?; // name
+        r.u2().ok()?; // descriptor
+        skip_attributes(&mut r).ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        r.u2().ok()?; // name
+        r.u2().ok()?; // descriptor
+        skip_attributes(&mut r).ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        let name = utf8(r.u2().ok()?);
+        let length = usize::try_from(r.u4().ok()?).ok()?;
+        let body = r.take(length).ok()?;
+        if name == attribute {
+            return Some(body.to_vec());
+        }
+    }
+    None
+}
+
 /// One method's `Code` attribute as the single-method scan recovers it, before the class attributes
 /// that follow it are read: `(max_stack, max_locals, code, StackMapTable, handlers, debug locals,
 /// line table)`.

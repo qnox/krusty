@@ -119,9 +119,20 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
         inline_body: Some(inner),
     });
     let outer = f.add_expr(IrExpr::GetValue(1)); // an enclosing value 1, sibling of the lambda
+    let start = f.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let end = f.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let range = f.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        variable: 1,
+        counter: Ty::Int,
+        operation: crate::fir::FirRangeOperation::Through,
+        start,
+        end,
+        body: outer,
+        label: String::new(),
+    }));
     let block = f.add_expr(IrExpr::Block {
-        stmts: vec![lam],
-        value: Some(outer),
+        stmts: vec![lam, range],
+        value: None,
     });
     shift_value_indices(&mut f, block, 1, 2);
     assert!(
@@ -135,6 +146,13 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
     assert!(
         matches!(f.exprs[inner as usize], IrExpr::GetValue(1)),
         "lambda-internal inline_body ref must NOT shift"
+    );
+    assert!(
+        matches!(
+            f.exprs[range as usize],
+            IrExpr::Checked(IrCheckedOperation::RangeLoop { variable: 3, .. })
+        ),
+        "a checked range loop's binding must shift with its uses"
     );
 }
 
