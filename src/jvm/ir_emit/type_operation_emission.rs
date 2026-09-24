@@ -149,31 +149,31 @@ impl Emitter<'_> {
         } else {
             Some(crate::jvm::names::instanceof_internal_name(physical_arg))
         };
-        // kotlinc guards the operand unless its nullability analysis proves it non-null; a boxed
-        // scalar is a fresh wrapper.
-        if !physical_arg.is_jvm_scalar() && !self.known_non_null(arg) {
-            let reread = self.ir.binding_read_stability.get(&arg)
-                == Some(&IrBindingStability::Stable)
-                && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
-            if !reread {
-                code.dup();
-            }
-            code.push_string(
-                &format!(
-                    "null cannot be cast to non-null type {}",
-                    rendered_cast_target(target_semantic)
-                ),
-                self.cw,
-            );
-            let check = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "checkNotNull",
-                "(Ljava/lang/Object;Ljava/lang/String;)V",
-            );
-            code.invokestatic(check, 2, 0);
-            if reread {
-                self.emit_type_op_operand(arg, code);
-            }
+        // Lowering always writes the semantic null guard. The finished-method CFG analysis in
+        // `classfile::null_checks` is the single owner that removes it when the emitted value is
+        // provably non-null; deciding here as well would give straight-line IR and bytecode control
+        // flow two different nullness lattices.
+        let reread = !physical_arg.is_jvm_scalar()
+            && self.ir.binding_read_stability.get(&arg) == Some(&IrBindingStability::Stable)
+            && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
+        if !reread {
+            code.dup();
+        }
+        code.push_string(
+            &format!(
+                "null cannot be cast to non-null type {}",
+                self.rendered_cast_target(target_semantic)
+            ),
+            self.cw,
+        );
+        let check = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "checkNotNull",
+            "(Ljava/lang/Object;Ljava/lang/String;)V",
+        );
+        code.invokestatic(check, 2, 0);
+        if reread {
+            self.emit_type_op_operand(arg, code);
         }
         // kotlinc writes a `checkcast` for every cast and then deletes the ones whose operand
         // already has exactly the target's JVM type; a cast to `java/lang/Object` from anything
@@ -191,6 +191,92 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(target_semantic, jvm_ty),
             );
         }
+    }
+
+    /// A cast target as kotlinc's IR renderer spells it in
+    /// `null cannot be cast to non-null type …`.
+    fn rendered_cast_target(&self, ty: Ty) -> String {
+        let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
+            let rendered: Vec<String> = arguments
+                .map(|argument| self.rendered_cast_target(argument))
+                .collect();
+            if rendered.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", rendered.join(", "))
+            }
+        };
+        match ty {
+            Ty::Unit => "kotlin.Unit".to_string(),
+            Ty::Nothing => "kotlin.Nothing".to_string(),
+            Ty::Null => "kotlin.Nothing?".to_string(),
+            Ty::Error => "<error>".to_string(),
+            Ty::Pending => "<pending>".to_string(),
+            Ty::Obj(name, types) => format!(
+                "{}{}",
+                name.render().replace(['/', '$'], "."),
+                arguments(&mut types.iter().copied())
+            ),
+            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_target(*inner)),
+            Ty::PlatformNullable(inner) => self.rendered_cast_target(*inner),
+            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_target(*inner)),
+            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_target(*inner)),
+            Ty::StarProjection(_) => "*".to_string(),
+            Ty::TyParam(name, _) => self.rendered_type_parameter(name),
+            Ty::Fun(signature) => format!(
+                "{}{}{}",
+                if signature.suspend {
+                    "kotlin.coroutines.SuspendFunction"
+                } else {
+                    "kotlin.Function"
+                },
+                signature.params.len(),
+                arguments(&mut signature.params.iter().copied().chain([signature.ret]))
+            ),
+        }
+    }
+
+    /// Render one declaration-owned type parameter through its recorded semantic identity. The
+    /// opaque identity is only compared; its coordinates are never parsed back into an owner.
+    fn rendered_type_parameter(&self, identity: &str) -> String {
+        let source = crate::types::type_parameter_source_name(identity);
+        if let Some((&function, _)) = self
+            .ir
+            .signatures
+            .iter()
+            .filter(|(_, signature)| {
+                signature
+                    .type_params
+                    .iter()
+                    .any(|parameter| parameter.semantic_name == identity)
+            })
+            .min_by_key(|(function, _)| *function)
+        {
+            let declaration = &self.ir.functions[function as usize];
+            let owner = declaration.dispatch_receiver.unwrap_or_else(|| {
+                self.ir
+                    .foreign_template_facade(function)
+                    .unwrap_or_else(|| crate::types::type_name(&self.facade))
+            });
+            let name = self
+                .ir
+                .vc_declared_sigs
+                .get(&function)
+                .map_or(declaration.name.as_str(), |(name, _, _)| name.as_str());
+            return format!(
+                "{source} of {}.{name}",
+                owner.render().replace(['/', '$'], ".")
+            );
+        }
+        if let Some((owner, _)) = self.ir.class_signatures().find(|(_, signature)| {
+            signature
+                .type_params
+                .iter()
+                .any(|parameter| parameter.semantic_name == identity)
+        }) {
+            return format!("{source} of {}", owner.render().replace(['/', '$'], "."));
+        }
+        source.to_string()
     }
 
     fn emit_implicit_coercion(
@@ -266,45 +352,5 @@ impl Emitter<'_> {
             .unwrap_or(physical);
         self.emit_value(operand, code);
         (physical, semantic)
-    }
-}
-
-/// A cast target as kotlinc's IR renderer spells it in `null cannot be cast to non-null type …`:
-/// the classifier's fully qualified name with its type arguments, projections and nullability, and
-/// a function type as the `FunctionN` (or `SuspendFunctionN`) interface it stands for.
-fn rendered_cast_target(ty: Ty) -> String {
-    let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
-        let rendered: Vec<String> = arguments.map(rendered_cast_target).collect();
-        if rendered.is_empty() {
-            String::new()
-        } else {
-            format!("<{}>", rendered.join(", "))
-        }
-    };
-    match ty {
-        Ty::Unit => "kotlin.Unit".to_string(),
-        Ty::Nothing => "kotlin.Nothing".to_string(),
-        Ty::Obj(name, types) => format!(
-            "{}{}",
-            name.render().replace(['/', '$'], "."),
-            arguments(&mut types.iter().copied())
-        ),
-        Ty::Nullable(inner) => format!("{}?", rendered_cast_target(*inner)),
-        Ty::PlatformNullable(inner) => rendered_cast_target(*inner),
-        Ty::InProjection(inner) => format!("in {}", rendered_cast_target(*inner)),
-        Ty::OutProjection(inner) => format!("out {}", rendered_cast_target(*inner)),
-        Ty::StarProjection(_) => "*".to_string(),
-        Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
-        Ty::Fun(signature) => format!(
-            "{}{}{}",
-            if signature.suspend {
-                "kotlin.coroutines.SuspendFunction"
-            } else {
-                "kotlin.Function"
-            },
-            signature.params.len(),
-            arguments(&mut signature.params.iter().copied().chain([signature.ret]))
-        ),
-        _ => "kotlin.Any".to_string(),
     }
 }

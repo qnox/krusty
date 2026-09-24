@@ -47,7 +47,6 @@ mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
 mod local_updates;
-mod known_non_null;
 mod member_schedule;
 mod metadata_policy;
 mod object_static_initialization;
@@ -57,6 +56,7 @@ mod property_access;
 mod property_reference_values;
 mod return_emission;
 mod safe_calls;
+mod scalar_coercion;
 mod try_emission;
 use try_emission::FinallyRegion;
 mod secondary_constructor;
@@ -86,6 +86,10 @@ use metadata_policy::{
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
+use scalar_coercion::{
+    box_prim_free, emit_num_conv, native_unsigned_impl_target, semantic_scalar_adapter, unbox_prim,
+    unbox_prim_from, unbox_prim_from_descriptor, wrapper_owner_primitive,
+};
 use secondary_constructor::SecondaryConstructorEmitter;
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
@@ -6105,7 +6109,6 @@ fn emit_class(
             for (i, a) in c.ctor_args.iter().enumerate() {
                 if let Some(name) = &a.check {
                     if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
-                        e.checked_parameters.insert(i as u32 + 1);
                         ctor.aload(slot);
                         ctor.push_string(name, e.cw);
                         let m = e.cw.methodref(
@@ -7959,175 +7962,6 @@ fn finish_code_sig<const ACCESS: u16>(
     code.ensure_locals(locals);
     code.link();
     cw.add_method_sig(ACCESS, name, desc, code, signature);
-}
-
-/// Box a primitive on the stack to its wrapper (free-function form for the bridge emitter). A signed
-/// primitive boxes via its `java/lang/*` `valueOf`; an UNSIGNED type via its inline-class wrapper's
-/// `box-impl` (`kotlin/UInt.box-impl(I)Lkotlin/UInt;`) — both are rows in the one table.
-fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
-    let (cls, meth, desc) = match t {
-        Ty::Int => ("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;"),
-        Ty::Long => ("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;"),
-        Ty::Double => ("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;"),
-        Ty::Float => ("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;"),
-        Ty::Boolean => ("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;"),
-        Ty::Char => ("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;"),
-        Ty::Byte => ("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;"),
-        Ty::Short => ("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;"),
-        Ty::UByte => ("kotlin/UByte", "box-impl", "(B)Lkotlin/UByte;"),
-        Ty::UShort => ("kotlin/UShort", "box-impl", "(S)Lkotlin/UShort;"),
-        Ty::UInt => ("kotlin/UInt", "box-impl", "(I)Lkotlin/UInt;"),
-        Ty::ULong => ("kotlin/ULong", "box-impl", "(J)Lkotlin/ULong;"),
-        _ => return,
-    };
-    let m = cw.methodref(cls, meth, desc);
-    code.invokestatic(m, slot_words(t) as i32, 1);
-}
-
-/// Select the scalar whose box/unbox adapter owns a reference boundary before reducing that scalar
-/// to its JVM carrier. Signed scalars are their carriers, but an unsigned scalar is an inline class:
-/// `UInt` uses `kotlin/UInt.box-impl`/`unbox-impl` even though values inside a method use the same
-/// `int` slots as `Int`. Keeping this choice in one helper prevents property, lambda, function-reference,
-/// or future generic-boundary paths from each rediscovering unsigned wrappers after `ir_ty_to_jvm`
-/// has intentionally erased the distinction.
-fn semantic_scalar_adapter(semantic: Ty, carrier: Ty) -> Ty {
-    fn concrete_scalar(mut ty: Ty) -> Option<Ty> {
-        loop {
-            match ty.non_null().canonical_semantic() {
-                Ty::TyParam(_, bound) => ty = *bound,
-                scalar @ (Ty::Int
-                | Ty::Long
-                | Ty::Double
-                | Ty::Float
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::Byte
-                | Ty::Short
-                | Ty::UByte
-                | Ty::UShort
-                | Ty::UInt
-                | Ty::ULong) => return Some(scalar),
-                _ => return None,
-            }
-        }
-    }
-    // Adapter selection must not CREATE a second boundary. Nullable scalars and other expressions
-    // can already be represented by a wrapper reference when they reach a generic consumer. In that
-    // case the carrier is the authority and this helper is deliberately a no-op; choosing the
-    // non-null semantic scalar would try to feed that existing reference into another `box-impl` or
-    // `valueOf`. Only a physical scalar crossing into/out of a reference slot needs semantic wrapper
-    // identity.
-    if !carrier.is_jvm_scalar() {
-        return carrier;
-    }
-    concrete_scalar(semantic).unwrap_or(carrier)
-}
-
-/// JVM implementation owner and carrier for one of Kotlin's built-in unsigned value classes.
-/// The semantic classifier selects the `*-impl` method; the carrier is used only for its descriptor
-/// and operand width after that choice has been made.
-fn native_unsigned_impl_target(semantic: Ty) -> Option<(TypeName, Ty)> {
-    let semantic = semantic.non_null().canonical_semantic();
-    semantic.is_unsigned().then(|| {
-        (
-            semantic
-                .kotlin_class_internal()
-                .expect("an unsigned scalar has a Kotlin classifier"),
-            ir_ty_to_jvm(&semantic),
-        )
-    })
-}
-
-/// Unbox the reference on the stack, statically typed `from`, to the scalar `t`: kotlinc's
-/// `StackValue.coerce` from an object type to a primitive. A wrapper already on the stack unboxes
-/// through its own accessor and then converts; any other reference reaches `Boolean` and `Char`
-/// through their wrappers and every number through `java/lang/Number`, with a `checkcast` only
-/// when the static type is not already that class. Unsigned scalars are value classes and unbox
-/// through their own `unbox-impl`.
-fn unbox_prim_from(cw: &mut ClassWriter, code: &mut CodeBuilder, from: Ty, t: Ty) {
-    unbox_prim_from_descriptor(cw, code, &type_descriptor(from), t);
-}
-
-/// [`unbox_prim_from`] for a stack value known by its JVM descriptor.
-fn unbox_prim_from_descriptor(cw: &mut ClassWriter, code: &mut CodeBuilder, from: &str, t: Ty) {
-    let from_internal = match from {
-        descriptor if descriptor.starts_with('L') && descriptor.ends_with(';') => {
-            descriptor[1..descriptor.len() - 1].to_string()
-        }
-        _ => "java/lang/Object".to_string(),
-    };
-    crate::trace_compiler!(
-        "value_classes",
-        "emit scalar unbox from={from_internal} adapter={t:?}"
-    );
-    if t.is_unsigned() {
-        let (owner, method, descriptor) = scalar_unbox_accessor(t);
-        if from_internal != owner {
-            let class = cw.class_ref(owner);
-            code.checkcast(class);
-        }
-        let m = cw.methodref(owner, method, descriptor);
-        code.invokevirtual(m, 0, slot_words(t) as i32);
-        return;
-    }
-    if let Some(own) = wrapper_owner_primitive(&from_internal) {
-        let (_, method, descriptor) = scalar_unbox_accessor(own);
-        let m = cw.methodref(&from_internal, method, descriptor);
-        code.invokevirtual(m, 0, slot_words(own) as i32);
-        emit_num_conv(own, t, code);
-        return;
-    }
-    match t {
-        Ty::Boolean => unbox_prim(cw, code, t),
-        Ty::Char if from_internal == "java/lang/Number" => {
-            let m = cw.methodref("java/lang/Number", "intValue", "()I");
-            code.invokevirtual(m, 0, 1);
-            emit_num_conv(Ty::Int, Ty::Char, code);
-        }
-        Ty::Char => unbox_prim(cw, code, t),
-        Ty::Int | Ty::Long | Ty::Double | Ty::Float | Ty::Byte | Ty::Short => {
-            if from_internal != "java/lang/Number" {
-                let number = cw.class_ref("java/lang/Number");
-                code.checkcast(number);
-            }
-            let (_, method, descriptor) = scalar_unbox_accessor(t);
-            let m = cw.methodref("java/lang/Number", method, descriptor);
-            code.invokevirtual(m, 0, slot_words(t) as i32);
-        }
-        _ => {}
-    }
-}
-
-/// The wrapper class, accessor and descriptor that unbox the scalar `t`.
-fn scalar_unbox_accessor(t: Ty) -> (&'static str, &'static str, &'static str) {
-    match t {
-        Ty::Int => ("java/lang/Integer", "intValue", "()I"),
-        Ty::Long => ("java/lang/Long", "longValue", "()J"),
-        Ty::Double => ("java/lang/Double", "doubleValue", "()D"),
-        Ty::Float => ("java/lang/Float", "floatValue", "()F"),
-        Ty::Boolean => ("java/lang/Boolean", "booleanValue", "()Z"),
-        Ty::Char => ("java/lang/Character", "charValue", "()C"),
-        Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
-        Ty::Short => ("java/lang/Short", "shortValue", "()S"),
-        Ty::UByte => ("kotlin/UByte", "unbox-impl", "()B"),
-        Ty::UShort => ("kotlin/UShort", "unbox-impl", "()S"),
-        Ty::UInt => ("kotlin/UInt", "unbox-impl", "()I"),
-        Ty::ULong => ("kotlin/ULong", "unbox-impl", "()J"),
-        _ => ("", "", ""),
-    }
-}
-
-/// Unbox a wrapper on the stack to the primitive `t` (free-function form for the bridge emitter).
-fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
-    crate::trace_compiler!("value_classes", "emit scalar unbox adapter={t:?}");
-    let (cls, meth, desc) = scalar_unbox_accessor(t);
-    if cls.is_empty() {
-        return;
-    }
-    let ci = cw.class_ref(cls);
-    code.checkcast(ci);
-    let m = cw.methodref(cls, meth, desc);
-    code.invokevirtual(m, 0, slot_words(t) as i32);
 }
 
 /// The `@java.lang.annotation.Target` mirror for an annotation class whose source declares
@@ -10867,7 +10701,6 @@ fn emit_method_inner_with_holder(
                 .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
-                e.checked_parameters.insert(vi);
                 code.aload(slot);
                 code.push_string(&name, e.cw);
                 let m = e.cw.methodref(
@@ -12676,10 +12509,6 @@ struct Emitter<'a> {
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
-    /// Every value stored into each local of the body, for proving an operand non-null.
-    value_stores: known_non_null::ValueStores,
-    /// Parameters asserted non-null at method entry; every later read of one is known non-null.
-    checked_parameters: HashSet<u32>,
     next_slot: u16,
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
@@ -12769,7 +12598,6 @@ impl<'a> Emitter<'a> {
         ret: Ty,
         roots: impl IntoIterator<Item = u32>,
     ) -> Self {
-        let roots: Vec<u32> = roots.into_iter().collect();
         Self {
             ir,
             cw,
@@ -12787,9 +12615,7 @@ impl<'a> Emitter<'a> {
             label_unassigned_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             safe_call_exit_temporaries: HashMap::new(),
-            var_types: collect_body_var_types(ir, roots.iter().copied()),
-            value_stores: known_non_null::ValueStores::collect(ir, &roots),
-            checked_parameters: HashSet::new(),
+            var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
@@ -19481,37 +19307,6 @@ pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
     }
 }
 
-fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
-    if from == to {
-        return;
-    }
-    let wide = |t: Ty| match t {
-        Ty::Byte | Ty::Short | Ty::Char | Ty::Int => Ty::Int,
-        o => o,
-    };
-    match (wide(from), wide(to)) {
-        (Ty::Int, Ty::Long) => code.i2l(),
-        (Ty::Int, Ty::Float) => code.i2f(),
-        (Ty::Int, Ty::Double) => code.i2d(),
-        (Ty::Long, Ty::Int) => code.l2i(),
-        (Ty::Long, Ty::Float) => code.l2f(),
-        (Ty::Long, Ty::Double) => code.l2d(),
-        (Ty::Float, Ty::Int) => code.f2i(),
-        (Ty::Float, Ty::Long) => code.f2l(),
-        (Ty::Float, Ty::Double) => code.f2d(),
-        (Ty::Double, Ty::Int) => code.d2i(),
-        (Ty::Double, Ty::Long) => code.d2l(),
-        (Ty::Double, Ty::Float) => code.d2f(),
-        _ => {} // same wide category (e.g. Byte→Int): the value is already correct on the stack
-    }
-    match to {
-        Ty::Byte => code.i2b(),
-        Ty::Short => code.i2s(),
-        Ty::Char => code.i2c(),
-        _ => {}
-    }
-}
-
 /// `(opcode, value-words)` for an array element load (`Xaload`).
 /// If `t` is the boxed-reference form of a primitive (the element of a `Array<Int>` etc., carried as
 /// `Obj("kotlin/Int")`), the underlying primitive `Ty`. Used to insert box/unbox at the boxed-array
@@ -19909,20 +19704,6 @@ fn discard(t: Ty, code: &mut CodeBuilder) {
         1 => code.pop(),
         _ => {}
     }
-}
-
-fn wrapper_owner_primitive(owner: &str) -> Option<Ty> {
-    Some(match owner {
-        "java/lang/Integer" | "kotlin/Int" => Ty::Int,
-        "java/lang/Long" | "kotlin/Long" => Ty::Long,
-        "java/lang/Double" | "kotlin/Double" => Ty::Double,
-        "java/lang/Float" | "kotlin/Float" => Ty::Float,
-        "java/lang/Boolean" | "kotlin/Boolean" => Ty::Boolean,
-        "java/lang/Character" | "kotlin/Char" => Ty::Char,
-        "java/lang/Byte" | "kotlin/Byte" => Ty::Byte,
-        "java/lang/Short" | "kotlin/Short" => Ty::Short,
-        _ => return None,
-    })
 }
 
 fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Option<&'a str> {

@@ -19,6 +19,7 @@ mod frame_layout;
 mod in_place_arguments;
 mod local_compaction;
 mod reified_operands;
+mod scalar_adapters;
 mod splice_result;
 use continuation_flow::caller_continuation_reachable;
 pub(super) use frame_layout::spliced_frame;
@@ -26,6 +27,7 @@ pub(super) use in_place_arguments::InPlacePlan;
 use local_compaction::LocalCompaction;
 use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
 pub(super) use reified_operands::{ReifiedArgument, ReifiedArguments};
+use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
 pub use splice_result::{BranchySplice, RelocatedLambdaSite};
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
@@ -1599,137 +1601,6 @@ fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
     Some(out)
 }
 
-/// THE unified inline splice. Relocates a (possibly branchy) host `inline fun` body into the caller,
-/// replacing each zero-arg lambda-parameter `Function0.invoke` site with that lambda's pre-built body.
-/// Subsumes the special cases: no lambdas + no branches → a single fall-through segment (like
-/// [`splice_branchless`]); branches + no lambdas (the former `splice_branchy`); one lambda + no branches
-/// (the former `branchless_lambda_segments`). The caller emits the non-lambda arguments first (empty
-/// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
-/// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
-/// The primitive descriptor a `Wrapper.valueOf(p)LWrapper;` boxing call consumes, if `insn` is one.
-/// Read from the HOST's own pool, where the instruction still lives.
-fn boxing_call_primitive(src_cp: &[C], insn: &Insn) -> Option<char> {
-    let Insn::Plain { op: 0xb8, operands } = insn else {
-        return None;
-    };
-    let index = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
-    let (class, name) = methodref_target(src_cp, index)?;
-    if name != "valueOf" {
-        return None;
-    }
-    wrapper_primitive(class)
-}
-
-/// The primitive a boxed wrapper carries: `java/lang/Integer` → `I`.
-fn wrapper_primitive(class: &str) -> Option<char> {
-    Some(match class {
-        "java/lang/Integer" => 'I',
-        "java/lang/Long" => 'J',
-        "java/lang/Short" => 'S',
-        "java/lang/Byte" => 'B',
-        "java/lang/Character" => 'C',
-        "java/lang/Boolean" => 'Z',
-        "java/lang/Float" => 'F',
-        "java/lang/Double" => 'D',
-        _ => return None,
-    })
-}
-
-/// Whether `class` is an owner an unboxing to `primitive` goes through: its own wrapper, or
-/// `java/lang/Number` for a number (kotlinc's coercion of any other reference).
-fn unboxes_through(class: &str, primitive: char) -> bool {
-    wrapper_primitive(class) == Some(primitive)
-        || (class == "java/lang/Number" && "IJSBFD".contains(primitive))
-}
-
-/// How many leading instructions of `insns` form an unboxing of `primitive` — an optional
-/// `checkcast` onto the wrapper or `Number` followed by its `xxxValue()` call — in the TARGET pool.
-///
-/// `0` when the head is not an unboxing.
-fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize {
-    let mut at = 0;
-    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
-        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
-            let index = (u16::from(*high) << 8) | u16::from(*low);
-            if cw
-                .class_name_at(index)
-                .is_some_and(|name| unboxes_through(name, primitive))
-            {
-                at = 1;
-            }
-        }
-    }
-    let Some(Insn::Plain { op: 0xb6, operands }) = insns.get(at) else {
-        return 0;
-    };
-    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
-        return 0;
-    };
-    let index = (u16::from(*high) << 8) | u16::from(*low);
-    let Some((class, _, descriptor)) = cw.methodref_parts(index) else {
-        return 0;
-    };
-    let unboxes = unboxes_through(class, primitive)
-        && descriptor.starts_with("()")
-        && descriptor[2..].starts_with(primitive);
-    if unboxes {
-        at + 1
-    } else {
-        0
-    }
-}
-
-/// Whether `insn` boxes `primitive`, read from the TARGET pool (the lambda body's own).
-fn is_target_boxing(cw: &ClassWriter, insn: &Insn, primitive: char) -> bool {
-    let Insn::Plain { op: 0xb8, operands } = insn else {
-        return false;
-    };
-    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
-        return false;
-    };
-    let index = (u16::from(*high) << 8) | u16::from(*low);
-    cw.methodref_parts(index).is_some_and(|(class, name, _)| {
-        name == "valueOf" && wrapper_primitive(class).is_some_and(|carried| carried == primitive)
-    })
-}
-
-/// The unboxing at the head of `insns` in the HOST's pool: an optional `checkcast` onto a wrapper
-/// or `java/lang/Number`, then an `xxxValue()` call. Returns the primitive it yields and how many
-/// instructions it spans.
-fn host_unboxing(src_cp: &[C], insns: &[Insn]) -> Option<(char, usize)> {
-    let mut at = 0;
-    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
-        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
-            let index = (u16::from(*high) << 8) | u16::from(*low);
-            if class_name(src_cp, index)
-                .is_some_and(|name| name == "java/lang/Number" || wrapper_primitive(name).is_some())
-            {
-                at = 1;
-            }
-        }
-    }
-    let Insn::Plain { op: 0xb6, operands } = insns.get(at)? else {
-        return None;
-    };
-    let index = (u16::from(*operands.first()?) << 8) | u16::from(*operands.get(1)?);
-    let (class, _, descriptor) = methodref_signature(src_cp, index)?;
-    if class != "java/lang/Number" && wrapper_primitive(class).is_none() {
-        return None;
-    }
-    let primitive = descriptor.strip_prefix("()")?.chars().next()?;
-    (descriptor.len() == 3 && "IJSBCZFD".contains(primitive)).then_some((primitive, at + 1))
-}
-
-/// `(class, name, descriptor)` of a method reference in a SOURCE pool.
-fn methodref_signature(src_cp: &[C], idx: u16) -> Option<(&str, &str, &str)> {
-    let (c, nt) = match src_cp.get(idx as usize)? {
-        C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) => (*c, *nt),
-        _ => return None,
-    };
-    let (name, descriptor) = name_and_type(src_cp, nt)?;
-    Some((class_name(src_cp, c)?, name, descriptor))
-}
-
 /// Instruction indices consumed by a parameter null-check triplet (`aload`/`ldc`/`invokestatic
 /// Intrinsics.checkNotNullParameter`), which the splice deletes. A lambda's `aload` inside one is not a
 /// use.
@@ -1889,6 +1760,9 @@ pub(super) enum ParameterBinding<'a> {
     InPlace(&'a InPlacePlan),
 }
 
+/// Relocate one inline body and splice its literal lambda bodies at their checked invoke sites.
+/// Stored and in-place arguments, branch frames, reified operands, and scalar adapter cancellation
+/// all converge here so no narrower fallback can emit a different body shape.
 pub(super) fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
