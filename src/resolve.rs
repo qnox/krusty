@@ -132,7 +132,8 @@ use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpe
 pub use lambda_returns::ReturnTarget;
 use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
-    local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
+    local_class_enclosing_tparams, local_class_sibling_declarations, local_class_sibling_names,
+    EnclosingTypeParameterDeclaration,
 };
 use loop_flow::collect_all_reassigned;
 pub(crate) use member_extension_selection::{
@@ -38847,9 +38848,31 @@ struct AnonymousLexicalClassScope {
 pub(crate) struct PassOneLocalClassContext {
     enclosing_type_parameters:
         HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
-    sibling_classifiers: HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>>,
+    sibling_classifiers:
+        HashMap<crate::fir::DeclarationId, Vec<(String, crate::fir::DeclarationId)>>,
     anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
+}
+
+impl PassOneLocalClassContext {
+    /// Local classifiers lexically visible from `declaration`'s body, as source spelling and
+    /// stable module identity. Siblings are recorded by declaration so their identity is the same
+    /// one every other compact consumer derives from the stub.
+    fn sibling_classifiers(
+        &self,
+        headers: &crate::fir::StreamedHeaderModule,
+        declaration: crate::fir::DeclarationId,
+    ) -> Vec<(String, TypeName)> {
+        self.sibling_classifiers
+            .get(&declaration)
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, sibling)| {
+                let (_, identity) = compact_classifier_identity(headers, headers.stub(*sibling)?)?;
+                Some((name.clone(), identity))
+            })
+            .collect()
+    }
 }
 
 pub(crate) fn pass_one_local_class_context(
@@ -38873,7 +38896,7 @@ pub(crate) fn pass_one_local_class_context(
         })
         .collect::<HashMap<_, _>>();
     let transient_tparams = local_class_enclosing_tparams(file);
-    let transient_siblings = local_class_sibling_names(file);
+    let transient_siblings = local_class_sibling_declarations(file);
     let transient_anonymous = anonymous_lexical_class_scope(file);
     crate::trace_compiler!(
         "fir",
@@ -38910,10 +38933,12 @@ pub(crate) fn pass_one_local_class_context(
         sibling_classifiers: transient_siblings
             .into_iter()
             .filter_map(|(declaration, siblings)| {
-                stable_by_transient
-                    .get(&declaration)
-                    .copied()
-                    .map(|stable| (stable, siblings))
+                let stable = *stable_by_transient.get(&declaration)?;
+                let siblings = siblings
+                    .into_iter()
+                    .filter_map(|(name, sibling)| Some((name, *stable_by_transient.get(&sibling)?)))
+                    .collect();
+                Some((stable, siblings))
             })
             .collect(),
         anonymous_owners: transient_anonymous

@@ -2942,6 +2942,14 @@ impl StreamedHeaderModule {
     /// scan of `stubs` observes, which is source order within a file. Identity order differs:
     /// a primary-constructor property is interned after the class body's, yet both carry
     /// sibling 0, and the ordinal lookups that read this take the FIRST match.
+    /// The declaration's own source spelling: the last segment of its lookup path. A local
+    /// classifier's semantic identity is opaque, so lexical lookup by spelling must use this rather
+    /// than a segment of the identity.
+    pub fn source_simple_name(&self, stub: &DeclarationStub) -> Option<&str> {
+        let path = self.lookup_names.get(stub.lookup_name?)?;
+        path.rsplit('.').next()
+    }
+
     pub fn owned_stubs(&self, owner: DeclarationId) -> impl Iterator<Item = &DeclarationStub> + '_ {
         let mut positions = self
             .declarations

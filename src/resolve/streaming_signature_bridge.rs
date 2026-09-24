@@ -2757,7 +2757,7 @@ impl ProductionSignatureSemantics<'_> {
             Some(label) => receivers.into_iter().find(|receiver| {
                 receiver
                     .obj_internal()
-                    .is_some_and(|classifier| classifier.nested_segment_ref() == label)
+                    .is_some_and(|classifier| self.classifier_source_spelling(classifier) == label)
             }),
             None => receivers.into_iter().next(),
         }

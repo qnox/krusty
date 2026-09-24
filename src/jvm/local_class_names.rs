@@ -14,10 +14,11 @@ fn physical_name(
     if let Some(name) = cache.get(&class) {
         return *name;
     }
-    let provenance = ir
-        .local_class_name_provenance
-        .get(&class)
-        .expect("a requested local classifier must carry naming provenance");
+    // An owner declared outside executable code (a top-level or member classifier) already has its
+    // physical identity; only local and anonymous classifiers are named from provenance.
+    let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
+        return ir.classes[class as usize].fq_name;
+    };
     let mut name = provenance
         .lexical_owner
         .map(|owner| physical_name(owner, facade, ir, cache))

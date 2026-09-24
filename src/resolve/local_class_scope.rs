@@ -427,11 +427,35 @@ pub(super) fn local_class_enclosing_tparams(
 }
 
 pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
+    local_class_sibling_declarations(file)
+        .into_iter()
+        .map(|(declaration, siblings)| {
+            let siblings = siblings
+                .into_iter()
+                .filter_map(|(name, sibling)| {
+                    let Decl::Class(hoisted) = file.decl(sibling) else {
+                        return None;
+                    };
+                    Some((name, type_name(&class_internal(file, &hoisted.name))))
+                })
+                .collect();
+            (declaration, siblings)
+        })
+        .collect()
+}
+
+/// Local classifiers visible from each local or anonymous classifier's lexical body, as their
+/// source spelling paired with the hoisted declaration. Callers choose the identity: the legacy
+/// path spells the hoisted name, while compact signature collection maps the declaration to its
+/// stable module identity.
+pub(super) fn local_class_sibling_declarations(
+    file: &File,
+) -> HashMap<DeclId, Vec<(String, DeclId)>> {
     let mut result = HashMap::new();
     if file.local_class_decls.is_empty() {
         return result;
     }
-    let record = |body: &FunBody, result: &mut HashMap<DeclId, Vec<(String, TypeName)>>| {
+    let record = |body: &FunBody, result: &mut HashMap<DeclId, Vec<(String, DeclId)>>| {
         let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
             return;
         };
@@ -445,13 +469,7 @@ pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(Str
             let Stmt::LocalClass(class) = file.stmt(statement) else {
                 continue;
             };
-            let Decl::Class(hoisted) = file.decl(declaration) else {
-                continue;
-            };
-            visible.push((
-                class.name.clone(),
-                type_name(&class_internal(file, &hoisted.name)),
-            ));
+            visible.push((class.name.clone(), declaration));
             declarations.push(declaration);
             declarations.extend(
                 file.local_class_nested
@@ -475,7 +493,7 @@ pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(Str
     };
 
     let record_property =
-        |property: &PropDecl, result: &mut HashMap<DeclId, Vec<(String, TypeName)>>| {
+        |property: &PropDecl, result: &mut HashMap<DeclId, Vec<(String, DeclId)>>| {
             for_each_property_body(property, |body| record(&body, result));
         };
     for &declaration in &file.decls {

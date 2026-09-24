@@ -1678,7 +1678,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 Some(label) => receivers.into_iter().find(|receiver| {
                     receiver
                         .obj_internal()
-                        .is_some_and(|classifier| classifier.nested_segment_ref() == label)
+                        .is_some_and(|classifier| self.classifier_source_spelling(classifier) == label)
                 }),
                 None => receivers.into_iter().next(),
             }
@@ -1740,7 +1740,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .find(|receiver| {
                     receiver
                         .obj_internal()
-                        .is_some_and(|classifier| classifier.nested_segment_ref() == label)
+                        .is_some_and(|classifier| self.classifier_source_spelling(classifier) == label)
                 })
                 .and_then(|receiver| crate::fir::ResolvedTy::new(receiver).ok())
                 .ok_or_else(Self::failure);
@@ -2514,7 +2514,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // The enclosing classifier itself is in lexical type scope. Inside its companion,
             // `Owner(args)` is therefore the owner's ordinary constructor call; treating `Owner`
             // only as a companion value would incorrectly search `Owner.Companion.invoke`.
-            if classifier.nested_segment_ref() == spelling {
+            if self.classifier_source_spelling(classifier) == spelling {
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
                         let (arguments, types) = Self::mapped_constructor_arguments(

@@ -104,13 +104,8 @@ pub(in crate::resolve) fn declared_classifier_inventory(
             // import table. Extend this compact header-only view with classifiers from the
             // declaration's lexical body before recording hierarchy edges.
             let mut names = file_class_names[source].clone();
-            for (simple, internal) in context
-                .sibling_classifiers
-                .get(&stub.id)
-                .into_iter()
-                .flatten()
-            {
-                names.insert_name(simple.clone(), *internal);
+            for (simple, internal) in context.sibling_classifiers(headers, stub.id) {
+                names.insert_name(simple, internal);
             }
             let classifier_header = streamed_classifier_header_by_declaration(headers, stub.id)
                 .expect("a production classifier must have a compact header");

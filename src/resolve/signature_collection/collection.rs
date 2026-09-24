@@ -1066,19 +1066,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     if let Some(simple) = c.name.rsplit('.').next() {
                         header_class_names.insert_name(simple.to_owned(), type_name(&internal));
                     }
-                    let stable_siblings = compact_classifier.and_then(|stub| {
-                        compact_local_contexts
-                            .and_then(|contexts| contexts.get(i))
-                            .and_then(|context| context.sibling_classifiers.get(&stub.id))
-                    });
+                    let stable_siblings =
+                        compact_headers
+                            .zip(compact_classifier)
+                            .and_then(|(headers, stub)| {
+                                compact_local_contexts
+                                    .and_then(|contexts| contexts.get(i))
+                                    .map(|context| context.sibling_classifiers(headers, stub.id))
+                            });
                     let legacy_siblings = legacy_local_class_siblings
                         .as_ref()
                         .and_then(|contexts| contexts.get(i))
-                        .and_then(|context| context.get(&d));
+                        .and_then(|context| context.get(&d))
+                        .cloned();
                     for (simple, internal) in
                         stable_siblings.or(legacy_siblings).into_iter().flatten()
                     {
-                        header_class_names.insert_name(simple.clone(), *internal);
+                        header_class_names.insert_name(simple, internal);
                     }
                     let mut lexical_inheritors = match (compact_headers, compact_classifier) {
                         (Some(headers), Some(stub)) => compact_declaration_lexical_class_names(
