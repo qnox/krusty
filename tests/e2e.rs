@@ -1050,6 +1050,8 @@ mod mpp_requires_the_feature_e2e;
 #[path = "expect_declaration_body_e2e.rs"]
 mod expect_declaration_body_e2e;
 
+#[path = "inline_arguments_in_place_e2e.rs"]
+mod inline_arguments_in_place_e2e;
 #[path = "inline_operand_copies_e2e.rs"]
 mod inline_operand_copies_e2e;
 #[path = "multi_index_operator_e2e.rs"]
