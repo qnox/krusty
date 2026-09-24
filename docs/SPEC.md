@@ -1436,6 +1436,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`i++`, `++i`, `i--` and `--i` on an `Int` local in statement position are `iinc`**, like
   `i += 1`: the lowered increment wraps the same `i + 1` in an identity coercion to its checked
   result type, which the `iinc` selection looks through. Test: `tests/increment_statement_e2e.rs`.
+- **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
+  condition each operand branches on its own: `if (a && b)` is `jumpIfFalse(a, else);
+  jumpIfFalse(b, else)`, `if (a || b)` is `jumpIfTrue(a, then); jumpIfFalse(b, else)`, and `!`
+  only flips the polarity. As a value, both operands jump to one shared `iconst_0` after
+  `iconst_1; goto end`, the way any branching Boolean is materialized. A hand-written
+  `if (a) b else false` is NOT fused (kotlinc materializes it and tests it again), so FIR lowering
+  records the `when`s that come from `&&`/`||` in `IrFile::short_circuits` rather than the backend
+  recognizing the shape. Tests: `tests/short_circuit_condition_e2e.rs`.
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
