@@ -468,7 +468,6 @@ ranges/contains/inRangeWithCustomContains.kt
 ranges/forInUntil/forInUntilInt.kt
 ranges/forInUntil/forInUntilLong.kt
 ranges/kt37370.kt
-reflection/classes/localClassSimpleName.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
