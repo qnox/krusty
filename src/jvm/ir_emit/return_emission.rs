@@ -90,7 +90,7 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
-        if self.ir.unit_result_tail_forwards.contains(&returned) {
+        if self.unit_result_tail_forwards.contains(&returned) {
             self.emit_unit_result_of_forward(ret, code);
         }
         let words = slot_words(ret);

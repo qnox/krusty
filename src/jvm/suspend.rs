@@ -31,6 +31,9 @@ mod call_operand_realization;
 pub(crate) mod cps;
 pub(crate) use cps::EmitTimeMachines;
 mod debug_metadata;
+mod emission_facts;
+pub(crate) use emission_facts::UnitResultTailForwards;
+pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 mod get_or_create;
 mod hoisting;
 mod live_scopes;
@@ -112,24 +115,6 @@ struct MachineContext<'a> {
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
-/// JVM class metadata computed before continuation spill scopes are discarded.
-#[derive(Clone, Debug, Default)]
-pub struct ContinuationMetadata {
-    pub l: Vec<i32>,
-    pub nl: Vec<i32>,
-    pub i: Vec<i32>,
-    pub s: Vec<String>,
-    pub n: Vec<String>,
-    pub m: String,
-    pub c: String,
-    pub v: i32,
-    pub enclosing_class: String,
-    pub enclosing_method: String,
-    pub enclosing_descriptor: String,
-}
-
-pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
-
 fn object_ty() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
@@ -205,6 +190,7 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
+    unit_result_tail_forwards: &mut UnitResultTailForwards,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
@@ -529,7 +515,7 @@ pub(crate) fn lower_suspend(
             if orig_rets[fid as usize] == Ty::Unit
                 && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
             {
-                ir.unit_result_tail_forwards.extend(returned);
+                unit_result_tail_forwards.extend(returned);
             }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must

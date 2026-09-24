@@ -28,6 +28,7 @@ mod block_scope;
 mod bottom_values;
 mod bridge_emission;
 mod call_operands;
+mod checked_facts;
 mod constructor_defaults;
 mod coroutine_machine;
 mod data_class_pool_seed;
@@ -62,6 +63,7 @@ mod vararg;
 mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
+pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(crate) use declaration_types::jvm_tys;
 pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
 use declaration_types::{field_jvm_tys, jvm_declared_ty};
@@ -336,6 +338,7 @@ pub(super) struct EmitEnv<'a> {
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
+    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
@@ -3894,26 +3897,6 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     }
 }
 
-/// Semantic metadata emitted beside one file's JVM classes.
-pub(crate) struct EmitMetadata<'a> {
-    pub facade: Option<&'a KotlinMetadata>,
-    pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
-    /// Suspend functions whose state machine this emission owns, because their only suspension is
-    /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
-    pub emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
-    pub bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
-}
-
-/// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
-pub(crate) struct CheckedEmitFacts<'a> {
-    pub(crate) metadata: EmitMetadata<'a>,
-    pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
-    pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
-    pub(crate) property_reference_realizations:
-        &'a crate::jvm::property_references::PropertyReferenceRealizations,
-    pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
-}
-
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     facade: &str,
@@ -3927,6 +3910,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         run,
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
+        unit_result_tail_forwards: facts.metadata.unit_result_tail_forwards,
         bridge_return_adaptations: facts.metadata.bridge_returns,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
@@ -12600,6 +12584,7 @@ struct Emitter<'a> {
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -12718,6 +12703,7 @@ impl<'a> Emitter<'a> {
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
+            unit_result_tail_forwards: env.unit_result_tail_forwards,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -19959,6 +19945,7 @@ mod fail_soft_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -19969,6 +19956,7 @@ mod fail_soft_tests {
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
                     emit_time_machines,
+                    unit_result_tail_forwards: &unit_result_tail_forwards,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
