@@ -48,6 +48,14 @@ pub(super) fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Ve
     parameters
 }
 
+/// The JVM descriptor a common-IR function is declared with.
+pub(in crate::jvm) fn function_descriptor(ir: &IrFile, function: crate::ir::FunId) -> String {
+    method_descriptor(
+        &jvm_function_params(ir, function),
+        jvm_declared_ty(&ir.functions[function as usize].ret),
+    )
+}
+
 pub(super) fn jvm_is_erased_top(ty: Ty) -> bool {
     match ty.obj_internal() {
         Some(name) if name.matches("java/lang/Object") || name.matches("kotlin/Any") => true,

@@ -13,6 +13,7 @@ use crate::plugins::registry::NativePlugins;
 mod header_validation;
 mod inline_preparation;
 mod local_class_names;
+mod local_function_names;
 mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
@@ -105,7 +106,7 @@ impl ReparseSource {
         #[cfg(test)]
         self.parse_count.set(self.parse_count.get() + 1);
         let tokens = crate::lexer::lex(&self.text, diags);
-        let mut anonymous_counters = std::collections::HashMap::new();
+        let mut local_name_counters = LocalNameCounters::default();
         crate::parser::visit_declaration_units_with_features(
             &self.text,
             &tokens,
@@ -115,7 +116,7 @@ impl ReparseSource {
                 file.is_common = self.is_common;
                 record_local_class_name_provenance_with_counters(
                     &mut file,
-                    &mut anonymous_counters,
+                    &mut local_name_counters,
                 );
                 visit(file, diags);
             },
@@ -1506,15 +1507,29 @@ pub fn analyze_source_standalone(
 
 /// Record local-class source ownership and ordering without choosing a target spelling.
 pub fn record_local_class_name_provenance(file: &mut crate::ast::File) {
-    let mut counters = std::collections::HashMap::new();
+    let mut counters = LocalNameCounters::default();
     record_local_class_name_provenance_with_counters(file, &mut counters);
+}
+
+/// The naming sequences of one source file, carried across its declaration units: kotlinc's
+/// local-class names and its lifted local-callable names each number one sequence per file.
+#[derive(Default)]
+struct LocalNameCounters {
+    classes: std::collections::HashMap<Vec<String>, u32>,
+    lifted: local_function_names::LiftingCounters,
 }
 
 fn record_local_class_name_provenance_with_counters(
     file: &mut crate::ast::File,
-    counters: &mut std::collections::HashMap<Vec<String>, u32>,
+    counters: &mut LocalNameCounters,
 ) {
-    let invented = local_class_names::invent(file, counters);
+    let lifted = local_function_names::record(file, &mut counters.lifted);
+    file.lambda_lifting_sites.extend(lifted.lambdas);
+    file.local_function_lifting_sites
+        .extend(lifted.local_functions);
+    file.local_delegate_lifting_sites
+        .extend(lifted.local_delegates);
+    let invented = local_class_names::invent(file, &mut counters.classes);
     file.local_class_name_provenance.extend(invented.classes);
     file.anonymous_object_enclosing_functions
         .extend(invented.anonymous_enclosing_functions);

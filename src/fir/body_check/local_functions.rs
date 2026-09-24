@@ -57,6 +57,9 @@ impl BodyFirChecker<'_> {
             body.set_implicit_return();
         }
         body.set_debug_name(function.name.clone());
+        if let Some(site) = self.file.local_function_lifting_sites.get(&statement) {
+            body.set_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
+        }
         let context_count = info.sig.context_count.min(info.sig.params.len());
         body.set_context_receiver_types(
             info.sig.params[..context_count]

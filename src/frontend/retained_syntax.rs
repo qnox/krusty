@@ -924,6 +924,8 @@ pub(super) fn compact(file: &mut File) {
         std::mem::take(&mut file.callable_reference_provenance),
         &expressions,
     );
+    file.lambda_lifting_sites =
+        remap_u32_map(std::mem::take(&mut file.lambda_lifting_sites), &expressions);
     file.lambda_labels = remap_u32_map(std::mem::take(&mut file.lambda_labels), &expressions);
     file.base_arg_names = remap_u32_map(std::mem::take(&mut file.base_arg_names), &expressions);
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);
@@ -951,6 +953,14 @@ pub(super) fn compact(file: &mut File) {
         .filter_map(|(old, declaration)| {
             statements.get(&old).copied().map(|new| (new, declaration))
         })
+        .collect();
+    file.local_function_lifting_sites = std::mem::take(&mut file.local_function_lifting_sites)
+        .into_iter()
+        .filter_map(|(old, site)| statements.get(&old).copied().map(|new| (new, site)))
+        .collect();
+    file.local_delegate_lifting_sites = std::mem::take(&mut file.local_delegate_lifting_sites)
+        .into_iter()
+        .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();
     file.local_class_nested = std::mem::take(&mut file.local_class_nested)
         .into_iter()

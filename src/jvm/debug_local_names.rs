@@ -80,10 +80,13 @@ pub(super) fn render(
         }
         Some(IrDebugLocalProvenance::InlineLambdaReceiver { implementation }) => {
             let origin = ir.lambda_origins.get(&implementation)?;
-            Some(format!(
-                "$this${}",
-                lambda_implementation_name(origin).replace('$', "_u24")
-            ))
+            // kotlinc spells the receiver after the lambda's lifted name.
+            let name = ir
+                .lifted_names
+                .get(&implementation)
+                .cloned()
+                .unwrap_or_else(|| lambda_implementation_name(origin));
+            Some(format!("$this${}", name.replace('$', "_u24")))
         }
         None => source.map(str::to_owned),
     }
