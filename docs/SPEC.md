@@ -3957,6 +3957,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classes are byte-identical to kotlinc; the value-class BODY itself has a pre-existing member-ORDER
   divergence (top-level ones diverge identically), so its test asserts the ABI surface. Test:
   `tests/nested_value_class_e2e.rs`.
+- **Unboxing a reference follows kotlinc's `StackValue.coerce`.** A wrapper already on the stack
+  unboxes through its own accessor and then converts (`a as Int` leaves an `Integer`, so only
+  `Integer.intValue` follows). Any other reference reaches `Boolean` and `Char` through their
+  wrappers and every number through `java/lang/Number` (`checkcast Number; Number.intValue`), with
+  the `checkcast` omitted when the static type already is `Number`; unsigned scalars unbox through
+  their `unbox-impl`. An `as` cast to a non-null type guards with `Intrinsics.checkNotNull(value,
+  "null cannot be cast to non-null type …")` only when the operand's type admits `null`, and a
+  variable operand is read again after the guard rather than duplicated
+  (`tests/unboxing_coercion_e2e.rs`).
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
