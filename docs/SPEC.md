@@ -6644,6 +6644,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/java_member_flexible_return_e2e.rs` (`java_member_return_keeps_the_callers_type_arguments`
   and `jdk_collection_index_keeps_the_callers_type_arguments`, both run against kotlinc, and
   `java_member_return_callers_match_kotlinc_bytes`, byte-identical to kotlinc).
+- **A member of a value class declared in another file of the module is called through its static
+  implementation.** kotlinc realizes every member of a `@JvmInline value class` — function,
+  computed-property accessor, `Any` or interface override — as a static method over the carrier
+  and calls it with the carrier as argument zero, whichever file the call is in:
+  `invokestatic Distance."getDoubled-impl":(I)I`, never `box-impl` + `invokevirtual`. Its name is
+  `name-impl`, or the value-class hash of the declared signature when that signature mentions a
+  value class (`plus--6cHqxc`, `getSelf-wFmgt0E`); a suspend member's hash covers its
+  continuation too, and an omitted default calls `name-impl$default`. A call from a sibling file
+  kept the instance shape the declaring file never emits, and failed with `NoSuchMethodError` (or
+  a verifier error once a generic `Any?` carrier was involved). The declaring file's realization
+  and the sibling call site now derive the name from the same declared signature
+  (`jvm::value_classes::member_names::vc_member_impl_name`); the call's declared parameters
+  decide its argument boundaries, so an `Any?` carrier is passed as it is rather than boxed for
+  what looks like a generic `Object` slot. The same rule fixed a computed accessor whose type is
+  a value class: it had been named with `-impl` first and hashed afterwards over its carrier
+  (`getSelf-impl-Iq56FA8`); it now takes kotlinc's `getSelf-wFmgt0E`. Tests:
+  `tests/sibling_value_class_members_e2e.rs` (the calling class byte-identical to kotlinc; a
+  generic value class in another package, instruction-identical; a suspend member).
 
 ## 8. Success criteria for the PoC
 

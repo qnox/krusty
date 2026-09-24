@@ -509,6 +509,83 @@ pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) ->
     result
 }
 
+/// One class compiled from the same multi-file module by both compilers.
+pub struct ModuleClassPair {
+    pub kotlinc: Vec<u8>,
+    pub krusty: Vec<u8>,
+}
+
+impl ModuleClassPair {
+    /// Compile `sources` as ONE module with kotlinc and with krusty, and take `class` from each.
+    /// Either compiler rejecting the fixture, or not emitting the class, fails the test.
+    pub fn compile(sources: &[(&str, &str)], class: &str) -> Self {
+        let work = common::scratch_dir().expect("cannot allocate module comparison fixture");
+        let source_paths = write_fixture_sources(&work, sources);
+        let output = work.join("out");
+        let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+        assert_eq!(code, 0, "kotlinc rejected module fixture: {diagnostics}");
+        let kotlinc = std::fs::read(output.join(format!("{class}.class")))
+            .unwrap_or_else(|_| panic!("kotlinc did not emit {class}"));
+        let _ = std::fs::remove_dir_all(work);
+        let stdlib = common::stdlib_jar();
+        let jdk = common::jdk_modules();
+        let classes = common::compile_in_process_files(sources, &[stdlib], Some(jdk.as_path()))
+            .expect("krusty rejected module fixture");
+        let krusty = classes
+            .into_iter()
+            .find_map(|(name, bytes)| (name == class).then_some(bytes))
+            .unwrap_or_else(|| panic!("krusty did not emit {class}"));
+        ModuleClassPair { kotlinc, krusty }
+    }
+
+    /// `method`'s disassembled instructions from each side (`kotlinc`, `krusty`), with constant-pool
+    /// indices masked but the symbolic owner/name/descriptor of every referenced member kept: two
+    /// pools interned in different orders describe the same code, while a different call target is
+    /// a different program.
+    pub fn method_code(&self, class: &str, method: &str) -> (String, String) {
+        let disassemble = |bytes: &[u8]| {
+            let work = common::scratch_dir().expect("cannot allocate disassembly fixture");
+            let path = work.join(format!("{}.class", class.replace('/', "_")));
+            std::fs::write(&path, bytes).expect("write class for disassembly");
+            let text =
+                common::javap(&["-c", "-p", &path.to_string_lossy()]).expect("javap unavailable");
+            let _ = std::fs::remove_dir_all(work);
+            method_instructions(&text, method)
+                .unwrap_or_else(|| panic!("{class} has no method {method}"))
+        };
+        (disassemble(&self.kotlinc), disassemble(&self.krusty))
+    }
+}
+
+/// The instruction lines of the first method whose declaration names `method`, with `#N` pool
+/// references masked.
+fn method_instructions(disassembly: &str, method: &str) -> Option<String> {
+    let mut lines = disassembly.lines().map(str::trim);
+    lines.find(|line| {
+        line.split('(')
+            .next()
+            .and_then(|head| head.split_whitespace().last())
+            == Some(method)
+    })?;
+    let mut body = String::new();
+    for line in lines.skip_while(|line| *line != "Code:").skip(1) {
+        if line.is_empty() || line == "}" {
+            break;
+        }
+        let masked = line
+            .split_whitespace()
+            .map(|token| match token.strip_prefix('#') {
+                Some(rest) if rest.trim_end_matches(',').parse::<u32>().is_ok() => "#N",
+                _ => token,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        body.push_str(&masked);
+        body.push('\n');
+    }
+    (!body.is_empty()).then_some(body)
+}
+
 /// Compile named in-memory fixtures with kotlinc and run `box()` from `main_class` on the shared JVM.
 pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
