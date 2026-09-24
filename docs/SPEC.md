@@ -6850,9 +6850,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rewrites (`jvm::classfile::stack_maps` over `bytecode_analysis::FrameComputation`): blocks split at
   every jump, protected range, line number and local-range bound; references of different classes
   meet at `Object`; a block nothing reaches becomes `nop`s ending in `athrow`, framed with a
-  `Throwable` and cut out of the exception table. A body the analysis cannot step (stacks of
-  different heights meeting) keeps the frames recorded while emitting. Because two classes join as
-  `Object`, kotlinc casts each value to the type the join has in Kotlin before it gets there
+  `Throwable` and cut out of the exception table. The computed result is authoritative: a non-empty
+  emitted body the analysis cannot step is an internal backend error, never a request to use the
+  frames recorded while emitting. Because two classes join as `Object`, kotlinc casts each value to
+  the type the join has in Kotlin before it gets there
   (`StackValue.coerce`: a `checkcast` whenever the JVM types differ and the target is not `Object`),
   and so does krusty: a reassigned local is coerced to its declared type like its initializer, and a
   boxed primitive from its wrapper to a wider target such as `Number` (the constant side of

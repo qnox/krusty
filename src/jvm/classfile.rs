@@ -2502,8 +2502,9 @@ impl ClassWriter {
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
         let mut stackmap_baseline = None;
         // The table the instructions imply: its classes intern now, where kotlinc's writer interns
-        // them, and `finish` writes it computed over the final body. Without a computation, the
-        // frames recorded while emitting.
+        // them, and `finish` writes it computed over the final body. A non-empty emitted body must
+        // be understood by the one authoritative frame computation; recorded emitter frames are
+        // retained temporarily only for the rewrite migration below, never as output fallback.
         let body = stack_maps::Body {
             access,
             name,
@@ -2516,11 +2517,11 @@ impl ClassWriter {
                 code.bytes.len(),
             ),
         };
-        let computed = if code.bytes.is_empty() {
-            None
-        } else {
-            self.compute_frames(&body).ok()
-        };
+        let computed = (!code.bytes.is_empty()).then(|| {
+            self.compute_frames(&body).unwrap_or_else(|decline| {
+                panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
+            })
+        });
         if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
             let mut initial_locals: Vec<VerifType> = Vec::new();
@@ -2534,13 +2535,6 @@ impl ClassWriter {
             stackmap_baseline =
                 Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
         }
-        let stackmap = if computed.is_some() {
-            None
-        } else if code.has_frames() {
-            code.build_stackmap(stackmap_baseline.as_deref(), &mut self.cp)
-        } else {
-            None
-        };
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -2561,7 +2555,7 @@ impl ClassWriter {
                 })
             }),
             exceptions: code.resolved_exceptions(),
-            stackmap,
+            stackmap: None,
             signature: sig,
             // `<init>`/`<clinit>` line tables are CURATED after the fact (`set_method_debug` /
             // `set_method_lines` — the class-decl-line super-call entry, per-initializer entries,

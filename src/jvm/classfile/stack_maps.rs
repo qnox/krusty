@@ -20,8 +20,9 @@
 //! local's range stands at; those are the ones used here, which reproduces every frame of kotlinc's
 //! own output.
 //!
-//! When the frames cannot be computed (a body the interpreter cannot step, or stacks of different
-//! heights meeting), the frames recorded while emitting are written instead.
+//! A non-empty emitted body the computation cannot step is an internal backend error. There is no
+//! recorded-frame fallback: accepting one would make two authorities for the verifier state and
+//! preserve exactly the emitter-specific bookkeeping this path replaces.
 
 use std::ops::Range;
 
@@ -93,9 +94,10 @@ impl ClassWriter {
             .ok_or(Decline::UnsupportedControlFlow)?;
         let mut labels = vec![false; insns.len() + 1];
         for &pc in &body.labels {
-            if let Ok(at) = offsets.binary_search(&pc) {
-                labels[at] = true;
-            }
+            let at = offsets
+                .binary_search(&pc)
+                .map_err(|_| Decline::UnsupportedControlFlow)?;
+            labels[at] = true;
         }
         let frames = FrameComputation {
             insns: &insns,
@@ -118,8 +120,8 @@ impl ClassWriter {
         if computed.frames.frames.is_empty() {
             return None;
         }
-        let entry =
-            entry_frame(body.access, body.name, body.descriptor, &self.internal_name).ok()?;
+        let entry = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
+            .expect("a successfully computed method must have a valid entry frame");
         Some(encode(
             &computed.frames.frames,
             &entry,
@@ -156,26 +158,33 @@ impl ClassWriter {
             exceptions: &rewritten.exceptions,
             labels: table_labels(&rewritten.lnt, &rewritten.lvt, rewritten.code.len()),
         };
-        match self.compute_frames(&body) {
-            Ok(computed) => self.encode_frames(&body, &computed),
-            Err(_) => self.encode_frames(&body, computed),
-        };
+        let computed = self.compute_frames(&body).unwrap_or_else(|decline| {
+            panic!(
+                "cannot compute rewritten JVM frames for {}{}: {decline:?}",
+                body.name, body.descriptor
+            )
+        });
+        self.encode_frames(&body, &computed);
     }
 
     /// Replace every method's table with the one its final body implies, rewriting unreachable
-    /// blocks as ASM does. A method whose frames cannot be computed keeps the recorded table.
+    /// blocks as ASM does. Every non-empty emitted body must pass the authoritative computation.
     pub(super) fn compute_stack_maps(&mut self) {
         for index in 0..self.methods.len() {
             let method = &self.methods[index];
             let Some(code) = method.code.as_deref().filter(|code| !code.is_empty()) else {
                 continue;
             };
-            let (Some(name), Some(descriptor)) =
-                (self.cp.utf8_at(method.name), self.cp.utf8_at(method.desc))
-            else {
-                continue;
-            };
-            let (name, descriptor) = (name.to_string(), descriptor.to_string());
+            let name = self
+                .cp
+                .utf8_at(method.name)
+                .expect("an added method must retain its name")
+                .to_string();
+            let descriptor = self
+                .cp
+                .utf8_at(method.desc)
+                .expect("an added method must retain its descriptor")
+                .to_string();
             let body = Body {
                 access: method.access,
                 name: &name,
@@ -184,16 +193,9 @@ impl ClassWriter {
                 exceptions: &method.exceptions,
                 labels: table_labels(&method.lnt, &method.lvt, code.len()),
             };
-            let computed = match self.compute_frames(&body) {
-                Ok(computed) => computed,
-                Err(decline) => {
-                    crate::trace_compiler!(
-                        "bytecode",
-                        "recorded frames kept for {name}{descriptor}: {decline:?}"
-                    );
-                    continue;
-                }
-            };
+            let computed = self.compute_frames(&body).unwrap_or_else(|decline| {
+                panic!("cannot compute final JVM frames for {name}{descriptor}: {decline:?}")
+            });
             let dead: Vec<Range<usize>> = computed.unreachable_bytes().collect();
             let mut code = code.to_vec();
             let mut exceptions = method.exceptions.clone();
@@ -361,6 +363,23 @@ fn write_type(value: &VerificationType, offsets: &[usize], out: &mut Vec<u8>, cp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_debug_label_between_instructions_is_rejected() {
+        let writer = ClassWriter::new("C", "java/lang/Object");
+        let body = Body {
+            access: 0x0008,
+            name: "f",
+            descriptor: "()V",
+            code: &[0x11, 0, 1, 0x57, 0xb1], // sipush 1; pop; return
+            exceptions: &[],
+            labels: vec![1],
+        };
+        assert_eq!(
+            writer.compute_frames(&body).err(),
+            Some(Decline::UnsupportedControlFlow)
+        );
+    }
 
     #[test]
     fn a_dead_range_is_cut_out_of_the_ranges_it_touches() {
