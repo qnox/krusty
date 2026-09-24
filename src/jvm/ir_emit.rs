@@ -14092,8 +14092,18 @@ impl<'a> Emitter<'a> {
                 };
                 // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
                 // compiles to `iinc slot, k` (kotlinc's form), not load/const/add/store.
+                // `i++`/`i--` carry the checked result type as an identity coercion around the same
+                // arithmetic, so it is the same update as `i += 1`.
+                let arithmetic = match *self.ir.expr(value) {
+                    IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg,
+                        type_operand: Ty::Int,
+                    } => arg,
+                    _ => value,
+                };
                 let delta: Option<i32> = if jt == Ty::Int {
-                    if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(value) {
+                    if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(arithmetic) {
                         let cint = |e: u32| match self.ir.expr(e) {
                             IrExpr::Const(IrConst::Int(k)) => Some(*k),
                             _ => None,

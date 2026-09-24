@@ -1413,6 +1413,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   wrapper-masquerade tables (`resolve::nullable_prim_wrapper`/`prim_of_wrapper`) are being retired onto
   this representation (consumer migration in progress).
 - Boolean short-circuit evaluation (`&&`/`||`) side-effect order.
+- **`i++`, `++i`, `i--` and `--i` on an `Int` local in statement position are `iinc`**, like
+  `i += 1`: the lowered increment wraps the same `i + 1` in an identity coercion to its checked
+  result type, which the `iinc` selection looks through. Test: `tests/increment_statement_e2e.rs`.
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
