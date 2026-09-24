@@ -277,7 +277,13 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         .enumerate()
         .all(|(index, (&p, &a))| {
             match p {
-                Ty::OutProjection(expected) | Ty::StarProjection(expected) => {
+                // `A<B> <: A<*>` for every argument `B`: a star projection contains every argument
+                // of its parameter. Its carried readable bound is derived from the declaration
+                // (kotlinc's `isSubtypeForSameConstructor` skips a star super-argument outright),
+                // so it never decides containment: a classpath `Frame<*>` whose bound the metadata
+                // reader leaves at `Any?` is the same type as a source `Frame<*>` reading `Bound`.
+                Ty::StarProjection(_) => return true,
+                Ty::OutProjection(expected) => {
                     if matches!(a, Ty::InProjection(_)) {
                         let readable = target
                             .map(|owner| oracle.type_param_upper_bounds(owner, index))
@@ -323,9 +329,9 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         })
 }
 
-/// Bind the declaration variables occurring inside a star projection's readable upper bound to the
-/// corresponding actual shape. F-bounds such as `S : Entity<D, S>` otherwise leave `S` unbound and
-/// reject `EntityImpl<D> : Entity<D, EntityImpl<D>>` as an argument of `Entity<D, *>`.
+/// Bind the declaration variables occurring inside an `out` projection's bound to the corresponding
+/// actual shape. F-bounds such as `S : Entity<D, S>` otherwise leave `S` unbound and reject
+/// `EntityImpl<D> : Entity<D, EntityImpl<D>>` as an argument of `Entity<D, out Entity<D, S>>`.
 fn capture_projection_parameters(
     cx: &mut TyCtx,
     oracle: &dyn TypeOracle,
@@ -383,8 +389,10 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
         (Ty::Nullable(a), Ty::Nullable(b))
         | (Ty::PlatformNullable(a), Ty::PlatformNullable(b))
         | (Ty::InProjection(a), Ty::InProjection(b))
-        | (Ty::OutProjection(a), Ty::OutProjection(b))
-        | (Ty::StarProjection(a), Ty::StarProjection(b)) => same_flexible_type(*a, *b),
+        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type(*a, *b),
+        // Two stars in one argument slot are one projection, whatever readable bound each carries:
+        // the bound is derived from the declaration, not part of the projection's identity.
+        (Ty::StarProjection(_), Ty::StarProjection(_)) => true,
         // A star projection is the `out` projection of its readable bound: `Resp<*>` is
         // `Resp<out Any?>`, and a Java wildcard `Resp<?>` arrives as `Resp<out Any!>`. Inside an
         // invariant argument the two spellings are one type.
@@ -751,6 +759,22 @@ mod tests {
             g("app/EntityImpl", &[data]),
             g("app/Entity", &[data, Ty::star_projection(self_bound)])
         ));
+    }
+
+    #[test]
+    fn a_star_projection_contains_every_argument_whatever_bound_it_carries() {
+        // A classpath `Frame<*>` read from `@Metadata` carries the decoder's `Any?` bound; a written
+        // `Frame<*>` carries the declared parameter bound. They are one type.
+        let read = g(
+            "app/Frame",
+            &[Ty::star_projection(Ty::nullable(s("kotlin/Any")))],
+        );
+        let written = g("app/Frame", &[Ty::star_projection(s("app/Animal"))]);
+        assert!(ok(read, written));
+        assert!(ok(written, read));
+        assert!(ok(g("app/Box", &[read]), g("app/Box", &[written])));
+        assert!(ok(g("app/Frame", &[s("app/Dog")]), written));
+        assert!(!ok(g("app/Box", &[s("app/Dog")]), written));
     }
 
     #[test]
