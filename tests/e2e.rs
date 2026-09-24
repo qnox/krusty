@@ -1052,6 +1052,8 @@ mod mpp_requires_the_feature_e2e;
 #[path = "expect_declaration_body_e2e.rs"]
 mod expect_declaration_body_e2e;
 
+#[path = "all_tail_calls_e2e.rs"]
+mod all_tail_calls_e2e;
 #[path = "classpath_tail_forward_e2e.rs"]
 mod classpath_tail_forward_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]
