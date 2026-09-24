@@ -50,6 +50,7 @@ pub(super) fn recover_pass_two_diagnostics(
     // check sees again. Collapse across the complete compilation diagnostic stream, not merely the
     // newly appended suffix, so recovery never duplicates that exact source error.
     diags.collapse_duplicates_from(0);
+    diags.sort_source_order();
     if !diags.has_errors() {
         // The recovery operation owns this postcondition. Reset attribution deliberately because
         // a prior source visit—or even a caller—may have left the sink pointing at another file.

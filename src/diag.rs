@@ -28,6 +28,10 @@ pub enum DiagnosticKind {
     IncompatibleEquality,
     ValReassignment,
     Inspection,
+    /// An `expect`/`actual` actualization error. The reference compiler actualizes after its
+    /// frontend has reported, so these follow every frontend diagnostic in its ledger, in the order
+    /// actualization produced them rather than in source order.
+    Actualization,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -232,6 +236,17 @@ impl DiagSink {
             }
         });
         self.diags.extend(tail);
+    }
+
+    /// Restore deterministic source order after diagnostics from multiple semantic phases have
+    /// been merged. The stable sort preserves production order for diagnostics at the same range.
+    /// Actualization diagnostics keep their production order after all others, as the reference
+    /// compiler reports them from a later phase.
+    pub(crate) fn sort_source_order(&mut self) {
+        self.diags.sort_by_key(|diagnostic| match diagnostic.kind {
+            DiagnosticKind::Actualization => (1, 0, 0, 0),
+            _ => (0, diagnostic.file, diagnostic.span.lo, diagnostic.span.hi),
+        });
     }
 
     pub fn has_errors(&self) -> bool {

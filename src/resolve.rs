@@ -20869,18 +20869,23 @@ impl<'a> Checker<'a> {
                     Some(extension) => self.record_extension_selection(
                         scope,
                         call_args,
-                        rt,
                         &name,
-                        &call_targs,
+                        CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        },
                         extension,
                     ),
                     None => self.record_extension_call_from_callables(
                         scope,
                         call_args,
-                        rt,
                         &name,
-                        &call_targs,
-                        expected,
+                        CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        },
                         &receiver_callables,
                     ),
                 };
@@ -21058,7 +21063,11 @@ impl<'a> Checker<'a> {
                     call,
                     args,
                     &arg_tys,
-                    &call_targs,
+                    CallConstraints {
+                        type_args: &call_targs,
+                        receiver: rt,
+                        expected,
+                    },
                     &inapplicable_candidates,
                 ) {
                     return Ty::Error;
@@ -23910,9 +23919,12 @@ impl<'a> Checker<'a> {
                                         args,
                                         arg_tys: &arg_tys,
                                     },
-                                    receiver,
                                     &fname,
-                                    &type_args,
+                                    CallConstraints {
+                                        type_args: &type_args,
+                                        receiver,
+                                        expected,
+                                    },
                                     extension,
                                 ) {
                                     self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -41008,6 +41020,43 @@ struct ExtensionRungSelection {
     overloads: Vec<crate::libraries::FunctionInfo>,
 }
 
+/// What a receiver call fixes about a candidate's type parameters independently of its value
+/// arguments: explicit type arguments, the receiver it is called on, and the type its result is
+/// expected to have. When no candidate is applicable, kotlinc still reports a mismatched argument
+/// against the parameter type under those constraints (`s.let(1)` expects `(String) -> Int` where
+/// `Int` is expected), so the diagnostic seeds its bindings from them.
+#[derive(Clone, Copy)]
+struct CallConstraints<'a> {
+    type_args: &'a [Ty],
+    receiver: Ty,
+    expected: Option<Ty>,
+}
+
+impl CallConstraints<'_> {
+    fn bindings(
+        self,
+        signature: &crate::libraries::GenericSig,
+    ) -> crate::symbol_resolver::GSigBinds {
+        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(signature, self.type_args);
+        if !self.type_args.is_empty() {
+            return bindings;
+        }
+        let mut seeded = crate::symbol_resolver::GSigBinds::new();
+        if let Some(declared) = signature.receiver {
+            crate::symbol_resolver::unify_ty(declared, self.receiver, &mut seeded);
+        }
+        if let Some(expected) = self.expected {
+            crate::symbol_resolver::unify_ty(signature.ret, expected, &mut seeded);
+        }
+        for (formal, ty) in seeded {
+            if signature.formals.contains(&formal) && !ty.mentions_pending() && ty != Ty::Error {
+                bindings.entry(formal).or_insert(ty);
+            }
+        }
+        bindings
+    }
+}
+
 struct MemberMappingFailure {
     failure: CallArgMappingFailure,
     candidate: crate::libraries::FunctionInfo,
@@ -45952,9 +46001,10 @@ impl<'a> Checker<'a> {
         call: ExprId,
         args: &[ExprId],
         arg_tys: &[Ty],
-        type_args: &[Ty],
+        constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) -> bool {
+        let type_args = constraints.type_args;
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let nearest_scope_rank = candidates
@@ -45969,7 +46019,7 @@ impl<'a> Checker<'a> {
                 if !type_args.is_empty() && signature.formals.len() != type_args.len() {
                     return None;
                 }
-                let bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
+                let bindings = constraints.bindings(&signature);
                 let params = crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
                 let shape = self.contextual_call_shape(
                     scope,
@@ -68800,9 +68850,12 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         },
-                                        recv,
                                         &name,
-                                        &type_args,
+                                        CallConstraints {
+                                            type_args: &type_args,
+                                            receiver: recv,
+                                            expected,
+                                        },
                                         extension,
                                     )
                                 })
@@ -68864,9 +68917,12 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         },
-                                        recv,
                                         &name,
-                                        &type_args,
+                                        CallConstraints {
+                                            type_args: &type_args,
+                                            receiver: recv,
+                                            expected,
+                                        },
                                         extension,
                                     )
                                 })
@@ -69041,7 +69097,11 @@ impl<'a> Checker<'a> {
                         e,
                         args.as_deref().unwrap_or_default(),
                         &checked_arg_tys,
-                        &type_args,
+                        CallConstraints {
+                            type_args: &type_args,
+                            receiver: safe_rt,
+                            expected,
+                        },
                         &candidates,
                     );
                     if !reported_inapplicable {
@@ -70334,6 +70394,24 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.classifier_value_ty(e, internal) {
                     return self.set(e, ty);
                 }
+            }
+            // A package, or a classifier that is neither an object nor has a companion, has no value
+            // facet: the prefix is a pure qualifier, so the miss is this segment's. kotlinc reports
+            // the segment (`Thread.Missing.x` is unresolved at `Missing`); reading the qualifier as
+            // a value would instead blame its root, which did resolve.
+            let pure_qualifier = match receiver_qualifier {
+                Ok(ResolvedQualifier::Package(_)) => true,
+                Ok(ResolvedQualifier::Classifier(owner)) => {
+                    self.classifier_singleton_value(owner).is_none()
+                }
+                Ok(ResolvedQualifier::Value) | Err(_) => false,
+            };
+            if pure_qualifier {
+                self.diags.error(
+                    self.member_name_span(e, &name),
+                    crate::diagnostic_wording::unresolved_reference_on(&name, None),
+                );
+                return self.set(e, Ty::Error);
             }
             let diag_mark = self.diags.diags.len();
             let mut rt = self.expr(scope, receiver);
@@ -73178,7 +73256,15 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let callables = self.stable_receiver_callables(rt, name);
         self.record_extension_call_from_callables(
-            scope, call_args, rt, name, type_args, expected, &callables,
+            scope,
+            call_args,
+            name,
+            CallConstraints {
+                type_args,
+                receiver: rt,
+                expected,
+            },
+            &callables,
         )
     }
 
@@ -73225,14 +73311,18 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
-        rt: Ty,
         name: &str,
-        type_args: &[Ty],
-        expected: Option<Ty>,
+        constraints: CallConstraints<'_>,
         callables: &crate::libraries::Callables,
     ) -> Option<Ty> {
-        let rung = self.select_extension_rung(scope, call_args, rt, type_args, expected, callables);
-        self.record_extension_selection(scope, call_args, rt, name, type_args, rung)
+        let CallConstraints {
+            type_args,
+            receiver,
+            expected,
+        } = constraints;
+        let rung =
+            self.select_extension_rung(scope, call_args, receiver, type_args, expected, callables);
+        self.record_extension_selection(scope, call_args, name, constraints, rung)
     }
 
     /// Finish an extension rung whose candidates have already been ranked. This function only
@@ -73241,11 +73331,15 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
-        rt: Ty,
         name: &str,
-        type_args: &[Ty],
+        constraints: CallConstraints<'_>,
         extension: ExtensionRungSelection,
     ) -> Option<Ty> {
+        let CallConstraints {
+            type_args,
+            receiver: rt,
+            ..
+        } = constraints;
         let ExtensionRungSelection {
             selection,
             overloads,
@@ -73280,7 +73374,12 @@ impl<'a> Checker<'a> {
                     return Some(Ty::Error);
                 }
                 if self.report_single_mapped_candidate_type_errors(
-                    scope, e, args, arg_tys, type_args, &overloads,
+                    scope,
+                    e,
+                    args,
+                    arg_tys,
+                    constraints,
+                    &overloads,
                 ) {
                     return Some(Ty::Error);
                 }
@@ -74442,7 +74541,17 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        let ret = self.record_extension_selection(scope, call_args, rt, name, &type_args, rung);
+        let ret = self.record_extension_selection(
+            scope,
+            call_args,
+            name,
+            CallConstraints {
+                type_args: &type_args,
+                receiver: rt,
+                expected,
+            },
+            rung,
+        );
         if let Some(ret) = ret {
             self.mark_implicit_receiver_selection(call, receiver);
             return Some(ret);

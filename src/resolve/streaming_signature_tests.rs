@@ -932,25 +932,18 @@ class Derived {
     assert_eq!(storage.get(), Ty::String);
 }
 
-#[test]
-fn inferred_signature_resolves_a_package_qualified_nested_constructor() {
-    let source = r#"
-package Package
-class Outer {
-    class Nested {
-        val first = "O"
-        val second = "K"
-    }
-}
-fun box() = Package.Outer.Nested().first + Outer.Nested().second
-"#;
-    let inputs = [SourceInput::kotlin(source).with_file_stem("QualifiedNestedSignature")];
+/// Analyze one JVM source file against the stdlib and JDK, as the driver does.
+fn analyze_jvm_source(
+    source: &str,
+    stem: &str,
+    diagnostics: &mut DiagSink,
+) -> crate::frontend::SourceSetAnalysis {
+    let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
     let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
     if let Some(jdk) = crate::toolchain::jdk_modules() {
         classpath.push(jdk);
     }
-    let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features(
+    crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
@@ -959,8 +952,24 @@ fun box() = Package.Outer.Nested().first + Outer.Nested().second
             .expect("JVM provider initialization"),
         ),
         &LangFeatures::new(),
-        &mut diagnostics,
-    );
+        diagnostics,
+    )
+}
+
+#[test]
+fn inferred_signature_resolves_a_package_qualified_nested_constructor() {
+    let source = r#"
+package outerpkg
+class Outer {
+    class Nested {
+        val first = "O"
+        val second = "K"
+    }
+}
+fun box() = outerpkg.Outer.Nested().first + Outer.Nested().second
+"#;
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_jvm_source(source, "QualifiedNestedSignature", &mut diagnostics);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     let index = analysis
@@ -975,6 +984,43 @@ fun box() = Package.Outer.Nested().first + Outer.Nested().second
         .and_then(|declaration| index.signature(declaration))
         .expect("resolved box signature");
     assert_eq!(result.result.get(), Ty::String);
+}
+
+/// A root spelled like both a default-imported classifier (`java.lang.Package`) and the source
+/// package commits to the classifier, as kotlinc does, so the next segment is the miss:
+/// `unresolved reference 'Outer'` at `Outer`, not at the root that did resolve.
+#[test]
+fn inferred_signature_commits_a_classifier_root_over_a_same_named_package() {
+    let source = r#"
+package Package
+class Outer {
+    class Nested {
+        val first = "O"
+    }
+}
+fun box() = Package.Outer.Nested().first
+"#;
+    let mut diagnostics = DiagSink::new();
+    analyze_jvm_source(source, "QualifiedRootClash", &mut diagnostics);
+
+    let outer = source.find("Package.Outer").expect("qualified read") + "Package.".len();
+    let reported = diagnostics
+        .diags
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.span.lo as usize..diagnostic.span.hi as usize,
+                diagnostic.msg.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reported,
+        [(
+            outer..outer + "Outer".len(),
+            "unresolved reference 'Outer'."
+        )]
+    );
 }
 
 #[test]

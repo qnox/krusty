@@ -2165,3 +2165,22 @@ fun CharSequence.f(): Int = choose(1)
         ["argument type mismatch: actual type is 'Int', but 'String' was expected.".to_string()]
     );
 }
+
+/// A prefix with no value facet (a classifier with neither an object nor a companion, or a
+/// package) that misses its next segment reports that segment, as kotlinc does. A root spelled
+/// like both a default-imported classifier and the source package commits to the classifier, so
+/// `Package.Outer` misses at `Outer` too.
+#[test]
+fn a_pure_qualifier_prefix_reports_its_missing_segment() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Qualified.kt",
+            "package Package\n\
+             class Outer { class Nested }\n\
+             fun f(): Any = Thread.Missing.x\n\
+             fun g(): Any = Thread.Missing.Nested()\n\
+             fun h(): Any = Package.Outer.Nested()\n",
+        )],
+        &[],
+    );
+}

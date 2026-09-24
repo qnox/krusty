@@ -207,6 +207,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         DiagnosticKind::IncompatibleEquality => 1,
                         DiagnosticKind::Inspection => 2,
                         DiagnosticKind::ValReassignment => 3,
+                        DiagnosticKind::Actualization => 4,
                     },
                     message: diagnostic.msg,
                 })
@@ -246,6 +247,7 @@ impl AnalysisResponse {
                         1 => DiagnosticKind::IncompatibleEquality,
                         2 => DiagnosticKind::Inspection,
                         3 => DiagnosticKind::ValReassignment,
+                        4 => DiagnosticKind::Actualization,
                         _ => DiagnosticKind::Compiler,
                     },
                     msg: diagnostic.message,

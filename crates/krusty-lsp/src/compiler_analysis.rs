@@ -231,6 +231,7 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
             DiagnosticKind::IncompatibleEquality => 1,
             DiagnosticKind::Inspection => 2,
             DiagnosticKind::ValReassignment => 3,
+            DiagnosticKind::Actualization => 4,
         },
     )
 }

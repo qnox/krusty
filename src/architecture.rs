@@ -625,6 +625,7 @@ mod tests {
                 "conformance",
                 "dhat",
                 "diag",
+                "diagnostic_wording",
                 "features",
                 "frontend",
                 "ir",

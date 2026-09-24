@@ -4374,3 +4374,15 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
 - ⬜ A read whose flow type is the intersection of merged assignments (`x` after a loop writes `""`
   and `42`) names krusty's declared `Any` as the receiver; kotlinc 2.4.20 names none, since the
   intersection is not class-like (`a_proof_does_not_survive_a_loop_that_overwrites_it`).
+- ✅ Diagnostic ledgers are exact and ordered: diagnostics merged in recovery are sorted per file by
+  position, and `expect` declarations without an `actual` are reported after them in kotlinc's
+  actualization order (classifiers, then callables).
+- ✅ A pure qualifier prefix (a package, or a classifier with no object or companion value) that
+  misses its next segment reports that segment (`Thread.Missing.x` at `Missing`), and a root that
+  names both a default-imported classifier and a package commits to the classifier.
+- ✅ An inapplicable generic call reports the mismatched argument against the parameter type
+  under the receiver and expected result (`s.let(1)` expects `(String) -> Int`).
+- ⬜ With no expected result, kotlinc also reports CANNOT_INFER for the unfixed type parameter and
+  renders it `uninferred R (of fun <T, R> T.let)`; krusty renders the bound.
+- ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
+  its reasons, anchored at the callee name) differs from krusty's.

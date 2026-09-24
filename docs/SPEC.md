@@ -210,12 +210,21 @@ follows kotlinc's `FOR_OPTIONAL_RECEIVER` rule: it names the type of a receiver 
 type (`null?.x` says `Nothing`, `null.x` says `Nothing?`, a smart cast to an intersection says its
 first class type), and is absent for a classifier qualifier (`Limits.MISSING` through a companion,
 `Obj.MISSING`), a type-parameter receiver, a callable reference, and a HIDDEN-deprecated candidate
-(`List.getFirst()`, reported as a bare unresolved name). Tests follow the same target:
+(`List.getFirst()`, reported as a bare unresolved name). Ledger order follows kotlinc's phases:
+frontend diagnostics per file in source position order, then actualization errors (an `expect`
+with no `actual`) in the order actualization finds them, every classifier before any callable.
+A dotted receiver commits its root at scope-tower priority and never backtracks: `Package.Outer`
+in package `Package` resolves `Package` to the default-imported `java.lang.Package`, so `Outer` is
+the unresolved segment, as it is for any prefix with no value facet (`Thread.Missing.x`). An
+inapplicable generic call reports a mismatched argument against its parameter under the type
+arguments fixed by the receiver and the expected result (`s.let(1)` where `Int` is expected
+expects `(String) -> Int`). Tests follow the same target:
 differential tests compare against whichever kotlinc the run provisions, and a test that pins what
 kotlinc says reads it from a values file recorded per version from kotlinc itself
 (`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
-`tests/diagnostic_wording_versions_e2e.rs`, plus `kotlin_version` unit tests and
-`the_reference_version_flag_accepts_only_supported_releases`.
+`tests/diagnostic_wording_versions_e2e.rs`, `expect_declaration_body_e2e`,
+`safe_call_unresolved_member_e2e`, `inferred_signature_commits_a_classifier_root_over_a_same_named_package`,
+plus `kotlin_version` unit tests and `the_reference_version_flag_accepts_only_supported_releases`.
 
 The harness (`harness/`) is a Rust integration test shelling out to the reference compiler,
 `javap`/a class-file parser, and `java`. Edge-case suite (§7) lives in `tests/cases/`.

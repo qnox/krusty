@@ -1,0 +1,6 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[nested_classifier_shadows_top_level_enum]
+2.4.0..:
+  unresolved reference 'READY'.

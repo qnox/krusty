@@ -9,11 +9,24 @@
 //! kotlinc: `error: unresolved reference 'thisDoesNotExistAnywhere'`.
 use super::common;
 
-/// Run the front end with stdlib + JDK on the classpath.
+/// Run the front end with stdlib + JDK on the classpath, reading each message as a ledger header.
 fn diags(src: &str) -> Vec<String> {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
+    headers(common::front_end_diagnostics(
+        src,
+        &[stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// Recorded kotlinc messages are ledger headers: kotlinc prints a candidate list on continuation
+/// lines, which the ledger does not read. Read krusty's messages the same way.
+fn headers(messages: Vec<String>) -> Vec<String> {
+    messages
+        .into_iter()
+        .map(|message| message.lines().next().unwrap_or_default().to_string())
+        .collect()
 }
 
 /// krusty reports the unresolved `name` behind `?.` exactly as kotlinc does (recorded per Kotlin
@@ -173,7 +186,7 @@ fn classpath_less_string_overload_mismatch_is_not_called_unresolved() {
     let expected = common::recorded(|| common::reference_error_messages("Main", SOURCE));
     assert!(!expected.is_empty(), "kotlinc must reject the invalid call");
     assert_eq!(
-        common::front_end_diagnostics(SOURCE, &[], None),
+        headers(common::front_end_diagnostics(SOURCE, &[], None)),
         expected,
         "the classpath-less declaration must preserve exact applicability diagnostics"
     );

@@ -183,12 +183,11 @@ fun box(): String {{\n\
 /// argument.
 ///
 /// Both compilers reject, and their diagnostics are recorded exactly rather than compared, because
-/// they disagree about more than wording: kotlinc keeps `P` bound from the RECEIVER and reports the
-/// argument against `Plug<App, …>`, while krusty binds `P` from the formal's bound and reports it
-/// against `Plug<Pipe, Any>`. That divergence is not introduced here — it is what the rejecting
-/// path does on both sides of this change — and converging it is its own work. What this fixture
-/// pins is that the call is refused, and by exactly these diagnostics, so a future change to the
-/// solve cannot start accepting it unnoticed.
+/// they still disagree about the formal nothing fixes: both keep `P` bound from the RECEIVER and
+/// report the argument against `Plug<App, …>`, but kotlinc renders the unfixed `B` as
+/// `uninferred B (…)` and adds CANNOT_INFER for it, while krusty renders its bound `Any`.
+/// Converging that is its own work. What this fixture pins is that the call is refused, and by
+/// exactly these diagnostics, so a future change to the solve cannot start accepting it unnoticed.
 #[test]
 fn a_receiver_the_invariant_argument_excludes_is_still_rejected() {
     let main = format!(
@@ -217,7 +216,7 @@ fun probe() {{\n\
                 line: 31,
                 column: 19,
                 message: "argument type mismatch: actual type is 'OtherPlug', but \
-                          'Plug<Pipe, Any>' was expected."
+                          'Plug<App, Any>' was expected."
                     .to_string(),
             },
             common::CompilerError {
