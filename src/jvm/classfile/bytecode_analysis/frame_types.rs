@@ -96,7 +96,7 @@ pub(crate) enum VerificationType {
 }
 
 impl VerificationType {
-    fn from_verif(v: &VerifType, pool: &dyn PoolView) -> VerificationType {
+    pub(super) fn from_verif(v: &VerifType, pool: &dyn PoolView) -> VerificationType {
         match v {
             VerifType::Top => VerificationType::Top,
             VerifType::Integer => VerificationType::Integer,
@@ -127,7 +127,7 @@ impl VerificationType {
         }
     }
 
-    fn is_wide(&self) -> bool {
+    pub(super) fn is_wide(&self) -> bool {
         matches!(self, VerificationType::Long | VerificationType::Double)
     }
 
@@ -239,7 +239,9 @@ fn descriptor_type(descriptor: &str) -> Option<VerificationType> {
 }
 
 /// A method descriptor's parameters (one entry each) and its result (`None` for `void`).
-fn method_types(descriptor: &str) -> Option<(Vec<VerificationType>, Option<VerificationType>)> {
+pub(super) fn method_types(
+    descriptor: &str,
+) -> Option<(Vec<VerificationType>, Option<VerificationType>)> {
     let inner = descriptor.strip_prefix('(')?;
     let close = inner.find(')')?;
     let (params, ret) = (&inner[..close], &inner[close + 1..]);
@@ -378,7 +380,7 @@ impl FrameTypes {
                 let Some(state) = before[index].clone() else {
                     continue;
                 };
-                let Some(after) = step(insns, index, &state, pool) else {
+                let Some(after) = step(insns, index, &state, pool, None) else {
                     crate::trace_compiler!(
                         "bytecode",
                         "frame analysis: cannot step {:?} at {index} from {state:?}",
@@ -528,7 +530,7 @@ impl FrameTypes {
             let Some(state) = self.before(index) else {
                 continue;
             };
-            let Some(after) = step(insns, index, state, pool) else {
+            let Some(after) = step(insns, index, state, pool, None) else {
                 return false;
             };
             for &to in graph.normal_successors(index) {
@@ -550,11 +552,12 @@ impl FrameTypes {
 
 /// The state after `insn` (at `index`) runs from `state`. `None` for an opcode this does not
 /// model, or one the state cannot legally run.
-fn step(
+pub(super) fn step(
     insns: &[Insn],
     index: usize,
     state: &FrameState,
     pool: &dyn PoolView,
+    this_class: Option<&str>,
 ) -> Option<FrameState> {
     use VerificationType::*;
     let mut s = state.clone();
@@ -761,8 +764,8 @@ fn step(
             let receiver = s.pop()?;
             // `<init>` on an uninitialized object makes every copy of it — on the stack and in
             // locals — the constructed class. Any other target is an ordinary call. A constructor's
-            // own `this` has no class name this view can give it; no suspend function is a
-            // constructor, so `Object` is as far as it needs to be right.
+            // own `this` becomes the class being written when the caller names it; otherwise
+            // `Object` is as far as it needs to be right (no suspend function is a constructor).
             if let Uninitialized(created) = receiver {
                 let constructed = Reference(constructed_class(insns, created, pool)?);
                 for value in s.locals.iter_mut().chain(s.stack.iter_mut()) {
@@ -771,9 +774,10 @@ fn step(
                     }
                 }
             } else if receiver == UninitializedThis {
+                let constructed = Reference(this_class.unwrap_or(OBJECT_INTERNAL_NAME).to_string());
                 for value in s.locals.iter_mut().chain(s.stack.iter_mut()) {
                     if *value == UninitializedThis {
-                        *value = Reference(OBJECT_INTERNAL_NAME.to_string());
+                        *value = constructed.clone();
                     }
                 }
             }
