@@ -4,9 +4,8 @@
 //! only the collection serializers, so a property of any of these types was rejected as an
 //! unsupported construct.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, member_body, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::both_compilers_box;
 
 /// Each tuple round-trips under both compilers, as a property, nested in a collection, nullable,

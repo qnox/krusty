@@ -6,9 +6,8 @@
 //! properties and enum entries only, so every class-level one was ignored: the discriminator was the
 //! qualified name `Event.Created`, and a document kotlinc wrote could not be read back.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions, plugin_and_runtime,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 use super::serialization_test_support::both_compilers_box;
 
 const SOURCE: &str = "import kotlinx.serialization.SerialName\n\

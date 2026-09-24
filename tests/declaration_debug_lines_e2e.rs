@@ -1,8 +1,7 @@
 //! Exact source-line parity for declaration-owned generated members.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, member_body, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 
 /// A bodyless `@Serializable` declaration followed by unrelated trivia and a sibling still closes
 /// on its own header. The generated serializer initializer exposes that source fact in bytecode.

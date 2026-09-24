@@ -7,7 +7,7 @@
 //! then described the renamed method a second time as a declared function, so `d1` grew extra
 //! function records and `d2` gained the mangled names at its end.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::compare_with_kotlinc_plugin;
+use super::common::compare_with_kotlinc_plugin;
 
 /// The `d1`/`d2` lines of the class's `@Metadata`.
 fn metadata(disassembly: &str) -> Vec<String> {

@@ -10,7 +10,7 @@
 //!
 //! krusty annotated every reference in all of them, and dropped the `constructor-impl` parameter's.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::compare_with_kotlinc_plugin;
+use super::common::compare_with_kotlinc_plugin;
 
 /// Every member header with the nullability annotations javap lists under it, in order.
 fn member_nullability(disassembly: &str) -> Vec<(String, Vec<String>)> {

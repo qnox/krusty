@@ -10,9 +10,8 @@
 //! because the frame names that parameter's type. Its position was the last non-debug difference on
 //! a `@Serializable` class with defaulted properties.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// The `Utf8` entries of a `javap -v` pool, in order, filtered to those asked for.
 fn pool_order(disassembly: &str, wanted: &[&str]) -> Vec<String> {

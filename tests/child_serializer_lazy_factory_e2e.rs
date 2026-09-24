@@ -15,9 +15,8 @@
 //! emitter machinery.
 
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, gradle_module_jar, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::{gradle_module_jar, plugin_and_runtime};
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\

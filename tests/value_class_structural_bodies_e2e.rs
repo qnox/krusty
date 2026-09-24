@@ -9,9 +9,7 @@
 //! underlying passed the operands in the opposite order — `areEqual(other, arg0)` — which runs the
 //! OTHER value's `equals`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 #[test]
 fn primitive_underlying_bodies_match_kotlinc() {

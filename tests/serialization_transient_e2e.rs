@@ -14,8 +14,9 @@
 //! `typealias` or an import alias of `kotlinx.serialization.Transient` is transient, and an unrelated
 //! annotation class that is also called `Transient` is not.
 
+use super::common::compare_with_kotlinc_plugin;
 use super::serialization_companion_byte_parity_e2e::{
-    compare_files_with_kotlinc_plugin, compare_with_kotlinc_plugin, plugin_and_runtime,
+    compare_files_with_kotlinc_plugin, plugin_and_runtime,
 };
 use super::serialization_test_support::{both_compilers_box, both_compilers_box_files};
 
@@ -102,10 +103,7 @@ fn a_class_with_a_transient_property_is_byte_identical() {
     }
 }
 
-fn assert_byte_identical(
-    class: &str,
-    built: &super::serialization_companion_byte_parity_e2e::ReferenceComparison,
-) {
+fn assert_byte_identical(class: &str, built: &super::common::ReferenceComparison) {
     if built.krusty_bytes != built.reference_bytes {
         let (want, got) = (disassembly(&built.reference), disassembly(&built.krusty));
         let first = want

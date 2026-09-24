@@ -11,9 +11,7 @@
 //!
 //! It now types the read from the carrier the value-class pass records beside it.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "@JvmInline value class Tag(val raw: String)\n\
     class Holder(val count: Int, val tag: Tag) {\n\

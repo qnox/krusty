@@ -7,9 +7,8 @@
 //! `ObjectSerializer` in place. krusty generated a `Solo$$serializer` class for it and referenced it
 //! from those places, while the class was never emitted: `NoClassDefFoundError` at first use.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, member_body, method_instructions, plugin_and_runtime,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::both_compilers_box;
 
 const SOURCE: &str = "import kotlinx.serialization.SerialName\n\

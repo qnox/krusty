@@ -5,9 +5,7 @@
 //! non-null: a parameter past its `checkNotNullParameter`, a local past an `ifnull` of it, a value
 //! already checked once. krusty kept every check.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "fun checkedParameter(a: Any): String = a as String\n\

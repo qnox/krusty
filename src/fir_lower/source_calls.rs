@@ -48,6 +48,12 @@ pub(super) enum SelectedDefaultMode {
     Materialize,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum SameFileExtensionReceiverMode {
+    Materialized,
+    DirectWhenOrdered,
+}
+
 pub(super) struct SelectedOperandRequest<'a> {
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
@@ -1366,6 +1372,7 @@ impl BodyLowering<'_> {
         target: CallableId,
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
+        extension_receiver_mode: SameFileExtensionReceiverMode,
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
@@ -1390,10 +1397,12 @@ impl BodyLowering<'_> {
             .owner
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
-        // An extension receiver is inserted among context/value parameters below. Keep that rarer
-        // shape on the general spill path; an ordinary receiver plus already ordered value arguments
-        // maps directly to the JVM operand order without any temporary.
-        let direct = extension_receiver.is_none()
+        // An extension receiver is inserted among context/value parameters below. The checked
+        // iterator-loop contract may keep its already-ordered, argument-free receiver direct;
+        // ordinary calls retain the materialized boundary recorded for general source evaluation.
+        let direct = (extension_receiver.is_none()
+            || (extension_receiver_mode == SameFileExtensionReceiverMode::DirectWhenOrdered
+                && arguments.is_empty()))
             && !declaration_flags.has(crate::fir::DeclarationFlags::TAILREC)
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
             && arguments_follow_parameter_order(arguments, None);
@@ -1430,7 +1439,11 @@ impl BodyLowering<'_> {
             Some(receiver) => {
                 let ty = declared_extension_receiver?;
                 let specialized = crate::types::ty_subst_keep_unbound(ty.get(), &bindings);
-                let receiver = self.spill_call_operand(receiver, specialized, &mut statements);
+                let receiver = if direct {
+                    self.direct_call_operand(receiver, specialized)
+                } else {
+                    self.spill_call_operand(receiver, specialized, &mut statements)
+                };
                 Some(if !specialized.is_reference() && ty.get().is_reference() {
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,

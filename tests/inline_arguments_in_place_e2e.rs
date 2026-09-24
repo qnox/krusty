@@ -6,9 +6,7 @@
 //! written, and the slots close. krusty stored every argument into its parameter slot and loaded it
 //! back: `maxOf(a, b)` was `iload_0; iload_1; istore_3; iload_3; invokestatic Math.max`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "fun larger(first: Int, second: Int): Int = maxOf(first, second)\n\

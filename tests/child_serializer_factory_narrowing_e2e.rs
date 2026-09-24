@@ -13,9 +13,8 @@
 //! The casts also move the `areturn`, which is the instruction kotlinc hangs the factory's
 //! `LineNumberTable` entry on, so the shape has to be right before that entry can be.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\

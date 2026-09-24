@@ -5,9 +5,7 @@
 //! its bytecode. krusty left `getstatic kotlin/Unit.INSTANCE; pop` after a `Unit` call used as the
 //! value of an `if` arm, after an inlined lambda's body, and after an inlined `forEach`/`repeat`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "class Node { var hits = 0\n\

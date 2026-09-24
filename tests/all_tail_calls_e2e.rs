@@ -7,9 +7,7 @@
 //! early `return null`. krusty forwarded only a body with exactly one suspension point as its
 //! final value, so these got a continuation class and a state machine.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const LIBRARY: &str = "package dependency\n\
     class Answer(val count: Int)\n\

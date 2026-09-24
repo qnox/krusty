@@ -6,9 +6,7 @@
 //! verification ("Inconsistent stackmap frames"). kotlinc emits a discarded `when` as a statement,
 //! each branch discarding its own value, and never materializes a discarded `Unit`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "fun choose(b: Boolean, c: Boolean) {\n\
     \x20   if (b) {\n\

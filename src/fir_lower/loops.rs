@@ -1,11 +1,25 @@
 use crate::fir::{
     ControlTargetId, FirBuiltinIterableKind, FirExprId, FirIteratorCall, FirIteratorReceiver,
-    FirLoopHeader, FirRangeCounterKind, FirRangeOperation, OriginId, ResolvedTy,
+    FirLoopHeader, FirRangeCounterKind, FirRangeOperation, LocalValueId, OriginId, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
+use super::source_calls::SameFileExtensionReceiverMode;
 use super::{BodyLowering, FirLoweringFailure};
+
+/// The checked pieces of one iterator-protocol loop, kept together across the FIR-to-IR boundary.
+struct IteratorLoopContract<'a> {
+    target: ControlTargetId,
+    variable: LocalValueId,
+    variable_ty: ResolvedTy,
+    iterable: FirExprId,
+    iterator_ty: ResolvedTy,
+    iterator: &'a FirIteratorCall,
+    has_next: &'a FirIteratorCall,
+    next: &'a FirIteratorCall,
+    body: FirExprId,
+}
 
 impl BodyLowering<'_> {
     fn loop_variable_declaration(
@@ -67,17 +81,17 @@ impl BodyLowering<'_> {
                 iterator,
                 has_next,
                 next,
-            } => self.iterator_loop(
+            } => self.iterator_loop(IteratorLoopContract {
                 target,
-                variable.raw(),
-                *variable_ty,
-                *iterable,
-                *iterator_ty,
+                variable: *variable,
+                variable_ty: *variable_ty,
+                iterable: *iterable,
+                iterator_ty: *iterator_ty,
                 iterator,
                 has_next,
                 next,
                 body,
-            ),
+            }),
         }
     }
 
@@ -345,36 +359,25 @@ impl BodyLowering<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn iterator_loop(
         &mut self,
-        target: ControlTargetId,
-        variable: u32,
-        variable_ty: ResolvedTy,
-        iterable: FirExprId,
-        iterator_ty: ResolvedTy,
-        iterator: &FirIteratorCall,
-        has_next: &FirIteratorCall,
-        next: &FirIteratorCall,
-        body: FirExprId,
+        contract: IteratorLoopContract<'_>,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let iterable_ty = self
-            .body
-            .expr(iterable)
-            .ok_or(FirLoweringFailure::MissingExpression(iterable))?
-            .ty
-            .get();
+        let IteratorLoopContract {
+            target,
+            variable,
+            variable_ty,
+            iterable,
+            iterator_ty,
+            iterator,
+            has_next,
+            next,
+            body,
+        } = contract;
+        // The checked iterable is the receiver of exactly one selected `iterator()` call. Keep that
+        // direct semantic operand instead of introducing state that does not exist in the source.
         let iterable_value = self.expression(iterable)?;
-        let iterable_slot = self.allocate_temporary();
-        let iterable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: iterable_slot,
-            ty: iterable_ty,
-            init: Some(iterable_value),
-            named: false,
-        });
-
-        let iterable_read = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
-        let iterator_value = self.iterator_call(iterator, iterable_read)?;
+        let iterator_value = self.iterator_call(iterator, iterable_value)?;
         let iterator_slot = self.allocate_temporary();
         let iterator_declaration = self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
@@ -388,7 +391,7 @@ impl BodyLowering<'_> {
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let element = self.iterator_call(next, iterator_read)?;
         let (_, variable_declaration) =
-            self.loop_variable_declaration(variable, variable_ty.get(), element);
+            self.loop_variable_declaration(variable.raw(), variable_ty.get(), element);
         let body = self.expression(body)?;
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable_declaration, body],
@@ -402,7 +405,7 @@ impl BodyLowering<'_> {
             label: Some(self.control_label(0, target)?),
         });
         Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![iterable_declaration, iterator_declaration, loop_expression],
+            stmts: vec![iterator_declaration, loop_expression],
             value: None,
         }))
     }
@@ -456,6 +459,7 @@ impl BodyLowering<'_> {
                     *target,
                     dispatch_receiver,
                     extension_receiver,
+                    SameFileExtensionReceiverMode::DirectWhenOrdered,
                     &arguments,
                     &context_parameter_types,
                     &[],

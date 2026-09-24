@@ -5,9 +5,7 @@
 //! (`append(Object)`), and calls `x.toString()`/`x.hashCode()` as the static `-impl` too. krusty
 //! boxed the carrier with `box-impl` first and dispatched on the box.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "@JvmInline value class N(val n: Int)\n\
     @JvmInline value class S(val s: String)\n\
