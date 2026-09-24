@@ -11,6 +11,19 @@ fn finish_pass_one(analysis: SourceSetAnalysis) -> StreamingSourceSetAnalysis {
     analysis
 }
 
+/// The semantic identity of the only classifier declared in executable code. Local classifiers
+/// carry an opaque identity, so tests find them by their naming provenance, not by a spelling.
+fn sole_local_classifier(index: &crate::fir::ResolvedModuleIndex) -> crate::types::TypeName {
+    let mut local = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| index.local_class_name_provenance(*declaration).is_some())
+        .filter_map(|declaration| index.classifier_header(declaration))
+        .map(|classifier| classifier.classifier);
+    let classifier = local.next().expect("one local classifier");
+    assert!(local.next().is_none(), "exactly one local classifier");
+    classifier
+}
+
 fn stable_declaration_at(
     analysis: &SourceSetAnalysis,
     source: usize,
@@ -1548,7 +1561,7 @@ fn reparsed_anonymous_object_retains_its_own_property_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let internal = crate::types::type_name("AnonymousPropertyKt$box$value$1");
+    let internal = sole_local_classifier(index);
     let legacy = analysis
         .symbols
         .class_by_type_name(internal)
@@ -1622,7 +1635,7 @@ fn non_local_property_signature_publishes_demanded_anonymous_member_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let anonymous = crate::types::type_name("A$x$1");
+    let anonymous = sole_local_classifier(index);
     let provider = crate::fir::StreamedModuleSymbols::for_file(index, 0);
     let classifier = provider
         .classifier(anonymous)

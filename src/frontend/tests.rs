@@ -51,10 +51,12 @@ fun calculate() {
     assert_eq!(anonymous[1].2.ordinal, Some(1));
     assert_eq!(anonymous[2].2.lexical_owner, None);
     assert_eq!(anonymous[2].2.segments, ["calculate"]);
-    assert_eq!(anonymous[2].2.ordinal, Some(2));
+    assert_eq!(anonymous[2].2.ordinal, Some(1));
     assert_eq!(anonymous[3].2.lexical_owner, None);
     assert_eq!(anonymous[3].2.segments, ["calculate"]);
-    assert_eq!(anonymous[3].2.ordinal, Some(4));
+    // kotlinc 2.4.10: `calculate$1`, `calculate$2` for `Probe::`class``, then `calculate$3`.
+    // A property initializer's object counts under `calculate$holder`, not `calculate`.
+    assert_eq!(anonymous[3].2.ordinal, Some(3));
 
     let local = file
         .local_class_decls

@@ -1676,9 +1676,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let label = spelling.rsplit_once('@').map(|(_, label)| label);
             let current = match label {
                 Some(label) => receivers.into_iter().find(|receiver| {
-                    receiver
-                        .obj_internal()
-                        .is_some_and(|classifier| self.classifier_source_spelling(classifier) == label)
+                    receiver.obj_internal().is_some_and(|classifier| {
+                        self.classifier_source_spelling(classifier) == label
+                    })
                 }),
                 None => receivers.into_iter().next(),
             }
@@ -1738,9 +1738,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .implicit_receivers(scope)
                 .into_iter()
                 .find(|receiver| {
-                    receiver
-                        .obj_internal()
-                        .is_some_and(|classifier| self.classifier_source_spelling(classifier) == label)
+                    receiver.obj_internal().is_some_and(|classifier| {
+                        self.classifier_source_spelling(classifier) == label
+                    })
                 })
                 .and_then(|receiver| crate::fir::ResolvedTy::new(receiver).ok())
                 .ok_or_else(Self::failure);

@@ -1765,7 +1765,11 @@ fun make(): A {
     let classifier = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
         .filter_map(|declaration| index.classifier_header(declaration))
-        .find(|classifier| classifier.classifier.contains("$B"))
+        .find(|classifier| {
+            index
+                .declaration_name(classifier.declaration)
+                .is_some_and(|name| name.rsplit('.').next() == Some("B"))
+        })
         .expect("stable local B classifier");
     let constructor = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
@@ -1866,15 +1870,24 @@ fun make(): Any {
         .expect("a parenless local superclass must finalize in Pass 1")
         .module
         .index();
-    let derived = (0..index.declaration_count())
-        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
-        .filter_map(|declaration| index.classifier_header(declaration))
-        .find(|classifier| classifier.classifier.contains("Derived"))
-        .expect("stable Derived classifier header");
-    assert!(derived.superclass.is_some_and(|superclass| superclass
-        .get()
-        .obj_internal()
-        .is_some_and(|owner| owner.contains("Base"))));
+    let local = |simple: &str| {
+        (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .filter_map(|declaration| index.classifier_header(declaration))
+            .find(|classifier| {
+                index
+                    .declaration_name(classifier.declaration)
+                    .is_some_and(|name| name.rsplit('.').next() == Some(simple))
+            })
+    };
+    let derived = local("Derived").expect("stable Derived classifier header");
+    let base = local("Base").expect("stable Base classifier header");
+    assert_eq!(
+        derived
+            .superclass
+            .and_then(|superclass| superclass.get().obj_internal()),
+        Some(base.classifier)
+    );
 }
 
 #[test]
