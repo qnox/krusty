@@ -13,6 +13,7 @@
 //! is buildable from any host. When no clang is available, krusty still builds — with no prebuilt
 //! runtime, the native backend reports that plainly instead of failing somewhere inside a link.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -53,6 +54,13 @@ const SOURCES: &[&str] = &["krusty_start.c"];
 const HEADERS: &[&str] = &["krusty_sys.h", "krusty_rt.h"];
 
 fn main() {
+    if let Err(error) = prebuild_runtime() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn prebuild_runtime() -> Result<(), String> {
     let runtime_dir = Path::new("src/native/runtime");
     for file in SOURCES.iter().chain(HEADERS) {
         println!(
@@ -76,7 +84,6 @@ fn main() {
         let target_dir = out_dir.join("runtime").join(arch);
         std::fs::create_dir_all(&target_dir).expect("create runtime output directory");
         let mut objects = Vec::new();
-        let mut ok = true;
         for source in SOURCES {
             let object = target_dir.join(Path::new(source).with_extension("o"));
             let status = Command::new(&compiler)
@@ -92,30 +99,30 @@ fn main() {
             match status {
                 Ok(status) if status.success() => objects.push(object),
                 Ok(status) => {
+                    return Err(format!(
+                        "native runtime: `{compiler}` failed compiling `{source}` for `{triple}` \
+                         ({status})"
+                    ));
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
                     println!(
-                        "cargo:warning=native runtime: `{compiler}` failed for {triple} on {source} ({status}); \
-                         the {arch} target will be unavailable"
+                        "cargo:warning=native runtime: compiler `{compiler}` was not found; no native \
+                         target will be available. Install clang, or set KRUSTY_RUNTIME_CC."
                     );
-                    ok = false;
+                    compiler_missing = true;
                     break;
                 }
                 Err(error) => {
-                    println!(
-                        "cargo:warning=native runtime: cannot run `{compiler}` ({error}); no native target \
-                         will be available. Install clang, or set KRUSTY_RUNTIME_CC."
-                    );
-                    compiler_missing = true;
-                    ok = false;
-                    break;
+                    return Err(format!(
+                        "native runtime: cannot run compiler `{compiler}` for `{triple}` on `{source}`: \
+                         {error}"
+                    ));
                 }
             }
         }
         // A compiler that cannot be started fails the same way for every target: one warning.
         if compiler_missing {
             break;
-        }
-        if !ok {
-            continue;
         }
         built_any = true;
         generated.push_str(&format!("    (crate::native::Arch::{arch}, &[\n"));
@@ -141,4 +148,5 @@ fn main() {
     if compiler_missing {
         println!("cargo:rerun-if-env-changed=PATH");
     }
+    Ok(())
 }
