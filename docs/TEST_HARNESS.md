@@ -244,19 +244,26 @@ unless the requested category is enabled.
 
 ## Current Conformance
 
-Latest verified codegen/box metric (2026-06-28):
+There is no conformance number written down in this repository, deliberately. Every figure committed
+to a document went stale within days of the commit that changed it, and a stale number read as
+current is worse than no number. The live measure is the **conformance badge** in `README.md`: the
+`conformance` job recomputes it per reference version on every master build and publishes the share
+of the `codegen/box` corpus whose `box()` returns `OK` on krusty-emitted bytecode. Read the badge, or
+the `conformance` job of the latest master CI run, when you need today's figure; run the gate locally
+when you need this checkout's.
 
-```text
-scanned: 7351 | krusty-compiled: 2078 | box()=OK: 2078 | skipped(unsupported): 5273 | FAIL: 0
-```
+A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
+measured at the time it landed, not a claim about the present, and must not be quoted as current.
 
-Only compare `box()=OK` numbers when `FAIL: 0`. The historical `1842 -> 1585` cliff in
-`target/ir_conformance_trend.csv` was a real temporary coverage drop from a conformance-safety cleanup,
-not the current metric. That cleanup stopped counting unsupported shapes as compiled support
-(builder-inference directives, JS-runtime-only files, advanced `Result<T>`/value-class cases, and
-unsupported `UByte`/`UShort` value-class paths). Later passes recovered past both plateaus; this checkout
-is currently at `2078 OK / 0 FAIL`. Likewise, `KRUSTY_NO_RUN=1` is for compile/emit profiling only; it
-skips JVM execution and must not be reported as runtime conformance.
+Two rules hold whatever the number is. Only compare `box()=OK` counts when `FAIL: 0` — a count taken
+beside a failure is not a coverage measurement. And `KRUSTY_NO_RUN=1` is for compile/emit profiling
+only: it skips JVM execution, so its output must never be reported as runtime conformance.
+
+One historical artifact is worth keeping, because the shape of the graph invites the wrong reading:
+the `1842 -> 1585` cliff in `target/ir_conformance_trend.csv` was a real temporary coverage drop from
+a conformance-safety cleanup, not a regression. That cleanup stopped counting unsupported shapes as
+compiled support (builder-inference directives, JS-runtime-only files, advanced `Result<T>`/value-class
+cases, and unsupported `UByte`/`UShort` value-class paths). Later passes recovered past both plateaus.
 
 For corpus triage, use the survey binary through the gate profile:
 
@@ -270,7 +277,17 @@ For corpus triage, use the survey binary through the gate profile:
 
 The parse-only TSV records exact corpus file, Kotlin block, failure stage, line, column, diagnostic,
 and source line. Its summary separately reports discovered cases, Kotlin blocks, parsed cases, lex
-failures, parse failures, AST failures, and panics; any failed case makes the command fail.
+failures, parse failures, AST failures, and panics; any failed case makes the command fail. Backend
+applicability is deliberately not consulted: valid syntax must reach a complete AST even where a
+later phase has no support for it, and capability diagnostics come after parsing.
+
+The parse gate does not reach a clean sweep of the corpus, and the one case it cannot is an input
+defect rather than a parser gap: `contextParameters/withExtensionReceiverInType.kt` carries extra
+closing parentheses, and the pinned reference compiler reports syntax errors at exactly the same two
+positions krusty rejects. The file is marked backend-inapplicable, but applicability cannot make
+invalid syntax valid. Accepting it would take a corpus-path exception, silent delimiter recovery
+reported as success, or a weakened invalid-syntax diagnostic, so the gate keeps the defect visible
+instead. No parser change should be needed once the pinned input is corrected.
 
 The harness builds the survey with the normal `gate` profile, applies the configurable
 `KRUSTY_TEST_TIMEOUT_SECONDS` deadline, provisions the same toolchain/corpus, and reports specific
