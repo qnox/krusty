@@ -1,0 +1,43 @@
+name: attribution
+
+# AGENTS.md forbids AI, assistant and tool attribution in commits and pull requests. `edited` re-runs
+# the check when only the title or body changes, which the main ci workflow does not react to.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: commits
+        env:
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
+        run: scripts/check-attribution.sh "$RANGE"
+      - name: title and body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"
+      # A squash merge is authored by whoever opened the pull request, so a squash-merged PR opened
+      # by an assistant's app account lands on master under that account. Warn so it is merged with
+      # "Rebase and merge", which keeps the maintainer-authored commits.
+      - name: opener
+        if: github.event_name == 'pull_request'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if printf '%s\n' "$PR_AUTHOR" | grep -qiE 'claude|codex|copilot|openai|anthropic'; then
+            echo "::warning title=attribution::opened by $PR_AUTHOR; merge with Rebase and merge, not squash, so master keeps the maintainer as author"
+          fi
