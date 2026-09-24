@@ -901,6 +901,9 @@ pub struct PropParam {
     /// Source span of the parameter name (zero when synthesized, e.g. an inner class's captured
     /// outer). Filled by the parser; the post-pass derives `decl_line` from it.
     pub span: Span,
+    /// The whole parameter declaration: its modifiers and annotations through its type or default.
+    /// A diagnostic about the declaration as a whole starts here, which is where kotlinc puts it.
+    pub declaration_span: Span,
     /// 1-based source line of this parameter (0 = unknown). kotlinc's primary-constructor
     /// `LineNumberTable` maps each property parameter's field store to the parameter's own line.
     pub decl_line: u32,
@@ -1304,7 +1307,12 @@ pub struct PropDecl {
     /// kotlinc puts it.
     pub delegate_by_span: Option<Span>,
     pub explicit_backing_field: Option<ExplicitBackingField>,
+    /// From the `val`/`var` keyword through the end of the declaration.
     pub span: Span,
+    /// [`Self::span`] widened to the member's modifiers and annotations, which is where kotlinc
+    /// starts a diagnostic about the declaration as a whole. Only a class member records its
+    /// modifier prefix; any other property starts at its keyword, as [`Self::span`] does.
+    pub declaration_span: Span,
     /// Exact span of the property's NAME, like [`FunDecl::name_span`].
     pub name_span: Span,
 }

@@ -6267,6 +6267,51 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc, `a_computed_default_is_omitted_from_json_like_kotlinc` and
   `a_body_property_initializer_is_omitted_and_restored_like_kotlinc`, the JSON under both
   compilers).
+- **A `@kotlinx.serialization.Transient` property is not a serial element.** kotlinc's plugin
+  serializes every property with a backing field except a transient one: it is absent from the
+  descriptor (element count and names), `childSerializers`, `write$Self` and `deserialize`, and the
+  deserialization constructor takes no argument or seen-mask bit for it. That constructor still
+  initializes every backing field in declaration order, and gives a transient property its
+  initializer (a constructor property's default or a body property's initializer), attributed to
+  the property's line like an absent optional element's default. krusty serialized a transient
+  property as an ordinary element (`{"x":1,"cache":7}` where kotlinc writes `{"x":1}`). Element
+  `i` is no longer backing field `i` once a transient property precedes another, so the plugin
+  keeps one mapping from elements to backing fields (`serial_elements`): the wire shape is
+  addressed by element, the object's fields by field. That mapping reads each checked
+  `IrProperty`'s own backing field and resolved annotation identities, never a property or field
+  name: a `typealias` or import alias of `kotlinx.serialization.Transient` is transient, an
+  unrelated annotation class also called `Transient` is not, and the identity survives the
+  streaming frontend releasing the declaring file's syntax. A `lateinit` transient property has no
+  initializer, and the deserialization constructor leaves its field unset, as kotlinc's does.
+  Tests: `tests/serialization_transient_e2e.rs` (`transient_properties_are_neither_written_nor_read`,
+  `a_transient_constructor_property_is_left_out_of_the_document`,
+  `an_aliased_transient_is_transient_and_a_same_named_annotation_is_not` and
+  `a_lateinit_transient_property_is_left_unset_by_deserialization`, the JSON under both compilers;
+  `a_class_with_a_transient_property_is_byte_identical`,
+  `a_class_with_aliased_and_same_named_transients_is_byte_identical` and
+  `a_transient_body_property_is_initialized_by_the_deserialization_constructor`, bytes, instruction
+  and line parity with kotlinc; `a_transient_property_declared_in_another_file_stays_transient`,
+  the JSON and bytes of a class serialized from a sibling file).
+- **A `@Transient` property must have an initializer — a frontend error, like kotlinc's.** With the
+  serialization plugin enabled, kotlinc's FIR class checker reports `TRANSIENT_MISSING_INITIALIZER`
+  ("this property is marked as @Transient and therefore must have an initializing expression") for
+  a transient property that stores a value (not abstract, delegated or accessor-only) but has
+  neither an initializer (a constructor property's default, a body property's initializer) nor
+  `lateinit`. It checks the classes whose serializer the plugin builds from their properties —
+  `@Serializable` without `with =`, not an object or an enum; an abstract or sealed class is
+  checked — and reports at the start of the whole declaration: its first modifier or annotation,
+  after any KDoc. krusty ran no plugin frontend rule, so the class reached the backend, which
+  declined the file with the generic unsupported-construct error at `1:1`. Native plugins now get
+  a frontend class-check hook (`IrPlugin::check_frontend_class`), run by the checker on each class
+  with its checked annotation identities while the class's syntax is live. The wording is the one
+  every supported reference (2.4.0, 2.4.10) uses; kotlinc 2.4.20 appends a period. Without the
+  plugin the property needs no initializer under either compiler.
+  Tests: `tests/serialization_transient_diagnostics_e2e.rs`
+  (`a_transient_property_without_an_initializer_is_rejected_like_kotlinc`, the exact error list of
+  both compilers over three files: a constructor property, modifier-first and own-line annotations,
+  a `typealias`, a sealed class, and the accepted `lateinit`, initialized, object and same-named
+  shapes; `without_the_plugin_a_transient_property_needs_no_initializer`), and the unit tests in
+  `src/plugins/serialization/transient_initializer.rs`.
 - **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
   extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
   `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for

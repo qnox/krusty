@@ -115,6 +115,42 @@ pub struct FrontendClassContext<'a> {
     pub annotation_class_arguments: &'a [(u32, TypeName)],
 }
 
+/// A source class as a frontend plugin CHECKER sees it: the resolved identities of its
+/// annotations and the declaration facts of its properties. The checker builds it while the class's
+/// syntax is live, from the same checked annotation applications lowering consumes, so a plugin
+/// never resolves a spelling and an alias names the class it aliases.
+pub struct FrontendClassCheckContext<'a> {
+    pub kind: crate::libraries::TypeKind,
+    pub annotations: &'a [TypeName],
+    /// Explicit class-literal arguments grouped by the ordinal of the annotation occurrence, as in
+    /// [`FrontendClassContext::annotation_class_arguments`].
+    pub annotation_class_arguments: &'a [(u32, TypeName)],
+    /// The class's properties in declaration order: primary-constructor properties first, then
+    /// the properties declared in its body.
+    pub properties: &'a [FrontendPropertyFacts],
+}
+
+/// One property of a [`FrontendClassCheckContext`].
+pub struct FrontendPropertyFacts {
+    /// Resolved annotation identities, in source order.
+    pub annotations: Vec<TypeName>,
+    /// Whether the property stores a value: not abstract, delegated or external, and either
+    /// accessor-less or with a getter that reads `field`.
+    pub has_backing_field: bool,
+    /// An initializer, or a primary-constructor property's default value.
+    pub has_initializer: bool,
+    pub is_lateinit: bool,
+    /// The whole declaration, modifiers and annotations included.
+    pub declaration_span: crate::diag::Span,
+}
+
+/// An error a frontend plugin checker reports against a source declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendPluginDiagnostic {
+    pub span: crate::diag::Span,
+    pub message: &'static str,
+}
+
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
 /// Contexts are built exclusively from checked common IR: plugins never resolve source spelling.
 pub struct PluginContext {
@@ -439,6 +475,15 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// Report a source class the plugin rejects, as kotlinc's plugin checkers do. This runs in the
+    /// frontend, so a rejected class never reaches backend generation.
+    fn check_frontend_class(
+        &self,
+        _ctx: &FrontendClassCheckContext<'_>,
+        _diagnostics: &mut Vec<FrontendPluginDiagnostic>,
+    ) {
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -752,6 +797,17 @@ impl PluginHost {
         for plugin in &self.plugins {
             plugin.publish_frontend_generated_classifiers(ctx, classifiers);
         }
+    }
+
+    pub fn check_frontend_class(
+        &self,
+        ctx: &FrontendClassCheckContext<'_>,
+    ) -> Vec<FrontendPluginDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for plugin in &self.plugins {
+            plugin.check_frontend_class(ctx, &mut diagnostics);
+        }
+        diagnostics
     }
 
     pub fn plan_frontend_expressions(
