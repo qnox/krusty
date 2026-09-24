@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::temporaries::{self, Body};
-use super::{negated_jumps, redundant_gotos};
+use super::{negated_jumps, redundant_checkcasts, redundant_gotos};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
@@ -348,6 +348,38 @@ impl ClassWriter {
             variable_bounds[end] = true;
             named.push((start, end, slot));
         }
+        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
+        let mut entry = Vec::new();
+        if source.access & 0x0008 == 0 {
+            entry.push(if source.name == "<init>" {
+                VerifType::UninitializedThis
+            } else {
+                VerifType::ObjectName(self.internal_name.clone())
+            });
+        }
+        if !Self::append_param_verif_types(&source.desc, &mut entry) {
+            return None;
+        }
+        let entry = expand_slots(&entry);
+        let original_graph = ControlGraph::build(&insns, &handlers)?;
+        // The verifier's types before each original instruction, computed at most once.
+        let original_types_cell = std::cell::OnceCell::new();
+        let original_types = || -> Option<&FrameTypes> {
+            original_types_cell
+                .get_or_init(|| {
+                    let original_frames = self
+                        .merged_frames(&source.builder)
+                        .into_iter()
+                        .map(|(at, locals, stack)| {
+                            Some((index_of(at)?, expand_slots(&locals), stack))
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)
+                })
+                .as_ref()
+        };
+        let redundant_casts =
+            redundant_checkcasts::select(self, method, &insns, &offsets, &original_types);
         // Which label each branch jumps to, and the labels bound at each index in the order they
         // stand: kotlinc's rules see labels, and several can share one offset.
         let mut branch_labels: Vec<Option<u32>> = vec![None; n];
@@ -382,6 +414,7 @@ impl ClassWriter {
             arrivals: &arrivals,
             marks: &marks,
             named: &named,
+            redundant_casts: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| {
@@ -565,32 +598,11 @@ impl ClassWriter {
         };
         let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
-        // Entry state: `this` (instance methods) and the parameters, one entry per slot.
-        let mut entry = Vec::new();
-        if source.access & 0x0008 == 0 {
-            entry.push(if source.name == "<init>" {
-                VerifType::UninitializedThis
-            } else {
-                VerifType::ObjectName(self.internal_name.clone())
-            });
-        }
-        if !Self::append_param_verif_types(&source.desc, &mut entry) {
-            return None;
-        }
-        let entry = expand_slots(&entry);
-
         // A null check that now keeps its value on the stack leaves it there at the jump target:
         // that target's frame gains it, typed as the checked local was at each check.
-        let original_graph = ControlGraph::build(&insns, &handlers)?;
         let mut pushed: Vec<(usize, VerifType)> = Vec::new();
         if !rewrite.stack_at_target.is_empty() {
-            let original_frames = self
-                .merged_frames(&source.builder)
-                .into_iter()
-                .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
-                .collect::<Option<Vec<_>>>()?;
-            let types =
-                FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)?;
+            let types = original_types()?;
             for (target, loads) in &rewrite.stack_at_target {
                 let mut value: Option<VerificationType> = None;
                 for &load in loads {
