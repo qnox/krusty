@@ -1234,6 +1234,8 @@ mod uncast_continuation_operand_e2e;
 mod upcast_checkcast_e2e;
 #[path = "when_subject_once_e2e.rs"]
 mod when_subject_once_e2e;
+#[path = "unmatched_null_check_temporaries_e2e.rs"]
+mod unmatched_null_check_temporaries_e2e;
 
 #[path = "child_serializer_accessor_body_e2e.rs"]
 mod child_serializer_accessor_body_e2e;
