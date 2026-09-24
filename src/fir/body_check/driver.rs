@@ -550,7 +550,10 @@ fn check_and_dispatch_enum_entry(
         origin: cause,
         ty: signature.result,
         kind: FirExprKind::ConstructorCall(FirConstructorCall {
-            target: FirConstructorTarget::Module(constructor.id),
+            target: FirConstructorTarget::Module {
+                declaration: constructor.id,
+                annotation: None,
+            },
             context_parameter_count: 0,
             outer_parameter: None,
             outer_receiver: None,

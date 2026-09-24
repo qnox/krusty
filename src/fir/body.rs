@@ -645,7 +645,10 @@ pub struct FirAnnotationConstruction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
-    Module(CallableId),
+    Module {
+        declaration: CallableId,
+        annotation: Option<Box<FirAnnotationConstruction>>,
+    },
     External {
         declaration: ExternalCallableId,
         classifier: TypeName,
@@ -657,7 +660,16 @@ pub enum FirConstructorTarget {
 impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module(_) => 0,
+            Self::Module { annotation, .. } => annotation.as_ref().map_or(0, |annotation| {
+                annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
+                    + annotation
+                        .members
+                        .iter()
+                        .map(|(name, _)| name.len())
+                        .sum::<usize>()
+                    + annotation.defaults.len()
+                        * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
+            }),
             Self::External {
                 parameters,
                 annotation,
@@ -2755,7 +2767,11 @@ impl FirBody {
                     }
                 }
                 FirExprKind::ConstructorCall(call) => {
-                    if let FirConstructorTarget::Module(callable) = call.target {
+                    if let FirConstructorTarget::Module {
+                        declaration: callable,
+                        ..
+                    } = call.target
+                    {
                         callables.insert(callable);
                     }
                 }

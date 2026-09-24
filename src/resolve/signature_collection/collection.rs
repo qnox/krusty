@@ -935,6 +935,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .map_or(c.is_value, |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
+                    let classifier_is_annotation = classifier_declaration_flags.map_or_else(
+                        || c.is_annotation(),
+                        |flags| flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS),
+                    );
                     if compact_headers.is_none() {
                         assert_eq!(
                             classifier_header.primary_parameters.len(),
@@ -1481,22 +1485,24 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             )
                         })
                         .collect::<Vec<_>>();
-                    // Primary-constructor defaults are executable checked body units. Compact
-                    // signatures retain their presence in `ctor_param_names`; they must not retain
-                    // or inspect initializer syntax merely to support legacy literal substitution.
-                    let ctor_defaults: Vec<Option<CtorDefaultValue>> = if compact_headers.is_some()
-                    {
-                        vec![None; classifier_header.primary_parameters.len()]
-                    } else {
-                        c.props
-                            .iter()
-                            .map(|p| {
-                                p.default.and_then(|dx| {
-                                    extract_ctor_default(file, dx, &class_names, &*libraries)
+                    // Ordinary primary-constructor defaults are executable checked body units.
+                    // Annotation defaults additionally form a closed, file-independent semantic
+                    // declaration shape: a construction in another file must carry them without
+                    // borrowing an ExprId from the declaring file. Normalize only that language-
+                    // required compact value here; ordinary constructors retain presence alone.
+                    let ctor_defaults: Vec<Option<CtorDefaultValue>> =
+                        if compact_headers.is_some() && !classifier_is_annotation {
+                            vec![None; classifier_header.primary_parameters.len()]
+                        } else {
+                            c.props
+                                .iter()
+                                .map(|p| {
+                                    p.default.and_then(|dx| {
+                                        extract_ctor_default(file, dx, &class_names, &*libraries)
+                                    })
                                 })
-                            })
-                            .collect()
-                    };
+                                .collect()
+                        };
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = classifier_header
                         .primary_parameters

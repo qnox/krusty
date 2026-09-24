@@ -1,7 +1,7 @@
 name: ci
 
 # Build the conformance test binary once, run it against every supported Kotlin version, and publish
-# only after every version matches its box expected-failure list (tests/box_expected_failures/).
+# only after every version matches its exact box fail/not-applicable manifests.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
