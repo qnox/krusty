@@ -210,12 +210,10 @@ impl<'a> StreamedModuleSymbols<'a> {
         }
         let owner = self.index.classifier_declaration(internal)?;
         let declaration_header = self.index.declaration_header(owner)?;
-        // An ordinary body-local classifier publishes its declaration identity in Pass 1, while
-        // its lexical superclass and constructor shapes are finalized by the active Pass-2 body.
-        // Expose that declaration through the same provider record immediately; the checker-owned
-        // overlays contribute the shapes as they are checked. Requiring a completed classifier
-        // header here makes a valid lexical binding look unresolved between those two operations.
-        let classifier_header = self.index.classifier_header(owner);
+        // A declaration identity alone is sufficient for lexical binding, but hierarchy and member
+        // projection require the complete semantic classifier header. Deferred body-local shapes
+        // stay on the checker-owned overlay until that contract is available.
+        let classifier_header = self.index.classifier_header(owner)?;
         let anchor = self.index.declaration_anchor(owner)?;
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
@@ -252,13 +250,12 @@ impl<'a> StreamedModuleSymbols<'a> {
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
         let mut supertype_templates = classifier_header
-            .into_iter()
-            .flat_map(|header| header.superclass.iter().chain(header.interfaces.iter()))
+            .superclass
+            .iter()
+            .chain(classifier_header.interfaces.iter())
             .map(|supertype| supertype.get())
             .collect::<Vec<_>>();
-        if classifier_header.is_some_and(|header| header.superclass.is_none())
-            && internal != crate::types::wk::any()
-        {
+        if classifier_header.superclass.is_none() && internal != crate::types::wk::any() {
             // Kotlin's root class is implicit in source syntax, including for a class that lists
             // only interfaces. Publish that ordinary semantic edge from the source provider so the
             // core hierarchy finds Any members without a resolver or value-class special case.
@@ -277,9 +274,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             .filter_map(|supertype| supertype.non_null().obj_internal())
             .collect::<Vec<_>>()
             .into();
-        projected.sealed_subclasses = classifier_header
-            .map(|header| header.sealed_subclasses.to_vec().into())
-            .unwrap_or_default();
+        projected.sealed_subclasses = classifier_header.sealed_subclasses.to_vec().into();
         projected.companion_object =
             self.companion_classifier(owner)
                 .map(|(declaration, classifier)| {

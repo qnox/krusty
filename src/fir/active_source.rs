@@ -11,8 +11,8 @@ use crate::ast::{
 use crate::diag::Span;
 
 use super::{
-    extract_file_stubs, order_file_stubs, DeclarationFlags, DeclarationId, DeclarationIds,
-    DeclarationKind, LookupNames, ResolvedModuleIndex, SourceFileId,
+    extract_file_stubs_for_stable_binding, order_file_stubs, DeclarationFlags, DeclarationId,
+    DeclarationIds, DeclarationKind, LookupNames, ResolvedModuleIndex, SourceFileId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,10 +167,11 @@ impl ActiveSourceCursor {
     ) -> Result<ActiveSourceDeclarations, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let parser_len = extract_file_stubs(file, source, &mut parser_ids, &mut parser_names)
-            .into_iter()
-            .filter(|stub| stub.kind != DeclarationKind::TypeAlias)
-            .count();
+        let parser_len =
+            extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names)
+                .into_iter()
+                .filter(|stub| stub.kind != DeclarationKind::TypeAlias)
+                .count();
         let end = self
             .next
             .checked_add(parser_len)
@@ -395,7 +396,8 @@ impl ActiveSourceDeclarations {
     ) -> Result<Self, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let mut parser_stubs = extract_file_stubs(file, source, &mut parser_ids, &mut parser_names);
+        let mut parser_stubs =
+            extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         // A source typealias has no ordinary executable unit. The streaming parser can accumulate
         // one immediately before the next declaration callback, while Pass 2 receives its complete
         // compact header environment separately. It therefore participates in neither active AST
@@ -644,7 +646,8 @@ impl ActiveSourceDeclarations {
     ) -> Result<Vec<super::BodyWorkItem>, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let parser_stubs = extract_file_stubs(file, source, &mut parser_ids, &mut parser_names);
+        let parser_stubs =
+            extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         let retained_by_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);
             let mut seen = std::collections::HashSet::new();

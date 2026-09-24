@@ -120,3 +120,22 @@ pub(super) fn stabilize_local_class_names(
     plans.sort_unstable_by_key(|(declaration, _)| *declaration);
     plans
 }
+
+pub(super) fn assert_complete_local_classifier_provenance(
+    plans: &[(DeclarationId, LocalClassNameProvenance)],
+    stubs: &[super::DeclarationStub],
+) {
+    let named = plans
+        .iter()
+        .map(|(declaration, _)| *declaration)
+        .collect::<std::collections::HashSet<_>>();
+    for stub in stubs.iter().filter(|stub| {
+        stub.kind == super::DeclarationKind::Classifier
+            && stub.flags.has(super::DeclarationFlags::LOCAL_CLASS)
+    }) {
+        assert!(
+            named.contains(&stub.id),
+            "every local classifier declaration must carry backend-neutral naming provenance"
+        );
+    }
+}

@@ -141,6 +141,9 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
             }
         }
     }
+    if let Some(script) = file.script_body {
+        inventor.expr(script, &file_chain);
+    }
     inventor.names
 }
 
@@ -329,6 +332,15 @@ impl Inventor<'_> {
             Expr::Lambda { body, .. } => {
                 let own = self.next(chain);
                 self.expr(*body, &own);
+            }
+            // A class literal has no generated callable-reference class and therefore consumes no
+            // position. Its bound expression, when present, remains in the surrounding chain.
+            Expr::CallableRef { receiver, .. }
+                if file.class_literal_references.contains(&expression.0) =>
+            {
+                if let Some(receiver) = receiver {
+                    self.expr(*receiver, chain);
+                }
             }
             // A bound receiver is walked inside the reference, like the lambda body it becomes.
             Expr::CallableRef { receiver, .. } => {

@@ -262,6 +262,27 @@ impl Checker<'_> {
     /// Candidate union at one exact receiver rung. The provider and active checked-local overlay
     /// contribute the same normalized shape; callers decide whether to stop at this rung or combine
     /// several direct supertypes for override matching.
+    fn body_local_classifier_bindings(
+        &self,
+        owner: TypeName,
+        receiver: Ty,
+    ) -> Option<crate::symbol_resolver::GSigBinds> {
+        let declaration = self.resolved_index?.classifier_declaration(owner)?;
+        let declaration_arguments = self
+            .checked_local_classifier_type_arguments
+            .get(&declaration)?;
+        let receiver = crate::symbol_resolver::member_scope_receiver(receiver);
+        let applied_arguments = receiver.type_args();
+        if declaration_arguments.len() != applied_arguments.len() {
+            return None;
+        }
+        declaration_arguments
+            .iter()
+            .zip(applied_arguments)
+            .map(|(formal, &argument)| Some((formal.ty_param_name()?.to_owned(), argument)))
+            .collect()
+    }
+
     fn body_local_declared_member_candidates_at(
         &self,
         receiver: Ty,
@@ -277,6 +298,7 @@ impl Checker<'_> {
         let mut contains_body_local = false;
         if let Some(owner) = crate::symbol_resolver::member_scope_receiver(receiver).obj_internal()
         {
+            let classifier_bindings = self.body_local_classifier_bindings(owner, receiver);
             if let Some(local) = self
                 .checked_local_methods
                 .get(&owner)
@@ -286,13 +308,26 @@ impl Checker<'_> {
                     .iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
                 {
+                    let Some(classifier_bindings) = classifier_bindings.as_ref() else {
+                        // The active classifier layout and the applied receiver are one checked
+                        // contract. A partial or mismatched layout cannot publish an unspecialized
+                        // member candidate as if it were semantically complete.
+                        continue;
+                    };
                     contains_body_local = true;
+                    let mut candidate = candidate.clone();
+                    crate::symbol_resolver::specialize_member_function(
+                        &self.fed_source(),
+                        receiver,
+                        &mut candidate,
+                        classifier_bindings,
+                    );
                     if let Some(existing) = candidates.iter().position(|existing| {
                         existing.stable_declaration == candidate.stable_declaration
                     }) {
-                        candidates[existing] = candidate.clone();
+                        candidates[existing] = candidate;
                     } else {
-                        candidates.push(candidate.clone());
+                        candidates.push(candidate);
                     }
                 }
             }

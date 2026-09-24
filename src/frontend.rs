@@ -606,7 +606,9 @@ pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<FrontendNameToken
 /// Lex and parse one source string after reading language-feature directives from the source.
 pub fn parse_source_with_detected_features(src: &str, diags: &mut DiagSink) -> File {
     let features = LangFeatures::from_source(src);
-    parse_source(src, &features, diags)
+    let mut file = parse_source(src, &features, diags);
+    record_local_class_name_provenance(&mut file);
+    file
 }
 
 /// Analyze a source set with project-wide and per-source language features.
@@ -886,8 +888,10 @@ where
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
         file.is_common = source.is_common;
-        if source.kind == SourceKind::Kotlin {
+        if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
+        }
+        if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
@@ -964,11 +968,11 @@ where
                 }
             }
         } else {
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(
-                &file,
-                &[],
-                &std::collections::HashMap::new(),
-            ));
+            // A declaration-only support source intentionally contributes no compact header
+            // inventory. Its transient local classifiers are body-owned and likewise publish no
+            // Pass-1 context; later phases must not fabricate stable identities for declarations
+            // excluded at this boundary.
+            local_class_contexts.push(crate::resolve::PassOneLocalClassContext::default());
         }
         files.push(file);
     }

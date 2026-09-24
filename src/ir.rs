@@ -36,6 +36,7 @@ mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod default_arguments;
 mod intrinsic;
 mod local_class_names;
 mod references;

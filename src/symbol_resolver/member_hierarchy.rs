@@ -98,75 +98,7 @@ fn specialize_declared_callables(
     let base_bindings = classifier_bindings(classifier, receiver);
     let (mut functions, mut properties) = callables.into_parts();
     for function in &mut functions.overloads {
-        let mut bindings = base_bindings.clone();
-        if let Some(signature) = &function.generic_sig {
-            for formal in &signature.formals {
-                // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`,
-                // the method's `T` shadows the receiver-bound class `T`; retaining the class binding
-                // here would specialize `Box<String>.echo(42)` to `String` before overload inference.
-                bindings.remove(formal);
-            }
-        }
-        match function.kind {
-            FnKind::Member => function.receiver = Some(receiver),
-            FnKind::Extension => {
-                function.receiver = function.receiver.map(|extension_receiver| {
-                    specialize_member_type(
-                        source,
-                        extension_receiver,
-                        &bindings,
-                        TypePosition::Invariant,
-                    )
-                });
-            }
-            FnKind::TopLevel => {}
-        }
-        specialize_callable(source, &mut function.callable, &bindings);
-        function.ret.class = function
-            .ret
-            .class
-            .map(|ty| ty_subst_keep_unbound(ty, &bindings));
-        specialize_call_sig(source, &mut function.call_sig, &bindings);
-        if let Some(signature) = &mut function.generic_sig {
-            let suspend_ret = function
-                .flags
-                .suspend
-                .then(|| {
-                    let continuation = *signature.params.last()?;
-                    match continuation {
-                        Ty::Obj(name, args)
-                            if crate::types::same(name, crate::types::wk::continuation()) =>
-                        {
-                            args.first().copied()
-                        }
-                        _ => None,
-                    }
-                })
-                .flatten();
-            if let Some(suspend_ret) = suspend_ret {
-                signature.params.pop();
-                signature.ret = suspend_ret;
-            }
-            let declared_ret = signature.ret;
-            signature.receiver = signature
-                .receiver
-                .map(|ty| specialize_member_type(source, ty, &bindings, TypePosition::Invariant));
-            signature.params = signature
-                .params
-                .iter()
-                .map(|ty| specialize_member_type(source, *ty, &bindings, TypePosition::In))
-                .collect();
-            signature.ret =
-                specialize_member_type(source, signature.ret, &bindings, TypePosition::Out);
-            if signature.ret != declared_ret {
-                function.callable.ret = signature.ret;
-            }
-            for bounds in &mut signature.formal_bounds {
-                for bound in bounds {
-                    *bound = ty_subst_keep_unbound(*bound, &bindings);
-                }
-            }
-        }
+        specialize_member_function(source, receiver, function, &base_bindings);
     }
     for property in &mut properties.overloads {
         let raw_owner_property = !classifier.type_params.is_empty()
@@ -218,6 +150,85 @@ fn specialize_declared_callables(
         }
     }
     Callables::from_parts(functions, properties)
+}
+
+/// Apply one classifier receiver's already-resolved formal bindings to a member candidate.
+/// Providers use this through [`specialize_declared_callables`]; the active body-local overlay uses
+/// the same operation after its stable classifier layout is checked on the current lexical rung.
+pub(crate) fn specialize_member_function(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    function: &mut FunctionInfo,
+    classifier_bindings: &super::GSigBinds,
+) {
+    let mut bindings = classifier_bindings.clone();
+    if let Some(signature) = &function.generic_sig {
+        for formal in &signature.formals {
+            // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`, the
+            // method's `T` shadows the receiver-bound class `T`; retaining the class binding here
+            // would specialize `Box<String>.echo(42)` before overload inference.
+            bindings.remove(formal);
+        }
+    }
+    match function.kind {
+        FnKind::Member => function.receiver = Some(receiver),
+        FnKind::Extension => {
+            function.receiver = function.receiver.map(|extension_receiver| {
+                specialize_member_type(
+                    source,
+                    extension_receiver,
+                    &bindings,
+                    TypePosition::Invariant,
+                )
+            });
+        }
+        FnKind::TopLevel => {}
+    }
+    specialize_callable(source, &mut function.callable, &bindings);
+    function.ret.class = function
+        .ret
+        .class
+        .map(|ty| ty_subst_keep_unbound(ty, &bindings));
+    specialize_call_sig(source, &mut function.call_sig, &bindings);
+    if let Some(signature) = &mut function.generic_sig {
+        let suspend_ret = function
+            .flags
+            .suspend
+            .then(|| {
+                let continuation = *signature.params.last()?;
+                match continuation {
+                    Ty::Obj(name, args)
+                        if crate::types::same(name, crate::types::wk::continuation()) =>
+                    {
+                        args.first().copied()
+                    }
+                    _ => None,
+                }
+            })
+            .flatten();
+        if let Some(suspend_ret) = suspend_ret {
+            signature.params.pop();
+            signature.ret = suspend_ret;
+        }
+        let declared_ret = signature.ret;
+        signature.receiver = signature
+            .receiver
+            .map(|ty| specialize_member_type(source, ty, &bindings, TypePosition::Invariant));
+        signature.params = signature
+            .params
+            .iter()
+            .map(|ty| specialize_member_type(source, *ty, &bindings, TypePosition::In))
+            .collect();
+        signature.ret = specialize_member_type(source, signature.ret, &bindings, TypePosition::Out);
+        if signature.ret != declared_ret {
+            function.callable.ret = signature.ret;
+        }
+        for bounds in &mut signature.formal_bounds {
+            for bound in bounds {
+                *bound = ty_subst_keep_unbound(*bound, &bindings);
+            }
+        }
+    }
 }
 
 pub(crate) fn declared_member_callables(

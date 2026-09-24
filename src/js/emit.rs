@@ -12,22 +12,13 @@ pub fn emit_file(ir: &IrFile) -> String {
         .exprs
         .iter()
         .filter_map(|expression| {
-            let IrExpr::Call {
-                callee:
-                    Callee::ModuleWithDefaults {
-                        target,
-                        default_provider:
-                            crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
-                        ..
-                    },
-                ..
-            } = expression
-            else {
+            let IrExpr::Call { callee, .. } = expression else {
                 return None;
             };
-            let target = ir.checked_callable_functions.get(target).copied()?;
-            let provider = ir.checked_callable_functions.get(provider).copied()?;
-            (target != provider).then_some((target, provider))
+            let (target, provider) = callee.inherited_module_default_provider()?;
+            let target = ir.checked_callable_functions.get(&target).copied()?;
+            let provider = ir.checked_callable_functions.get(&provider).copied()?;
+            Some((target, provider))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let class_methods: std::collections::HashSet<u32> = ir

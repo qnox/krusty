@@ -1113,6 +1113,12 @@ struct ExtractedFileStubs {
     local_class_name_provenance: Vec<(DeclarationId, super::LocalClassNameProvenance)>,
 }
 
+#[derive(Clone, Copy)]
+enum LocalClassProvenanceOwnership {
+    Publish,
+    AlreadyPublished,
+}
+
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
 /// stubs contain no parser arena ids or owned spellings; an optional temporary lookup-name id is not
 /// semantic identity. Stubs remain valid after `file` is dropped. This is the stable-identity portion
@@ -1122,6 +1128,7 @@ fn extract_file_stub_inventory(
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
+    provenance: LocalClassProvenanceOwnership,
 ) -> ExtractedFileStubs {
     fn body_range(file: &File, body: &FunBody) -> Option<TextRange> {
         let expression = match body {
@@ -2037,16 +2044,10 @@ fn extract_file_stub_inventory(
         &stable_by_transient,
         &nested_owners,
     );
-    let named_local_classifiers = local_class_name_provenance
-        .iter()
-        .map(|(declaration, _)| *declaration)
-        .collect::<std::collections::HashSet<_>>();
-    for stub in stubs.iter().filter(|stub| {
-        stub.kind == DeclarationKind::Classifier && stub.flags.has(DeclarationFlags::LOCAL_CLASS)
-    }) {
-        assert!(
-            named_local_classifiers.contains(&stub.id),
-            "every local classifier declaration must carry backend-neutral naming provenance"
+    if matches!(provenance, LocalClassProvenanceOwnership::Publish) {
+        super::local_class_names::assert_complete_local_classifier_provenance(
+            &local_class_name_provenance,
+            &stubs,
         );
     }
     ExtractedFileStubs {
@@ -2070,7 +2071,33 @@ pub fn extract_file_stubs(
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
 ) -> Vec<DeclarationStub> {
-    extract_file_stub_inventory(file, source, ids, names).stubs
+    extract_file_stub_inventory(
+        file,
+        source,
+        ids,
+        names,
+        LocalClassProvenanceOwnership::Publish,
+    )
+    .stubs
+}
+
+/// Recreate transient declaration anchors after the stable module index has already published local
+/// naming provenance. Inspection may call this after releasing body arenas, so this path never
+/// attempts to republish body-derived naming facts.
+pub(crate) fn extract_file_stubs_for_stable_binding(
+    file: &File,
+    source: SourceFileId,
+    ids: &mut DeclarationIds,
+    names: &mut LookupNames,
+) -> Vec<DeclarationStub> {
+    extract_file_stub_inventory(
+        file,
+        source,
+        ids,
+        names,
+        LocalClassProvenanceOwnership::AlreadyPublished,
+    )
+    .stubs
 }
 
 /// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
@@ -3678,6 +3705,7 @@ impl HeaderInventoryBuilder {
             source,
             &mut self.declarations,
             &mut self.lookup_names,
+            LocalClassProvenanceOwnership::Publish,
         );
         let mut stubs = extracted.stubs;
         let stable_by_transient = extracted.stable_by_transient;
