@@ -7,11 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::nodes::{
-    Constant, Handle, Insn, LabelId, LocalVariable, MethodNode, Node, TryCatchBlock,
-};
+use super::nodes::{Insn, LabelId, LocalVariable, MethodNode, Node, TryCatchBlock};
+use super::pool::{ConstantPoolView, SourcePool};
 use crate::jvm::bytecode::instruction_len;
-use crate::jvm::classreader::{utf8_value, MethodCode, C};
+use crate::jvm::classreader::{ExcEntry, MethodCode, MethodLocal};
 
 /// Why a body could not be decoded: the offset of the offending instruction or table entry, and
 /// what was wrong there.
@@ -21,132 +20,12 @@ pub struct MalformedCode {
     pub reason: &'static str,
 }
 
-fn malformed(offset: usize, reason: &'static str) -> MalformedCode {
+pub(super) fn malformed(offset: usize, reason: &'static str) -> MalformedCode {
     MalformedCode { offset, reason }
 }
 
 const GOTO: u8 = 0xa7;
 const JSR: u8 = 0xa8;
-
-/// The defining class's constant pool and bootstrap table, resolved on demand.
-struct SourcePool<'a> {
-    cp: &'a [C],
-    bootstrap_methods: &'a [(u16, Vec<u16>)],
-    /// The instruction or table entry being decoded, for error reports.
-    at: usize,
-}
-
-impl<'a> SourcePool<'a> {
-    fn fail(&self, reason: &'static str) -> MalformedCode {
-        malformed(self.at, reason)
-    }
-
-    fn utf8(&self, index: u16) -> Result<&'a str, MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::Utf8(text)) => Ok(text),
-            _ => Err(self.fail("expected a Utf8 constant")),
-        }
-    }
-
-    fn class(&self, index: u16) -> Result<String, MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::Class(name)) => Ok(self.utf8(*name)?.to_string()),
-            _ => Err(self.fail("expected a Class constant")),
-        }
-    }
-
-    fn name_and_type(&self, index: u16) -> Result<(String, String), MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::NameAndType(name, desc)) => {
-                Ok((self.utf8(*name)?.to_string(), self.utf8(*desc)?.to_string()))
-            }
-            _ => Err(self.fail("expected a NameAndType constant")),
-        }
-    }
-
-    /// A field or method reference: `(owner, name, desc, is InterfaceMethodref)`.
-    fn member(&self, index: u16) -> Result<(String, String, String, bool), MalformedCode> {
-        let (class, signature, interface) = match self.cp.get(index as usize) {
-            Some(C::Fieldref(class, signature)) | Some(C::Methodref(class, signature)) => {
-                (*class, *signature, false)
-            }
-            Some(C::InterfaceMethodref(class, signature)) => (*class, *signature, true),
-            _ => return Err(self.fail("expected a member reference")),
-        };
-        let (name, desc) = self.name_and_type(signature)?;
-        Ok((self.class(class)?, name, desc, interface))
-    }
-
-    fn field(&self, index: u16) -> Result<(String, String, String), MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::Fieldref(..)) => {
-                let (owner, name, desc, _) = self.member(index)?;
-                Ok((owner, name, desc))
-            }
-            _ => Err(self.fail("expected a Fieldref constant")),
-        }
-    }
-
-    fn method(&self, index: u16) -> Result<(String, String, String, bool), MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::Methodref(..)) | Some(C::InterfaceMethodref(..)) => self.member(index),
-            _ => Err(self.fail("expected a method reference")),
-        }
-    }
-
-    fn handle(&self, index: u16) -> Result<Handle, MalformedCode> {
-        match self.cp.get(index as usize) {
-            Some(C::MethodHandle(kind, member)) => {
-                let (owner, name, desc, interface) = self.member(*member)?;
-                Ok(Handle {
-                    kind: *kind,
-                    owner,
-                    name,
-                    desc,
-                    interface,
-                })
-            }
-            _ => Err(self.fail("expected a MethodHandle constant")),
-        }
-    }
-
-    fn constant(&self, index: u16) -> Result<Constant, MalformedCode> {
-        Ok(match self.cp.get(index as usize) {
-            Some(C::Integer(value)) => Constant::Int(*value),
-            Some(C::Float(bits)) => Constant::Float(*bits),
-            Some(C::Long(value)) => Constant::Long(*value),
-            Some(C::Double(bits)) => Constant::Double(*bits),
-            Some(C::String(value)) => Constant::String(
-                utf8_value(self.cp, *value)
-                    .ok_or_else(|| self.fail("malformed String constant"))?,
-            ),
-            Some(C::Class(_)) => Constant::Class(self.class(index)?),
-            Some(C::MethodType(desc)) => Constant::MethodType(self.utf8(*desc)?.to_string()),
-            Some(C::MethodHandle(..)) => Constant::Handle(self.handle(index)?),
-            _ => return Err(self.fail("expected a loadable constant")),
-        })
-    }
-
-    fn invoke_dynamic(&self, index: u16) -> Result<Insn, MalformedCode> {
-        let Some(C::InvokeDynamic(bootstrap, signature)) = self.cp.get(index as usize) else {
-            return Err(self.fail("expected an InvokeDynamic constant"));
-        };
-        let (name, desc) = self.name_and_type(*signature)?;
-        let (handle, arguments) = self
-            .bootstrap_methods
-            .get(*bootstrap as usize)
-            .ok_or_else(|| self.fail("bootstrap method index out of range"))?;
-        Ok(Insn::InvokeDynamic {
-            name,
-            desc,
-            bootstrap: self.handle(*handle)?,
-            arguments: arguments
-                .iter()
-                .map(|&argument| self.constant(argument))
-                .collect::<Result<_, _>>()?,
-        })
-    }
-}
 
 fn u1(code: &[u8], at: usize) -> u8 {
     code[at]
@@ -192,19 +71,59 @@ fn branch_targets(code: &[u8], pc: usize) -> Vec<isize> {
     }
 }
 
+/// A method's `Code` attribute as far as a node needs it: the bytes and the tables keyed by their
+/// offsets, every pool reference still an index into the pool it is decoded against.
+#[derive(Clone, Copy, Debug)]
+pub struct CodeAttribute<'a> {
+    pub max_stack: u16,
+    pub max_locals: u16,
+    pub code: &'a [u8],
+    pub handlers: &'a [ExcEntry],
+    /// `(start_pc, line)` in table order.
+    pub lines: &'a [(u16, u16)],
+    pub locals: &'a [MethodLocal],
+}
+
+impl<'a> From<&'a MethodCode> for CodeAttribute<'a> {
+    fn from(body: &'a MethodCode) -> CodeAttribute<'a> {
+        CodeAttribute {
+            max_stack: body.max_stack,
+            max_locals: body.max_locals,
+            code: &body.code,
+            handlers: &body.handlers,
+            lines: &body.lines,
+            locals: &body.locals,
+        }
+    }
+}
+
 impl MethodNode {
-    /// Decode `body`, the `Code` of the method `name``desc` with `access` flags.
-    ///
-    /// Fails on anything the node form cannot represent faithfully: a truncated or unknown
-    /// instruction, a table naming an offset inside an instruction, a pool entry of the wrong kind,
-    /// or one of krusty's own coroutine-site markers (which never reach a class file).
+    /// Decode `body`, the `Code` of the method `name``desc` with `access` flags, against the pool
+    /// of the class it was read from.
     pub fn read(
         access: u16,
         name: &str,
         desc: &str,
         body: &MethodCode,
     ) -> Result<MethodNode, MalformedCode> {
-        let code = body.code.as_slice();
+        MethodNode::read_code(access, name, desc, &CodeAttribute::from(body), body)
+    }
+
+    /// Decode `body` against `pool`, the pool of the class the body was written into.
+    ///
+    /// Fails on anything the node form cannot represent faithfully: a truncated or unknown
+    /// instruction, a table naming an offset inside an instruction, a pool entry of the wrong kind,
+    /// or one of krusty's own coroutine-site markers (which never reach a class file). A branch to
+    /// the end of the code and a line number starting there are malformed (JVMS 4.9.2, 4.7.12); a
+    /// protected or local range may end there, and the node then ends with a label.
+    pub fn read_code(
+        access: u16,
+        name: &str,
+        desc: &str,
+        body: &CodeAttribute<'_>,
+        pool: &(impl ConstantPoolView + ?Sized),
+    ) -> Result<MethodNode, MalformedCode> {
+        let code = body.code;
         let end = code.len();
 
         let mut starts = Vec::new();
@@ -238,7 +157,7 @@ impl MethodNode {
                 mark(target, pc, "branch into the middle of an instruction")?;
             }
         }
-        for handler in &body.handlers {
+        for handler in body.handlers {
             let at = handler.start_pc as usize;
             for offset in [handler.start_pc, handler.end_pc, handler.handler_pc] {
                 mark(
@@ -248,7 +167,7 @@ impl MethodNode {
                 )?;
             }
         }
-        for &(start, _) in &body.lines {
+        for &(start, _) in body.lines {
             if start as usize == end {
                 return Err(malformed(end, "line number past the last instruction"));
             }
@@ -258,7 +177,7 @@ impl MethodNode {
                 "line number off an instruction boundary",
             )?;
         }
-        for local in &body.locals {
+        for local in body.locals {
             let (start, stop) = (
                 local.start_pc as usize,
                 local.start_pc as usize + local.length as usize,
@@ -282,15 +201,11 @@ impl MethodNode {
         let label = |offset: isize| labels[&(offset as usize)];
 
         let mut lines_at: BTreeMap<usize, Vec<u16>> = BTreeMap::new();
-        for &(start, line) in &body.lines {
+        for &(start, line) in body.lines {
             lines_at.entry(start as usize).or_default().push(line);
         }
 
-        let mut pool = SourcePool {
-            cp: &body.source_cp,
-            bootstrap_methods: &body.bootstrap_methods,
-            at: 0,
-        };
+        let mut pool = SourcePool { pool, at: 0 };
         let mut nodes = Vec::with_capacity(starts.len() + labels.len());
         for &pc in &starts {
             pool.at = pc;
@@ -348,11 +263,35 @@ impl MethodNode {
     }
 }
 
+impl Insn {
+    /// Decode `bytes`, exactly one instruction that names no label (anything but a jump or a
+    /// switch), against `pool`.
+    pub fn decode(
+        bytes: &[u8],
+        pool: &(impl ConstantPoolView + ?Sized),
+    ) -> Result<Insn, MalformedCode> {
+        match bytes.first() {
+            None => return Err(malformed(0, "truncated instruction")),
+            Some(0xfe) => return Err(malformed(0, "coroutine-site marker in a class-file body")),
+            Some(_) => {}
+        }
+        if instruction_len(bytes, 0) != Some(bytes.len()) {
+            return Err(malformed(0, "not exactly one instruction"));
+        }
+        if matches!(bytes[0], 0x99..=0xa8 | 0xaa | 0xab | 0xc6..=0xc9) {
+            return Err(malformed(0, "a jump or switch needs its labels"));
+        }
+        decode(bytes, 0, &SourcePool { pool, at: 0 }, &|_| {
+            unreachable!("an instruction that is no jump or switch names no label")
+        })
+    }
+}
+
 /// Decode the instruction at `pc`, whose length and branch targets are already validated.
 fn decode(
     code: &[u8],
     pc: usize,
-    pool: &SourcePool,
+    pool: &SourcePool<'_, impl ConstantPoolView + ?Sized>,
     label: &impl Fn(isize) -> LabelId,
 ) -> Result<Insn, MalformedCode> {
     let op = code[pc];

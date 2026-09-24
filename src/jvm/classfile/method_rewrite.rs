@@ -14,14 +14,20 @@
 //! rewritten body is only kept if those frames can be computed; otherwise the method is written
 //! exactly as emitted.
 
+mod node_bridge;
+
 use std::collections::BTreeSet;
 
-use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler};
-use super::temporaries::{self, Body};
+use super::bytecode_analysis::{ControlGraph, FrameTypes};
+use super::constant_pool_queries::PoolLookup;
+use super::temporaries::{self, Body, Placement};
 use super::{dead_code, local_slots, negated_jumps, redundant_checkcasts, redundant_gotos};
 use super::{stack_maps, stack_peephole};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
-use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
+use crate::jvm::classreader::{ExcEntry, MethodLocal};
+use crate::jvm::inline::{assemble, insn_offsets_at, BranchTarget, Insn};
+use crate::jvm::method_node::{CodeAttribute, MethodNode};
+use node_bridge::IndexedBody;
 
 fn is_expression_null_check(owner: &str, name: &str, descriptor: &str) -> bool {
     owner == "kotlin/jvm/internal/Intrinsics"
@@ -90,21 +96,6 @@ pub(super) fn var_slot(insn: &Insn) -> Option<(u16, u16)> {
     })
 }
 
-/// Whether every short branch still reaches its target after a rewrite. [`assemble`] encodes these
-/// operands as signed 16-bit deltas, so accepting a larger delta would wrap and corrupt the method.
-fn short_branches_fit(insns: &[Insn], offsets: &[usize]) -> bool {
-    insns.iter().enumerate().all(|(at, insn)| match insn {
-        Insn::Branch {
-            target: BranchTarget::Internal(target),
-            ..
-        } => offsets.get(*target).is_some_and(|target_offset| {
-            i16::try_from(*target_offset as isize - offsets[at] as isize).is_ok()
-        }),
-        Insn::Branch { .. } => false,
-        _ => true,
-    })
-}
-
 impl ClassWriter {
     /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
     pub(super) fn rewrite_methods(&mut self) {
@@ -136,27 +127,21 @@ impl ClassWriter {
         if bytes.is_empty() || source.builder.bytes != *bytes {
             return None;
         }
-        let code_len = bytes.len();
-        let insns = disassemble(bytes)?;
-        let offsets = insn_offsets_at(&insns, 0);
-        if offsets.last().copied() != Some(code_len) {
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let node = self.finished_node(method, source, bytes, &pool)?;
+        let indexed = IndexedBody::new(&node, &mut pool).ok()?;
+        let insns = &indexed.insns;
+        // The builder's labels and branch fixups name offsets of the emitted bytes, so the indexed
+        // body must lay out exactly as emitted.
+        if pool.missed() || assemble(insns) != *bytes {
             return None;
         }
+        let offsets = insn_offsets_at(insns, 0);
         let index_of = |pc: usize| offsets.binary_search(&pc).ok();
         let n = insns.len();
-        let handlers: Vec<Handler> = method
-            .exceptions
-            .iter()
-            .map(|&(start, end, handler, _)| {
-                Some(Handler {
-                    start: index_of(usize::from(start))?,
-                    end: index_of(usize::from(end))?,
-                    handler: index_of(usize::from(handler))?,
-                })
-            })
-            .collect::<Option<_>>()?;
+        let handlers = &indexed.handlers;
         let mut arrivals = vec![false; n + 1];
-        for insn in &insns {
+        for insn in insns {
             match insn {
                 Insn::Branch {
                     target: BranchTarget::Internal(to),
@@ -181,38 +166,28 @@ impl ClassWriter {
                 _ => {}
             }
         }
-        for handler in &handlers {
+        for handler in handlers {
             arrivals[handler.start] = true;
             arrivals[handler.end] = true;
             arrivals[handler.handler] = true;
         }
         let mut marks = vec![false; n + 1];
         let mut lines = vec![false; n + 1];
-        for &(pc, _) in &method.lnt {
-            let at = index_of(usize::from(pc))?;
+        for &(at, _) in &indexed.lines {
             marks[at] = true;
             lines[at] = true;
         }
         let mut variable_bounds = vec![false; n + 1];
-        // A local-variable entry without a start covers the whole method; one without a length
-        // runs to the end.
-        let range = |start: Option<u16>, len: Option<u16>| {
-            let start = start.map_or(0, usize::from);
-            let end = len.map_or(code_len, |len| start + usize::from(len));
-            (start, end.min(code_len))
-        };
         let mut named = Vec::new();
-        for &(_, _, slot, start, len) in &method.lvt {
-            let (start, end) = range(start, len);
-            if start >= code_len {
+        for (range, local) in indexed.locals.iter().zip(&node.local_variables) {
+            let Some((start, end)) = *range else {
                 continue;
-            }
-            let (start, end) = (index_of(start)?, index_of(end)?);
+            };
             marks[start] = true;
             marks[end] = true;
             variable_bounds[start] = true;
             variable_bounds[end] = true;
-            named.push((start, end, slot));
+            named.push((start, end, local.slot));
         }
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
@@ -227,7 +202,7 @@ impl ClassWriter {
             return None;
         }
         let entry = expand_slots(&entry);
-        let original_graph = ControlGraph::build(&insns, &handlers)?;
+        let original_graph = ControlGraph::build(insns, handlers)?;
         // The verifier's types before each original instruction, computed at most once. Seed the
         // walk with the frames the original bytecode itself implies: in particular, a typed catch
         // handler enters with its declared exception class, not the generic `Throwable` used by an
@@ -255,15 +230,15 @@ impl ClassWriter {
         let flow_types = || {
             flow_types_cell
                 .get_or_init(|| {
-                    FrameTypes::analyze(&insns, &original_graph, &entry, original_frames()?, self)
+                    FrameTypes::analyze(insns, &original_graph, &entry, original_frames()?, self)
                 })
                 .as_ref()
         };
-        let redundant_casts = redundant_checkcasts::select(self, &insns, flow_types);
+        let redundant_casts = redundant_checkcasts::select(self, insns, flow_types);
         // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
         // nullability analysis proves non-null goes (see `null_checks`).
         let redundant_null_checks = self.redundant_null_checks(
-            &insns,
+            insns,
             &original_graph,
             &arrivals,
             usize::from(method.max_locals),
@@ -297,8 +272,8 @@ impl ClassWriter {
             }
         }
         let body = Body {
-            insns: &insns,
-            handlers: &handlers,
+            insns,
+            handlers,
             arrivals: &arrivals,
             marks: &marks,
             named: &named,
@@ -321,30 +296,16 @@ impl ClassWriter {
                     })
             },
         };
-        if insns.iter().any(|insn| {
-            matches!(
-                insn,
-                Insn::Branch {
-                    target: BranchTarget::External(_),
-                    ..
-                } | Insn::BranchW {
-                    target: BranchTarget::External(_),
-                    ..
-                }
-            )
-        }) {
-            return None;
-        }
         let folded = temporaries::eliminate(&body);
         let folded_any = folded.is_some();
         let mut rewrite = folded.unwrap_or_else(|| temporaries::Rewrite {
             nodes: insns
                 .iter()
                 .enumerate()
-                .map(|(index, insn)| (insn.clone(), temporaries::Placement::Original(index)))
+                .map(|(index, insn)| (insn.clone(), Placement::Original(index)))
                 .collect(),
             stack_at_target: Vec::new(),
-            late_labels: std::collections::BTreeSet::new(),
+            late_labels: BTreeSet::new(),
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
         let rewrite_late = rewrite.late_labels.clone();
@@ -399,62 +360,41 @@ impl ClassWriter {
             .zip(&variable_bounds)
             .map(|(&line, &bound)| line || bound)
             .collect();
-        for handler in &handlers {
+        for handler in handlers {
             for at in [handler.start, handler.end, handler.handler] {
                 labelled[at] = true;
             }
         }
-        let jumps_negated = negated_jumps::negate(&mut rewrite.nodes, &labelled, &|index| {
-            branch_labels
-                .get(index)
-                .copied()
-                .flatten()
-                .is_some_and(|label| rewrite_late.contains(&label))
-        });
+        let jumps_negated = negated_jumps::negate(&mut rewrite.nodes, &labelled, &late_branch);
         // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
         // above left unreachable goes, with its line numbers, empty protected ranges and emptied
         // local variables (see `dead_code`).
-        let lines_at: Vec<(usize, u16)> = method
-            .lnt
+        let stack_targets: Vec<usize> = rewrite
+            .stack_at_target
             .iter()
-            .map(|&(pc, line)| Some((index_of(usize::from(pc))?, line)))
-            .collect::<Option<_>>()?;
-        let local_ranges: Vec<Option<(usize, usize)>> = method
-            .lvt
-            .iter()
-            .map(|&(_, _, _, start, len)| {
-                let (start, end) = range(start, len);
-                (start < code_len)
-                    .then(|| Some((index_of(start)?, index_of(end)?)))
-                    .flatten()
-            })
+            .map(|(target, _)| *target)
             .collect();
         let dead = dead_code::eliminate(
             &mut rewrite.nodes,
             &dead_code::Flow {
-                handlers: &handlers,
+                handlers,
                 late_branch: &late_branch,
-                lines: &lines_at,
-                line_after_inserted: &|index| {
-                    rewrite
-                        .stack_at_target
-                        .iter()
-                        .any(|(target, _)| *target == index)
-                },
-                locals: &local_ranges,
+                lines: &indexed.lines,
+                line_after_inserted: &|index| stack_targets.contains(&index),
+                locals: &indexed.locals,
             },
         );
-        let removed = |table: fn(&dead_code::Elimination) -> &[bool], at: usize| {
-            dead.as_ref().is_some_and(|dead| table(dead)[at])
-        };
+        let removed_locals = dead
+            .as_ref()
+            .map_or(&[][..], |dead| &dead.removed_locals[..]);
         let mut fixed_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
-        for (at, &(_, desc, slot, _, _)) in method.lvt.iter().enumerate() {
-            if removed(|dead| &dead.removed_locals, at) {
+        for (at, local) in node.local_variables.iter().enumerate() {
+            if removed_locals.get(at).copied().unwrap_or(false) {
                 continue;
             }
-            fixed_slots.insert(slot);
-            if matches!(self.cp.utf8_at(desc), Some("J" | "D")) {
-                fixed_slots.insert(slot + 1);
+            fixed_slots.insert(local.slot);
+            if matches!(local.desc.as_str(), "J" | "D") {
+                fixed_slots.insert(local.slot + 1);
             }
         }
         let renumbered = local_slots::compact(&mut rewrite.nodes, &fixed_slots);
@@ -467,181 +407,151 @@ impl ClassWriter {
         {
             return None;
         }
-        // Every original index `k` now starts at the first rewritten instruction of group `k` or a
-        // later one — where a label that stood at `k` lands.
-        let mut new_index = vec![rewrite.nodes.len(); n + 1];
-        let mut next = 0;
-        for (k, slot) in new_index.iter_mut().enumerate().take(n) {
-            while next < rewrite.nodes.len() && rewrite.nodes[next].1.group() < k {
-                next += 1;
-            }
-            *slot = next;
-        }
-        // A late label stands after the instructions a rule inserted in front of its index's group.
-        let mut late_index = vec![rewrite.nodes.len(); n + 1];
-        let mut next = 0;
-        for (k, slot) in late_index.iter_mut().enumerate().take(n) {
-            while next < rewrite.nodes.len()
-                && (rewrite.nodes[next].1.group() < k
-                    || rewrite.nodes[next].1 == temporaries::Placement::Before(k))
-            {
-                next += 1;
-            }
-            *slot = next;
-        }
-        let debug_after_insert: BTreeSet<usize> = rewrite
-            .stack_at_target
-            .iter()
-            .filter_map(|(target, _)| {
-                (new_index[*target] != late_index[*target]).then_some(*target)
-            })
-            .collect();
-        let is_late_label = |label: u32| rewrite.late_labels.contains(&label);
-        let retarget = |to: usize| new_index[to];
-        let retarget_branch = |placement: temporaries::Placement, to: usize| match placement {
-            temporaries::Placement::Original(index)
-                if branch_labels
-                    .get(index)
-                    .copied()
-                    .flatten()
-                    .is_some_and(is_late_label) =>
-            {
-                late_index[to]
-            }
-            _ => new_index[to],
-        };
-        let new_insns: Vec<Insn> = rewrite
-            .nodes
-            .iter()
-            .map(|(insn, placement)| match insn {
-                Insn::Branch {
-                    op,
-                    target: BranchTarget::Internal(to),
-                } => Insn::Branch {
-                    op: *op,
-                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
-                },
-                Insn::BranchW {
-                    op,
-                    target: BranchTarget::Internal(to),
-                } => Insn::BranchW {
-                    op: *op,
-                    target: BranchTarget::Internal(retarget_branch(*placement, *to)),
-                },
-                Insn::TableSwitch {
-                    default,
-                    low,
-                    targets,
-                } => Insn::TableSwitch {
-                    default: retarget(*default),
-                    low: *low,
-                    targets: targets.iter().map(|&to| retarget(to)).collect(),
-                },
-                Insn::LookupSwitch { default, pairs } => Insn::LookupSwitch {
-                    default: retarget(*default),
-                    pairs: pairs.iter().map(|&(key, to)| (key, retarget(to))).collect(),
-                },
-                other => other.clone(),
-            })
-            .collect();
-        let new_offsets = insn_offsets_at(&new_insns, 0);
-        let new_len = new_offsets[new_insns.len()];
-        if new_len > usize::from(u16::MAX) || !short_branches_fit(&new_insns, &new_offsets) {
-            return None;
-        }
-        // An original offset maps to where the instruction that began there now begins; a removed
-        // instruction's offset to whatever follows it, as a label in front of it would.
-        let map = |pc: usize| -> usize {
-            let k = offsets.partition_point(|&at| at < pc);
-            new_offsets[new_index[k.min(n)]]
-        };
-        let map16 = |pc: u16| map(usize::from(pc)) as u16;
-        // A debug boundary and the implicit return at an `ifnull` fold's target describe the
-        // original instruction/range boundary after its labels. They therefore belong after the
-        // `pop` inserted in front of that original instruction. Other `Before(k)` insertions (the
-        // `dup` beside a branch) do not move a table boundary at `k`.
-        let map_after_inserted = |pc: usize| -> usize {
-            let k = offsets.partition_point(|&at| at < pc).min(n);
-            if debug_after_insert.contains(&k) {
-                new_offsets[late_index[k]]
-            } else {
-                map(pc)
-            }
-        };
-        let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
-        let exceptions: Vec<(u16, u16, u16, u16)> = method
-            .exceptions
-            .iter()
-            .enumerate()
-            .filter(|&(at, _)| !removed(|dead| &dead.removed_handlers, at))
-            .map(|(_, entry)| entry)
-            .map(|&(start, end, handler, catch)| (map16(start), map16(end), map16(handler), catch))
-            .collect();
-        if exceptions.iter().any(|&(start, end, _, _)| start >= end) {
+        // Back to a node: each original index's labels stand where its instructions landed, so
+        // every table moves with them when the node is laid out again.
+        let late_label = |label: u32| rewrite.late_labels.contains(&label);
+        let relabelled = node_bridge::relabel(
+            &node,
+            &indexed,
+            &node_bridge::PassOutcome {
+                nodes: &rewrite.nodes,
+                late_branch: &|placement| match placement {
+                    Placement::Original(index) => branch_labels
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_some_and(late_label),
+                    Placement::Before(_) | Placement::After(_) => false,
+                },
+                stack_targets: &stack_targets,
+                removed_lines: dead
+                    .as_ref()
+                    .map_or(&[][..], |dead| &dead.removed_lines[..]),
+                removed_handlers: dead
+                    .as_ref()
+                    .map_or(&[][..], |dead| &dead.removed_handlers[..]),
+                removed_locals,
+                slot: &|slot| match &renumbered {
+                    Some(renumbered) => renumbered.slot(slot),
+                    None => Some(slot),
+                },
+                implicit_return: method
+                    .implicit_void_return_pc
+                    .map(|pc| offsets.partition_point(|&at| at < usize::from(pc)).min(n)),
+            },
+            &pool,
+        )?;
+        // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
+        // fails to lay out; the method is then written as emitted.
+        let assembled = relabelled.node.assemble(&mut pool).ok()?;
+        if pool.missed()
+            || assembled
+                .exception_table
+                .iter()
+                .any(|&(start, end, _, _)| start >= end)
+        {
             return None;
         }
-        let lnt: Vec<(u16, u16)> = method
-            .lnt
-            .iter()
-            .enumerate()
-            .filter(|&(at, _)| !removed(|dead| &dead.removed_lines, at))
-            .map(|(_, entry)| entry)
-            .map(|&(pc, line)| (map_after_inserted16(pc), line))
-            .collect();
-        let mut lvt: Vec<LvtEntry> = method
+        // Each kept local keeps its pool entries, and a bound it left open stays open: a missing
+        // start is the method's start and a missing length runs to its end.
+        let kept_locals = method
             .lvt
             .iter()
             .enumerate()
-            .filter(|&(at, _)| !removed(|dead| &dead.removed_locals, at))
-            .map(|(_, entry)| entry)
-            .map(|&(name, desc, slot, old_start, old_len)| {
-                let start = old_start.map(map_after_inserted16);
-                let len = old_len.map(|old_len| {
-                    let end =
-                        map_after_inserted(old_start.map_or(0, usize::from) + usize::from(old_len));
-                    (end - start.map_or(0, usize::from)) as u16
-                });
-                (name, desc, slot, start, len)
+            .filter(|&(at, _)| !removed_locals.get(at).copied().unwrap_or(false))
+            .map(|(_, entry)| entry);
+        let lvt: Vec<LvtEntry> = kept_locals
+            .zip(&assembled.local_variables)
+            .map(|(&(name, desc, _, old_start, old_len), local)| {
+                let start = old_start.map(|_| local.start_pc);
+                let end = local.start_pc + local.length;
+                let len = old_len.map(|_| end - start.unwrap_or(0));
+                (name, desc, local.slot, start, len)
             })
             .collect();
-        if let Some(renumbered) = &renumbered {
-            for entry in &mut lvt {
-                entry.2 = renumbered.slot(entry.2)?;
-            }
-        }
         if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
             // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
             // does not own debug-local deletion, so preserve the original method instead.
             return None;
         }
+        let implicit_void_return_pc = match relabelled.implicit_return {
+            Some(label) => Some(assembled.offset_of(label)?),
+            None => None,
+        };
 
         // The class carries the frames the rewritten body implies. A body they cannot be computed
         // for is written as emitted.
-        let code = assemble(&new_insns);
         self.compute_frames(&stack_maps::Body {
             access: source.access,
             name: &source.name,
             descriptor: &source.desc,
-            code: &code,
-            exceptions: &exceptions,
-            labels: stack_maps::table_labels(&lnt, &lvt, code.len()),
+            code: &assembled.code,
+            exceptions: &assembled.exception_table,
+            labels: stack_maps::table_labels(&assembled.line_numbers, &lvt, assembled.code.len()),
         })
         .ok()?;
         Some(Rewritten {
-            code,
-            exceptions,
-            lnt,
+            code: assembled.code,
+            exceptions: assembled.exception_table,
+            lnt: assembled.line_numbers,
             lvt,
-            implicit_void_return_pc: method.implicit_void_return_pc.map(map_after_inserted16),
+            implicit_void_return_pc,
         })
+    }
+
+    /// The finished `method` read into a node against the writer's own pool. A local-variable
+    /// entry without a start covers the method from its first instruction, one without a length
+    /// runs to its end; a range reaching past the code is cut at its end.
+    fn finished_node(
+        &self,
+        method: &MethodInfo,
+        source: &RewriteSource,
+        bytes: &[u8],
+        pool: &PoolLookup<'_>,
+    ) -> Option<MethodNode> {
+        let code_len = bytes.len();
+        let handlers: Vec<ExcEntry> = method
+            .exceptions
+            .iter()
+            .map(|&(start_pc, end_pc, handler_pc, catch_type)| ExcEntry {
+                start_pc,
+                end_pc,
+                handler_pc,
+                catch_type,
+            })
+            .collect();
+        let locals: Vec<MethodLocal> = method
+            .lvt
+            .iter()
+            .map(|&(name, desc, slot, start, len)| {
+                let start = usize::from(start.unwrap_or(0));
+                let end = len.map_or(code_len, |len| start + usize::from(len));
+                let (start, end) = (start.min(code_len), end.min(code_len));
+                Some(MethodLocal {
+                    start_pc: start as u16,
+                    length: end.checked_sub(start)? as u16,
+                    slot,
+                    name: self.cp.utf8_at(name)?.to_string(),
+                    descriptor: self.cp.utf8_at(desc)?.to_string(),
+                })
+            })
+            .collect::<Option<_>>()?;
+        let code = CodeAttribute {
+            max_stack: method.max_stack,
+            max_locals: method.max_locals,
+            code: bytes,
+            handlers: &handlers,
+            lines: &method.lnt,
+            locals: &locals,
+        };
+        MethodNode::read_code(source.access, &source.name, &source.desc, &code, pool).ok()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_expression_null_check, short_branches_fit};
-    use crate::jvm::inline::{insn_offsets_at, BranchTarget, Insn};
+    use super::is_expression_null_check;
 
     #[test]
     fn expression_null_check_identity_includes_its_descriptor() {
@@ -660,33 +570,5 @@ mod tests {
             "checkNotNullExpressionValue",
             "(Ljava/lang/Object;Ljava/lang/String;)V",
         ));
-    }
-
-    #[test]
-    fn a_rewrite_declines_a_short_branch_that_grows_out_of_range() {
-        fn body(nops: usize) -> Vec<Insn> {
-            let target = nops + 1;
-            let mut insns = vec![Insn::Branch {
-                op: 0xa7,
-                target: BranchTarget::Internal(target),
-            }];
-            insns.extend((0..nops).map(|_| Insn::Plain {
-                op: 0x00,
-                operands: Vec::new(),
-            }));
-            insns.push(Insn::Plain {
-                op: 0xb1,
-                operands: Vec::new(),
-            });
-            insns
-        }
-
-        let at_limit = body(32_764);
-        assert!(short_branches_fit(
-            &at_limit,
-            &insn_offsets_at(&at_limit, 0)
-        ));
-        let too_far = body(32_765);
-        assert!(!short_branches_fit(&too_far, &insn_offsets_at(&too_far, 0)));
     }
 }
