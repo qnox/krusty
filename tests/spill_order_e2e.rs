@@ -13,16 +13,16 @@ use super::serialization_companion_byte_parity_e2e::{
 
 const SOURCE: &str = "import kotlin.coroutines.*\n\
     import kotlin.coroutines.intrinsics.*\n\
-    class Box(val name: String)\n\
+    class SpillPayload(val name: String)\n\
     var parked: Continuation<Int>? = null\n\
     suspend fun step(): Int = suspendCoroutineUninterceptedOrReturn { continuation ->\n\
     \x20   parked = continuation\n\
     \x20   COROUTINE_SUSPENDED\n\
     }\n\
-    fun inspect(box: Box): Int = box.name.length\n\
+    fun inspect(payload: SpillPayload): Int = payload.name.length\n\
     suspend fun mixed(): Int {\n\
     \x20   val count = step()\n\
-    \x20   val second = Box(\"bc\")\n\
+    \x20   val second = SpillPayload(\"bc\")\n\
     \x20   val more = step()\n\
     \x20   return count + more + inspect(second)\n\
     }\n";

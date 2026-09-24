@@ -39,8 +39,8 @@ use live_scopes::{
 };
 mod spill_layout;
 use spill_layout::{
-    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty,
-    suspension_points_in_order, SpillLayout, REFERENCE_SPILL_KIND,
+    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
+    suspension_points_in_order, SpillLayout,
 };
 mod statement_normalization;
 mod value_liveness;
@@ -3023,13 +3023,12 @@ fn build_state_machine(
         let mut state_indices = Vec::new();
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
-            let mut positions = kind_positions(&scope.values);
+            let positions = spill_order(&scope.values);
             // `@DebugMetadata`'s `n`/`s` lists hoist the REFERENCE spills ahead of the rest and
             // otherwise keep the order the locals were spilled in. They are not grouped by kind:
             // kotlinc lists `J$0` between `I$0` and `I$1` when the `long` was declared between the
             // two `int`s. Nor do they follow the class's field layout, which groups by kind — the
             // two orders are independent and only look alike when they agree.
-            positions.sort_by_key(|&(_, _, kind, _)| u8::from(kind != REFERENCE_SPILL_KIND));
             for (slot, _ty, kind, pos) in positions {
                 let name = scope
                     .names
