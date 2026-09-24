@@ -117,7 +117,11 @@ impl BodyLowering<'_> {
                 if let Some(element) = self.shared_local_type(*value) {
                     self.shared_cell_read(self.value_slot(*value), element)
                 } else {
-                    self.ir.add_expr(IrExpr::GetValue(self.value_slot(*value)))
+                    let read = self.ir.add_expr(IrExpr::GetValue(self.value_slot(*value)));
+                    if let Some(stability) = self.binding_stability.get(value).copied() {
+                        self.ir.binding_read_stability.insert(read, stability);
+                    }
+                    read
                 }
             }
             FirExprKind::LateinitRead { value, name } => {
@@ -341,6 +345,7 @@ impl BodyLowering<'_> {
                                 .iter()
                                 .map(|(_, ty)| crate::ir::IrCtorArg {
                                     name: None,
+                                    context_kind: crate::types::ContextParameterKind::None,
                                     ty: *ty,
                                     declared_ty: None,
                                     is_field: false,
@@ -1041,6 +1046,16 @@ impl BodyLowering<'_> {
                     let result = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(condition), rhs), (None, lhs)],
                     });
+                    // An elvis over a safe call is one more guard of that call's chain: its left
+                    // value's null check joins the chain's, and every `null` reaches the right side.
+                    let over_safe_call = matches!(
+                        self.ir.expr(lhs_value),
+                        IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
+                    );
+                    if over_safe_call {
+                        self.ir.null_guards.insert(result);
+                        self.ir.elvis_safe_call_guards.insert(result);
+                    }
                     self.ir.add_expr(IrExpr::Block {
                         stmts: vec![variable],
                         value: Some(result),
@@ -1733,6 +1748,7 @@ impl BodyLowering<'_> {
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
+        self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),

@@ -104,6 +104,7 @@ pub(super) fn checked_function_body_with_platform_and_features(
             name: parameter.name.as_str(),
             ty,
             span: parameter.ty.span,
+            context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
     let mut session = BodyCheckSession::default();
@@ -119,7 +120,6 @@ pub(super) fn checked_function_body_with_platform_and_features(
         &[],
         CheckedBodyReceiverShape {
             context_receivers: &signature.parameters[..context_count],
-            context_value_count: callable.shape.context_value_count,
             extension_receiver: super::driver::body_extension_receiver(
                 &index,
                 declaration,

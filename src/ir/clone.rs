@@ -346,6 +346,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(value_names);
     copy_map!(logical_types);
     copy_map!(exhaustive_whens);
+    copy_map!(binding_read_stability);
     copy_map!(physical_types);
     copy_map!(reified_call_subst);
     copy_map!(ext_call_source_receiver);
@@ -363,6 +364,12 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.inline_regions.contains(&source) {
         ir.inline_regions.insert(target);
+    }
+    if ir.null_guards.contains(&source) {
+        ir.null_guards.insert(target);
+    }
+    if ir.elvis_safe_call_guards.contains(&source) {
+        ir.elvis_safe_call_guards.insert(target);
     }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);

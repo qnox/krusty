@@ -7,9 +7,7 @@
 
 use super::classpath::{Classpath, ExternalCallableKind};
 use crate::fir::{ExternalCallableId, FirCallableReferenceBinding, FirCallableReferenceTarget};
-use crate::ir::{
-    FrDispatch, FuncRef, IrBinOp, IrCheckedOperation, IrClass, IrExpr, IrFile, IrFunction,
-};
+use crate::ir::{FrDispatch, FuncRef, IrCheckedOperation, IrClass, IrExpr, IrFile, IrFunction};
 use crate::libraries::MemberRealization;
 use crate::types::{type_name, Ty};
 
@@ -208,41 +206,35 @@ fn intrinsic_member_adapter(
         .enumerate()
         .map(|(parameter, _)| ir.add_expr(IrExpr::GetValue(parameter as u32 + 1)))
         .collect::<Vec<_>>();
-    let value =
-        match realization {
-            MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::BooleanNot)
-                if parameters.is_empty()
-                    && receiver.non_null() == Ty::Boolean
-                    && result == Ty::Boolean =>
-            {
-                let false_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
-                ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: receiver_value,
-                    rhs: false_value,
-                })
-            }
-            MemberRealization::Intrinsic(
-                crate::libraries::CompilerIntrinsic::NumericConversion,
-            ) if parameters.is_empty() => ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: receiver_value,
-                type_operand: result,
-            }),
-            MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::StringPlus)
-                if arguments.len() == 1 =>
-            {
-                ir.add_expr(IrExpr::Call {
-                    callee: crate::ir::Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
-                        ret: result,
-                    },
-                    dispatch_receiver: Some(receiver_value),
-                    args: arguments,
-                })
-            }
-            _ => return None,
-        };
+    let value = match realization {
+        MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::StringPlus)
+            if arguments.len() == 1 =>
+        {
+            ir.add_expr(IrExpr::Call {
+                callee: crate::ir::Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::StringPlus,
+                    ret: result,
+                },
+                dispatch_receiver: Some(receiver_value),
+                args: arguments,
+            })
+        }
+        MemberRealization::Intrinsic(intrinsic) => {
+            let operation = super::builtin_member_operations::operation(
+                ir,
+                intrinsic,
+                super::builtin_member_operations::BuiltinMemberOperands {
+                    receiver: receiver_value,
+                    receiver_ty: receiver,
+                    arguments: &arguments,
+                    parameters,
+                    result,
+                },
+            )?;
+            ir.add_expr(operation)
+        }
+        _ => return None,
+    };
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
