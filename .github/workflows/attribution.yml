@@ -22,15 +22,22 @@ jobs:
         env:
           RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
         run: scripts/check-attribution.sh "$RANGE"
-      # A squash merge is authored by whoever opened the pull request, so a PR opened by an
-      # assistant's app account lands on master under that account. Such a PR must be reopened
-      # from the maintainer's account.
-      - name: title, body and author
+      - name: title and body
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"
+      # A squash merge is authored by whoever opened the pull request, so a squash-merged PR opened
+      # by an assistant's app account lands on master under that account. Warn so it is merged with
+      # "Rebase and merge", which keeps the maintainer-authored commits.
+      - name: opener
+        if: github.event_name == 'pull_request'
+        env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          printf 'opened by %s\n\n%s\n\n%s\n' "$PR_AUTHOR" "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
-          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request"
+          if printf '%s\n' "$PR_AUTHOR" | grep -qiE 'claude|codex|copilot|openai|anthropic'; then
+            echo "::warning title=attribution::opened by $PR_AUTHOR; merge with Rebase and merge, not squash, so master keeps the maintainer as author"
+          fi
