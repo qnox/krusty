@@ -28,6 +28,12 @@ pub(super) enum ElementSerializerPlan {
     },
     Contextual(TypeName),
     Polymorphic(TypeName),
+    /// A `@Serializable object`: `ObjectSerializer(<serial name>, <object>.INSTANCE, [])`.
+    Object {
+        object: TypeName,
+        serial_name: crate::kt_string::KtString,
+        serial_info_unsupported: bool,
+    },
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
     Builtin(TypeName),
@@ -51,11 +57,14 @@ pub(super) fn child_cache_element_plan(
     let Some(classifier) = ty.kotlin_class_internal() else {
         return Ok(None);
     };
+    // kotlinc caches every element whose serializer is a constructed instance rather than a
+    // singleton: a collection's, an enum's and an object's `ObjectSerializer`.
     let cacheable = collection_serializer_builder(classifier).is_some()
         || ir
             .classes
             .iter()
-            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty());
+            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty())
+        || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some();
     if !cacheable {
         return Ok(None);
     }
@@ -240,6 +249,15 @@ pub(super) fn element_serializer_plan(
     // element (`List<FlexibleMap>`).
     if type_is_contextual(ctx, ir, fq_name) {
         return Some(ElementSerializerPlan::Contextual(fq_name));
+    }
+    // A `@Serializable object` has no `$serializer` either: its serializer is an `ObjectSerializer`
+    // over its `INSTANCE`, which kotlinc constructs at the use site.
+    if let Some(object) = super::cached_serializer::local_serializable_object(ir, ctx, fq_name) {
+        return Some(ElementSerializerPlan::Object {
+            object: fq_name,
+            serial_name: super::annotations::class_serial_name(ir, object),
+            serial_info_unsupported: super::annotations::class_has_serial_info(ctx, ir, object),
+        });
     }
     // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
     // the serializer at run time (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), so an
@@ -539,6 +557,14 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             })
+        }
+        ElementSerializerPlan::Object {
+            object,
+            serial_name,
+            serial_info_unsupported,
+        } => {
+            let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
+            super::cached_serializer::object_serializer(ir, object, name, serial_info_unsupported)
         }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,
