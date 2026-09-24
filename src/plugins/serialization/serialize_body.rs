@@ -1,9 +1,9 @@
 //! Generation of a serializer method and its serialized-class write helper.
 
+use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, collection_serializer_builder,
-    contextual_serializer_for, encode_element_method, field_serializer_of, is_nullable,
-    property_is_contextual, ty_descriptor, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, encode_element_method,
+    field_serializer_of, is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -222,10 +222,11 @@ impl SerializeBody<'_> {
                 || ty
                     .non_null()
                     .obj_internal()
-                    .and_then(collection_serializer_builder)
+                    .and_then(constructed_standard_serializer)
                     .is_some()
             {
-                // Nested @Serializable OR a standard collection: encode[Nullable]Serializable
+                // Nested @Serializable OR a constructed standard type:
+                // encode[Nullable]Serializable
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
