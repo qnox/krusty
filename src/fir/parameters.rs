@@ -323,6 +323,53 @@ impl ResolvedModuleIndex {
         );
     }
 
+    /// Transfer default availability across an already-resolved override edge. Parameter identity,
+    /// type, and every other modifier remain owned by the overriding declaration; only the exact
+    /// provider's declaration bit is inherited ordinal-for-ordinal.
+    pub(crate) fn publish_inherited_callable_defaults(
+        &mut self,
+        target: CallableId,
+        defaults: &[bool],
+        provider: super::ResolvedFunctionOverrideTarget,
+    ) {
+        let parameters = self
+            .callable_parameters
+            .get_mut(&target)
+            .expect("an inherited default target must retain its callable parameters");
+        assert_eq!(
+            parameters.len(),
+            defaults.len(),
+            "an exact override edge must preserve semantic parameter arity"
+        );
+        for (parameter, &inherited) in parameters.iter_mut().zip(defaults) {
+            if inherited {
+                parameter.flags.0 |= ResolvedValueParameterFlags::DEFAULT;
+            }
+        }
+        if parameters
+            .iter()
+            .any(|parameter| parameter.flags.has_default())
+        {
+            self.callable_default_providers.insert(target, provider);
+        }
+    }
+
+    pub fn callable_default_provider(
+        &self,
+        callable: CallableId,
+    ) -> Option<super::ResolvedFunctionOverrideTarget> {
+        self.callable_default_providers.get(&callable).copied()
+    }
+
+    pub(crate) fn callable_default_bitmap(&self, callable: CallableId) -> Option<Vec<bool>> {
+        self.callable_parameters.get(&callable).map(|parameters| {
+            parameters
+                .iter()
+                .map(|parameter| parameter.flags.has_default())
+                .collect()
+        })
+    }
+
     pub(super) fn callable_parameter_storage_payload_bytes(&self) -> usize {
         self.callable_parameters.len()
             * (std::mem::size_of::<CallableId>()

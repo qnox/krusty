@@ -51,6 +51,22 @@ fn nearest_enclosing_type_parameter_wins_in_a_local_class() {
     assert_eq!(run(SRC).expect("nearest type parameter is captured"), "OK");
 }
 
+/// The anonymous classifier's member result is specialized by the captured callable argument at
+/// the construction site. The active local-member overlay must observe the same receiver binding as
+/// an immutable provider candidate; otherwise `calc()` leaks its declaration-owned `T` here.
+#[test]
+fn an_anonymous_member_result_uses_the_captured_callable_type_argument() {
+    const SRC: &str = "class Test {\n\
+        \x20   private fun <T : Any> T.self() = object { fun calc(): T = this@self }\n\
+        \x20   fun value(): Int = 1.self().calc()\n\
+        }\n\
+        fun box(): String = if (Test().value() == 1) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("anonymous member result is receiver-specialized"),
+        "OK"
+    );
+}
+
 /// kotlinc: accepted.
 ///
 /// The local class's own property shadows a same-named property of the enclosing class, so this is

@@ -4336,3 +4336,24 @@ or splice rather than a successful run — a declined splice still runs correctl
 method being present for Java interop. That test also pins the library's JVM target at 25: string
 concatenation compiles to `invokedynamic` only from target 9, so on a lower target the concatenating
 body contains none and krusty splices it.
+
+## Byte-identical box conformance, item 1 — local-class naming  ◐
+
+Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
+kotlinc names local classes (`InventNamesForLocalClasses`): one walk numbers every lambda, function
+expression, callable reference, anonymous object, delegated property and suspend continuation in a
+single sequence per enclosing name. On master cb2dded, krusty's internal names reach the output in
+1,207 box files.
+
+- ✅ 1a. `frontend::local_class_names` records source ownership segments and shared sequence
+  ordinals without formatting a target name. Stable declaration identities carry that provenance
+  through FIR/common IR; `jvm::local_class_names` combines it with the physical facade/class owner.
+- ☐ 1b. Suspend lambdas as `SuspendLambda` classes named from the walk (today a static method plus a
+  `…$fir_…$1` continuation).
+- ☐ 1c. Function and property reference classes named from the walk (today `Facade$fir$function$N`
+  and `Facade$fir$property$N`), with kotlinc's direct `invoke` in place of the adapter.
+- ☐ 1d. Local functions and lambda bodies named as `InventNamesForLocalFunctions` does
+  (`box$local`, `box$lambda$0`), replacing `name$fir_A_B_C`.
+- ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
+  realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
+  same provenance with their own separators and container rules.

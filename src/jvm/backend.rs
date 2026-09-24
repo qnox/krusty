@@ -913,6 +913,11 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
+        let stems = &file.stems;
+        crate::jvm::local_class_names::realize(&mut file.ir, |source| {
+            crate::jvm::module_calls::facade_for(source, stems)
+                .expect("a local classifier's declaring source has a file stem")
+        });
         if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -954,15 +959,6 @@ impl Backend for JvmBackend {
         crate::jvm::annotation_constructions::lower_annotation_constructions(&mut file.ir, &facade);
         let mut default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
-        if let Err(target) =
-            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                format!("internal error: missing JVM dependency realization for {target}"),
-            );
-            return Vec::new();
-        }
         let mut property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
         if let Err(target) =
@@ -983,6 +979,15 @@ impl Backend for JvmBackend {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: missing JVM module layout for {target:?}"),
+            );
+            return Vec::new();
+        }
+        if let Err(target) =
+            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: missing JVM dependency realization for {target}"),
             );
             return Vec::new();
         }

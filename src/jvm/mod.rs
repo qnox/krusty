@@ -29,6 +29,7 @@ pub mod ir_emit;
 pub mod java_stub;
 pub mod jvm_class_map;
 pub mod jvm_libraries;
+mod local_class_names;
 mod local_properties;
 mod mapped_builtin_declarations;
 pub mod metadata;

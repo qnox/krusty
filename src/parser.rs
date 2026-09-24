@@ -3478,9 +3478,7 @@ impl<'a> Parser<'a> {
     ) {
         self.reprefix_hoisted(outer, start);
         nested.visibility = visibility_of(modifiers);
-        nested.name = format!("{outer}.{}", nested.name);
-        let id = self.file.add_decl(Decl::Class(nested));
-        self.file.decls.insert(start, id);
+        let id = self.file.add_hoisted_classifier(nested, outer, start);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
     }
 
