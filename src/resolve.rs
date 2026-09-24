@@ -66,6 +66,7 @@ mod member_extension_selection;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
+mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
 mod postponed_applicability;
@@ -37770,6 +37771,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     let mut checker = Checker {
         file,
         libraries: syms.libraries(),
+        native_plugins: syms.native_plugins(),
         compilation_id: syms.compilation_id(),
         demand_name: None,
         demand_call: None,
@@ -40679,6 +40681,9 @@ struct Checker<'a> {
     /// External declarations and platform semantics. This provider is independent of the
     /// temporary current-module signature graph and remains valid after that graph is destroyed.
     libraries: &'a dyn SemanticPlatform,
+    /// The compilation's native plugins, whose frontend checkers see each source class
+    /// (`plugin_class_checks`).
+    native_plugins: &'a crate::plugins::registry::NativePlugins,
     /// Compilation-scoped identity used only to intern declaration-owned generic variables.
     compilation_id: u64,
     /// This compilation's declarations as a [`SymbolSource`], federated OVER the classpath by the resolver
@@ -58568,6 +58573,8 @@ impl<'a> Checker<'a> {
                 &cl.primary_ctor_annotation_args,
             );
         }
+        // Compiler plugins' own class rules read the applications checked just above.
+        self.check_plugin_class_rules(scope, cl);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.

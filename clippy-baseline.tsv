@@ -83,7 +83,6 @@
 1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if merged.as_slice() != arguments { Ty::obj_args_name(name, &merged) } else { declared }`
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
-1	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	iterating on a map's keys
 1	src/resolve.rs	large size difference between variants: the entire enum is at least 408 bytes
