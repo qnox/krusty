@@ -381,7 +381,11 @@ fn all_returned_tail_calls(
             return None;
         }
     }
-    let forwarded: HashSet<ExprId> = calls.iter().copied().collect();
+    // Common IR is a DAG: two distinct returns may reference the same physical call expression.
+    // Threading `$completion` twice into that one call would corrupt its operand list, so keep each
+    // selected suspension point exactly once while preserving the first traversal order.
+    let mut forwarded = HashSet::new();
+    calls.retain(|call| forwarded.insert(*call));
     (forwarded == points).then_some(calls)
 }
 

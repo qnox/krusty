@@ -510,9 +510,8 @@ pub(crate) fn lower_suspend(
         }
 
         if let (Some(forward), Some(b)) = (forward, body) {
-            // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into
-            // each callee and return its `Object` result directly. No state machine, no continuation
-            // class — exactly kotlinc's tail-call optimization.
+            // Forward this function's `$completion` (value-index `p_old`) into every tail callee and
+            // return each `Object` directly, without a state machine, exactly as kotlinc does.
             for &call in forward.calls() {
                 let cont = ir.add_expr(IrExpr::GetValue(p_old));
                 if !append_continuation(ir, call, cont, default_call_operands) {
