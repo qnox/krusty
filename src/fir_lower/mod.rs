@@ -44,6 +44,7 @@ mod statement;
 mod suspend_conversions;
 mod tailrec;
 mod type_operations;
+mod when_expressions;
 
 pub use error::*;
 pub use sink::*;
