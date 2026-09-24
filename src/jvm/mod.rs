@@ -7,6 +7,10 @@ mod bridge_return_adaptations;
 pub mod bridges;
 mod builtin_member_operations;
 mod bytecode;
+// kotlinc's bytecode passes over `method_node`; only its tests use them until the emitter hands
+// the coroutine transformation a method node.
+#[cfg(test)]
+pub(crate) mod bytecode_passes;
 mod call_result_boundaries;
 pub mod classfile;
 pub mod classpath;

@@ -1,8 +1,12 @@
 # JVM: splice inline bodies before the coroutine transform
 
-Status: **design, not yet implemented.** Reviewable decision record for a large, staged change.
+Status: **revised 2026-09-24 (§1a).** The ordering below stands; the way it is reached changes from
+two-pass emission (§5.2, landed as §6a) to a port of kotlinc's own transformer over a method node.
+§5.1's marker-free suspension sites, §5.2, the staging in §6 and the divergences listed in §6a are
+superseded by §1a and describe code that goes away as §1a's steps land.
 Scope: the JVM backend only. Other backends keep today's IR-level inline expansion and IR-level
-coroutine lowering, unchanged.
+coroutine lowering, unchanged; krusty has no coroutine lowering for them yet, and when one comes it
+is a per-backend IR lowering, as in kotlinc's JS/Wasm/Native backends.
 
 ## 1. The decision
 
@@ -24,6 +28,47 @@ expansion to a **bytecode → bytecode** pass that runs *after* it. This is the 
 uses: its IR lowering fixes the suspend ABI, and `CoroutineTransformerMethodVisitor` does the state
 machine, the liveness analysis and the spilling on the already-inlined `MethodNode`. krusty reaches
 the same ordering by emitting the body twice (§5.2) rather than by editing a finished method.
+
+## 1a. Revision (2026-09-24): port `CoroutineTransformerMethodVisitor`
+
+Two-pass emission reaches kotlinc's ordering but not kotlinc's output: it spills a widened set,
+hoists suspensions into temps and restores in its own order (§6a), and every one of those is a byte
+difference. The revision gives the JVM backend kotlinc's machinery itself:
+
+```
+  IR → lower_suspend_abi (IR) → emit a MethodNode with kotlinc's suspension markers
+     → inline (method-node inliner) → coroutine transformer (method node → method node)
+     → continuation class from the transformer's layout and debug metadata → class file
+```
+
+* The emitter marks each suspension point exactly as kotlinc's codegen does: `InlineMarker`
+  `beforeInlineCall`/`afterInlineCall` around the call, `mark(0)`/`mark(1)` around the invoke, and
+  the other `mark(I)V` ids where kotlinc emits them.
+* `src/jvm/bytecode_passes/` holds the ports over `src/jvm/method_node/`, pass for pass and in
+  kotlinc's order: FixStack (the save/restore of the operand stack around a marked call), the
+  suspension-point collection, redundant-locals elimination, the boxing change, the tail-call
+  check, the prelude and `tableswitch`, `UninitializedStoresProcessor`, and spilling with kotlinc's
+  liveness, field-type and cleanup analyses. `transform_named_function` returns the method and
+  what the continuation class needs: its spill fields and `@DebugMetadata`.
+* The tests build the body kotlinc's codegen hands the transformer and compare the result with
+  kotlinc's, instruction for instruction, including line numbers and local-variable ranges.
+  Where kotlinc's optimizer changes the method afterwards (its `removeUnusedLocalVariables`
+  renumbers slots left unused by FixStack's stores of uninitialized `new` copies), the reference is
+  the transformer's own output, dumped from kotlinc.
+
+Steps, one PR each:
+
+| # | Step |
+| --- | --- |
+| 1 | The transformer for named functions, with the analyses and FixStack, tested against kotlinc. Not wired. |
+| 2 | Wiring for top-level functions: the emitter marks suspension points, the continuation class comes from the layout. |
+| 3 | Members and `$suspendImpl`. |
+| 4 | FixStack's `try` handling (saved stacks around handlers). |
+| 5 | Spliced inline bodies, including inline suspend functions (markers 6/7) and fake continuations. |
+| 6 | Suspend lambdas (`invokeSuspend`). |
+| 7 | Delete the IR machine and the two-pass machine for the JVM. |
+
+Each step reports box passes, byte-identical files and divergent classes before and after.
 
 ## 2. The symptom this exists to fix
 
