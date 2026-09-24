@@ -2936,7 +2936,9 @@ impl ClassWriter {
         // actually used — an unused entry would diverge from kotlinc's output for non-generic classes.
         let class_has_sig = self.class_signature.is_some();
         let signature_attr_name = field_sig_name.or_else(|| {
-            (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
+            self.methods
+                .iter()
+                .any(|m| m.signature.is_some())
                 .then(|| self.cp.utf8("Signature"))
         });
         // `MethodParameters` (written only under `-java-parameters`) interns once, when some method
@@ -3009,6 +3011,10 @@ impl ClassWriter {
             u2(&mut body, nat_idx);
             (name, body)
         });
+        // A class-only `Signature` interns its name after `InnerClasses` and `EnclosingMethod`, the
+        // order kotlinc writes the three in.
+        let signature_attr_name =
+            signature_attr_name.or_else(|| class_has_sig.then(|| self.cp.utf8("Signature")));
         // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
         // `RuntimeVisibleAnnotations` name, so build this attribute first.
         let sourcefile_attr = sourcefile_value.map(|file_idx| {
@@ -3317,10 +3323,12 @@ impl ClassWriter {
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
-        // `InnerClasses` precedes `Signature` — kotlinc's order for BOTH a generic class and an
-        // enum (verified against each). Writing the signature first left the two transposed on
-        // every class that has a nested member and a generic supertype.
+        // `InnerClasses`, then `EnclosingMethod`, then `Signature` — kotlinc's order for a generic
+        // class, an enum and a generated local class alike (verified against each). Writing the
+        // signature first left them transposed on every class with a nested member and a generic
+        // supertype.
         ordered.extend(inner_classes_attr);
+        ordered.extend(enclosing_method_attr);
         if let Some(sig) = self.class_signature {
             let mut body = Vec::new();
             u2(&mut body, sig);
@@ -3328,7 +3336,6 @@ impl ClassWriter {
         }
         ordered.extend(
             [
-                enclosing_method_attr,
                 sourcefile_attr,
                 smap_attr,
                 deprecated_attr,

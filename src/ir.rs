@@ -1465,6 +1465,19 @@ pub struct IrProperty {
     pub needs_access_bridge: bool,
 }
 
+/// The executable scope a local, anonymous or generated class is declared in. A backend realizes it
+/// as its own enclosure record (the JVM's `EnclosingMethod`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrEnclosure {
+    /// A function body, or a local function's own function. A lambda is not a scope of its own:
+    /// what it declares belongs to the function the lambda is written in.
+    Function(FunId),
+    /// A top-level property initializer: the file itself.
+    File,
+    /// A classifier's property initializer or `init` block.
+    ClassInitializer(ClassId),
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -1474,10 +1487,11 @@ pub struct IrClass {
     /// classes must not be published as declared nested classifiers in language metadata, even when
     /// their backend name happens to look nested.
     pub is_source_declared: bool,
-    /// A source anonymous-object declaration. Its lexical function is recorded separately as an
-    /// exact [`FunId`], so a backend can realize enclosure metadata without parsing generated names.
+    /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
-    pub enclosing_function: Option<FunId>,
+    /// The executable scope a local, anonymous or generated class is declared in, recorded as an
+    /// exact identity so a backend realizes enclosure metadata without parsing generated names.
+    pub enclosure: Option<IrEnclosure>,
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
@@ -1805,7 +1819,7 @@ impl IrClass {
             fq_name,
             is_source_declared: false,
             is_anonymous_object: false,
-            enclosing_function: None,
+            enclosure: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -1917,7 +1931,7 @@ impl IrClass {
             fq_name: header.classifier,
             is_source_declared: true,
             is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
-            enclosing_function: None,
+            enclosure: None,
             is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
             is_local_class: flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS),
             is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
@@ -2184,6 +2198,9 @@ pub struct IrFile {
     /// that realizes the reference as a class of its own names that class from it.
     pub(crate) callable_reference_provenance:
         std::collections::HashMap<u32, IrLocalClassNameProvenance>,
+    /// The executable scope each source callable-reference node is written in, by expression id. A
+    /// target that realizes the reference as a class of its own records that class's enclosure.
+    pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
     /// The class name a target chose for each source callable reference, by expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.

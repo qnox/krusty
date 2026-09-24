@@ -104,7 +104,10 @@ impl BodyLowering<'_> {
                 unreachable!("local function declaration changed during FIR lowering")
             };
             let tailrec = *tailrec;
-            let lowered = self.lower_nested_function(body, function, false, false, tailrec)?;
+            // A local function is the scope of what it declares.
+            let enclosure = Some(crate::ir::IrEnclosure::Function(function));
+            let lowered =
+                self.lower_nested_function(body, function, enclosure, false, false, tailrec)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -364,7 +367,10 @@ impl BodyLowering<'_> {
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
         // A lambda carries no `tailrec`: the modifier is a function declaration's.
-        let lowered = self.lower_nested_function(body, function, unit_as_value, true, false)?;
+        // A lambda is not a scope: what it declares belongs to the enclosing one.
+        let enclosure = self.enclosure;
+        let lowered =
+            self.lower_nested_function(body, function, enclosure, unit_as_value, true, false)?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
             .any(|(_, depth)| *depth > 0)
@@ -949,6 +955,7 @@ impl BodyLowering<'_> {
         &mut self,
         body: &FirBody,
         function: crate::ir::FunId,
+        enclosure: Option<crate::ir::IrEnclosure>,
         unit_as_value: bool,
         retain_inline_template: bool,
         tailrec: bool,
@@ -981,6 +988,7 @@ impl BodyLowering<'_> {
             scopes,
             self.published_local_callables.clone(),
         );
+        nested.enclosure = enclosure;
         nested.control_path = self.control_path.clone();
         nested.control_path.push(
             body.local_callable()
