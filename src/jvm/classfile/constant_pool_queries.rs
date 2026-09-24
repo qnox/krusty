@@ -7,6 +7,17 @@
 use super::{Const, ConstPool, VerifType};
 
 impl ConstPool {
+    /// Non-interning lookup of an existing `CONSTANT_Utf8` entry.
+    pub(super) fn lookup_utf8(&self, text: &str) -> Option<u16> {
+        self.dedup.get(&Const::Utf8(text.to_string())).copied()
+    }
+
+    /// Non-interning lookup of an existing `CONSTANT_String` entry.
+    pub(super) fn lookup_string(&self, text: &str) -> Option<u16> {
+        let utf8 = self.dedup.get(&Const::Utf8(text.to_string())).copied()?;
+        self.dedup.get(&Const::String(utf8)).copied()
+    }
+
     /// The entry at 1-based pool index `idx` (long/double occupy two slots).
     pub(super) fn entry_at(&self, idx: u16) -> Option<&Const> {
         if self.wide_count == 0 {
@@ -57,6 +68,21 @@ impl ConstPool {
         };
         Some((
             self.class_name(class_idx)?,
+            self.utf8_at(*name_idx)?,
+            self.utf8_at(*descriptor_idx)?,
+        ))
+    }
+
+    /// The `(owner, name, descriptor)` named by a field reference.
+    pub(super) fn fieldref_parts(&self, idx: u16) -> Option<(&str, &str, &str)> {
+        let Const::Fieldref(class_idx, name_and_type) = self.entry_at(idx)? else {
+            return None;
+        };
+        let Const::NameAndType(name_idx, descriptor_idx) = self.entry_at(*name_and_type)? else {
+            return None;
+        };
+        Some((
+            self.class_name(*class_idx)?,
             self.utf8_at(*name_idx)?,
             self.utf8_at(*descriptor_idx)?,
         ))
