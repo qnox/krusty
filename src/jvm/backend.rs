@@ -130,6 +130,9 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
+    // Every body of the file is lowered, so each lifting sequence is whole: name its callables
+    // before any pass renders a debug name from them.
+    crate::jvm::lifted_names::number(ir);
     crate::jvm::module_calls::realize_super_calls(ir).map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -202,6 +205,8 @@ fn run_backend_passes_after_plugins(
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
+    // After reparenting: a lifted name is distinct only within the class the method lands in.
+    crate::jvm::lifted_names::realize(ir);
     Ok(())
 }
 

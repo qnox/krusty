@@ -68,6 +68,7 @@ mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
+pub(super) use declaration_types::function_descriptor;
 pub(crate) use declaration_types::jvm_tys;
 pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
 use declaration_types::{field_jvm_tys, jvm_declared_ty};
@@ -5626,10 +5627,7 @@ fn function_enclosure(
         .dispatch_receiver
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
-    let descriptor = method_descriptor(
-        &jvm_function_params(ir, function),
-        jvm_declared_ty(&declaration.ret),
-    );
+    let descriptor = function_descriptor(ir, function);
     Some((owner, Some((declaration.name.clone(), descriptor))))
 }
 

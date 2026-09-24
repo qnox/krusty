@@ -71,6 +71,13 @@ impl BodyFirChecker<'_> {
             body.set_debug_name(name.to_owned());
         }
         body.mark_source_lambda(self.lambda_binding_name.clone());
+        if let Some(site) = self.file.lambda_lifting_sites.get(&expression.0) {
+            // A suspend lambda becomes a class of its own rather than a lifted method.
+            body.set_lifting_site(crate::fir::FirLiftingSite::from_source(
+                site,
+                !signature.suspend,
+            ));
+        }
         if let Some(owner) = self.body.lexical_class_owner() {
             body.set_lexical_class_owner(Some(owner));
         }
