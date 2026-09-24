@@ -10,7 +10,8 @@
 //! It runs twice per method:
 //!
 //! - when the method is added, so the classes its frames name are interned where ASM interns them:
-//!   after the method's own constants and before the next method's;
+//!   after the method's own constants and before the next method's (except a class only an unnamed
+//!   temporary holds, which a later rewrite may fold away);
 //! - when the class is written, after kotlinc's bytecode rewrites, over the final code, exception
 //!   table, line numbers and local ranges. This is the table the class carries.
 //!
@@ -125,6 +126,55 @@ impl ClassWriter {
             &computed.offsets,
             &mut self.cp,
         ))
+    }
+
+    /// Intern the classes the table of `computed` names, where ASM interns them when it writes the
+    /// table, leaving out the locals no local-variable entry names beyond the arguments: a rewrite
+    /// when the class is written may fold such a temporary away, and kotlinc's writer never sees a
+    /// temporary its optimizer folded.
+    pub(super) fn intern_frame_classes(
+        &mut self,
+        body: &Body<'_>,
+        computed: &Computed,
+        named: &[u16],
+    ) {
+        let Ok(entry) = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
+        else {
+            return;
+        };
+        let arguments: usize = entry.iter().map(words).sum();
+        let frames: Vec<ComputedFrame> = computed
+            .frames
+            .frames
+            .iter()
+            .map(|frame| {
+                let mut slot = 0;
+                let mut locals: Vec<VerificationType> = frame
+                    .locals
+                    .iter()
+                    .map(|value| {
+                        let kept = slot < arguments || named.contains(&(slot as u16));
+                        slot += words(value);
+                        if kept {
+                            value.clone()
+                        } else {
+                            VerificationType::Top
+                        }
+                    })
+                    .collect();
+                while locals.last() == Some(&VerificationType::Top) {
+                    locals.pop();
+                }
+                ComputedFrame {
+                    index: frame.index,
+                    locals,
+                    stack: frame.stack.clone(),
+                }
+            })
+            .collect();
+        if !frames.is_empty() {
+            encode(&frames, &entry, &computed.offsets, &mut self.cp);
+        }
     }
 
     /// Replace every method's table with the one its final body implies, rewriting unreachable
@@ -301,6 +351,13 @@ fn encode(
         previous_locals = locals;
     }
     body
+}
+
+fn words(value: &VerificationType) -> usize {
+    match value {
+        VerificationType::Long | VerificationType::Double => 2,
+        _ => 1,
+    }
 }
 
 fn write_type(value: &VerificationType, offsets: &[usize], out: &mut Vec<u8>, cp: &mut ConstPool) {
