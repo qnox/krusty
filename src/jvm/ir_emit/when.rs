@@ -186,10 +186,8 @@ impl Emitter<'_> {
         if matches!(exit, Some((_, false))) {
             return;
         }
-        let mut end_targeted = false;
         if !selector_diverges {
             code.goto(emission.end);
-            end_targeted = true;
         }
         self.bind(null_path, code);
         // A chain's inner guards jumped here before its later receiver temporaries were stored.
@@ -197,8 +195,7 @@ impl Emitter<'_> {
             self.unassigned_values.extend(temporaries);
         }
         code.set_stack(emission.entry_height);
-        let null_diverges = emit_arm(self, null_result, code);
-        if end_targeted && !null_diverges {}
+        let _ = emit_arm(self, null_result, code);
         self.bind(emission.end, code);
     }
 
@@ -236,13 +233,11 @@ impl Emitter<'_> {
         }
 
         let merge = emission.terminal_target.unwrap_or(emission.end);
-        let mut end_reachable = false;
         for (index, (_, body)) in plan.cases.iter().enumerate() {
             self.bind(case_labels[index], code);
             code.set_stack(emission.entry_height);
             if self.emit_switch_body(*body, &emission, code) {
                 code.goto(merge);
-                end_reachable = true;
             }
         }
         self.bind(default, code);
@@ -253,17 +248,14 @@ impl Emitter<'_> {
                     if emission.terminal_target.is_some() {
                         code.goto(merge);
                     }
-                    end_reachable = true;
                 }
             }
             None => {
                 if emission.terminal_target.is_some() {
                     code.goto(merge);
                 }
-                end_reachable = true;
             }
         }
-        if end_reachable && emission.terminal_target.is_none() {}
         if emission.terminal_target.is_none() {
             self.bind(emission.end, code);
         }

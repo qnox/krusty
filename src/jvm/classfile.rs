@@ -3405,10 +3405,9 @@ pub struct CodeBuilder {
     /// point sees exactly the state it saw before this suppression existed.
     dead: bool,
     /// Labels bound while `dead` and NOT revived, by label id. They sit at the end of a dropped
-    /// region, which is also where the next live instruction lands — so their frames would collide
-    /// with (and, being registered first, out-rank) the live label's frame in `build_stackmap`'s
-    /// same-offset dedup. Their frames are dropped instead. Indexed like `labels`; `false` for a
-    /// label bound normally, and for one never bound at all.
+    /// region, which is also where the next live instruction lands. Rewrites and side-table
+    /// resolution must ignore them rather than attach dead ranges to that live instruction.
+    /// Indexed like `labels`; `false` for a label bound normally, and for one never bound at all.
     dead_bound: Vec<bool>,
     /// When each label was last bound, by label id (0 = never): the order labels bound at one offset
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.

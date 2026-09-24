@@ -84,13 +84,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `krusty [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
   `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
 ### 4e — v52 + StackMapTable ✅ (exact version match with kotlinc)
-- ✅ All emitted methods now carry a valid `StackMapTable` attribute, required by Java 8
-  (class-file v52). Branch targets tracked via `rec()` / `rec_s()` in `FunctionEmitter`;
-  synthetic methods (`copy$default`, `equals`) register frames via `CodeBuilder.add_frame_if_new`.
-- ✅ `init_temp` pattern: any slot added to `self.slots` via `alloc_temp` or `alloc_slot` before a
-  `rec()` call gets a zero/null default store so the JVM's computed type matches the declared frame.
-- ✅ Divergence-aware codegen: `goto`/store after a `return`/`throw` branch is elided; frames for
-  dead code are filtered to avoid "bad offset" errors; duplicate-offset frames deduped.
+- ✅ Every non-empty emitted v52 method gets a valid `StackMapTable` computed from its final rewritten
+  bytecode, exception table, and method descriptor. Emission records no verifier frames.
+- ✅ The same final-body dataflow computes `max_stack` and `max_locals`; failure to analyze an emitted
+  instruction graph is an explicit backend invariant violation, with no recorded-frame fallback.
+- ✅ Divergence-aware codegen drops straight-line instructions after `return`/`throw`; final analysis
+  derives reachable blocks and merge states from the remaining graph.
 - ✅ All `cargo test` green; `-Xverify:all` passes on all emitted class files.
 
 ## Phase 5 — Differential harness vs kotlinc  🚧
@@ -1764,12 +1763,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   subject/condition temp.
 
 - ✅ **Phase 157 — spill branchy operands to temps (root-cause fix)** (146 → 147 box()=OK, 0 FAIL).
-  The recurring bug behind several `is_branchy` bail-guards: an expression that records a StackMapTable
-  frame (a primitive comparison, `when`, `while`) can't be emitted while other operands sit on the
-  stack — its merge frame omits them (VerifyError). Added `Emitter::records_frame(e)` (recurses the IR
-  subtree for frame-recording nodes) and, in `New` and the enum `<clinit>` entry construction, when an
-  argument records a frame, evaluate all args into temps **first** (clean stack) then construct. This
-  retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same `records_frame` spill
+  The recurring bug behind several `is_branchy` bail-guards: an expression that introduces control
+  flow (a primitive comparison, `when`, `while`) needs a consistent operand baseline at its joins.
+  `Emitter::emits_control_flow(e)` recurses through the IR; in `New` and enum `<clinit>` construction,
+  when an argument branches, all arguments are evaluated into temps **first** and then loaded. This
+  retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same control-flow spill
   should next be applied to `MethodCall`/`Call` argument lists.
 
 - ✅ **Phase 158 — finish the operand spill + single-eval branchy `when` subject** (147 → 148, 0 FAIL).
@@ -1784,8 +1782,8 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   Applied the spill to `emit_compare` (both the `Objects.equals` and primitive paths), retiring the
   last branchy-operand guard — the branchy `when` **condition** (`x == when{…}`) now compiles. Fixed a
   latent correctness bug in the spill itself: an earlier operand's temp is **live** while a later
-  branchy operand records frames, so the temps must be in `self.slots` during that window (else those
-  frames mark the slot `Top` → "Bad local variable type"). Centralized into `spill_to_temps` (registers
+  branchy operand executes, so the temp must stay in the backend-local plan during that window.
+  Centralized into `spill_to_temps` (registers
   each temp in `self.slots`, caller removes after load); `New`/`MethodCall`/`Call`/enum-`<clinit>`/
   `emit_compare` all share it. The branchy-operand-on-non-empty-stack VerifyError class is now fully
   closed.

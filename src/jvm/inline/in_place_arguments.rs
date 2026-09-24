@@ -214,7 +214,7 @@ fn whitelisted_static(insn: &Insn, body: &MethodCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{splice_unified, spliced_frame, ParameterBinding, ReifiedArguments, VType};
+    use super::super::{splice_unified, spliced_frame, ParameterBinding, ReifiedArguments};
     use super::*;
     use crate::jvm::classfile::ClassWriter;
 
@@ -362,7 +362,6 @@ mod tests {
                 0x88, 0x60, 0x36, 0x04, 0x15, 0x04, 0x99, 0x00, 0x07, 0x04, 0xa7, 0x00, 0x04, 0x03
             ]
         );
-        assert_eq!(splice.frames, vec![(13, vec![VType::Int], vec![])]);
         assert_eq!(splice.locals, vec![(2, 12, 4, "sum$iv".into(), "I".into())]);
     }
 

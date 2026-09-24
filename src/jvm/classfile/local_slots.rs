@@ -133,16 +133,6 @@ impl Renumbering {
     pub(crate) fn slot(&self, slot: u16) -> Option<u16> {
         self.moved.get(usize::from(slot)).copied().flatten()
     }
-
-    /// A frame's locals, one entry per old slot, with the unused slots left out.
-    pub(crate) fn locals<T>(&self, slots: Vec<T>) -> Vec<T> {
-        slots
-            .into_iter()
-            .enumerate()
-            .filter(|(slot, _)| self.moved.get(*slot).copied().flatten().is_some())
-            .map(|(_, local)| local)
-            .collect()
-    }
 }
 
 /// Close the gaps among the slots `nodes` and `fixed` (`this`, the parameters and the named locals,

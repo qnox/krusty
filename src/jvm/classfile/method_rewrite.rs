@@ -229,42 +229,12 @@ impl ClassWriter {
         let entry = expand_slots(&entry);
         let original_graph = ControlGraph::build(&insns, &handlers)?;
         // The verifier's types before each original instruction, computed at most once. Rewrite
-        // selection must follow the instruction graph itself: emitter-recorded frames are migration
-        // input and can be more precise than the state the final bytecode actually proves (for
-        // example, a smart-cast fact after the value has been stored in a broader local). Using
-        // those frames to remove a `checkcast` can therefore make a valid body unverifiable.
+        // selection follows the instruction graph itself; a semantic smart-cast fact, for example,
+        // cannot remove a `checkcast` after the value has been stored in a broader physical local.
         let flow_types_cell = std::cell::OnceCell::new();
         let flow_types = || {
             flow_types_cell
                 .get_or_init(|| FrameTypes::analyze(&insns, &original_graph, &entry, &[], self))
-                .as_ref()
-        };
-        // Recorded frames remain only as a compatibility certificate for accepting reference
-        // widenings while the rewrite-frame migration is completed by the next stack stage.
-        let original_analysis_cell = std::cell::OnceCell::new();
-        let original_analysis = || {
-            original_analysis_cell
-                .get_or_init(|| {
-                    let original_frames = self
-                        .compute_frames(&stack_maps::Body {
-                            access: source.access,
-                            name: &source.name,
-                            descriptor: &source.desc,
-                            code: bytes,
-                            exceptions: &method.exceptions,
-                            labels: stack_maps::table_labels(&method.lnt, &method.lvt, code_len),
-                        })
-                        .ok()
-                        .map(|computed| stack_maps::verif_frames(computed.frames()))?;
-                    let types = FrameTypes::analyze(
-                        &insns,
-                        &original_graph,
-                        &entry,
-                        &original_frames,
-                        self,
-                    )?;
-                    Some((types, original_frames))
-                })
                 .as_ref()
         };
         let redundant_casts = redundant_checkcasts::select(self, &insns, || flow_types());

@@ -41,9 +41,8 @@ impl Emitter<'_> {
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
         if let IrExpr::Const(IrConst::Boolean(b)) = *self.ir.expr(cond) {
-            // Frame the target regardless (callers — `when`/loop emission — rely on the branch target
-            // having a stack-map frame), but only emit the jump when the constant actually takes it.
-            self.frame(target, vec![], code);
+            // Only emit the jump when the constant actually takes it. Final-bytecode analysis
+            // discovers the target state from the emitted control-flow edge.
             if b == jump_when_true {
                 code.goto(target);
                 return true;
@@ -127,7 +126,6 @@ impl Emitter<'_> {
                 };
                 let method = self.cw.methodref(owner, "compare", descriptor);
                 code.invokestatic(method, (slot_words(scalar) * 2) as i32, 1);
-                self.frame(target, vec![], code);
                 if jump_when_true {
                     code.ifeq(target);
                 } else {
@@ -180,7 +178,6 @@ impl Emitter<'_> {
             }
             let ci = self.cw.class_ref(&internal);
             code.instance_of(ci);
-            self.frame(target, vec![], code);
             // Stack holds 1 iff `arg instanceof T`. The condition is true on `instanceof` for `InstanceOf`
             // and on `!instanceof` for `NotInstanceOf`; jump when the condition equals `jump_when_true`.
             let jump_on_instance = if matches!(to, IrTypeOp::InstanceOf) {
@@ -196,7 +193,6 @@ impl Emitter<'_> {
             return false;
         }
         self.emit_value(cond, code);
-        self.frame(target, vec![], code);
         if jump_when_true {
             code.ifne(target);
         } else {

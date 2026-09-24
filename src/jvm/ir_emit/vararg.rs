@@ -27,7 +27,7 @@ pub(super) fn emit(
     // empty stack first. Spilling all of them preserves source order and exactly-once evaluation.
     let temps = elements
         .iter()
-        .any(|&element| emitter.records_frame(element))
+        .any(|&element| emitter.emits_control_flow(element))
         .then(|| emitter.spill_to_temps(elements, code));
     let element_type = array_jvm_element(array_type);
     if element_type.is_jvm_scalar() {
@@ -83,7 +83,7 @@ fn emit_primitive_spread(
             let (slot, ty, _) = temps[index];
             load(ty, slot, code);
         } else {
-            // Preserve the established byte sequence when no child records a frame.
+            // Preserve the established byte sequence when no child introduces control flow.
             emitter.emit_value(element, code);
         }
         if spreads[index] {
@@ -127,7 +127,7 @@ fn emit_reference_spread(
             let (slot, ty, _) = temps[index];
             load(ty, slot, code);
         } else {
-            // Preserve the established byte sequence when no child records a frame.
+            // Preserve the established byte sequence when no child introduces control flow.
             emitter.emit_value(element, code);
         }
         let method = if spreads[index] {
@@ -181,7 +181,7 @@ fn emit_packed_array(
     // are all ordinary keeps its existing emission byte for byte.
     if elements
         .iter()
-        .any(|&element| emitter.records_frame(element))
+        .any(|&element| emitter.emits_control_flow(element))
     {
         emit_packed_array_through_temps(emitter, array_type, elements, code);
         return;
@@ -228,7 +228,7 @@ fn emit_packed_array(
 }
 
 /// Build the same packed array with every element evaluated into a temp first. Used when any element
-/// records a frame; see the caller for why the stack must be clean at that point.
+/// introduces control flow; see the caller for why the stack must be clean at that point.
 fn emit_packed_array_through_temps(
     emitter: &mut Emitter<'_>,
     array_type: &Ty,

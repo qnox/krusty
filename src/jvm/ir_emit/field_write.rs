@@ -38,7 +38,7 @@ impl Emitter<'_> {
             // Kotlin still evaluates the receiver before the RHS. A branchy divergent RHS must
             // start from a clean operand stack, so preserve an effectful receiver through a
             // temporary before emitting the non-returning value.
-            if self.records_frame(value) {
+            if self.emits_control_flow(value) {
                 let temps = self.spill_to_temps(&[receiver], code);
                 self.emit_value(value, code);
                 self.release_temporary(temps[0].2);
@@ -50,7 +50,7 @@ impl Emitter<'_> {
         }
         // A branchy value emits a merge frame; spill it before loading the receiver so those frames
         // begin with a clean operand stack. Plain values retain direct receiver/value order.
-        if self.records_frame(value) {
+        if self.emits_control_flow(value) {
             let temps = self.spill_to_temps(&[value], code);
             self.emit_value(receiver, code);
             let (slot, ty, lease) = temps[0];
@@ -135,7 +135,7 @@ impl Emitter<'_> {
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let field_ty = jvm_declared_ty(&field.ty);
-        if field_ty != Ty::Int || self.records_frame(rhs) || self.must_spill_across(rhs) {
+        if field_ty != Ty::Int || self.emits_control_flow(rhs) || self.must_spill_across(rhs) {
             return false;
         }
         let owner = class_decl.fq_name();

@@ -268,7 +268,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   state 0 calls the suspend callee with its own continuation and returns `COROUTINE_SUSPENDED` if the
   callee suspends, the resume state reads `result`; both yield the suspension value, bound once via a
   `when`-expression (a single store — assigning a pre-declared local in two branches trips the frame
-  verifier). Built as ordinary IR (the emitter produces bytecode + frames), runtime-equivalent to
+  verifier). Built as ordinary IR; the emitter produces bytecode and final-body analysis computes
+  its frames, runtime-equivalent to
   kotlinc's `tableswitch` form (an `if`-chain dispatch). Proven end-to-end: a Java `Continuation`
   driver runs `bar` (`val a = foo(); return a + 1`) to completion → 43
   (`tests/suspend_e2e.rs::suspend_fun_with_suspension_point_runs_via_continuation`). Two supporting
@@ -2278,9 +2279,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
   the next free local at that point, released again afterwards. krusty used `dup; index; <element>;
   aastore`, one instruction shorter per element and different on every vararg call site in a real
-  module. The `Vararg` emitter now spills the fresh array into `next_slot` (registered in the frame
-  slot map while the elements are emitted, so a branchy element frames it as live), reloads it for
-  each store and for the final use, and releases the slot when it is the topmost one. Measured
+  module. The `Vararg` emitter now spills the fresh array into `next_slot`, reloads it for each store
+  and for the final use, and releases the slot when it is the topmost one. Final-body dataflow sees
+  the temp's actual lifetime across a branchy element. Measured
   byte-identical for a top-level `f("a", "b")`, a non-final vararg with a trailing named argument, an
   instance method, `arrayOf`/`intArrayOf`/`listOf`, and a parameter used as an element. Still open
   beside it: kotlinc allocates a `val`'s slot BEFORE evaluating its initializer (`val t = f("a")`
@@ -2327,9 +2328,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch — an `if`/`when`/elvis, a **safe call** `c?.calc()`, a relational comparison — is rejected on the
   vararg-pack lowering paths (the file skips): `is_branchy` treats those as non-spliceable (`ArrayOfRef`
   in `tests/feature_box_e2e.rs`). This is a *conservative lowering* restriction, not a verifier one — the
-  emitter now types the held `[array, array, index]` into a mid-fill element's frames (see "An operand
-  held on the stack across a branchy sub-expression must be TYPED into its frames"), so the shapes that
-  do reach emit are verifiable. `try` must stay rejected regardless: a handler CLEARS the operand stack,
+  final-body analyzer propagates the held `[array, array, index]` prefix through a mid-fill element's
+  control flow, so the shapes that do reach emit are verifiable. `try` must stay rejected regardless:
+  a handler CLEARS the operand stack,
   so the partly-built array held there would be lost. `is_branchy`'s `==`/`!=` arm fires only when the
   LHS is *syntactically* a primitive literal (`file_expr_is_jvm_scalar`), so `listOf(x == y, …)` over
   `Int` parameters is NOT declined and does reach emit — that gap is what exposed the frame bug.
@@ -2346,8 +2347,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   — reusing the existing size-alloc and `kotlin/Array.set` intrinsics (the backend selects `iastore`/… by
   the array's element type). The single lambda parameter is the **index** (bound to the loop counter); the
   body yields the element. The element value is spilled to a temp before the store, since a branchy body
-  (`{ it % 2 == 0 }`) records a stackmap frame and `Array.set` pushes the array+index before the value —
-  without the spill those would be stranded across the frame (VerifyError). Reference `Array<T>(n) { … }`
+  (`{ it % 2 == 0 }`) and `Array.set` otherwise leave the array+index live across nested control flow.
+  Reference `Array<T>(n) { … }`
   allocates via the `NewArray` IR node (`anewarray`); a *primitive* `Array<Int>` (boxed `Integer[]`) is
   skipped. `PrimArrayInit`/`RefArrayInit` in `tests/feature_box_e2e.rs`.
 - **`x == null` / `x != null` compile to `ifnull` / `ifnonnull`** (kotlinc's bytecode), regardless of the
@@ -2355,7 +2356,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   primitive `if_icmp*` path — `if_icmpeq` on a reference operand is only accepted by the verifier when no
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
-  neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+  neither of which is the `null` literal. `emits_control_flow` accounts for the `ifnull` branch+merge.
 - **A comparison that PRODUCES a `Boolean` fuses its test exactly like one that drives a branch.** Both
   positions share one rule: never materialize an `iconst_0` just to feed a two-operand `if_icmp*` when a
   single-operand branch already says the same thing.
@@ -2391,8 +2392,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     a reference and fails verification. Same in both positions, and on the pre-change compiler.
   - Fixing the merge-point accounting (`set_stack` at the false arm, previously applied only to the
     numeric arm) also removed a permanent `+1` drift in the null/referential arms. That drift made a
-    LATER branchy inline splice in the same expression see a non-empty baseline and refuse, escalating to
-    a hard `inline splice failed` compile error — so e.g.
+    LATER branchy inline splice in the same expression see a bogus baseline and refuse under the former
+    relocated-frame path. Final-body dataflow no longer needs an empty baseline, but the counter fix still
+    preserves correct physical stack accounting — so e.g.
     `two(a === b, x.takeIf { it > 0 }.toString())` now compiles.
   `tests/bytecode_parity_e2e.rs`: `long_compare_in_value_position_tests_lcmp_without_materialized_zero`,
   `unsigned_long_equality_tests_lcmp_without_materialized_zero`,
@@ -2584,15 +2586,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classpath-class fallback (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`). `is UInt`/
   `is ULong` and smart-casting a reference to an unsigned value type are rejected (value-type boxing).
 - **A branchy arithmetic operand spills.** When one operand of a primitive `+`/`-`/`*`/`/`/`%`/bitwise/
-  shift is branchy (records a stackmap frame — `5 + if (c) 1 else 2`, `r += if (…) … else …`), the
+  shift is branchy (`5 + if (c) 1 else 2`, `r += if (…) … else …`), the
   emitter routes both operands through `emit_operands`, which stores the already-pushed operand to a temp
   so it isn't stranded on the operand stack across the branch's merge frame (`VerifyError: Inconsistent
   stackmap frames`). Non-branchy operands emit in place, so the common-case bytecode is unchanged.
   `BranchyArithmetic` in `tests/feature_box_e2e.rs`.
-- **An operand held on the stack across a branchy sub-expression must be TYPED into its frames.** Where
+- **An operand held on the stack across a branchy sub-expression is part of final-body dataflow.** Where
   spilling to a temp isn't available — the store instruction needs its operands underneath it — the
-  emitter keeps the held entries on the operand stack and records them in every stack-map frame the
-  sub-expression writes (`pending_stack`, applied through `emit_value_over`). This covers the positions
+  emitter keeps the held entries on the operand stack and the frame computer propagates that prefix
+  through every emitted edge. This covers the positions
   that fill a container element-wise: a `Vararg`'s `dup; index; <element>; aastore` loop (`[array, array,
   index]` held), the `SpreadBuilder`/`PrimitiveSpreadBuilder` `dup; <element>; add` loop
   (`[builder, builder]`), and `kotlin/Array.get`/`.set` (`[array]` under the index, `[array, index]` under
@@ -2600,20 +2602,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   merge label whose frame previously declared an EMPTY stack; the class file still emitted successfully
   and only failed at link time (`VerifyError: Inconsistent stackmap frames at branch target N` /
   "Current frame's stack size doesn't match stackmap"). kotlinc also holds operands live across the
-  element, just with full frames — and one fewer, since it `astore`s the array to a local and reloads
+  element — and one fewer, since it `astore`s the array to a local and reloads
   it per element instead of `dup`ing it. All comparison arms are affected alike (numeric `if_icmp*`,
-  referential `if_acmp*`, `ifnull`, and the `lcmp`/`dcmp*` three-way forms), since each records its own
-  branch+merge frames. Where the position CAN spill instead — `Array.get`/`.set`, which start from an
+  referential `if_acmp*`, `ifnull`, and the `lcmp`/`dcmp*` three-way forms). Where the position CAN spill
+  instead — `Array.get`/`.set`, which start from an
   empty stack — an operand that must not be held at all (`must_spill_across`: a `try`, whose handler
   clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
   loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
-- **A `lateinit` FIELD read is itself frame-recording.** The uninitialized guard kotlinc inserts at every
+- **A `lateinit` FIELD read is itself branchy.** The uninitialized guard kotlinc inserts at every
   such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
-  branches, and its join records a stack-map frame typing only the field value. So a `lateinit` read is a
+  branches and rejoins. So a `lateinit` read is a
   branchy sub-expression exactly like a comparison or a `when`, and every position that holds operands
   across one — `emit_operands`, `New`, `SetField`, `StringConcat`, and the `emit_value_over` fill/subscript
-  positions above — must spill or type the held entries. `records_frame` answers this for `GetField` by
+  positions above — must spill or retain the held entries. `emits_control_flow` answers this for `GetField` by
   the field's `lateinit` flag, and for `PropertyRead` by first resolving which realization the read takes:
   only a DIRECT FIELD load carries the guard inline, since a read through the accessor hides it inside the
   getter body (which is why a cross-class or inherited read, always an accessor read, was never affected).
@@ -2654,12 +2656,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `bind_handler`, which revives on whether its protected range holds live emitted bytes — that is exactly
   the `try` whose body diverges (dead at the handler, yet the handler runs), while a `try` that is itself
   inside a dropped region guards nothing and goes with it. A label bound inside a dropped region sits at
-  the same offset as the next live instruction, so its frame is dropped too: registered first, it would
-  otherwise out-rank the live label's frame in `build_stackmap`'s same-offset dedup. An inline splice in a
-  dead region is dropped as well — its relocated frames are bound INSIDE the body, never at its first
-  byte, so emitting it would leave an unreachable region with no entry frame; `bind_at` is a no-op while
-  dead and every consumer (`resolved_frames`, `build_stackmap`, `resolved_exceptions`) drops entries for
-  an unbound label.
+  the same offset as the next live instruction, so rewrite and side-table resolution ignore that dead
+  label rather than attaching its ranges to the live instruction. An inline splice in a dead region is
+  dropped as well: `bind_at` is a no-op while dead, and the final instruction graph therefore contains
+  neither the unreachable bytes nor verifier state reconstructed from them.
   Relatedly, a `Nothing`-returning REAL call is emitted with zero result words
   (`slot_words(Nothing) == 0`) yet physically leaves a `Void`; the terminating
   `throw KotlinNothingValueException()` re-declares that word before discarding it, or `max_stack` is
@@ -3019,20 +3019,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`MethodInliner`): read the callee's compiled body from the classpath jar and splice it into the
   caller, relocating the constant pool. The IR `Callee::Static` carries `inline` (from the resolved
   signature); `Emitter::try_inline_static` splices, falling back to `invokestatic` on any unsupported
-  shape (never a miscompile). **Landed so far:** a *branchless, single-exit* body with no function-typed
-  (lambda) parameter — `inline::splice_branchless` drops the trailing return (leaving the result on the
-  stack to fall through) rather than rewriting it to a `goto`, so the spliced region needs no
-  StackMapTable frame. Proven end-to-end against a real kotlinc-compiled library inline fn
-  (`tests/inline_splice_e2e.rs`: the call is spliced, no `invokestatic` to the callee survives). **Branchy
-  bodies** also splice: the callee's `StackMapTable` is decoded (`inline::decode_stackmap`) and relocated
-  into the caller (`inline::splice_branchy`) — frame offsets remapped past the `shift_locals` resize and
-  the prologue, the body locals prefixed with the caller's locals (`Emitter::verif_locals_upto`), pool
-  refs re-interned, the join frame added where the redirected returns land. Restricted (v1) to primitive
-  parameters and an empty operand-stack baseline (statement / `val x = f(...)`); else falls back. Proven
-  against a real kotlinc `if/else` inline fn (`inline_splice_e2e`). Pending: lambda-argument splicing
-  (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
-  `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
-  `UserInline` snippet in `tests/feature_box_e2e.rs`. Two soundness declines gate every splice: a
+  shape (never a miscompile). `inline::splice_unified` handles branchless and branchy bodies plus
+  literal lambda substitution. It relocates instructions, constant-pool references, handlers and
+  debug ranges, but never relocates or synthesizes output frames: the class writer computes them once
+  from the final instruction graph. Ordinary internal branches preserve any operand prefix already
+  held by the caller. Exception handlers (which clear it), coroutine suspension boundaries, and
+  transfers outside the splice require earlier operands to be spilled. Relative branches are
+  position-independent; only switch padding and absolute
+  handler/external-transfer offsets cause a second layout at the real call-site offset. Proven
+  end-to-end by `tests/inline_splice_e2e.rs` and the inline-HOF cases in `tests/feature_box_e2e.rs`.
+  Two soundness declines gate every splice: a
   `$default` body is never spliced (the caller's placeholder nulls would type its parameter locals
   `Object`, a VerifyError — the real call is verifier-correct), and a body referencing an
   `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
@@ -7451,9 +7447,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **The same inline HOF spliced in both branches of an `if`/`when`.** `emit_when` tracked the operand
   stack with a linear counter; a branch that left its value on the counter (height 1) leaked that height
   into the NEXT branch, which is actually reached by a conditional JUMP at the pre-branch baseline (height
-  0). A framed inline splice (e.g. `xs.find { … }`'s loop body) requires an empty operand baseline, so the
-  second branch's splice bailed ("inline splice failed"). `emit_when` now resets the stack counter to the
-  branch-entry height at each jump-reached branch. (`build722_hh1_inline_hof_both_branches_e2e`)
+  0). Under the former relocated-frame path, a framed inline splice (e.g. `xs.find { … }`'s loop body)
+  required an empty operand baseline, so the second branch's splice bailed ("inline splice failed").
+  `emit_when` now resets the stack counter to the branch-entry height at each jump-reached branch; the
+  current final-body analyzer also carries real prefixes through ordinary splice edges.
+  (`build722_hh1_inline_hof_both_branches_e2e`)
 
 - **A class literal on a REIFIED type parameter (`T::class`).** Inside an `inline fun <reified T>`, a
   class literal `T::class` is now accepted (a non-reified `T::class` still errors, as kotlinc rejects it —

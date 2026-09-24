@@ -6240,7 +6240,7 @@ fn emit_class(
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
-            if super_args.iter().any(|&a| e.records_frame(a)) {
+            if super_args.iter().any(|&a| e.emits_control_flow(a)) {
                 let temps = e.spill_to_temps(&super_args, &mut ctor);
                 ctor.aload(0);
                 for &(slot, t, _) in &temps {
@@ -9619,7 +9619,7 @@ fn emit_enum_class(
             let args = &entry.args;
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
-            let spill = args.iter().any(|&a| e.records_frame(a));
+            let spill = args.iter().any(|&a| e.emits_control_flow(a));
             let temps = if spill {
                 e.spill_to_temps(args, &mut clinit)
             } else {
@@ -12702,8 +12702,10 @@ impl<'a> Emitter<'a> {
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
     /// BRANCHY host `inline fun` body, replacing each zero-arg lambda-parameter `Function0.invoke` site
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
-    /// where the lambda runs only on a branch. v1: zero-arg (Function0) lambdas with branchless bodies,
-    /// at an empty operand-stack baseline. Returns `false` (caller falls back / skips) on any other shape.
+    /// where the lambda runs only on a branch. Final-body dataflow carries any existing operand prefix
+    /// through ordinary branches; handlers, suspensions, and external transfers require a spill
+    /// boundary.
+    /// Returns `false` (caller falls back / skips) on any unsupported shape.
     #[allow(clippy::too_many_arguments)]
     fn try_inline_unified(
         &mut self,
@@ -12744,7 +12746,7 @@ impl<'a> Emitter<'a> {
             })
             .map(|(i, _)| i)
             .collect();
-        // ONE plan for the caller frame: where the relocated host body ends, and where each
+        // ONE plan for caller locals: where the relocated host body ends, and where each
         // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
         // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
@@ -12755,10 +12757,9 @@ impl<'a> Emitter<'a> {
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
         self.next_slot = self.next_slot.max(top_local);
-        // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
-        // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
+        // Build each lambda argument's pre-relocated body, leaving its boxed result on the stack, and
+        // record whether its instruction graph branches.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
-        let mut lam_branchy: Vec<Vec<bool>> = Vec::new();
         // Capture initializers belong to lambda-creation time, in argument evaluation order. A
         // capture that is already a caller local needs no code; every other checked value is
         // materialized once when its lambda operand is reached, then the spliced body reads that
@@ -12770,7 +12771,7 @@ impl<'a> Emitter<'a> {
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
-            let (bodies, branchy, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
+            let (bodies, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -12876,7 +12877,6 @@ impl<'a> Emitter<'a> {
                 let slot_base = self.next_slot;
                 let states_before = self.machine_next_ordinal;
                 let mut bodies: Vec<crate::jvm::inline::LambdaBody> = Vec::new();
-                let mut branchy: Vec<bool> = Vec::new();
                 let mut lam_max_locals = 0u16;
                 let mut lam_stack = 0u16;
                 loop {
@@ -12978,12 +12978,6 @@ impl<'a> Emitter<'a> {
                     };
                     lam_max_locals = lam_max_locals.max(scratch.max_locals);
                     lam_stack = lam_stack.max(scratch.max_stack);
-                    branchy.push(
-                        !scratch.resolved_exceptions().is_empty()
-                            || lam_insns.iter().any(|insn| {
-                                !matches!(insn, crate::jvm::inline::Insn::Plain { .. })
-                            }),
-                    );
                     bodies.push(crate::jvm::inline::LambdaBody {
                         body: lam_insns,
                         locals: lam_locals_declared,
@@ -12995,7 +12989,7 @@ impl<'a> Emitter<'a> {
                         break;
                     }
                 }
-                (bodies, branchy, lam_max_locals, lam_stack)
+                (bodies, lam_max_locals, lam_stack)
             } else {
                 continue;
             };
@@ -13004,7 +12998,6 @@ impl<'a> Emitter<'a> {
             }
             self.next_slot = self.next_slot.max(lam_max_locals);
             lam_max_stack = lam_max_stack.max(lam_stack);
-            lam_branchy.push(branchy);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
                 bodies,
@@ -13013,7 +13006,8 @@ impl<'a> Emitter<'a> {
         if lam_splices.is_empty() {
             return false; // no lambda argument — not this path
         }
-        // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
+        // Probe at offset 0. Switch padding and absolute handler/external-transfer offsets require a
+        // second splice at the method's real byte offset; relative branches do not.
         let Some(probe) = crate::jvm::inline::splice_unified(
             body,
             descriptor,
@@ -13026,25 +13020,18 @@ impl<'a> Emitter<'a> {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
-        // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
-        // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
-        // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
-        // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
-        // Per lambda, per BODY, the frames that body records: a lambda argument always has a body, so
-        // the question is whether any body actually produced a frame — not whether one exists.
-        let needs_frames = probe.join_required
-            || !probe.frames.is_empty()
-            || lam_branchy
-                .iter()
-                .any(|bodies| bodies.iter().any(|branchy| *branchy))
-            || !probe.external_branches.is_empty();
-        if needs_frames && code.stack_height() != 0 {
+        let needs_relayout = probe.needs_relayout;
+        // Ordinary branches preserve the caller's operand prefix and final-body dataflow computes it.
+        // A handler clears that prefix, while an external transfer targets code outside the splice;
+        // neither is sound until the surrounding operands have been spilled.
+        let needs_empty_stack = !probe.handlers.is_empty() || !probe.external_branches.is_empty();
+        if needs_empty_stack && code.stack_height() != 0 {
             crate::trace_compiler!(
                 "splice",
-                "unified BAIL: needs_frames but stack_height={}",
+                "unified BAIL: control transfer requires empty stack but stack_height={}",
                 code.stack_height()
             );
-            return false; // frames carry no stack prefix → need an empty baseline
+            return false;
         }
         let ret_words = descriptor_ret_words(descriptor);
         // Emit each NON-lambda argument (the operands the host prologue stores into its parameter slots).
@@ -13066,8 +13053,8 @@ impl<'a> Emitter<'a> {
             self.adapt_physical_call_operand_for(call_expression, i, a, at, params[i], code);
             arg_words += slot_words(params[i]) as i32;
         }
-        if !needs_frames {
-            // Pure branchless host + lambda: append the bytes, no frames; works at any stack height.
+        if !needs_relayout {
+            // Position-independent host + lambda: append the probed bytes at any stack height.
             // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
             // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
             let ret_words = if probe.falls_through { ret_words } else { 0 };
@@ -13085,8 +13072,7 @@ impl<'a> Emitter<'a> {
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
-        // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
-        // bind the relocated HOST frames, the LAMBDA bodies' own frames, the spliced bytes, and the join.
+        // RE-splice at the real method offset so any switch in the host/lambda body pads correctly.
         let splice_start = code.bytes.len();
         let Some(bs) = crate::jvm::inline::splice_unified(
             body,
@@ -13101,9 +13087,7 @@ impl<'a> Emitter<'a> {
             return false;
         };
         // Register the spliced body's relocated exception handlers (try/catch/finally from `use`/
-        // `synchronized`/`runCatching`). The handler frames are already bound above (each handler is a
-        // StackMapTable target in `bs.frames`); here we add the guarded-range entries to the caller's
-        // exception table via labels bound at the absolute spliced offsets.
+        // `synchronized`/`runCatching`). Final-body analysis derives their handler-entry frames.
         bind_inline_handlers(code, &bs.handlers);
         let ret_words = if bs.falls_through { ret_words } else { 0 };
         // Host stack must cover the host body PLUS the deepest spliced lambda body (safe upper bound).
@@ -13118,10 +13102,6 @@ impl<'a> Emitter<'a> {
         );
         self.record_spliced_lines(&bs.lines, body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
-        if bs.join_required {
-            let join = code.new_label();
-            self.bind(join, code);
-        }
         true
     }
 
@@ -13476,9 +13456,8 @@ impl<'a> Emitter<'a> {
 
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
     ///
-    /// Every frame in the emitter is laid out here: a frame recorded inside a spliced body, and the
-    /// collapsed form the ordinary frames are built from. Both the semantic locals and the backend
-    /// temporaries belong to the same physical frame, which is why one operation places them.
+    /// Semantic locals and backend temporaries share this physical layout. Coroutine discovery uses
+    /// it as the entry state for final-bytecode dataflow; ordinary method frames are computed later.
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let semantic = self.assigned_semantic_slots();
         let temporaries = self.temporaries.live();
@@ -13656,9 +13635,8 @@ impl<'a> Emitter<'a> {
         let binding = in_place.binding();
         let top_local = in_place.top_local();
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
-        // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
-        // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
-        // any `tableswitch`/`lookupswitch` pads correctly.
+        // paths). Probe at offset 0; switch padding and absolute side-table/fixup offsets require a
+        // second splice at the method's real byte offset, while relative branches do not.
         let Some(probe) = crate::jvm::inline::splice_unified(
             &body,
             splice_desc,
@@ -13678,8 +13656,13 @@ impl<'a> Emitter<'a> {
             .iter()
             .map(|ty| slot_words(*ty) as i32)
             .sum();
-        if !probe.join_required {
-            // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
+        let needs_relayout = probe.needs_relayout;
+        let needs_empty_stack = !probe.handlers.is_empty() || !probe.external_branches.is_empty();
+        if needs_empty_stack && code.stack_height() != 0 {
+            return false;
+        }
+        if !needs_relayout {
+            // Position-independent: append the bytes directly. A DIVERGING body (ends in `athrow`, e.g.
             // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
             // A speculative splice DECLINES on a descriptor mismatch rather than bailing the file:
             // nothing has been pushed, so the ordinary call path still gets its chance to emit this
@@ -13710,11 +13693,6 @@ impl<'a> Emitter<'a> {
             self.record_spliced_lines(&probe.lines, &body, inline_only, splice_start, code);
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
-        }
-        // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
-        // prefix); a sub-expression inline call (non-empty stack) falls back to a normal call.
-        if code.stack_height() != 0 {
-            return false;
         }
         // See the branchless arm above: decline, do not bail.
         if self
@@ -13755,9 +13733,6 @@ impl<'a> Emitter<'a> {
         );
         self.record_spliced_lines(&bs.lines, &body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
-        // The redirected returns land at the continuation right after the spliced body.
-        let join = code.new_label();
-        self.bind(join, code);
         true
     }
 
@@ -14333,11 +14308,11 @@ impl<'a> Emitter<'a> {
             | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
         let takes_receiver = accessor_takes_receiver(&access);
-        // A branchy assigned value emits merge frames. It cannot do so with an instance receiver already
-        // on the operand stack because those frames describe an empty baseline. Spill BOTH operands in
-        // source evaluation order (receiver, then value), then reload them; spilling only the value would
-        // reverse observable side effects.
-        let spilled = if takes_receiver && self.records_frame(value) {
+        // Keep the reference compiler's evaluation layout for a branchy assigned value: spill BOTH
+        // operands in source order (receiver, then value), then reload them. Spilling only the value
+        // would reverse observable side effects. Final-body analysis could verify a live receiver
+        // prefix, but changing this layout would lose bytecode parity.
+        let spilled = if takes_receiver && self.emits_control_flow(value) {
             Some(
                 self.spill_to_temps(
                     &[
@@ -14881,7 +14856,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
-    /// field carries the inline uninitialized guard, so the read emission and [`Self::records_frame`]
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
     /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
     fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
         self.ir
@@ -15251,7 +15226,7 @@ impl<'a> Emitter<'a> {
                 let physical_params =
                     parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                if args.iter().any(|&a| self.records_frame(a)) {
+                if args.iter().any(|&a| self.emits_control_flow(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
                     // would omit them. Evaluate all args into temps first (clean stack), then build.
                     let temps = self.spill_to_temps(&args, code);
@@ -16434,7 +16409,7 @@ impl<'a> Emitter<'a> {
                         .methodref("java/lang/StringBuilder", "<init>", "()V");
                     // A branchy part (`"${when{…}}"`) records merge frames that would omit the
                     // StringBuilder on the stack — spill every part to a temp first, then build.
-                    if parts.iter().any(|&p| self.records_frame(p)) {
+                    if parts.iter().any(|&p| self.emits_control_flow(p)) {
                         let temps = self.spill_to_temps(&parts, code);
                         code.new_obj(sb);
                         code.dup();
@@ -16612,10 +16587,10 @@ impl<'a> Emitter<'a> {
                 for s in stmts {
                     self.mark_statement_line(*s, code);
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
-                    // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
-                    // tracks its internal branches only approximately and can leave `cur_stack` drifted
-                    // above the real (verified-balanced) height, which would make a LATER branchy splice
-                    // in the same block falsely see a non-empty baseline and bail.
+                    // the tracked height to that baseline afterward: raw spliced control flow is opaque
+                    // to the builder's linear counter and can leave `cur_stack` drifted above the real,
+                    // verified-balanced height. Later emission still relies on accurate physical stack
+                    // accounting even though final-body analysis owns verifier frames.
                     let base = code.stack_height();
                     self.emit(*s, code);
                     if self.discarding_diverges(*s) {
@@ -17017,7 +16992,7 @@ impl<'a> Emitter<'a> {
                 let (cls, fdesc) = ref_class(elem);
                 let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
                 // A branchy initializer can't run with `[holder, holder]` on the stack — spill it.
-                if self.records_frame(*init) {
+                if self.emits_control_flow(*init) {
                     let temps = self.spill_to_temps(&[*init], code);
                     let ci = self.cw.class_ref(cls);
                     code.new_obj(ci);
@@ -17066,7 +17041,7 @@ impl<'a> Emitter<'a> {
             } => {
                 // A branchy value (`msg = x ?: "?"`) can't run with the holder on the stack — its
                 // branch frames assume a clean stack. Spill it first (mirrors `RefNew`).
-                if self.records_frame(*value) {
+                if self.emits_control_flow(*value) {
                     let temps = self.spill_to_temps(&[*value], code);
                     self.emit_value(*holder, code);
                     for &(slot, t, _) in &temps {
@@ -17091,7 +17066,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let n = args.len();
                 let high_arity = is_high_arity_function(n as u8);
-                if args.iter().any(|&a| self.records_frame(a)) {
+                if args.iter().any(|&a| self.emits_control_flow(a)) {
                     // A branchy argument can't run with the function value on the stack — its merge
                     // frame would omit it. Evaluate the function + args into temps first (in order),
                     // then load and box.
@@ -17334,7 +17309,7 @@ impl<'a> Emitter<'a> {
         let sb = self.cw.class_ref("java/lang/StringBuilder");
         // A branchy operand (`when`/`try`) can't be emitted with the `StringBuilder` on the stack — its
         // merge frames would omit it. Spill such operands to temps first.
-        if parts.iter().any(|&part| self.records_frame(part)) {
+        if parts.iter().any(|&part| self.emits_control_flow(part)) {
             let temps = self.spill_to_temps(parts, code);
             code.new_obj(sb);
             code.dup();
@@ -17382,7 +17357,7 @@ impl<'a> Emitter<'a> {
         }
         // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
         // that is the same open problem as elsewhere, so leave those on the StringBuilder path.
-        if parts.iter().any(|&p| self.records_frame(p)) {
+        if parts.iter().any(|&p| self.emits_control_flow(p)) {
             return false;
         }
         if parts.iter().any(|part| {
@@ -17483,17 +17458,36 @@ impl<'a> Emitter<'a> {
     }
 
     /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead
-    /// (`pending_stack` must not be used across it): a `try` in the subtree — the JVM clears the
-    /// operand stack on handler entry, so a held value would be lost (and its handler frame mistyped) —
-    /// or an inlinable call, whose splice expects the stack baseline its frames were recorded at.
+    /// a `try` in the subtree — the JVM clears the operand stack on handler entry, so a held value
+    /// would be lost — a transfer to a loop target outside the subtree, or a suspension whose state
+    /// machine cannot carry an unrecorded JVM operand prefix across resumption. An ordinary inline
+    /// branch is not such a boundary: final-body dataflow carries the live prefix through its edges.
     /// Conservative: the spill path is always correct, only byte-parity with kotlinc is deferred.
     fn must_spill_across(&self, e: u32) -> bool {
+        if self.machine_suspensions.contains(&e) {
+            return true;
+        }
         match self.ir.expr(e) {
-            IrExpr::Try { .. } => true,
+            IrExpr::Try { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
             IrExpr::Call {
-                callee: Callee::Static { inline, .. },
-                ..
-            } if inline.can_inline() => true,
+                callee:
+                    Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline,
+                    },
+                dispatch_receiver,
+                args,
+            } if inline.can_inline() => {
+                self.bodies
+                    .body(&owner.render(), name, descriptor)
+                    .is_some_and(|body| !body.handlers.is_empty())
+                    || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
+                    || args
+                        .iter()
+                        .any(|&argument| self.must_spill_across(argument))
+            }
             _ => {
                 let mut spill = false;
                 crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
@@ -17504,17 +17498,17 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Whether emitting `e` records a StackMapTable frame anywhere in its subtree. An operand
-    /// sequence uses this semantic fact either to spill earlier values to locals or, where the
-    /// instruction shape must keep them live, to describe them through [`Self::emit_value_over`].
-    fn records_frame(&self, e: u32) -> bool {
+    /// Whether emitting `e` introduces non-linear JVM control flow anywhere in its subtree. Operand
+    /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
+    /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.
+    fn emits_control_flow(&self, e: u32) -> bool {
         use IrBinOp::*;
         match self.ir.expr(e) {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             // The multi-part `StringConcat` itself spills branchy parts internally, so as a whole it
             // leaves only its `String` result — but a parent operand sequence still must treat it as
-            // frame-recording if any part does (it builds the StringBuilder mid-stack otherwise).
-            IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.records_frame(p)),
+            // branchy if any part is (it builds the StringBuilder mid-stack otherwise).
+            IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.emits_control_flow(p)),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
                     // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
@@ -17524,20 +17518,17 @@ impl<'a> Emitter<'a> {
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.records_frame(*lhs) || self.records_frame(*rhs)
+                    || self.emits_control_flow(*lhs) || self.emits_control_flow(*rhs)
             }
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 args,
             } => {
-                // An inline call whose SPLICED body records StackMapTable frames — a branchy lambda body,
-                // or a branchy host body (a loop HOF like `map`/`filter`, or an `@InlineOnly` `require`/
-                // `check`) — records frames at THIS position. So a parent operand sequence must spill the
-                // earlier operands to temps (keeping the splice at an empty baseline), exactly as for
-                // `when`/`try`. Without this, an inline HOF used as a non-first operand
-                // (`sb.append(xs.map { … }))`) would splice at a non-empty baseline and bail to a real call.
-                let splice_records = match callee {
+                // Preserve the reference compiler's temp layout when a spliced host or lambda branches.
+                // This is no longer a verifier requirement: final-body dataflow can carry a live prefix,
+                // and `must_spill_across` separately identifies handlers/external transfers that cannot.
+                let splice_branches = match callee {
                     Callee::Static {
                         owner,
                         name,
@@ -17546,7 +17537,7 @@ impl<'a> Emitter<'a> {
                     } if inline.can_inline() => {
                         args.iter().any(|&a| {
                             matches!(self.ir.expr(a),
-                                IrExpr::Lambda { inline_body: Some(b), .. } if self.records_frame(*b))
+                                IrExpr::Lambda { inline_body: Some(b), .. } if self.emits_control_flow(*b))
                         }) || self
                             .bodies
                             .body(&owner.render(), name, descriptor)
@@ -17564,31 +17555,31 @@ impl<'a> Emitter<'a> {
                         operation: crate::ir::IrIntrinsic::Assert { .. },
                         ..
                     }
-                ) || splice_records
-                    || dispatch_receiver.map_or(false, |r| self.records_frame(r))
-                    || args.iter().any(|&a| self.records_frame(a))
+                ) || splice_branches
+                    || dispatch_receiver.map_or(false, |r| self.emits_control_flow(r))
+                    || args.iter().any(|&a| self.emits_control_flow(a))
             }
             IrExpr::MethodCall { receiver, args, .. } => {
-                self.records_frame(*receiver)
+                self.emits_control_flow(*receiver)
                     || args
                         .iter()
-                        .any(|a| a.map_or(false, |x| self.records_frame(x)))
+                        .any(|a| a.map_or(false, |x| self.emits_control_flow(x)))
             }
             IrExpr::InvokeFunction { func, args, .. } => {
-                self.records_frame(*func) || args.iter().any(|&arg| self.records_frame(arg))
+                self.emits_control_flow(*func)
+                    || args.iter().any(|&arg| self.emits_control_flow(arg))
             }
-            IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::New { args, .. } => args.iter().any(|&a| self.emits_control_flow(a)),
             // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
-            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join records a frame
-            // typing only the field value — so an operand already on the stack must be spilled first. A
-            // read through a getter records nothing here: the guard lives inside the accessor body.
-            IrExpr::EnclosingInstance { receiver, .. } => self.records_frame(*receiver),
+            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join requires the
+            // surrounding operand baseline to agree — so an earlier operand is spilled first.
+            IrExpr::EnclosingInstance { receiver, .. } => self.emits_control_flow(*receiver),
             IrExpr::GetField {
                 receiver,
                 class,
                 index,
             } => {
-                self.records_frame(*receiver)
+                self.emits_control_flow(*receiver)
                     || self.ir.classes[*class as usize].fields[*index as usize].is_lateinit()
             }
             IrExpr::PropertyRead {
@@ -17597,50 +17588,49 @@ impl<'a> Emitter<'a> {
                 name,
                 ..
             } => {
-                receiver.is_some_and(|receiver| self.records_frame(receiver))
+                receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
                     || self.lateinit_direct_field_read(&owner.render(), name)
             }
             IrExpr::SetField {
                 receiver, value, ..
-            } => self.records_frame(*receiver) || self.records_frame(*value),
+            } => self.emits_control_flow(*receiver) || self.emits_control_flow(*value),
             IrExpr::PropertyWrite {
                 receiver, value, ..
             } => {
-                receiver.is_some_and(|receiver| self.records_frame(receiver))
-                    || self.records_frame(*value)
+                receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
+                    || self.emits_control_flow(*value)
             }
             IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
-                self.records_frame(*value)
+                self.emits_control_flow(*value)
             }
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
-                self.records_frame(*arg)
+                self.emits_control_flow(*arg)
             }
-            IrExpr::BottomValue { producer, .. } => self.records_frame(*producer),
-            IrExpr::NotNullAssert { operand, .. } => self.records_frame(*operand),
+            IrExpr::BottomValue { producer, .. } => self.emits_control_flow(*producer),
+            IrExpr::NotNullAssert { operand, .. } => self.emits_control_flow(*operand),
             // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
             // first (else the frame at the join would omit them).
             IrExpr::LateinitCheck { .. } => true,
-            IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
+            IrExpr::RefGet { holder, .. } => self.emits_control_flow(*holder),
             IrExpr::RefSet { holder, value, .. } => {
-                self.records_frame(*holder) || self.records_frame(*value)
+                self.emits_control_flow(*holder) || self.emits_control_flow(*value)
             }
-            IrExpr::RefNew { init, .. } => self.records_frame(*init),
-            IrExpr::Throw { operand } => self.records_frame(*operand),
-            IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
-            IrExpr::NewArray { size, .. } => self.records_frame(*size),
-            IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
-            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
+            IrExpr::RefNew { init, .. } => self.emits_control_flow(*init),
+            IrExpr::Throw { operand } => self.emits_control_flow(*operand),
+            IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.emits_control_flow(a)),
+            IrExpr::NewArray { size, .. } => self.emits_control_flow(*size),
+            IrExpr::Return(v) => v.map_or(false, |x| self.emits_control_flow(x)),
+            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.emits_control_flow(i)),
             IrExpr::Block { stmts, value } => {
-                stmts.iter().any(|&s| self.records_frame(s))
-                    || value.map_or(false, |v| self.records_frame(v))
+                stmts.iter().any(|&s| self.emits_control_flow(s))
+                    || value.map_or(false, |v| self.emits_control_flow(v))
             }
-            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — no frames
+            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — straight-line
         }
     }
 
-    /// Push `ops` onto the stack in order. If any op after the first records a frame (so an earlier
-    /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
-    /// them — keeping the stack empty while each frame-recording op runs.
+    /// Push `ops` onto the stack in order. If any later op introduces control flow, evaluate all ops
+    /// into temps first, then load them, keeping the operand baseline empty across nested branches.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         self.emit_operands_adapted(None, ops, code, |_, _, _| {});
     }
@@ -17685,7 +17675,7 @@ impl<'a> Emitter<'a> {
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
         let mut inside_run = false;
-        if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
+        if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
             let temps = self.spill_to_temps(ops, code);
             for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
                 self.mark_synthesized_operand_run(
@@ -17890,16 +17880,14 @@ impl<'a> Emitter<'a> {
         match op {
             Add | Sub | Mul | Div | Rem => {
                 // A branchy RHS (`result*31 + <nullable-field hashCode ternary>`): keep the numeric LHS on
-                // the operand stack across the RHS's branch — matching kotlinc — by typing it into the
-                // RHS's stack-map frames via `pending_stack`, instead of spilling it to a temp. The LHS of
-                // arithmetic is always a numeric scalar, so the pending verif type interns no `Class`. A
+                // the operand stack across the RHS's branch — matching kotlinc. Final-bytecode analysis
+                // carries that prefix through every edge, so emitter-side frame annotation is unnecessary. A
                 // non-branchy RHS (or a branchy LHS) keeps the ordinary `emit_operands` path (spill only if
                 // needed) — bytecode unchanged for the common case. NOT applicable when the RHS can enter
-                // an exception handler or splice inline bytecode (`must_spill_across`): a handler CLEARS
-                // the operand stack (the held LHS would be lost and its handler frame mistyped), and a
-                // splice expects its recorded baseline.
-                if self.records_frame(rhs)
-                    && !self.records_frame(lhs)
+                // an exception handler, suspend, or transfer to an enclosing loop (`must_spill_across`):
+                // those boundaries cannot carry the held LHS to this operation.
+                if self.emits_control_flow(rhs)
+                    && !self.emits_control_flow(lhs)
                     && !self.must_spill_across(rhs)
                 {
                     self.emit_value(lhs, code);
@@ -17962,8 +17950,8 @@ impl<'a> Emitter<'a> {
                 );
             }
             And | Or => {
-                // Evaluate lhs, hold it in a temp while rhs is emitted (rhs may record frames that
-                // must see the temp as live), then combine. The temp is dead afterwards, so remove it
+                // Evaluate lhs, hold it in a temp while a branchy rhs is emitted, then combine. The
+                // temp is dead afterwards, so release it
                 // from the slot map so it doesn't leak into later merge frames (next_slot stays
                 // monotonic — no reuse). Without this, a `false`/`else` path that never assigned the
                 // temp reaches a merge whose frame claims it's defined → VerifyError.
@@ -17982,7 +17970,7 @@ impl<'a> Emitter<'a> {
                 self.release_temporary(lease);
             }
             BitAnd | BitOr | BitXor => {
-                self.emit_binary_operands_over_frames(lhs, rhs, code);
+                self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
                 match lt {
                     Ty::Long => match op {
                         BitAnd => code.land(),
@@ -18445,13 +18433,6 @@ impl<'a> Emitter<'a> {
             );
             return;
         }
-        // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
-        // no-`else` statement always has the implicit no-match fallthrough.
-        let mut end_reachable = !has_else && exhaustive_result.is_none();
-        // Whether anything BRANCHES to the merge, as opposed to falling into it. Only a branch
-        // target needs a `StackMapTable` frame; a `when` whose one arm was fused into its condition
-        // is reached by fall-through alone, and a frame there is one kotlinc does not write.
-        let mut end_targeted = false;
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
@@ -18478,20 +18459,6 @@ impl<'a> Emitter<'a> {
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,
                     // unframed body. Suspend flattening produces this shape for some do-while loops.
                     if self.emit_cond_branch(*c, next, false, code) {
-                        // Skipping the CODE must not skip the merge-point accounting: `diverges` does
-                        // not fold constant conditions, so a `when` whose only falling-through branch is
-                        // this dead one still reports as falling through, and the caller keeps emitting
-                        // at `end`. Leaving `end` unframed just moves the same VerifyError there —
-                        // `if (FALSE_CONST) "a" else return "b"` failed at the merge instead of at the
-                        // dead body. Mirror what the emitted path does, minus the code.
-                        let body_diverges = if is_stmt {
-                            self.discarding_diverges(*body)
-                        } else {
-                            self.diverges(*body)
-                        };
-                        if !body_diverges {
-                            end_reachable = true;
-                        }
                         self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;
@@ -18528,10 +18495,7 @@ impl<'a> Emitter<'a> {
                         if !falls_into_end {
                             code.goto(end);
                         }
-                        end_reachable = true;
                     }
-                    // `next` is a branch target at this offset, so the merge shares its frame.
-                    end_targeted = true;
                     self.bind(next, code);
                     // `next` is reached only via the conditional jump above, where the stack is back at the
                     // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
@@ -18550,14 +18514,6 @@ impl<'a> Emitter<'a> {
                             code,
                         );
                     }
-                    let body_diverges = if is_stmt {
-                        self.discarding_diverges(*body)
-                    } else {
-                        self.diverges(*body)
-                    };
-                    if !body_diverges {
-                        end_reachable = true;
-                    }
                     // The else is last — it falls through to `end` (no goto needed).
                 }
             }
@@ -18572,10 +18528,6 @@ impl<'a> Emitter<'a> {
             code.invokespecial(constructor, 0, 0);
             code.athrow();
         }
-        // Frame `end` only when it's actually reachable AND something branches there; if every
-        // branch diverges, `end` is dead (no jump targets it) and a frame there would be
-        // "Expecting a stack map frame", and if control only falls in, no frame is needed at all.
-        if end_reachable && end_targeted {}
         self.bind(end, code);
     }
 
@@ -18654,10 +18606,8 @@ impl<'a> Emitter<'a> {
     }
 
     fn verif_single(&mut self, ty: Ty) -> VerifType {
-        // Object types are recorded by NAME (`VerifType::ObjectName`), NOT interned here — the class is
-        // interned only when a WRITTEN StackMapTable frame lists it (`build_stackmap`). A frame that
-        // compresses to `same_frame` drops its locals, so a class appearing only in dropped frames (e.g.
-        // a `copy$default` mask-branch param) never enters the pool — matching kotlinc, no orphan.
+        // Keep object types by name here. The final StackMapTable encoder interns only classes that
+        // survive frame compression, avoiding constant-pool entries for omitted locals.
         match ty {
             t if is_jvm_int_category(t) => VerifType::Integer,
             Ty::Long => VerifType::Long,

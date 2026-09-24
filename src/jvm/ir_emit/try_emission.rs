@@ -203,7 +203,7 @@ impl Emitter<'_> {
         if !body_diverges {
             if let Some(f) = finally {
                 // The result has just been stored and is loaded again at `after`, so it is live
-                // across the finalizer inlined here. A finalizer that records frames of its own — a
+                // across the finalizer inlined here. A finalizer that introduces control flow — a
                 // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
                 // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
                 // with this copy: the handler copies below are reached on edges that never stored it.
