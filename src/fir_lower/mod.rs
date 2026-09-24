@@ -310,8 +310,8 @@ struct BodyLowering<'a> {
     enclosure: Option<crate::ir::IrEnclosure>,
 }
 
-/// The enclosure of a root body: its function, or the file or classifier whose initialization it
-/// is part of. A default-argument fragment, an accessor and a constructor have none recorded yet.
+/// The enclosure of a root body: its exact callable, or the file or classifier whose initialization
+/// it is part of. Default-argument fragments carry no declarations of their own.
 fn root_enclosure(
     body: &FirBody,
     index: &ResolvedModuleIndex,
@@ -330,7 +330,8 @@ fn root_enclosure(
             .position(|class| class.fq_name == classifier)?;
         Some(crate::ir::ClassId::try_from(class).expect("too many classes"))
     };
-    match index.declaration_anchor(declaration)?.kind {
+    let anchor = index.declaration_anchor(declaration)?;
+    match anchor.kind {
         DeclarationKind::Function => index
             .callable_for_declaration(declaration)
             .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
@@ -340,6 +341,25 @@ fn root_enclosure(
                 crate::ir::IrEnclosure::ClassInitializer(classifier)
             }),
         ),
+        DeclarationKind::Accessor => {
+            let property_declaration = anchor.owner?;
+            let property = index.property_for_declaration(property_declaration)?;
+            match anchor.sibling {
+                0 => Some(crate::ir::IrEnclosure::PropertyAccessor {
+                    property,
+                    setter: false,
+                }),
+                1 => Some(crate::ir::IrEnclosure::PropertyAccessor {
+                    property,
+                    setter: true,
+                }),
+                _ => None,
+            }
+        }
+        DeclarationKind::Constructor => Some(crate::ir::IrEnclosure::Constructor {
+            class: classifier()?,
+            ordinal: anchor.sibling,
+        }),
         DeclarationKind::Initializer => classifier().map(crate::ir::IrEnclosure::ClassInitializer),
         _ => None,
     }

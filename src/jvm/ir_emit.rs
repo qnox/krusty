@@ -5504,17 +5504,91 @@ fn class_enclosure(
     facade: &str,
 ) -> Option<(String, Option<(String, String)>)> {
     match c.enclosure? {
-        crate::ir::IrEnclosure::Function(function) => {
-            let declaration = &ir.functions[function as usize];
-            let owner = declaration
-                .dispatch_receiver
-                .map(TypeName::render)
-                .unwrap_or_else(|| facade.to_string());
-            let descriptor = method_descriptor(
-                &jvm_function_params(ir, function),
-                jvm_declared_ty(&declaration.ret),
-            );
-            Some((owner, Some((declaration.name.clone(), descriptor))))
+        crate::ir::IrEnclosure::Function(function) => function_enclosure(ir, function, facade),
+        crate::ir::IrEnclosure::PropertyAccessor {
+            property,
+            setter: is_setter,
+        } => {
+            let layout = ir.local_property_layouts.get(&property).unwrap_or_else(|| {
+                panic!("property accessor enclosure has no finalized property realization")
+            });
+            let function = match layout {
+                crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                    getter,
+                    setter: accessor_setter,
+                    ..
+                } => {
+                    if is_setter {
+                        *accessor_setter
+                    } else {
+                        *getter
+                    }
+                }
+                crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter,
+                    setter: accessor_setter,
+                    ..
+                } => {
+                    if is_setter {
+                        *accessor_setter
+                    } else {
+                        Some(*getter)
+                    }
+                }
+                crate::ir::IrLocalPropertyLayout::Member {
+                    getter,
+                    setter: accessor_setter,
+                    ..
+                } => {
+                    if is_setter {
+                        *accessor_setter
+                    } else {
+                        *getter
+                    }
+                }
+                crate::ir::IrLocalPropertyLayout::MemberExtension {
+                    getter,
+                    setter: accessor_setter,
+                    ..
+                } => {
+                    if is_setter {
+                        *accessor_setter
+                    } else {
+                        Some(*getter)
+                    }
+                }
+            }
+            .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"));
+            function_enclosure(ir, function, facade)
+        }
+        crate::ir::IrEnclosure::Constructor { class, ordinal } => {
+            let declaration = &ir.classes[class as usize];
+            let mut parameters = if ordinal == 0 {
+                class_ctor_jvm_tys(declaration)
+            } else {
+                let constructor = declaration
+                    .secondary_ctors
+                    .get(ordinal.saturating_sub(1) as usize)
+                    .unwrap_or_else(|| panic!("constructor enclosure has no declared constructor"));
+                jvm_tys(
+                    &constructor
+                        .prefix_params
+                        .iter()
+                        .chain(&constructor.params)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
+            };
+            if !declaration.enum_entries.is_empty() {
+                parameters.splice(0..0, [Ty::String, Ty::Int]);
+            }
+            Some((
+                declaration.fq_name(),
+                Some((
+                    "<init>".to_string(),
+                    method_descriptor(&parameters, Ty::Unit),
+                )),
+            ))
         }
         crate::ir::IrEnclosure::File => Some((facade.to_string(), None)),
         crate::ir::IrEnclosure::ClassInitializer(class) => {
@@ -5540,6 +5614,23 @@ fn class_enclosure(
             })
         }
     }
+}
+
+fn function_enclosure(
+    ir: &IrFile,
+    function: crate::ir::FunId,
+    facade: &str,
+) -> Option<(String, Option<(String, String)>)> {
+    let declaration = &ir.functions[function as usize];
+    let owner = declaration
+        .dispatch_receiver
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
+    let descriptor = method_descriptor(
+        &jvm_function_params(ir, function),
+        jvm_declared_ty(&declaration.ret),
+    );
+    Some((owner, Some((declaration.name.clone(), descriptor))))
 }
 
 /// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
@@ -5693,23 +5784,12 @@ fn emit_class(
     let mut cw = new_classifier_writer(ir, c, &superclass, env, opts);
     // A LOCAL or ANONYMOUS class carries kotlinc's `EnclosingMethod` attribute: without it
     // reflection reads the class as top-level and `simpleName` reports the whole `owner$Local` name.
-    // The lowering records the exact scope; a class it has none for (a scope not yet recorded, such
-    // as an accessor or a constructor) names the longest `$`-prefix of its name that is an emitted
-    // class, or else the file facade, with no method.
+    // Lowering records the exact semantic scope; the backend only realizes its physical owner and
+    // descriptor here.
     if let Some((owner, method)) = class_enclosure(ir, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),
-        }
-    } else if c.is_local_class && !c.is_anonymous_object {
-        let owner = fq_name
-            .match_indices('$')
-            .map(|(at, _)| &fq_name[..at])
-            .rfind(|candidate| ir.classes.iter().any(|other| other.fq_name() == *candidate))
-            .map(str::to_string)
-            .or_else(|| (!facade.is_empty()).then(|| facade.to_string()));
-        if let Some(owner) = owner {
-            cw.set_enclosing_class(&owner);
         }
     }
     let continuation_metadata = env.continuation_metadata.get(&fq_name);
