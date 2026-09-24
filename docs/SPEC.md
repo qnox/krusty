@@ -3977,6 +3977,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `kotlin.Function0<kotlin.Unit>`, `T of p.FileKt.f`). Every cast then writes a `checkcast` unless
   the operand already has exactly the target's JVM type, so `as Any` from a narrower type keeps
   `checkcast java/lang/Object` (`tests/unboxing_coercion_e2e.rs`).
+- **A local's StackMapTable type is the type its stores leave in the slot.** The LVT keeps the
+  declared type, but a verifier frame, like the one kotlinc's ASM backend computes, carries the exact
+  class every store writes. A declaration's initializer is coerced to the declared type first, and a
+  differing type other than `Object` takes a `checkcast`, so `val g: Greeter = Ann()` stores and
+  frames a `Greeter` while `val g: Any = Ann()` frames an `Ann`. An assignment stores the value as
+  emitted (`tests/unboxing_coercion_e2e.rs`).
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a

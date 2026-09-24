@@ -14,7 +14,16 @@ use super::Emitter;
 /// Every value stored into each semantic local of one emitted body.
 #[derive(Default)]
 pub(super) struct ValueStores {
-    stores: HashMap<u32, Vec<u32>>,
+    stores: HashMap<u32, Vec<Store>>,
+}
+
+/// One value stored into a semantic local.
+#[derive(Clone, Copy)]
+struct Store {
+    value: u32,
+    /// A declaration's initializer is adapted to the local's slot type before the store; an
+    /// assignment stores the value as emitted.
+    adapted: bool,
 }
 
 impl ValueStores {
@@ -34,10 +43,16 @@ impl ValueStores {
                         .stores
                         .entry(*index)
                         .or_default()
-                        .extend(init.iter().copied());
+                        .extend(init.iter().map(|&value| Store {
+                            value,
+                            adapted: true,
+                        }));
                 }
                 IrExpr::SetValue { var, value } => {
-                    stores.stores.entry(*var).or_default().push(*value);
+                    stores.stores.entry(*var).or_default().push(Store {
+                        value: *value,
+                        adapted: false,
+                    });
                 }
                 _ => {}
             }
@@ -51,7 +66,7 @@ impl ValueStores {
         stores
     }
 
-    fn values(&self, value: u32) -> Option<&[u32]> {
+    fn values(&self, value: u32) -> Option<&[Store]> {
         self.stores.get(&value).map(Vec::as_slice)
     }
 }
@@ -117,8 +132,12 @@ impl Emitter<'_> {
         }
         let result = self.value_stores.stores.get(&value).is_some_and(|stores| {
             !stores.is_empty()
-                && stores.iter().all(|&stored| {
-                    self.semantic_non_null_within(stored, visiting_expressions, visiting_values)
+                && stores.iter().all(|stored| {
+                    self.semantic_non_null_within(
+                        stored.value,
+                        visiting_expressions,
+                        visiting_values,
+                    )
                 })
         });
         visiting_values.remove(&value);
@@ -136,13 +155,14 @@ impl Emitter<'_> {
         if !declared.is_reference() {
             return declared;
         }
-        self.common_stored_reference_ty(value, &mut HashSet::new())
+        self.common_stored_reference_ty(value, declared, &mut HashSet::new())
             .unwrap_or(declared)
     }
 
     fn common_stored_reference_ty(
         &self,
         value: u32,
+        declared: crate::types::Ty,
         visiting_values: &mut HashSet<u32>,
     ) -> Option<crate::types::Ty> {
         if !visiting_values.insert(value) {
@@ -155,7 +175,7 @@ impl Emitter<'_> {
         let mut common = None;
         let mut saw_null = false;
         for &stored in stores {
-            let Some(ty) = self.expression_reference_ty(stored, visiting_values) else {
+            let Some(ty) = self.stored_reference_ty(stored, declared, visiting_values) else {
                 visiting_values.remove(&value);
                 return None;
             };
@@ -180,13 +200,37 @@ impl Emitter<'_> {
         common.or_else(|| saw_null.then_some(crate::types::Ty::Null))
     }
 
+    /// The verifier type one store leaves in its local. An adapted initializer goes through the
+    /// same reference coercion the emitter applies: a `checkcast` leaves the slot's own type
+    /// (`val g: Greeter = Ann()` stores a `Greeter`, as in kotlinc), and a carrier adaptation is not
+    /// modelled, so it keeps the declared type.
+    fn stored_reference_ty(
+        &self,
+        stored: Store,
+        declared: crate::types::Ty,
+        visiting_values: &mut HashSet<u32>,
+    ) -> Option<crate::types::Ty> {
+        let ty = self.expression_reference_ty(stored.value, visiting_values)?;
+        if !stored.adapted || ty == crate::types::Ty::Null {
+            return Some(ty);
+        }
+        match self.reference_coercion(self.value_ty(stored.value), declared) {
+            super::operand_representation::ReferenceCoercion::Unchanged => Some(ty),
+            super::operand_representation::ReferenceCoercion::Cast(_) => Some(declared),
+            super::operand_representation::ReferenceCoercion::Carried => None,
+        }
+    }
+
     fn expression_reference_ty(
         &self,
         expression: u32,
         visiting_values: &mut HashSet<u32>,
     ) -> Option<crate::types::Ty> {
         match self.ir.expr(expression) {
-            IrExpr::GetValue(value) => self.common_stored_reference_ty(*value, visiting_values),
+            IrExpr::GetValue(value) => {
+                let &(_, declared) = self.slots.get(value)?;
+                self.common_stored_reference_ty(*value, declared, visiting_values)
+            }
             IrExpr::Block {
                 value: Some(value), ..
             } => self.expression_reference_ty(*value, visiting_values),
