@@ -27,60 +27,77 @@ pub(super) fn named_context_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     types: &[Ty],
-) -> Vec<(String, Ty)> {
-    let accessor = index.owned_declaration(declaration, DeclarationKind::Accessor, 0);
+) -> Result<Vec<(String, crate::types::ContextParameterKind, Ty)>, FirFileLoweringFailure> {
+    let property = index
+        .property_for_declaration(declaration)
+        .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
     types
         .iter()
         .enumerate()
         .map(|(ordinal, ty)| {
-            let name = accessor
-                .and_then(|accessor| {
-                    index.callable_parameter_name(
-                        crate::fir::CallableId::from_raw(accessor.raw()),
-                        ordinal as u32,
-                    )
-                })
-                .unwrap_or("_")
-                .to_owned();
-            (name, *ty)
+            let parameter = index
+                .property_context_parameter(property, ordinal as u32)
+                .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+            let kind = parameter.kind;
+            let name = match kind {
+                crate::types::ContextParameterKind::Named
+                | crate::types::ContextParameterKind::Anonymous => {
+                    parameter.source_name.to_string()
+                }
+                crate::types::ContextParameterKind::LegacyReceiver => String::new(),
+                crate::types::ContextParameterKind::None => {
+                    return Err(FirFileLoweringFailure::MissingProperty(declaration));
+                }
+            };
+            Ok((name, kind, *ty))
         })
         .collect()
 }
 
-pub(super) fn set_extension_accessor_parameter_names(
+pub(super) fn set_accessor_parameter_identities(
     index: &ResolvedModuleIndex,
     property: DeclarationId,
-    property_name: &str,
     setter: bool,
     function: FunId,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    let accessor = index
-        .owned_declaration(property, DeclarationKind::Accessor, u32::from(setter))
-        .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
-    let callable = index
-        .callable_for_declaration(accessor)
-        .ok_or(FirFileLoweringFailure::MissingCallable(accessor))?;
-    let mut names = (0..index.callable_parameter_name_count(callable.id))
-        .map(|ordinal| {
-            index
-                .callable_parameter_name(callable.id, ordinal as u32)
-                .map(str::to_owned)
-                .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if callable.shape.extension_receiver.is_some() {
-        let receiver_position = callable.shape.context_parameter_count as usize;
-        if receiver_position > names.len() {
-            return Err(FirFileLoweringFailure::MissingCallable(accessor));
+    let property_id = index
+        .property_for_declaration(property)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+    let property_header = index
+        .property(property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+    let mut identities = index
+        .property_context_parameter_identities(property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(property))?
+        .iter()
+        .map(super::resolved_parameter_identity)
+        .collect::<Vec<_>>();
+    if property_header.extension_receiver.is_some() {
+        let source_name = index
+            .declaration_name(property)
+            .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
+        ir.fn_source_names.insert(function, source_name.to_owned());
+        let receiver_position = property_header.context_parameter_count as usize;
+        if receiver_position > identities.len() {
+            return Err(FirFileLoweringFailure::MissingProperty(property));
         }
-        names.insert(receiver_position, format!("$this${property_name}"));
+        identities.insert(
+            receiver_position,
+            crate::ir::IrParameterIdentity::extension_receiver(),
+        );
     }
-    if ir.functions[function as usize].params.len() != names.len() {
-        return Err(FirFileLoweringFailure::MissingCallable(accessor));
+    if setter {
+        let identity = index
+            .property_setter_parameter_identity(property_id)
+            .ok_or(FirFileLoweringFailure::MissingProperty(property))?;
+        identities.push(super::resolved_parameter_identity(identity));
+    }
+    if ir.functions[function as usize].params.len() != identities.len() {
+        return Err(FirFileLoweringFailure::MissingProperty(property));
     }
     ir.fn_params
-        .insert(function, crate::ir::FnParamInfo::names(names));
+        .insert(function, crate::ir::FnParamInfo::identities(identities));
     Ok(())
 }
 
@@ -435,6 +452,10 @@ fn materialize_member_extension_property(
         )),
         None => None,
     };
+    set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+    if let Some(setter) = setter {
+        set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+    }
     let type_params = declaration_type_parameters(index, property.declaration);
     for function in std::iter::once(getter).chain(setter) {
         ir.fn_source_order.insert(function, source_order);
@@ -533,7 +554,7 @@ fn materialize_top_level_property(
                 ));
             }
         };
-        let index = u32::try_from(ir.statics.len())
+        let storage_index = u32::try_from(ir.statics.len())
             .map_err(|_| FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration))?;
         ir.statics.push(IrStatic {
             name: property.name.clone(),
@@ -573,10 +594,16 @@ fn materialize_top_level_property(
                 None,
             )
         });
+        if let Some(getter) = getter {
+            set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+        }
+        if let Some(setter) = setter {
+            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+        }
         realizations.insert(
             property_id,
             IrLocalPropertyLayout::TopLevelStorage {
-                storage: index,
+                storage: storage_index,
                 getter,
                 setter,
                 qualifier: None,
@@ -595,7 +622,6 @@ fn materialize_top_level_property(
         .chain(extension_receiver)
         .collect::<Vec<_>>();
     let declaration = property.declaration;
-    let property_name = property.name.clone();
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -620,16 +646,9 @@ fn materialize_top_level_property(
             None,
         )
     });
-    set_extension_accessor_parameter_names(index, declaration, &property_name, false, getter, ir)?;
+    set_accessor_parameter_identities(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {
-        set_extension_accessor_parameter_names(
-            index,
-            declaration,
-            &property_name,
-            true,
-            setter,
-            ir,
-        )?;
+        set_accessor_parameter_identities(index, declaration, true, setter, ir)?;
     }
     realizations.insert(
         property_id,
@@ -918,6 +937,7 @@ fn materialize_member_property(
         ir.fn_source_order.insert(getter, source_order);
         ir.open_methods.insert(getter);
         ir.classes[class_id as usize].methods.push(getter);
+        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
         // The accessor of a property typed by an enclosing-class type parameter signs `()TT;`, the
         // same as a member function returning `T`. A declared function gets this from
         // `attach_callable_generic_facts`, which runs over CALLABLES; an accessor is synthesized
@@ -941,6 +961,7 @@ fn materialize_member_property(
             ir.fn_source_order.insert(setter, source_order);
             ir.open_methods.insert(setter);
             ir.classes[class_id as usize].methods.push(setter);
+            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
             ir.member_semantic_sigs.insert(
                 setter,
                 (
@@ -972,6 +993,12 @@ fn materialize_member_property(
         ir.classes[class_id as usize].methods.push(function);
         function
     });
+    if let Some(getter) = getter {
+        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+    }
+    if let Some(setter) = setter {
+        set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+    }
     // Accessor bodies are streamed after ordinary function declarations, but their declaration
     // position is the property's position. Publish that stable order on every concrete accessor so
     // targets can interleave properties and functions without consulting syntax or names.
@@ -1000,7 +1027,7 @@ fn materialize_member_property(
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
-        context_params: named_context_parameters(index, property.declaration, &context_parameters),
+        context_params: named_context_parameters(index, property.declaration, &context_parameters)?,
         source_order,
         decl_line: 0,
         ty: property.ty,
@@ -1101,7 +1128,7 @@ pub(super) fn add_accessor_function(
     };
     let parameter_count = params.len();
     let function = ir.add_fun(IrFunction {
-        name,
+        name: name.clone(),
         params,
         ret,
         body: Some(body),
@@ -1109,11 +1136,20 @@ pub(super) fn add_accessor_function(
         dispatch_receiver,
         param_checks: vec![None; parameter_count],
     });
+    ir.fn_source_names.insert(function, name);
     ir.fn_params.insert(
         function,
-        crate::ir::FnParamInfo::names(
+        crate::ir::FnParamInfo::identities(
             (0..parameter_count)
-                .map(|ordinal| format!("value{ordinal}"))
+                .map(|ordinal| {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::AccessorValue {
+                            ordinal: u32::try_from(ordinal)
+                                .expect("too many generated accessor parameters"),
+                        },
+                        None,
+                    )
+                })
                 .collect(),
         ),
     );
@@ -1129,7 +1165,7 @@ fn add_abstract_accessor_function(
 ) -> FunId {
     let parameter_count = params.len();
     let function = ir.add_fun(IrFunction {
-        name,
+        name: name.clone(),
         params,
         ret,
         body: None,
@@ -1137,11 +1173,20 @@ fn add_abstract_accessor_function(
         dispatch_receiver: Some(owner),
         param_checks: vec![None; parameter_count],
     });
+    ir.fn_source_names.insert(function, name);
     ir.fn_params.insert(
         function,
-        crate::ir::FnParamInfo::names(
+        crate::ir::FnParamInfo::identities(
             (0..parameter_count)
-                .map(|ordinal| format!("value{ordinal}"))
+                .map(|ordinal| {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::AccessorValue {
+                            ordinal: u32::try_from(ordinal)
+                                .expect("too many generated accessor parameters"),
+                        },
+                        None,
+                    )
+                })
                 .collect(),
         ),
     );

@@ -154,6 +154,8 @@ mod callable_ref_extension_e2e;
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
 mod callable_ref_unresolved_e2e;
+#[path = "caller_type_param_receiver_e2e.rs"]
+mod caller_type_param_receiver_e2e;
 #[path = "cannot_infer_cascade_e2e.rs"]
 mod cannot_infer_cascade_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
@@ -1182,6 +1184,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "redundant_checkcast_e2e.rs"]
+mod redundant_checkcast_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "spliced_expression_null_check_e2e.rs"]

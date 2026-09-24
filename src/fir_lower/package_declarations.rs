@@ -181,16 +181,23 @@ pub(super) fn publish(
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
-                let context_parameter_names = (0..context_count)
+                let context_parameters_facts = (0..context_count)
                     .map(|ordinal| {
                         index
-                            .property_context_parameter_name(property_id, ordinal as u32)
-                            .map(str::to_owned)
+                            .property_context_parameter(property_id, ordinal as u32)
                             .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
                                 declaration,
                             ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let context_parameter_names = context_parameters_facts
+                    .iter()
+                    .map(|parameter| parameter.source_name.to_string())
+                    .collect();
+                let context_parameter_kinds = context_parameters_facts
+                    .iter()
+                    .map(|parameter| parameter.kind)
+                    .collect();
                 let receiver = property_header
                     .extension_receiver
                     .map(crate::fir::ResolvedTy::get);
@@ -203,6 +210,7 @@ pub(super) fn publish(
                     receiver,
                     context_parameters,
                     context_parameter_names,
+                    context_parameter_kinds,
                     is_const: header.flags.has(DeclarationFlags::CONST),
                     has_constant: index.compile_time_constant(declaration).is_some(),
                     visibility: header.visibility,

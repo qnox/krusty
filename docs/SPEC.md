@@ -6269,6 +6269,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
   rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
   for the plain override, JDK skeleton collections, and the shapes that stay rejected).
+- **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
+  callee's own formals in its declared receiver bind at the call. In
+  `fun <T> lowest(xs: Iterable<T>) where T : Comparable<T> = xs.minOrNull()`, the caller's `T` is a
+  definite type bounded by `Comparable<T>`, so it is not an `Iterable<Double>`. The receiver
+  type-argument check treated a type parameter on either side as a wildcard. That let the
+  `@JvmName` element variants `Iterable<Double>.minOrNull` and `Iterable<Float>.minOrNull` match,
+  and the generic `Iterable<T>.minOrNull` then failed against them, so krusty reported
+  "none of the following candidates is applicable". A caller type parameter is now checked through
+  its bounds like any other argument; a declared type variable and the erased `Any`/`Object` of a
+  library signature stay wildcards. It does not matter whether the bound is written inline
+  (`<T : Comparable<T>>`) or in a `where` clause; both went through the same receiver check.
+  Tests: `tests/caller_type_param_receiver_e2e.rs`
+  (`a_caller_bounded_type_parameter_receiver_selects_the_generic_extension`,
+  `a_caller_type_parameter_receiver_does_not_match_a_concrete_element_overload`, cross-checked
+  against the reference compiler).
 
 ## 8. Success criteria for the PoC
 
