@@ -119,6 +119,9 @@ pub struct FrontendClassContext<'a> {
 /// Contexts are built exclusively from checked common IR: plugins never resolve source spelling.
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
+    /// Annotation classifiers whose resolved declaration carries kotlinx.serialization's
+    /// `@SerialInfo` meta-annotation.
+    serial_info_annotations: std::collections::HashSet<TypeName>,
     target_type_descriptor: fn(Ty) -> Option<String>,
     /// Types this compilation does NOT declare, mapped to the serializer that already exists for
     /// them: another file's or a dependency's generated `$serializer`, or the one a class names for
@@ -140,6 +143,7 @@ impl Default for PluginContext {
     fn default() -> Self {
         Self {
             class_annotations: HashMap::new(),
+            serial_info_annotations: std::collections::HashSet::new(),
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
@@ -152,6 +156,7 @@ impl Clone for PluginContext {
     fn clone(&self) -> Self {
         Self {
             class_annotations: self.class_annotations.clone(),
+            serial_info_annotations: self.serial_info_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
@@ -161,6 +166,18 @@ impl Clone for PluginContext {
 }
 
 impl PluginContext {
+    fn with_serial_info_annotations(
+        mut self,
+        annotations: std::collections::HashSet<TypeName>,
+    ) -> Self {
+        self.serial_info_annotations = annotations;
+        self
+    }
+
+    pub(crate) fn is_serial_info_annotation(&self, annotation: TypeName) -> bool {
+        self.serial_info_annotations.contains(&annotation)
+    }
+
     pub fn with_target_type_descriptor(mut self, f: fn(Ty) -> Option<String>) -> Self {
         self.target_type_descriptor = f;
         self
@@ -475,10 +492,44 @@ pub fn run_enabled(
         .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
         .collect();
     let ctx = ctx
+        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
         .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
     plugins.host(module_name).run(ir, &ctx);
+}
+
+fn serial_info_annotations(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> std::collections::HashSet<TypeName> {
+    let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+    let local_classes = ir
+        .classes
+        .iter()
+        .map(|class| (class.fq_name_id(), class))
+        .collect::<std::collections::HashMap<_, _>>();
+    ir.classes
+        .iter()
+        .flat_map(|class| class.applied_annotations.applications())
+        .map(|application| application.internal)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .filter(|&annotation| {
+            local_classes.get(&annotation).is_some_and(|class| {
+                class
+                    .applied_annotations
+                    .applications()
+                    .any(|meta| meta.internal == serial_info)
+            }) || classifiers
+                .classifier_annotations(annotation)
+                .is_some_and(|annotations| {
+                    annotations
+                        .iter()
+                        .any(|meta| meta.annotation == serial_info)
+                })
+        })
+        .collect()
 }
 
 /// Publish the value classes this file's fields refer to without declaring into common IR's one
@@ -792,6 +843,38 @@ mod tests {
         assert_eq!(ctx.classes_with(crate::types::type_name("c/D")), vec![0]);
         assert!(ctx.has_annotation(0, crate::types::type_name("c/D")));
         assert!(!ctx.has_annotation(1, crate::types::type_name("c/D")));
+    }
+
+    #[test]
+    fn serial_info_roles_come_from_resolved_classifier_facts() {
+        let stamp = crate::types::type_name("fixtures/SchemaStamp");
+        let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+        let mut object = synthetic_class("sample/StampedObject");
+        object.applied_annotations =
+            crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
+                retention: crate::types::AnnotationRetention::Runtime,
+                annotation: crate::ir::AppliedAnnotation {
+                    internal: stamp,
+                    values: vec![],
+                },
+            }]);
+        let mut ir = IrFile::default();
+        ir.add_class(object);
+        let facts = FakeClassifierFacts {
+            annotations: std::collections::HashMap::from([(
+                stamp,
+                vec![crate::types::ResolvedAnnotation {
+                    annotation: serial_info,
+                    arguments: vec![],
+                }],
+            )]),
+            ..FakeClassifierFacts::default()
+        };
+
+        assert_eq!(
+            serial_info_annotations(&ir, &facts),
+            std::collections::HashSet::from([stamp])
+        );
     }
 
     #[test]

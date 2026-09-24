@@ -6353,12 +6353,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every element site, and never emitted it (`NoClassDefFoundError` on first use). The object path
   now shares the enum's cached-serializer delegate. Generated members come after the declared ones,
   the delegate is initialized after the object's own properties in `<clinit>`, its store maps to the
-  annotated declaration line, and the return maps to the closing line. The `@SerialInfo` annotation
-  array is always empty, the same gap the enum factory has with its `null`.
+  annotated declaration line, and the return maps to the closing line. A resolved `@SerialInfo`
+  application remains an explicit unsupported plugin residual until runtime annotation construction
+  is available; it is never silently replaced with an empty descriptor-annotation array.
   Tests: `tests/serialization_object_serializer_e2e.rs` (the runtime result under both compilers,
   whole-class parity for a bodiless object, an object with properties, a sealed `object` case and a
   holder's `$serializer`, plus the in-place element construction in a holder's child-serializer
-  cache and in a sealed serializer).
+  cache and in a sealed serializer), and
+  `plugins::serialization::cached_serializer::tests::serial_info_never_silently_becomes_an_empty_annotation_array`.
 
 ## 8. Success criteria for the PoC
 

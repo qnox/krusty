@@ -32,6 +32,7 @@ pub(super) enum ElementSerializerPlan {
     Object {
         object: TypeName,
         serial_name: crate::kt_string::KtString,
+        serial_info_unsupported: bool,
     },
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
@@ -255,6 +256,7 @@ pub(super) fn element_serializer_plan(
         return Some(ElementSerializerPlan::Object {
             object: fq_name,
             serial_name: super::annotations::class_serial_name(ir, object),
+            serial_info_unsupported: super::annotations::class_has_serial_info(ctx, ir, object),
         });
     }
     // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
@@ -559,9 +561,10 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         ElementSerializerPlan::Object {
             object,
             serial_name,
+            serial_info_unsupported,
         } => {
             let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
-            super::cached_serializer::object_serializer(ir, object, name)
+            super::cached_serializer::object_serializer(ir, object, name, serial_info_unsupported)
         }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,

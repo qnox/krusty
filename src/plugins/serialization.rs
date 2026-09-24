@@ -1201,7 +1201,14 @@ impl SerializationPlugin {
                     let name = ir.add_expr(IrExpr::Const(IrConst::String(
                         annotations::class_serial_name(ir, object),
                     )));
-                    return cached_serializer::object_serializer(ir, subtype, name);
+                    let serial_info_unsupported =
+                        annotations::class_has_serial_info(ctx, ir, object);
+                    return cached_serializer::object_serializer(
+                        ir,
+                        subtype,
+                        name,
+                        serial_info_unsupported,
+                    );
                 }
                 let s = subtype.render();
                 serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
@@ -1487,7 +1494,7 @@ impl IrPlugin for SerializationPlugin {
             // A `@Serializable object`: no generated `$serializer` — `serializer()` is a member of
             // the object returning a cached `ObjectSerializer` over its `INSTANCE`.
             if ir.classes[class_id as usize].is_object {
-                cached_serializer::add_object_serializer(ir, class_id, class_name);
+                cached_serializer::add_object_serializer(ir, ctx, class_id, class_name);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —

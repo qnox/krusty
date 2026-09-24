@@ -109,27 +109,49 @@ pub(super) fn add_cached_serializer_delegate(
     });
 }
 
-/// `new ObjectSerializer(<serial name>, <object>.INSTANCE, new Annotation[0])`.
+/// `new ObjectSerializer(<serial name>, <object>.INSTANCE, <serial-info annotations>)`.
 ///
-/// The annotation array is the object's `@SerialInfo` annotations; materializing retained
-/// annotation values is a separate gap (the enum factory passes `null` for the same reason), so it
-/// is empty here.
-pub(super) fn object_serializer(ir: &mut IrFile, object: TypeName, name: ExprId) -> ExprId {
+/// Typed retained annotation facts identify `@SerialInfo` applications. Runtime annotation
+/// construction is not yet available to the serialization plugin, so preserve that exact case as
+/// a plugin residual; emitting an empty array would silently change the descriptor contract.
+pub(super) fn object_serializer(
+    ir: &mut IrFile,
+    object: TypeName,
+    name: ExprId,
+    serial_info_unsupported: bool,
+) -> ExprId {
     let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
         owner: object,
         ty: object,
         field: "INSTANCE".to_string(),
     });
-    let annotations = ir.add_expr(IrExpr::Vararg {
-        array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Annotation")]),
-        spreads: Vec::new(),
-        elements: Vec::new(),
-    });
+    let annotations = object_serial_info_annotations(ir, object, serial_info_unsupported);
     ir.new_external(
         OBJECT_SERIALIZER_FQ,
         "(Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/annotation/Annotation;)V",
         vec![name, instance, annotations],
     )
+}
+
+fn object_serial_info_annotations(
+    ir: &mut IrFile,
+    object: TypeName,
+    serial_info_unsupported: bool,
+) -> ExprId {
+    if serial_info_unsupported {
+        return ir.add_expr(IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind: "object-serial-info-annotations",
+            exprs: Vec::new(),
+            data: vec![object],
+            types: Vec::new(),
+        });
+    }
+    ir.add_expr(IrExpr::Vararg {
+        array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Annotation")]),
+        spreads: Vec::new(),
+        elements: Vec::new(),
+    })
 }
 
 /// The `@Serializable object` this file declares as `classifier`, when its serializer is the
@@ -151,7 +173,12 @@ pub(super) fn local_serializable_object(
 
 /// A `@Serializable object`: `serializer()` is a member of the object returning the cached
 /// `ObjectSerializer`, through a private `get$cachedSerializer()` that reads the delegate.
-pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, object: TypeName) {
+pub(super) fn add_object_serializer(
+    ir: &mut IrFile,
+    ctx: &crate::plugins::PluginContext,
+    class_id: ClassId,
+    object: TypeName,
+) {
     let owner_line = ir.classes[class_id as usize].decl_start_line;
 
     // `get$cachedSerializer()`: `(KSerializer) $cachedSerializer$delegate.getValue()`.
@@ -238,7 +265,8 @@ pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, object: 
     let name = ir.add_expr(IrExpr::Const(IrConst::String(
         super::annotations::class_serial_name(ir, class_id),
     )));
-    let serializer = object_serializer(ir, object, name);
+    let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
+    let serializer = object_serializer(ir, object, name, serial_info_unsupported);
     // kotlinc narrows the initializer's value to the `KSerializer` it returns.
     let serializer = ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::Cast,
@@ -251,4 +279,39 @@ pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, object: 
     let delegate = u32::try_from(ir.statics.len() - 1).expect("static index fits u32");
     ir.mark_compiler_generated_static(delegate);
     ir.place_static_initializer_after_source(delegate);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_info_never_silently_becomes_an_empty_annotation_array() {
+        let object = type_name("sample/StampedObject");
+        let mut ir = IrFile::default();
+
+        let unsupported = object_serial_info_annotations(&mut ir, object, true);
+        assert!(matches!(
+            ir.expr(unsupported),
+            IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                kind: "object-serial-info-annotations",
+                exprs,
+                data,
+                types,
+            } if exprs.is_empty() && data == &[object] && types.is_empty()
+        ));
+
+        let empty = object_serial_info_annotations(&mut ir, object, false);
+        assert!(matches!(
+            ir.expr(empty),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } if *array_type == Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Annotation")])
+                && spreads.is_empty()
+                && elements.is_empty()
+        ));
+    }
 }
