@@ -149,7 +149,7 @@ impl Checker<'_> {
         }
     }
 
-    fn report_joined_rejection(
+    pub(super) fn report_joined_rejection(
         &mut self,
         call: ExprId,
         name: &str,
