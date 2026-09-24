@@ -431,9 +431,7 @@ pub(super) fn report_unactualized_members(
         match subject {
             Ok(rendered) => diags.error(
                 actual.name,
-                format!(
-                    "'{rendered}' has no corresponding members for expected class members:{listing}"
-                ),
+                crate::diagnostic_wording::no_actual_class_members(&rendered, &listing),
             ),
             Err(unreachable) => diags.error(
                 actual.name,
@@ -485,7 +483,7 @@ pub(super) fn report(
             Ok(None) => {}
             Ok(Some(rendered)) => diags.error(
                 actual.name,
-                format!("'{rendered}' has no corresponding expected declaration"),
+                crate::diagnostic_wording::actual_without_expect(&rendered),
             ),
             Err(unreachable) => diags.error(
                 actual.name,

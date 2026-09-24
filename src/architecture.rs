@@ -11,6 +11,7 @@ mod tests {
             &[
                 "ast",
                 "diag",
+                "diagnostic_wording",
                 "features",
                 "fir",
                 "lexer",
@@ -175,7 +176,14 @@ mod tests {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
             &[
-                "compiler", "diag", "features", "frontend", "jvm", "plugins", "source",
+                "compiler",
+                "diag",
+                "features",
+                "frontend",
+                "jvm",
+                "kotlin_version",
+                "plugins",
+                "source",
             ],
         );
     }
@@ -251,6 +259,9 @@ mod tests {
             "ir",
             "jvm",
             "klib",
+            // Which reference kotlinc's class-file details to reproduce (`@Metadata.xi` bits,
+            // annotation-implementation nullability) is a per-release fact, not a JVM concept.
+            "kotlin_version",
             "kt_string",
             "libraries",
             "lru",
@@ -614,12 +625,14 @@ mod tests {
                 "conformance",
                 "dhat",
                 "diag",
+                "diagnostic_wording",
                 "features",
                 "frontend",
                 "ir",
                 "js",
                 "jvm",
                 "klib",
+                "kotlin_version",
                 "lexer",
                 "libraries",
                 "metadata",

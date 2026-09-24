@@ -2636,18 +2636,16 @@ pub struct LibraryType {
     /// substitutes an applied receiver into these templates before its single hierarchy BFS.
     pub supertype_templates: Vec<Ty>,
     pub constructors: Vec<LibraryMember>,
-    /// Names declared in the classifier's physical surface that block an inherited instance
-    /// property without themselves denoting a Kotlin instance property (for example a private or
-    /// static Java field). This is a semantic name-hiding fact; no storage shape crosses the provider
-    /// boundary.
+    /// Physical names that block an inherited Kotlin property without denoting one themselves,
+    /// such as a private or static Java field.
     pub hidden_member_properties: HashSet<String>,
+    /// Provider-recorded hidden-deprecated names. They remain rejection facts, never candidates.
+    pub hidden_deprecated_callables: HashSet<String>,
     /// Exact source-level callable/property declarations keyed by source name. Providers populate this
     /// once with the classifier signature; core applies receiver type arguments and walks inheritance.
     pub declared_callables: HashMap<String, Callables>,
-    /// Source declaration order of the keys in [`Self::declared_callables`]. A hash table answers
-    /// lookup; it cannot carry the ordering required when a language feature materializes the whole
-    /// declaration surface (interface delegation and metadata emission). Providers normalize this
-    /// once from source metadata or class declaration order.
+    /// Source order for [`Self::declared_callables`], used where interface delegation or metadata
+    /// emission materializes the full declaration surface.
     pub declared_callable_order: Vec<String>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
@@ -2808,6 +2806,7 @@ impl LibraryType {
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
@@ -3302,6 +3301,7 @@ mod tests {
             supertype_templates: Vec::new(),
             constructors: vec![],
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: std::collections::HashMap::new(),
             declared_callable_order: Vec::new(),
             members: vec![],

@@ -1,7 +1,7 @@
 # Kotlin declaration owner, source name, erased descriptor, declaration kind, JVM owner, JVM name.
 # PROPERTY rows mirror BuiltinSpecialProperties.PROPERTY_FQ_NAME_TO_JVM_GETTER_NAME_MAP; FUNCTION
 # rows mirror SpecialGenericSignatures.NAME_AND_SIGNATURE_TO_JVM_REPRESENTATION_NAME_MAP.
-# Verified against the supported Kotlin 2.4.0 and 2.4.10 compiler policies.
+# Verified against the supported Kotlin 2.4.0, 2.4.10 and 2.4.20 compiler policies.
 kotlin/collections/Collection	size	()I	property	java/util/Collection	size
 kotlin/collections/Map	size	()I	property	java/util/Map	size
 kotlin/collections/Map	values	()Ljava/util/Collection;	property	java/util/Map	values

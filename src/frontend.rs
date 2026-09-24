@@ -332,8 +332,11 @@ fn report_unmatched_expect_roots(
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
-    for stub in headers.stubs.iter().filter(|stub| {
-        stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
+    let mut unmatched = headers
+        .stubs
+        .iter()
+        .filter(|stub| {
+            stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
             && headers
                 .declarations
                 .anchor(stub.id)
@@ -345,7 +348,13 @@ fn report_unmatched_expect_roots(
             // did not get it wrong.
             && !incompatible.contains(&stub.id)
             && !symbols.is_source_optional_expectation(stub.id)
-    }) {
+        })
+        .collect::<Vec<_>>();
+    // The reference compiler reports a missing `actual` while actualizing IR, which matches every
+    // top-level expect classifier of the module before it links any callable. So its ledger names
+    // each unactualized classifier, in source order, before any unactualized function or property.
+    unmatched.sort_by_key(|stub| stub.kind != crate::fir::DeclarationKind::Classifier);
+    for stub in unmatched {
         let source = stub.source.raw() as usize;
         if let Some(rejected) = rejected_sources.get_mut(source) {
             *rejected = true;
@@ -386,11 +395,10 @@ fn report_unmatched_expect_roots(
             );
             continue;
         };
-        diags.error(
+        diags.error_kind(
             range,
-            format!(
-                "expected {name} has no actual declaration in module <{module_name}> for {target}"
-            ),
+            crate::diag::DiagnosticKind::Actualization,
+            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
         );
     }
 }

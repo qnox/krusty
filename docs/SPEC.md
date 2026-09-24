@@ -194,6 +194,51 @@ LongArray`. krusty answers `true` there because it does not box; that is krusty'
 kotlinc bug to match. Running the reference compiler is what separated the two, which is why
 `docs/TEST_HARNESS.md` now insists on provisioning it.
 
+**Every supported reference version is an oracle, one at a time.** The `kotlin-versions` manifest
+lists several kotlinc releases, and they do not all agree: kotlinc 2.4.20 rewords about sixty
+diagnostics (`expected declaration` becomes `'expect' declaration`, an unresolved member names its
+receiver's type), reports NO_VALUE_FOR_PARAMETER at the callee's name instead of the argument list,
+lists every rung's candidates in a failed `getValue`, drops `@NotNull`/`@Nullable` from annotation
+implementation classes, packs a synthetic class's visibility into bits 8–10 of `@Metadata.xi`, and
+names an anonymous context parameter by its label in the IR: it gains a `LocalVariableTable` row,
+and repeated labels are numbered `$context-String$1` where earlier releases wrote
+`$context-String#1`. A `Unit` suspend function whose body is a tail call still forwards its
+continuation, but 2.4.20 returns the callee's result only when it is `COROUTINE_SUSPENDED` and
+`Unit.INSTANCE` otherwise, where earlier releases return the callee's result unchanged.
+krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
+it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
+part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The
+provisioned toolchain follows the same target. Where releases differ, code asks the target rather
+than hardcoding either answer; diagnostic text and positions live in one version-keyed table,
+`src/diagnostic_wording.rs`, so the next release adds rows there. The 2.4.20 receiver clause
+follows kotlinc's `FOR_OPTIONAL_RECEIVER` rule: it names the type of a receiver VALUE of class-like
+type (`null?.x` says `Nothing`, `null.x` says `Nothing?`, a smart cast to an intersection says its
+first class type), and is absent for a classifier qualifier (`Limits.MISSING` through a companion,
+`Obj.MISSING`), a type-parameter receiver, a callable reference, and a HIDDEN-deprecated candidate
+(`List.getFirst()`, reported as a bare unresolved name). Ledger order follows kotlinc's phases:
+frontend diagnostics per file in source position order, then actualization errors (an `expect`
+with no `actual`) in the order actualization finds them, every classifier before any callable.
+A dotted receiver commits its root at scope-tower priority and never backtracks: `Package.Outer`
+in package `Package` resolves `Package` to the default-imported `java.lang.Package`, so `Outer` is
+the unresolved segment, as it is for any prefix with no value facet (`Thread.Missing.x`). An
+inapplicable generic call reports a mismatched argument against its parameter under the type
+arguments fixed by the receiver and the expected result (`s.let(1)` where `Int` is expected
+expects `(String) -> Int`). When a member exists but rejects the arguments and every same-name
+extension the tower climbs to is rejected too, kotlinc 2.4.20 chooses among all of them as among
+applicable overloads: the most specific by the parameters the arguments map to, then a non-generic
+declaration over a generic one. A single survivor reports its own errors (`catalog.loadAll<Entry>()`
+against a generic member and a non-generic extension reports the extension's missing argument and
+unexpected type argument); tied survivors are reported together as NONE_APPLICABLE at the callee
+name (`i?.hashCode(1)` lists `hashCode()` and `Any?.hashCode()`). Earlier releases report the
+member's own error (`too many arguments for 'fun hashCode(): Int'.` at the argument). One call's
+diagnostics are listed in source order. Tests follow the same target:
+differential tests compare against whichever kotlinc the run provisions, and a test that pins what
+kotlinc says reads it from a values file recorded per version from kotlinc itself
+(`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
+`tests/diagnostic_wording_versions_e2e.rs`, `expect_declaration_body_e2e`,
+`safe_call_unresolved_member_e2e`, `inferred_signature_commits_a_classifier_root_over_a_same_named_package`,
+plus `kotlin_version` unit tests and `the_reference_version_flag_accepts_only_supported_releases`.
+
 The harness (`harness/`) is a Rust integration test shelling out to the reference compiler,
 `javap`/a class-file parser, and `java`. Edge-case suite (§7) lives in `tests/cases/`.
 
@@ -3106,8 +3151,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
 
   Mapped collection scopes also admit the exact physical signatures in the provider-owned,
-  versioned `visible_methods_2_4.tsv` policy (verified identical for the supported Kotlin 2.4.0 and
-  2.4.10 toolchains), matching
+  versioned `visible_methods_2_4.tsv` policy (verified identical for the supported Kotlin 2.4.0,
+  2.4.10 and 2.4.20 toolchains), matching
   `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`. Read-only signatures such as `stream` and
   `getOrDefault` attach to the read-only declaration and are inherited by its mutable sibling;
   mutating signatures such as `removeIf`, `computeIfAbsent`, and `merge` attach directly to the
@@ -4603,10 +4648,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   artifact that could not link — a call to an unmatched `expect fun` was written as an
   `invokestatic` of a method the facade does not declare. (2) An `expect` declaration that carries
   an implementation is an error regardless of the feature, so a file without the feature gets BOTH
-  sentences, the gate first. `expected declaration cannot have a body.` covers a function with an
+  sentences, the gate first (worded per reference version: 2.4.20 says `'expect'` where earlier
+  releases say `expected`). `'expect' declaration cannot have a body.` covers a function with an
   expression or block body, a property ACCESSOR with a body, an `init` block, and any of these on a
-  member of an `expect` classifier; `expected property cannot have an initializer.` covers an
-  initializer; `expected property cannot be delegated.` covers a `by` delegate. Positions are
+  member of an `expect` classifier; `'expect' property cannot have an initializer.` covers an
+  initializer; `'expect' property cannot be delegated.` covers a `by` delegate. Positions are
   measured, not derived: a top-level declaration is reported at its
   `expect` keyword, a member at its own declaration, an accessor at its header (`get()` / `set(v)`,
   hence `PropDecl::getter_span` and `PropAccessor::span`), an `init` block at the KEYWORD (hence
@@ -4617,13 +4663,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same position is. Once any body error exists the reference compiler never reaches actualization,
   so the unmatched-expect report is suppressed for the WHOLE compilation, not per file (measured
   with two files: a body error in one silenced a clean unmatched `expect` in the other). An
-  unmatched `expect` with the feature ON reports `expected <name> has no actual declaration in
-  module <name> for JVM` at the `expect` keyword, naming the `-module-name` it looked in. Tests:
+  unmatched `expect` with the feature ON reports `the 'expect' declaration '<name>' has no 'actual'
+  declaration in module '<name> for JVM'.` (2.4.20; earlier releases say `expected <name> has no
+  actual declaration in module <name> for JVM`) at the `expect` keyword, naming the `-module-name`
+  it looked in. Tests:
   `mpp_requires_the_feature_e2e`, `expect_declaration_body_e2e`.
 
 - **An `actual` with no `expect` to actualize is an error, named by a declaration renderer.** With
   `+MultiPlatformProjects` on, a top-level `actual` that actualizes nothing reports
-  `'<rendered declaration>' has no corresponding expected declaration` at the declaration's NAME
+  `'<rendered declaration>' has no corresponding 'expect' declaration` (2.4.20; `expected
+  declaration` before it) at the declaration's NAME
   (`actual fun simple(): Int = 1` → column 12, under `simple`). krusty used to accept it and emit.
   The message names the declaration the way the reference compiler's own renderer does — the full
   measured grammar is in `docs/PARITY_PROTOCOL.md` — and that rendering is a HYBRID by necessity:
@@ -6350,9 +6399,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after any KDoc. krusty ran no plugin frontend rule, so the class reached the backend, which
   declined the file with the generic unsupported-construct error at `1:1`. Native plugins now get
   a frontend class-check hook (`IrPlugin::check_frontend_class`), run by the checker on each class
-  with its checked annotation identities while the class's syntax is live. The wording is the one
-  every supported reference (2.4.0, 2.4.10) uses; kotlinc 2.4.20 appends a period. Without the
-  plugin the property needs no initializer under either compiler.
+  with its checked annotation identities while the class's syntax is live. The wording follows
+  the serialization plugin's release, not the Kotlin version krusty targets: the plugin ships inside
+  kotlinc, and 2.4.20's appends a full stop that 2.4.0 and 2.4.10's lack. krusty reads the release
+  from the `-Xplugin` jar's manifest (`Implementation-Version: 2.4.10-release-377`) and uses the
+  newest wording when no jar names one (`-P` alone, an editor enabling every native extension); the
+  e2e case records kotlinc's ledger per reference version, each run given that kotlinc's own plugin
+  jar. Without the plugin the property needs no initializer under either compiler.
   Tests: `tests/serialization_transient_diagnostics_e2e.rs`
   (`a_transient_property_without_an_initializer_is_rejected_like_kotlinc`, the exact error list of
   both compilers over three files: a constructor property, modifier-first and own-line annotations,

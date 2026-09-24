@@ -40,6 +40,28 @@ impl Emitter<'_> {
         self.emit_transfer_finalizers(0, code)
     }
 
+    /// A forwarded `Unit` suspend function's result under Kotlin 2.4.20: the callee's
+    /// `COROUTINE_SUSPENDED` is returned as is (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn`),
+    /// and any other result is replaced by `Unit.INSTANCE`, which the caller's `return` then returns.
+    fn emit_unit_result_of_forward(&mut self, ret: crate::types::Ty, code: &mut CodeBuilder) {
+        let resumed = code.new_label();
+        code.dup();
+        let suspended = self.cw.methodref(
+            "kotlin/coroutines/intrinsics/IntrinsicsKt",
+            "getCOROUTINE_SUSPENDED",
+            "()Ljava/lang/Object;",
+        );
+        code.invokestatic(suspended, 0, 1);
+        code.if_acmpne(resumed);
+        code.areturn();
+        let stack = self.verif_stack(ret);
+        self.frame(resumed, stack, code);
+        self.bind(resumed, code);
+        code.pop();
+        let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+    }
+
     pub(super) fn emit_return_node(
         &mut self,
         returned: ExprId,
@@ -67,6 +89,9 @@ impl Emitter<'_> {
         // `return <diverging>` has already transferred control and must not grow dead bytecode.
         if self.diverges(value) {
             return;
+        }
+        if self.unit_result_tail_forwards.contains(&returned) {
+            self.emit_unit_result_of_forward(ret, code);
         }
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {

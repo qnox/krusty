@@ -891,38 +891,51 @@ impl Checker<'_> {
             })
             .expect("a checked delegate convention candidate has a finalized result")
         };
-        let candidates = if !members.is_empty() {
-            ordinary(members)
-        } else if !member_extensions.is_empty() {
-            member_extensions
-                .iter()
-                .map(|candidate| {
-                    let result = if candidate.ret.mentions_pending() {
-                        let declaration = candidate.stable_declaration.expect(
-                            "an undetermined excluded delegate candidate retains its declaration",
-                        );
-                        self.resolved_index
-                            .and_then(|index| index.signature(declaration))
-                            .map(|signature| signature.result.get())
-                            .expect("an excluded delegate candidate has a finalized result")
-                    } else {
-                        candidate.ret
-                    };
-                    let context_count = candidate.context_count.min(candidate.params.len());
-                    let (context, parameters) = candidate.params.split_at(context_count);
-                    delegate_convention_diagnostic_candidate(
-                        name,
-                        Some(candidate.extension_receiver),
-                        context,
-                        parameters,
-                        &candidate.parameter_names,
-                        result,
-                    )
-                })
-                .collect()
-        } else {
-            ordinary(extensions)
-        };
+        let member_extension_candidates =
+            |checker: &Self| -> Vec<DelegateConventionDiagnosticCandidate> {
+                member_extensions
+                    .iter()
+                    .map(|candidate| {
+                        let result = if candidate.ret.mentions_pending() {
+                            let declaration = candidate.stable_declaration.expect(
+                        "an undetermined excluded delegate candidate retains its declaration",
+                    );
+                            checker
+                                .resolved_index
+                                .and_then(|index| index.signature(declaration))
+                                .map(|signature| signature.result.get())
+                                .expect("an excluded delegate candidate has a finalized result")
+                        } else {
+                            candidate.ret
+                        };
+                        let context_count = candidate.context_count.min(candidate.params.len());
+                        let (context, parameters) = candidate.params.split_at(context_count);
+                        delegate_convention_diagnostic_candidate(
+                            name,
+                            Some(candidate.extension_receiver),
+                            context,
+                            parameters,
+                            &candidate.parameter_names,
+                            result,
+                        )
+                    })
+                    .collect()
+            };
+        // Kotlin 2.4.20 lists every rung's candidates, members first; earlier releases diagnosed
+        // only the earliest rung that contributed any.
+        let candidates =
+            if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
+                let mut all = ordinary(members);
+                all.extend(member_extension_candidates(self));
+                all.extend(ordinary(extensions));
+                all
+            } else if !members.is_empty() {
+                ordinary(members)
+            } else if !member_extensions.is_empty() {
+                member_extension_candidates(self)
+            } else {
+                ordinary(extensions)
+            };
         let message = delegate_convention_message_with_candidates(
             site.clone(),
             delegate_ty,

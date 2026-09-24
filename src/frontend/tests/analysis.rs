@@ -180,6 +180,7 @@ impl ExistingLibrary {
                 supertype_templates: Vec::new(),
                 constructors: Vec::new(),
                 hidden_member_properties: Default::default(),
+                hidden_deprecated_callables: Default::default(),
                 declared_callables,
                 declared_callable_order: Vec::new(),
                 members: Vec::new(),
