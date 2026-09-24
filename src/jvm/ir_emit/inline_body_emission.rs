@@ -50,6 +50,11 @@ impl Emitter<'_> {
             &mut self.var_types,
             collect_body_var_types(self.ir, std::iter::once(inline_body)),
         );
+        let saved_value_stores = std::mem::replace(
+            &mut self.value_stores,
+            super::known_non_null::ValueStores::collect(self.ir, &[inline_body]),
+        );
+        let saved_checked_parameters = std::mem::take(&mut self.checked_parameters);
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
             self.slots.insert(index as u32, (slot, ty));
         }
@@ -57,6 +62,8 @@ impl Emitter<'_> {
         self.emit_value(inline_body, code);
         self.slots = saved_slots;
         self.var_types = saved_var_types;
+        self.value_stores = saved_value_stores;
+        self.checked_parameters = saved_checked_parameters;
         result
     }
 }

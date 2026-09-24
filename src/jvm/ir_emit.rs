@@ -47,6 +47,7 @@ mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
 mod local_updates;
+mod known_non_null;
 mod member_schedule;
 mod metadata_policy;
 mod object_static_initialization;
@@ -6104,6 +6105,7 @@ fn emit_class(
             for (i, a) in c.ctor_args.iter().enumerate() {
                 if let Some(name) = &a.check {
                     if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
+                        e.checked_parameters.insert(i as u32 + 1);
                         ctor.aload(slot);
                         ctor.push_string(name, e.cw);
                         let m = e.cw.methodref(
@@ -10865,6 +10867,7 @@ fn emit_method_inner_with_holder(
                 .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
+                e.checked_parameters.insert(vi);
                 code.aload(slot);
                 code.push_string(&name, e.cw);
                 let m = e.cw.methodref(
@@ -12673,6 +12676,10 @@ struct Emitter<'a> {
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
+    /// Every value stored into each local of the body, for proving an operand non-null.
+    value_stores: known_non_null::ValueStores,
+    /// Parameters asserted non-null at method entry; every later read of one is known non-null.
+    checked_parameters: HashSet<u32>,
     next_slot: u16,
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
@@ -12762,6 +12769,7 @@ impl<'a> Emitter<'a> {
         ret: Ty,
         roots: impl IntoIterator<Item = u32>,
     ) -> Self {
+        let roots: Vec<u32> = roots.into_iter().collect();
         Self {
             ir,
             cw,
@@ -12779,7 +12787,9 @@ impl<'a> Emitter<'a> {
             label_unassigned_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             safe_call_exit_temporaries: HashMap::new(),
-            var_types: collect_body_var_types(ir, roots),
+            var_types: collect_body_var_types(ir, roots.iter().copied()),
+            value_stores: known_non_null::ValueStores::collect(ir, &roots),
+            checked_parameters: HashSet::new(),
             next_slot: 0,
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
