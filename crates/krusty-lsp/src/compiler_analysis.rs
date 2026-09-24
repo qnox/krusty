@@ -934,23 +934,25 @@ mod tests {
         let analysis = analyze_standalone_source_set(&[source]);
         let diagnostics = &analysis.files[0].diagnostics;
         assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-        let diagnostic = &diagnostics[0];
-        assert_eq!(
-            diagnostic.msg,
-            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
+        // Their order follows the reference version's positions (front_end_errors_more_e2e).
+        let by_message = |message: &str| {
+            diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.msg == message)
+                .unwrap_or_else(|| panic!("no `{message}` in {diagnostics:?}"))
+        };
+        let mixing = by_message(
+            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
         );
         let positional = source.rfind('1').expect("positional argument") as u32;
         assert_eq!(
-            diagnostic.span,
+            mixing.span,
             krusty::diag::Span::new(positional, positional + 1)
         );
-        assert_eq!(diagnostics[1].msg, "no value passed for parameter 'a'.");
+        let missing = by_message("no value passed for parameter 'a'.");
         let callee = source.rfind("pair").expect("callee") as u32;
-        assert_eq!(
-            diagnostics[1].span,
-            krusty::diag::Span::new(callee, callee + 4)
-        );
-        assert_eq!(diagnostics[1].editor_span, None);
+        assert_eq!(missing.span, krusty::diag::Span::new(callee, callee + 4));
+        assert_eq!(missing.editor_span, None);
     }
 
     #[test]

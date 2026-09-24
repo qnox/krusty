@@ -51,11 +51,11 @@ pub(super) fn attach_declared_function_debug(
         slot = 1;
     }
     let mut body_pc = 0u16;
-    let local_names = crate::jvm::parameter_names::function_locals(ir, fid, &param_tys)
-        .expect("a debug-published parameter needs its canonical source identity");
+    let local_names = crate::jvm::parameter_names::function_locals(ir, fid, &param_tys);
     for (index, ty) in param_tys.iter().enumerate() {
         let name = local_names
-            .get(index)
+            .as_ref()
+            .and_then(|names| names.get(index))
             .cloned()
             .expect("a debug-published parameter needs its canonical source identity");
         if function
