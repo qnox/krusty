@@ -6,6 +6,7 @@ pub mod backend;
 mod bridge_return_adaptations;
 pub mod bridges;
 mod builtin_member_operations;
+mod call_result_boundaries;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;

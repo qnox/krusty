@@ -275,22 +275,10 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                if let Some(declared) =
-                    declared_result.filter(|declared| *declared != expression.ty.get())
-                {
-                    // A retained inline body has already crossed and removed the declaration ABI:
-                    // its result slot is specialized to the call-site type. Ordinary calls still
-                    // return through the declaration's erased slot before this checked coercion.
-                    // When the declaration's erasure is already the result's own erasure
-                    // (`fun <A> f(): Box<A>` read as `Box<Int>`), the slot adds no physical
-                    // boundary: only type arguments differ, and they have no representation.
-                    let physical = declared.erased_recv();
-                    let result = expression.ty.get();
-                    let same_erasure = physical == result.erased_recv()
-                        && declared.is_nullable() == result.is_nullable();
-                    if !same_erasure && !self.ir.inline_regions.contains(&lowered) {
-                        self.ir.physical_types.insert(lowered, physical);
-                    }
+                if declared_result.is_some_and(|declared| declared != expression.ty.get()) {
+                    // Preserve the checked semantic conversion from the declaration's result to
+                    // its call-site substitution. Whether that conversion crosses a physical ABI
+                    // boundary is target-owned; the JVM records its answer after generic erasure.
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: lowered,
