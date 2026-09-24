@@ -149,31 +149,32 @@ impl Emitter<'_> {
         } else {
             Some(crate::jvm::names::instanceof_internal_name(physical_arg))
         };
-        // Lowering always writes the semantic null guard. The finished-method CFG analysis in
-        // `classfile::null_checks` is the single owner that removes it when the emitted value is
-        // provably non-null; deciding here as well would give straight-line IR and bytecode control
-        // flow two different nullness lattices.
-        let reread = !physical_arg.is_jvm_scalar()
-            && self.ir.binding_read_stability.get(&arg) == Some(&IrBindingStability::Stable)
-            && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
-        if !reread {
-            code.dup();
-        }
-        code.push_string(
-            &format!(
-                "null cannot be cast to non-null type {}",
-                self.rendered_cast_target(target_semantic)
-            ),
-            self.cw,
-        );
-        let check = self.cw.methodref(
-            "kotlin/jvm/internal/Intrinsics",
-            "checkNotNull",
-            "(Ljava/lang/Object;Ljava/lang/String;)V",
-        );
-        code.invokestatic(check, 2, 0);
-        if reread {
-            self.emit_type_op_operand(arg, code);
+        // Checked IR facts suppress a guard before its message/method constants are interned.
+        // Facts that arise only in emitted control flow remain the responsibility of the finished
+        // classfile CFG pass.
+        if !physical_arg.is_jvm_scalar() && !self.semantic_non_null(arg) {
+            let reread = self.ir.binding_read_stability.get(&arg)
+                == Some(&IrBindingStability::Stable)
+                && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
+            if !reread {
+                code.dup();
+            }
+            code.push_string(
+                &format!(
+                    "null cannot be cast to non-null type {}",
+                    self.rendered_cast_target(target_semantic)
+                ),
+                self.cw,
+            );
+            let check = self.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "checkNotNull",
+                "(Ljava/lang/Object;Ljava/lang/String;)V",
+            );
+            code.invokestatic(check, 2, 0);
+            if reread {
+                self.emit_type_op_operand(arg, code);
+            }
         }
         // kotlinc writes a `checkcast` for every cast and then deletes the ones whose operand
         // already has exactly the target's JVM type; a cast to `java/lang/Object` from anything
