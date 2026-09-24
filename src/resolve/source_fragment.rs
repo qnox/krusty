@@ -1,9 +1,9 @@
 //! How much of a file the pass currently running actually holds.
 //!
-//! Most checking sees a COMPLETE file: every declaration, every expression. Two passes deliberately
-//! do not, and re-enter a declaration they did not select purely to rebuild its lexical type and
-//! value scopes. For those the file is a fragment, and syntax belonging to members they skipped has
-//! already been released — reaching it is expected, not a defect.
+//! Most checking sees a COMPLETE file: every declaration, every expression. Restricted passes
+//! deliberately retain only the syntax they own. Some re-enter declarations only to rebuild
+//! lexical scopes, while metadata publication keeps just its selected header expressions. Syntax
+//! belonging to neighboring declarations has already been released.
 //!
 //! The distinction has to be an explicit mode rather than a fact inferred from whichever data a
 //! pass happens to carry. Ordinary Pass 2 also supplies selected declarations, so
@@ -24,6 +24,10 @@ pub(crate) enum SourceFragmentMode {
     /// Pass-1 default checking: only signature defaults are checked, and the declaration is
     /// re-entered solely to recreate its scopes.
     SignatureDefaults,
+    /// Stable classifier-metadata publication: only a selected class declaration's own annotation
+    /// applications are checked. Their argument expressions are retained explicitly; neighboring
+    /// declarations and class bodies have already been released.
+    ClassifierAnnotations,
 }
 
 impl SourceFragmentMode {
@@ -40,6 +44,10 @@ impl SourceFragmentMode {
     pub(crate) fn is_signature_defaults(self) -> bool {
         matches!(self, Self::SignatureDefaults)
     }
+
+    pub(crate) fn is_classifier_annotations(self) -> bool {
+        matches!(self, Self::ClassifierAnnotations)
+    }
 }
 
 #[cfg(test)]
@@ -52,6 +60,7 @@ mod tests {
         assert!(!SourceFragmentMode::Complete.may_observe_released_annotation_syntax());
         assert!(SourceFragmentMode::InlinePreparation.may_observe_released_annotation_syntax());
         assert!(SourceFragmentMode::SignatureDefaults.may_observe_released_annotation_syntax());
+        assert!(!SourceFragmentMode::ClassifierAnnotations.may_observe_released_annotation_syntax());
     }
 
     /// Only Pass-1 default checking carries the signature-defaults restrictions; inline preparation
@@ -61,6 +70,7 @@ mod tests {
         assert!(SourceFragmentMode::SignatureDefaults.is_signature_defaults());
         assert!(!SourceFragmentMode::InlinePreparation.is_signature_defaults());
         assert!(!SourceFragmentMode::Complete.is_signature_defaults());
+        assert!(!SourceFragmentMode::ClassifierAnnotations.is_signature_defaults());
     }
 
     /// A pass that says nothing about itself is complete, so a new call site is fail-closed unless

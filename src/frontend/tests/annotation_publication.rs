@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
     let source = "annotation class Mark(val text: String, val count: Int, val enabled: Boolean)\n\
-                  @Mark(count = 3, enabled = true, text = \"kept\") class Subject\n";
+                  @Mark(count = 3, enabled = true, text = \"kept\")\n\
+                  class Subject { fun discardedBody(): String = \"not retained\" }\n";
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Annotations")],
@@ -12,6 +13,7 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    assert!(analysis.reparse_sources[0].released_before_collection());
     let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
     let subject = index
         .classifier_declaration(crate::types::type_name("Subject"))

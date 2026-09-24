@@ -952,6 +952,7 @@ where
             // editor queries while consuming declaration identities from the finalized index.
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
+                || retained_syntax::has_classifier_annotation_arguments(&file)
                 || stubs.iter().any(|stub| {
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)

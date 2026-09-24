@@ -46,7 +46,7 @@ use crate::types::{type_name, Ty, TypeName};
 use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
-use element_serializer::{element_serializer_expr, element_serializer_plan};
+use element_serializer::element_serializer_expr;
 use generated_classifier::{
     companion_fq, publish_generated_classifier_facts, publish_serializer_accessor_declaration,
     serializer_fq, serializer_name, SERIALIZER_OBJECT_NAME,

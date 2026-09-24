@@ -16,6 +16,9 @@ pub(crate) fn publish_checked_classifier_annotations(
             .values()
             .filter(|class| class.source_file == file_index as u32)
             .filter_map(|class| Some((class.stable_declaration?, class.source_decl?)))
+            .filter(|(_, declaration)| {
+                matches!(file.decl(*declaration), Decl::Class(class) if !class.annotations.is_empty())
+            })
             .collect::<Vec<_>>();
         let selected = declarations
             .iter()
@@ -29,15 +32,22 @@ pub(crate) fn publish_checked_classifier_annotations(
         }
         diags.set_file(file_index as u32);
         let no_bodies = std::collections::HashSet::new();
-        let info = check_file_at_impl_mode(
+        let info = check_file_at_impl_mode_with_index(
             file,
             file_index as u32,
             Some(files),
             table,
+            None,
             diags,
             false,
             Some(&selected),
             Some(&no_bodies),
+            None,
+            None,
+            None,
+            SourceFragmentMode::ClassifierAnnotations,
+            None,
+            None,
         );
         let mut checked = Vec::new();
         for (_, declaration) in declarations {

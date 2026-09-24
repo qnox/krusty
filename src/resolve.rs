@@ -39182,7 +39182,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
     // IR. Capture discovery and Pass-1 default preparation are scratch traversals whose results are
     // discarded; neither may become a second owner of the application.
-    if !capture_discovery && !fragment.is_signature_defaults() {
+    if !capture_discovery
+        && !fragment.is_signature_defaults()
+        && !fragment.is_classifier_annotations()
+    {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -39192,14 +39195,17 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // The streaming path already published contracts as stable, semantically resolved Pass-1
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !fragment.is_signature_defaults() && resolved_index.is_none() {
+    if !fragment.is_signature_defaults()
+        && !fragment.is_classifier_annotations()
+        && resolved_index.is_none()
+    {
         c.collect_source_contracts(scope, selected_body_declarations);
     }
 
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
-    if !capture_discovery {
+    if !capture_discovery && !fragment.is_classifier_annotations() {
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
@@ -39281,7 +39287,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if !capture_discovery {
+    if !capture_discovery && !fragment.is_classifier_annotations() {
         if let (Some(index), Some(selected_bodies)) = (resolved_index, selected_stable_bodies) {
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
@@ -39368,7 +39374,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if let Some(body) = file.script_body.filter(|_| {
-        !c.signature_defaults_only
+        !fragment.is_classifier_annotations()
+            && !c.signature_defaults_only
             && (!capture_discovery
                 || c.capture_scope
                     .as_ref()
@@ -39381,7 +39388,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         });
         c.in_script_body = false;
     }
-    if !capture_discovery {
+    if !capture_discovery && !fragment.is_classifier_annotations() {
         c.check_import_paths();
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
@@ -39496,7 +39503,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         source_contracts,
         ..
     } = c;
-    if !capture_discovery {
+    if !capture_discovery && !fragment.is_classifier_annotations() {
         if let Some(syms) = syms.pass_one_symbols_mut() {
             publish_checked_primary_constructor_types(
                 file,
@@ -39824,7 +39831,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery {
+    if !capture_discovery && !fragment.is_classifier_annotations() {
         plugin_expression_planning::plan_plugin_expressions(
             file,
             &mut info,
@@ -58142,17 +58149,6 @@ impl<'a> Checker<'a> {
             .as_ref()
             .and_then(|scope| scope.class_plans.get(&d))
             .cloned();
-        let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
-        if cl.is_singleton() && self.file.is_local_declaration(d) && !is_anonymous_object {
-            self.diags.error(
-                cl.span,
-                format!(
-                    "named object '{}' cannot be local. Try to use an anonymous object instead.",
-                    class_declaration_label(&cl.name)
-                ),
-            );
-        }
-        tailrec_declarations::check_members(self.diags, cl);
         let current_owner = self.active_classifier_internal(d, cl);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
@@ -58179,6 +58175,25 @@ impl<'a> Checker<'a> {
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
             self.push_declaration_suppressions(scope, &cl.annotations, &cl.annotation_args);
+        if self.fragment.is_classifier_annotations() {
+            for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+            self.active_statement_suppressions
+                .truncate(class_suppression_depth);
+            return;
+        }
+        let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
+        if cl.is_singleton() && self.file.is_local_declaration(d) && !is_anonymous_object {
+            self.diags.error(
+                cl.span,
+                format!(
+                    "named object '{}' cannot be local. Try to use an anonymous object instead.",
+                    class_declaration_label(&cl.name)
+                ),
+            );
+        }
+        tailrec_declarations::check_members(self.diags, cl);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
         // identities and finalized declaration types; the JVM pass may then assume a valid shape.
