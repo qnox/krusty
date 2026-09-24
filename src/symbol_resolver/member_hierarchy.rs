@@ -9,6 +9,74 @@ use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, P
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
 
+/// Whether an overriding declaration's value-parameter types match one inherited declaration.
+/// Both sides are compared after replacing their declaration-owned formal identities with the
+/// same canonical coordinates. The subtype-equivalence check preserves flexible/provider types
+/// without weakening the invariant position of override inputs.
+pub(crate) fn override_parameter_types_match(
+    source: &dyn SymbolSource,
+    inherited: &[Ty],
+    inherited_formals: &[String],
+    implementation: &[Ty],
+    implementation_formals: &[String],
+) -> bool {
+    inherited.len() == implementation.len()
+        && inherited
+            .iter()
+            .copied()
+            .zip(implementation.iter().copied())
+            .all(|(inherited, implementation)| {
+                let inherited = crate::types::ty_canonicalize_params(inherited, inherited_formals);
+                let implementation =
+                    crate::types::ty_canonicalize_params(implementation, implementation_formals);
+                inherited == implementation
+                    || resolution_subtype(source, inherited, implementation)
+                        && resolution_subtype(source, implementation, inherited)
+            })
+}
+
+pub(crate) struct OverrideInputShape<'a> {
+    pub params: &'a [Ty],
+    pub receiver: Option<Ty>,
+    pub formals: &'a [String],
+    pub context_count: usize,
+    pub suspend: bool,
+}
+
+/// Compare the complete invariant input shape of an override edge. Context and suspension are
+/// declaration semantics just like value and extension-receiver inputs; keeping them in this one
+/// predicate prevents transient body-local selection and the frozen override graph from accepting
+/// different edges.
+pub(crate) fn override_input_shapes_match(
+    source: &dyn SymbolSource,
+    inherited: OverrideInputShape<'_>,
+    implementation: OverrideInputShape<'_>,
+) -> bool {
+    inherited.formals.len() == implementation.formals.len()
+        && inherited.context_count == implementation.context_count
+        && inherited.suspend == implementation.suspend
+        && override_parameter_types_match(
+            source,
+            inherited.params,
+            inherited.formals,
+            implementation.params,
+            implementation.formals,
+        )
+        && match (inherited.receiver, implementation.receiver) {
+            (None, None) => true,
+            (Some(inherited_receiver), Some(implementation_receiver)) => {
+                override_parameter_types_match(
+                    source,
+                    &[inherited_receiver],
+                    inherited.formals,
+                    &[implementation_receiver],
+                    implementation.formals,
+                )
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        }
+}
+
 pub(super) fn declared_callables(
     source: &dyn SymbolSource,
     classifier: &crate::libraries::LibraryType,
@@ -30,75 +98,7 @@ fn specialize_declared_callables(
     let base_bindings = classifier_bindings(classifier, receiver);
     let (mut functions, mut properties) = callables.into_parts();
     for function in &mut functions.overloads {
-        let mut bindings = base_bindings.clone();
-        if let Some(signature) = &function.generic_sig {
-            for formal in &signature.formals {
-                // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`,
-                // the method's `T` shadows the receiver-bound class `T`; retaining the class binding
-                // here would specialize `Box<String>.echo(42)` to `String` before overload inference.
-                bindings.remove(formal);
-            }
-        }
-        match function.kind {
-            FnKind::Member => function.receiver = Some(receiver),
-            FnKind::Extension => {
-                function.receiver = function.receiver.map(|extension_receiver| {
-                    specialize_member_type(
-                        source,
-                        extension_receiver,
-                        &bindings,
-                        TypePosition::Invariant,
-                    )
-                });
-            }
-            FnKind::TopLevel => {}
-        }
-        specialize_callable(source, &mut function.callable, &bindings);
-        function.ret.class = function
-            .ret
-            .class
-            .map(|ty| ty_subst_keep_unbound(ty, &bindings));
-        specialize_call_sig(source, &mut function.call_sig, &bindings);
-        if let Some(signature) = &mut function.generic_sig {
-            let suspend_ret = function
-                .flags
-                .suspend
-                .then(|| {
-                    let continuation = *signature.params.last()?;
-                    match continuation {
-                        Ty::Obj(name, args)
-                            if crate::types::same(name, crate::types::wk::continuation()) =>
-                        {
-                            args.first().copied()
-                        }
-                        _ => None,
-                    }
-                })
-                .flatten();
-            if let Some(suspend_ret) = suspend_ret {
-                signature.params.pop();
-                signature.ret = suspend_ret;
-            }
-            let declared_ret = signature.ret;
-            signature.receiver = signature
-                .receiver
-                .map(|ty| specialize_member_type(source, ty, &bindings, TypePosition::Invariant));
-            signature.params = signature
-                .params
-                .iter()
-                .map(|ty| specialize_member_type(source, *ty, &bindings, TypePosition::In))
-                .collect();
-            signature.ret =
-                specialize_member_type(source, signature.ret, &bindings, TypePosition::Out);
-            if signature.ret != declared_ret {
-                function.callable.ret = signature.ret;
-            }
-            for bounds in &mut signature.formal_bounds {
-                for bound in bounds {
-                    *bound = ty_subst_keep_unbound(*bound, &bindings);
-                }
-            }
-        }
+        specialize_member_function(source, receiver, function, &base_bindings);
     }
     for property in &mut properties.overloads {
         let raw_owner_property = !classifier.type_params.is_empty()
@@ -150,6 +150,85 @@ fn specialize_declared_callables(
         }
     }
     Callables::from_parts(functions, properties)
+}
+
+/// Apply one classifier receiver's already-resolved formal bindings to a member candidate.
+/// Providers use this through [`specialize_declared_callables`]; the active body-local overlay uses
+/// the same operation after its stable classifier layout is checked on the current lexical rung.
+pub(crate) fn specialize_member_function(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    function: &mut FunctionInfo,
+    classifier_bindings: &super::GSigBinds,
+) {
+    let mut bindings = classifier_bindings.clone();
+    if let Some(signature) = &function.generic_sig {
+        for formal in &signature.formals {
+            // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`, the
+            // method's `T` shadows the receiver-bound class `T`; retaining the class binding here
+            // would specialize `Box<String>.echo(42)` before overload inference.
+            bindings.remove(formal);
+        }
+    }
+    match function.kind {
+        FnKind::Member => function.receiver = Some(receiver),
+        FnKind::Extension => {
+            function.receiver = function.receiver.map(|extension_receiver| {
+                specialize_member_type(
+                    source,
+                    extension_receiver,
+                    &bindings,
+                    TypePosition::Invariant,
+                )
+            });
+        }
+        FnKind::TopLevel => {}
+    }
+    specialize_callable(source, &mut function.callable, &bindings);
+    function.ret.class = function
+        .ret
+        .class
+        .map(|ty| ty_subst_keep_unbound(ty, &bindings));
+    specialize_call_sig(source, &mut function.call_sig, &bindings);
+    if let Some(signature) = &mut function.generic_sig {
+        let suspend_ret = function
+            .flags
+            .suspend
+            .then(|| {
+                let continuation = *signature.params.last()?;
+                match continuation {
+                    Ty::Obj(name, args)
+                        if crate::types::same(name, crate::types::wk::continuation()) =>
+                    {
+                        args.first().copied()
+                    }
+                    _ => None,
+                }
+            })
+            .flatten();
+        if let Some(suspend_ret) = suspend_ret {
+            signature.params.pop();
+            signature.ret = suspend_ret;
+        }
+        let declared_ret = signature.ret;
+        signature.receiver = signature
+            .receiver
+            .map(|ty| specialize_member_type(source, ty, &bindings, TypePosition::Invariant));
+        signature.params = signature
+            .params
+            .iter()
+            .map(|ty| specialize_member_type(source, *ty, &bindings, TypePosition::In))
+            .collect();
+        signature.ret = specialize_member_type(source, signature.ret, &bindings, TypePosition::Out);
+        if signature.ret != declared_ret {
+            function.callable.ret = signature.ret;
+        }
+        for bounds in &mut signature.formal_bounds {
+            for bound in bounds {
+                *bound = ty_subst_keep_unbound(*bound, &bindings);
+            }
+        }
+    }
 }
 
 pub(crate) fn declared_member_callables(
@@ -712,4 +791,37 @@ pub(crate) fn inherited_nested_classifier_name(
         }
     }
     InheritedNestedClassifier::NotFound
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_input_shape_includes_context_and_suspend() {
+        let source = crate::libraries::EmptySymbolSource;
+        let shape = |context_count, suspend| OverrideInputShape {
+            params: &[],
+            receiver: None,
+            formals: &[],
+            context_count,
+            suspend,
+        };
+
+        assert!(override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(1, true),
+        ));
+        assert!(!override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(0, true),
+        ));
+        assert!(!override_input_shapes_match(
+            &source,
+            shape(1, true),
+            shape(1, false),
+        ));
+    }
 }

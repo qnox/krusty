@@ -73,9 +73,9 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     })
 }
 
-/// Test-only entry for exercising compact headers without the production local-class context.
-/// Production always supplies that context through
-/// [`collect_signatures_with_cp_headers_and_local_contexts`].
+/// Test-only entry for exercising compact headers. Reconstruct the same declaration-bound local
+/// context from the still-live test AST; production captures it while each Pass-1 source is active
+/// through [`collect_signatures_with_cp_headers_and_local_contexts`].
 #[cfg(test)]
 pub(crate) fn collect_signatures_with_cp_headers(
     files: &[File],
@@ -85,7 +85,53 @@ pub(crate) fn collect_signatures_with_cp_headers(
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
         let no_plugins = crate::plugins::PluginHost::new();
-        collect_signatures_with_cp_impl(files, libraries, &no_plugins, diags, Some(headers), None)
+        let local_contexts = files
+            .iter()
+            .enumerate()
+            .map(|(source, file)| {
+                let source = crate::fir::SourceFileId::from_raw(
+                    u32::try_from(source).expect("too many source files"),
+                );
+                let stable_by_transient: crate::fir::ParserDeclarationIdentities = file
+                    .decls
+                    .iter()
+                    .copied()
+                    .zip(headers.source_declarations(source).iter().copied())
+                    .collect();
+                let stubs = headers
+                    .stubs
+                    .iter()
+                    .filter(|stub| stub.source == source)
+                    .copied()
+                    .collect::<Vec<_>>();
+                if file.local_class_decls.is_empty() && file.anonymous_object_classes.is_empty() {
+                    let parser_classifier_identities = stable_by_transient
+                        .iter()
+                        .filter_map(|(&parser, &stable)| {
+                            let stub = headers.stub(stable)?;
+                            (stub.kind == crate::fir::DeclarationKind::Classifier)
+                                .then(|| compact_classifier_identity(headers, stub))?
+                                .map(|(_, identity)| (parser, identity))
+                        })
+                        .collect();
+                    PassOneLocalClassContext {
+                        parser_declaration_identities: stable_by_transient,
+                        parser_classifier_identities,
+                        ..PassOneLocalClassContext::default()
+                    }
+                } else {
+                    pass_one_local_class_context(file, &stubs, &stable_by_transient)
+                }
+            })
+            .collect::<Vec<_>>();
+        collect_signatures_with_cp_impl(
+            files,
+            libraries,
+            &no_plugins,
+            diags,
+            Some(headers),
+            Some(&local_contexts),
+        )
     })
 }
 

@@ -18,20 +18,18 @@
 
 mod bridge_returns;
 mod declaration_inventory;
+mod default_calls;
+mod descriptor_parameters;
+mod operation_relocation;
 mod property_references;
 mod synth_members;
-
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
-use std::collections::{HashMap, HashSet};
-
-mod descriptor_parameters;
-mod operation_relocation;
-
 use operation_relocation::clone_below_representation_wrapper;
+use std::collections::{HashMap, HashSet};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -1409,6 +1407,7 @@ pub(crate) fn lower_value_classes(
                     ),
                     Callee::ModuleWithDefaults {
                         target,
+                        default_provider,
                         name,
                         params,
                         ret,
@@ -1418,7 +1417,8 @@ pub(crate) fn lower_value_classes(
                         if let Some(receiver) = dispatch_receiver_ty {
                             *receiver = erase(receiver, &under);
                         }
-                        (name, params, ret, Some(*target), true, true)
+                        let provider = default_calls::module_provider(*target, *default_provider);
+                        (name, params, ret, Some(provider), true, true)
                     }
                     _ => continue,
                 };
@@ -3949,34 +3949,33 @@ pub(crate) fn lower_value_classes(
                         .collect()
                 }
                 // A semantic sibling-source default call still carries only supplied arguments.
-                // Adapt each one against the selected declaration parameter that remains after
+                // Adapt each one against the provider declaration parameter that remains after
                 // removing omitted ordinals; JVM placeholders are created only after this pass.
                 IrExpr::Call {
                     callee:
                         Callee::ModuleWithDefaults {
-                            target, defaults, ..
+                            target,
+                            default_provider,
+                            defaults,
+                            ..
                         },
                     args,
                     ..
-                } => ir
-                    .referenced_module_callables
-                    .get(target)
-                    .map(|callable| {
-                        args.iter()
-                            .zip(callable.parameters.iter().enumerate().filter_map(
-                                |(parameter, ty)| {
-                                    (!defaults.contains(&(parameter as u32))).then_some(*ty)
-                                },
-                            ))
-                            .map(|(argument, parameter)| {
-                                (
-                                    repr_ctx.through_erased_generic_coercion(*argument).0,
-                                    parameter,
-                                )
-                            })
-                            .collect()
+                } => args
+                    .iter()
+                    .zip(default_calls::supplied_provider_parameters(
+                        ir,
+                        *target,
+                        *default_provider,
+                        defaults,
+                    ))
+                    .map(|(argument, parameter)| {
+                        (
+                            repr_ctx.through_erased_generic_coercion(*argument).0,
+                            parameter,
+                        )
                     })
-                    .unwrap_or_default(),
+                    .collect(),
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected

@@ -3,6 +3,32 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    pub(super) fn bound_or_nested_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        bound: Option<crate::fir::DeclarationId>,
+    ) -> Option<crate::types::TypeName> {
+        match bound {
+            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
+            None => self.lexically_nested_classifier(scope, spelling),
+        }
+    }
+
+    pub(super) fn bound_or_scoped_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        bound: Option<crate::fir::DeclarationId>,
+    ) -> Option<crate::types::TypeName> {
+        match bound {
+            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
+            None => self
+                .qualified_classifier(scope, spelling)
+                .or_else(|| self.lexically_nested_classifier(scope, spelling)),
+        }
+    }
+
     /// The classifier that owns a declaration whose syntax is physically duplicated from the
     /// primary constructor header. Its nested declarations and type parameters are lexically
     /// visible there even though no dispatch receiver exists yet. Nested classifiers inherited by
@@ -265,7 +291,7 @@ impl ProductionSignatureSemantics<'_> {
                 let mut display = super::super::BoundedSourceDisplay::new(usize::MAX);
                 use std::fmt::Write as _;
                 display
-                    .write_str(internal.nested_segment_ref())
+                    .write_str(self.classifier_source_spelling(internal))
                     .expect("unbounded type display");
                 display.write_str("<").expect("unbounded type display");
                 super::super::write_source_type_list_with(
@@ -1143,6 +1169,28 @@ impl ProductionSignatureSemantics<'_> {
         self.lexically_nested_classifier_at(scope, spelling, true)
     }
 
+    /// The source spelling that names `classifier` in a label or lexical lookup. A local
+    /// classifier's identity is opaque, so its spelling comes from its stable declaration.
+    pub(super) fn classifier_source_spelling(&self, classifier: crate::types::TypeName) -> &str {
+        self.table
+            .classes
+            .get(&classifier)
+            .and_then(|class| class.stable_declaration)
+            .and_then(|declaration| self.headers.stub(declaration))
+            .and_then(|stub| self.headers.source_simple_name(stub))
+            .unwrap_or_else(|| classifier.nested_segment_ref())
+    }
+
+    pub(super) fn bound_classifier_identity(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> crate::types::TypeName {
+        *self
+            .classifier_types
+            .get(&declaration)
+            .expect("a bound local classifier call must retain its semantic identity")
+    }
+
     fn lexically_nested_classifier_at(
         &self,
         scope: crate::fir::SignatureScope,
@@ -1171,8 +1219,8 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(classifier) = self.headers.owned_stubs(declaration).find_map(|stub| {
                 let classifier = self.classifier_types.get(&stub.id).copied()?;
                 (stub.kind == crate::fir::DeclarationKind::Classifier
-                    && classifier.nested_segment_ref() == spelling)
-                    .then_some(classifier)
+                    && self.headers.source_simple_name(stub) == Some(spelling))
+                .then_some(classifier)
             }) {
                 return Some(classifier);
             }

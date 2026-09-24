@@ -29,6 +29,179 @@ pub(super) enum LocalMethodDemand {
 }
 
 impl Checker<'_> {
+    /// Select the one inherited declaration whose invariant input shape this body-local method
+    /// overrides. This runs only over typed provider candidates; the method's still-pending result
+    /// is deliberately irrelevant to default availability, while the completed override plan later
+    /// validates covariance and freezes the same stable declaration edge.
+    fn inherited_body_local_default_candidate(
+        &self,
+        owner: TypeName,
+        implementation: &crate::libraries::FunctionInfo,
+    ) -> Option<(
+        crate::libraries::FunctionInfo,
+        crate::fir::ResolvedFunctionOverrideTarget,
+    )> {
+        let implementation_formals = implementation
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formals.as_slice())
+            .unwrap_or_default();
+        let implementation_parameters = implementation.semantic_params();
+        let source = self.fed_source();
+        let matches_override = |candidate: &crate::libraries::FunctionInfo| {
+            if candidate.kind != implementation.kind
+                || candidate.visibility == Visibility::Private
+                || candidate.flags.is_final
+            {
+                return false;
+            }
+            let candidate_formals = candidate
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formals.as_slice())
+                .unwrap_or_default();
+            crate::symbol_resolver::override_input_shapes_match(
+                &source,
+                crate::symbol_resolver::OverrideInputShape {
+                    params: &candidate.semantic_params(),
+                    receiver: candidate
+                        .semantic_receiver()
+                        .filter(|_| candidate.is_extension()),
+                    formals: candidate_formals,
+                    context_count: candidate.context_count,
+                    suspend: candidate.flags.suspend,
+                },
+                crate::symbol_resolver::OverrideInputShape {
+                    params: &implementation_parameters,
+                    receiver: implementation
+                        .semantic_receiver()
+                        .filter(|_| implementation.is_extension()),
+                    formals: implementation_formals,
+                    context_count: implementation.context_count,
+                    suspend: implementation.flags.suspend,
+                },
+            )
+        };
+        let identity = |candidate: &crate::libraries::FunctionInfo| {
+            if let Some(provider) = candidate.callable.external_default_provider {
+                return Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                    provider,
+                ));
+            }
+            if let Some(declaration) = candidate.stable_declaration {
+                if let Some(provider) = self.body_local_default_providers.get(&declaration) {
+                    return Some(*provider);
+                }
+                let callable = self
+                    .resolved_index
+                    .and_then(|index| index.callable_for_declaration(declaration))?;
+                return Some(
+                    self.resolved_index?
+                        .callable_default_provider(callable.id)
+                        .unwrap_or(crate::fir::ResolvedFunctionOverrideTarget::Module(
+                            callable.id,
+                        )),
+                );
+            }
+            candidate
+                .callable
+                .external_identity
+                .map(crate::fir::ResolvedFunctionOverrideTarget::External)
+        };
+
+        let direct_supertypes = |receiver| {
+            let active = self.body_local_supertypes(receiver);
+            if active.is_empty() {
+                crate::symbol_resolver::direct_supertypes(&source, receiver)
+            } else {
+                active
+            }
+        };
+        let mut rung = direct_supertypes(Ty::obj_name(owner));
+        let mut seen = std::collections::HashSet::new();
+        while !rung.is_empty() {
+            let mut next = Vec::new();
+            let mut candidates = Vec::new();
+            for supertype in rung {
+                if !seen.insert(supertype) {
+                    continue;
+                }
+                let declared = self
+                    .body_local_declared_member_candidates_at(
+                        supertype,
+                        &implementation.callable.name,
+                    )
+                    .0;
+                candidates.extend(
+                    declared
+                        .into_iter()
+                        .filter(|candidate| matches_override(candidate))
+                        .filter(|candidate| {
+                            candidate
+                                .call_sig
+                                .param_defaults
+                                .iter()
+                                .any(|default| *default)
+                        }),
+                );
+                next.extend(direct_supertypes(supertype));
+            }
+            if let Some(selected) = candidates.first().cloned() {
+                let selected_identity = identity(&selected);
+                if selected_identity.is_some()
+                    && candidates
+                        .iter()
+                        .all(|candidate| identity(candidate) == selected_identity)
+                {
+                    return Some((selected, selected_identity?));
+                }
+                return None;
+            }
+            rung = next;
+        }
+        None
+    }
+
+    /// Normalize inherited default availability on one declaration candidate at the active
+    /// body-local hierarchy boundary. Revisited postponed expressions may republish the same
+    /// declaration before or after its surrounding classifier bodies, but selection must observe
+    /// the semantic override edge derived from the current stable owner/hierarchy identities, not
+    /// whichever transient publication happened last.
+    fn apply_inherited_body_local_defaults(
+        &self,
+        owner: TypeName,
+        candidate: &mut crate::libraries::FunctionInfo,
+    ) -> Option<crate::fir::ResolvedFunctionOverrideTarget> {
+        let is_override = candidate.stable_declaration.is_some_and(|declaration| {
+            self.resolved_index
+                .and_then(|index| index.declaration_header(declaration))
+                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::OVERRIDE))
+        });
+        if !is_override
+            || candidate
+                .call_sig
+                .param_defaults
+                .iter()
+                .any(|default| *default)
+        {
+            return None;
+        }
+        let Some((inherited, provider)) =
+            self.inherited_body_local_default_candidate(owner, candidate)
+        else {
+            return None;
+        };
+        candidate.call_sig.param_defaults = inherited.call_sig.param_defaults;
+        candidate.call_sig.required = inherited.call_sig.required;
+        candidate.default_values = inherited.default_values;
+        candidate.callable.external_default_provider = inherited
+            .callable
+            .external_default_provider
+            .or(inherited.callable.external_identity);
+        candidate.callable.default_realization = inherited.callable.default_realization;
+        Some(provider)
+    }
+
     /// The first member rung visible on `receiver`, including headers published by classifiers in
     /// the active bounded body. The immutable symbol provider cannot contain those headers when
     /// their results are inferred on this Pass-2 lexical rung, so every member consumer must use
@@ -38,41 +211,42 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> (Ty, Vec<crate::libraries::FunctionInfo>, bool) {
-        let candidates_at = |candidate_receiver: Ty| {
-            let mut candidates = self
-                .stable_receiver_callables(candidate_receiver, name)
-                .functions()
-                .iter()
-                .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut contains_body_local = false;
+        let body_local_receiver = crate::symbol_resolver::member_scope_receiver(receiver)
+            .obj_internal()
+            .is_some_and(|owner| {
+                self.resolved_body_local_supertypes.contains_key(&owner)
+                    || self.checked_local_methods.contains_key(&owner)
+                    || self.resolved_index.is_some_and(|index| {
+                        index
+                            .classifier_declaration(owner)
+                            .and_then(|declaration| index.declaration_header(declaration))
+                            .is_some_and(|header| {
+                                header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                            })
+                    })
+            });
+        if !body_local_receiver {
+            return (
+                crate::symbol_resolver::member_scope_receiver(receiver),
+                self.stable_receiver_callables(receiver, name)
+                    .functions()
+                    .iter()
+                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+                    .cloned()
+                    .collect(),
+                false,
+            );
+        }
+        let (mut direct, contains_body_local) =
+            self.body_local_declared_member_candidates_at(receiver, name);
+        if !direct.is_empty() {
             if let Some(owner) =
-                crate::symbol_resolver::member_scope_receiver(candidate_receiver).obj_internal()
+                crate::symbol_resolver::member_scope_receiver(receiver).obj_internal()
             {
-                if let Some(local) = self
-                    .checked_local_methods
-                    .get(&owner)
-                    .and_then(|methods| methods.get(name))
-                {
-                    for candidate in local
-                        .iter()
-                        .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                    {
-                        contains_body_local = true;
-                        if !candidates.iter().any(|existing| {
-                            existing.stable_declaration == candidate.stable_declaration
-                        }) {
-                            candidates.push(candidate.clone());
-                        }
-                    }
+                for candidate in &mut direct {
+                    let _ = self.apply_inherited_body_local_defaults(owner, candidate);
                 }
             }
-            (candidates, contains_body_local)
-        };
-
-        let (direct, contains_body_local) = candidates_at(receiver);
-        if !direct.is_empty() {
             return (
                 crate::symbol_resolver::member_scope_receiver(receiver),
                 direct,
@@ -80,12 +254,89 @@ impl Checker<'_> {
             );
         }
         for supertype in self.body_local_supertypes(receiver) {
-            let (inherited, contains_body_local) = candidates_at(supertype);
+            let (inherited, contains_body_local) =
+                self.body_local_declared_member_candidates_at(supertype, name);
             if !inherited.is_empty() {
                 return (supertype, inherited, contains_body_local);
             }
         }
         (receiver, Vec::new(), false)
+    }
+
+    /// Candidate union at one exact receiver rung. The provider and active checked-local overlay
+    /// contribute the same normalized shape; callers decide whether to stop at this rung or combine
+    /// several direct supertypes for override matching.
+    fn body_local_classifier_bindings(
+        &self,
+        owner: TypeName,
+        receiver: Ty,
+    ) -> Option<crate::symbol_resolver::GSigBinds> {
+        let declaration = self.resolved_index?.classifier_declaration(owner)?;
+        let declaration_arguments = self
+            .checked_local_classifier_type_arguments
+            .get(&declaration)?;
+        let receiver = crate::symbol_resolver::member_scope_receiver(receiver);
+        let applied_arguments = receiver.type_args();
+        if declaration_arguments.len() != applied_arguments.len() {
+            return None;
+        }
+        declaration_arguments
+            .iter()
+            .zip(applied_arguments)
+            .map(|(formal, &argument)| Some((formal.ty_param_name()?.to_owned(), argument)))
+            .collect()
+    }
+
+    fn body_local_declared_member_candidates_at(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> (Vec<crate::libraries::FunctionInfo>, bool) {
+        let mut candidates =
+            crate::symbol_resolver::declared_member_callables(&self.fed_source(), receiver, name)
+                .functions()
+                .iter()
+                .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+                .cloned()
+                .collect::<Vec<_>>();
+        let mut contains_body_local = false;
+        if let Some(owner) = crate::symbol_resolver::member_scope_receiver(receiver).obj_internal()
+        {
+            let classifier_bindings = self.body_local_classifier_bindings(owner, receiver);
+            if let Some(local) = self
+                .checked_local_methods
+                .get(&owner)
+                .and_then(|methods| methods.get(name))
+            {
+                for candidate in local
+                    .iter()
+                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+                {
+                    let Some(classifier_bindings) = classifier_bindings.as_ref() else {
+                        // The active classifier layout and the applied receiver are one checked
+                        // contract. A partial or mismatched layout cannot publish an unspecialized
+                        // member candidate as if it were semantically complete.
+                        continue;
+                    };
+                    contains_body_local = true;
+                    let mut candidate = candidate.clone();
+                    crate::symbol_resolver::specialize_member_function(
+                        &self.fed_source(),
+                        receiver,
+                        &mut candidate,
+                        classifier_bindings,
+                    );
+                    if let Some(existing) = candidates.iter().position(|existing| {
+                        existing.stable_declaration == candidate.stable_declaration
+                    }) {
+                        candidates[existing] = candidate;
+                    } else {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        (candidates, contains_body_local)
     }
 
     /// Register one selected body-local member before the class's source-order method walk begins.
@@ -110,6 +361,7 @@ impl Checker<'_> {
             return;
         };
         if self.has_finalized_signature(Some(declaration)) {
+            self.publish_finalized_body_local_method_candidate(owner, function, declaration);
             return;
         }
         self.publish_body_local_method_candidate(scope, owner, function, source, declaration);
@@ -129,6 +381,51 @@ impl Checker<'_> {
                 this_extension_receiver: self.this_extension_receiver,
             },
         );
+    }
+
+    /// Expose an already-finalized local method on the active local-class provider boundary. The
+    /// immutable module index owns its signature, but a deferred local classifier has no immutable
+    /// classifier projection yet; publishing the exact declaration candidate keeps both sources in
+    /// the same stable-identity union used by inferred local methods.
+    fn publish_finalized_body_local_method_candidate(
+        &mut self,
+        owner: DeclId,
+        function: &FunDecl,
+        declaration: crate::fir::DeclarationId,
+    ) {
+        let (owner_name, owner_is_interface) = match self.file.decl(owner) {
+            Decl::Class(class) => match self.active_classifier_internal(owner, class) {
+                Some(owner_name) => (owner_name, class.is_interface()),
+                None => return,
+            },
+            Decl::Fun(_) | Decl::Property(_) => return,
+        };
+        let Some(mut candidate) =
+            self.module
+                .finalized_function(declaration, owner_name, owner_is_interface)
+        else {
+            return;
+        };
+        self.body_local_default_providers.remove(&declaration);
+        if let Some(provider) = self.apply_inherited_body_local_defaults(owner_name, &mut candidate)
+        {
+            self.body_local_default_providers
+                .insert(declaration, provider);
+        }
+        let candidates = self
+            .checked_local_methods
+            .entry(owner_name)
+            .or_default()
+            .entry(function.name.clone())
+            .or_default();
+        if let Some(existing) = candidates
+            .iter_mut()
+            .find(|existing| existing.stable_declaration == Some(declaration))
+        {
+            *existing = candidate;
+        } else {
+            candidates.push(candidate);
+        }
     }
 
     /// Publish one active body-local method header before source-order body checking starts. The
@@ -324,19 +621,33 @@ impl Checker<'_> {
             contract: None,
             plugin_expression: None,
         };
-        let candidate = crate::module_symbols::source_member_function(
+        let mut candidate = crate::module_symbols::source_member_function(
             &function.name,
             &signature,
             receiver,
             owner_name,
             owner_is_interface,
         );
-        self.checked_local_methods
+        self.body_local_default_providers.remove(&declaration);
+        if let Some(provider) = self.apply_inherited_body_local_defaults(owner_name, &mut candidate)
+        {
+            self.body_local_default_providers
+                .insert(declaration, provider);
+        }
+        let candidates = self
+            .checked_local_methods
             .entry(owner_name)
             .or_default()
             .entry(function.name.clone())
-            .or_default()
-            .push(candidate);
+            .or_default();
+        if let Some(existing) = candidates
+            .iter_mut()
+            .find(|existing| existing.stable_declaration == candidate.stable_declaration)
+        {
+            *existing = candidate;
+        } else {
+            candidates.push(candidate);
+        }
     }
 
     pub(super) fn begin_registered_local_method(

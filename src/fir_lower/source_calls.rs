@@ -1481,6 +1481,22 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         let has_defaults = slots.iter().any(Option::is_none);
+        let inherited_default_provider = has_defaults
+            .then(|| self.index.callable_default_provider(target))
+            .flatten();
+        let default_provider = inherited_default_provider
+            .unwrap_or(crate::fir::ResolvedFunctionOverrideTarget::Module(target));
+        let default_dispatch_receiver_ty = match default_provider {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(provider) => self
+                .index
+                .callable(provider)
+                .and_then(|provider| self.index.enclosing_classifier(provider.declaration))
+                .map(|classifier| Ty::obj_name(classifier.classifier)),
+            crate::fir::ResolvedFunctionOverrideTarget::External(_) => self
+                .index
+                .enclosing_classifier(callable.declaration)
+                .map(|classifier| Ty::obj_name(classifier.classifier)),
+        };
         let mut parameter_types = declared_parameters;
         if let Some(receiver) = declared_extension_receiver {
             parameter_types.insert(extension_position, receiver.get());
@@ -1576,7 +1592,9 @@ impl BodyLowering<'_> {
         let physical_function =
             function.filter(|function| !self.ir.foreign_inline_templates.contains(function));
         let call = match dispatch_receiver {
-            Some(receiver) if physical_function.is_some() => {
+            Some(receiver)
+                if physical_function.is_some() && inherited_default_provider.is_none() =>
+            {
                 let function = physical_function.expect("same-file callable realization");
                 let class = match enum_entry_class {
                     Some(class) => class,
@@ -1624,18 +1642,20 @@ impl BodyLowering<'_> {
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,
                 })
             }
-            Some(receiver) if physical_function.is_none() => {
+            Some(receiver)
+                if physical_function.is_none() || inherited_default_provider.is_some() =>
+            {
                 // Preserve the checked source call. A target backend owns the static bridge, masks,
                 // marker parameter, and dispatch-receiver placement.
                 self.ir.add_expr(IrExpr::Call {
                     callee: Callee::ModuleWithDefaults {
                         target,
+                        default_provider,
                         name: self.index.callable_name(target)?.to_owned(),
                         params: declaration_parameter_types,
                         ret: declaration_result,
                         defaults: default_argument_positions.clone().into_boxed_slice(),
-                        dispatch_receiver_ty: enclosing_classifier
-                            .map(|classifier| Ty::obj_name(classifier.classifier)),
+                        dispatch_receiver_ty: default_dispatch_receiver_ty,
                         extension_receiver_parameter: declared_extension_receiver.map(|_| {
                             u32::try_from(extension_position).expect("too many source parameters")
                         }),
@@ -1650,6 +1670,7 @@ impl BodyLowering<'_> {
                     self.ir.add_expr(IrExpr::Call {
                         callee: Callee::ModuleWithDefaults {
                             target,
+                            default_provider,
                             name: self.index.callable_name(target)?.to_owned(),
                             params: declaration_parameter_types,
                             ret: declaration_result,
