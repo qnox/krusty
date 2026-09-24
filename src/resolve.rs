@@ -14722,26 +14722,26 @@ impl<'a> Checker<'a> {
     }
 
     fn active_classifier_internal(&self, parser: DeclId, class: &ClassDecl) -> Option<TypeName> {
-        self.active_declarations
-            .zip(self.resolved_index)
-            .and_then(|(active, index)| {
-                active
-                    .canonical_classifier_declaration(parser, index)
-                    .and_then(|declaration| index.classifier_identity(declaration))
-            })
-            .or_else(|| {
-                self.module.legacy_symbols().and_then(|symbols| {
-                    symbols
-                        .stable_parser_classifier_identities
-                        .get(&(self.file_index, parser))
-                        .copied()
-                })
-            })
-            .or_else(|| {
-                (!self.file.local_class_name_provenance.contains_key(&parser))
-                    .then(|| self.same_package_classifier_name(&class.name))
-                    .flatten()
-            })
+        if let Some((active, index)) = self.active_declarations.zip(self.resolved_index) {
+            // Pass 2 has one authoritative parser -> stable declaration binding. A miss is a miss:
+            // do not reinterpret it through Pass-1 coordinates or source spelling.
+            return active
+                .canonical_classifier_declaration(parser, index)
+                .and_then(|declaration| index.classifier_identity(declaration));
+        }
+        if let Some(symbols) = self.module.legacy_symbols() {
+            if !symbols.stable_parser_classifier_identities.is_empty() {
+                // Compact Pass 1 published the exact parser coordinate while this AST was live.
+                // Once that direct inventory exists, source spelling is not an alternative identity.
+                return symbols
+                    .stable_parser_classifier_identities
+                    .get(&(self.file_index, parser))
+                    .copied();
+            }
+        }
+        (!self.file.local_class_name_provenance.contains_key(&parser))
+            .then(|| self.same_package_classifier_name(&class.name))
+            .flatten()
     }
 
     fn direct_superclass_name(&self, owner: TypeName) -> Option<TypeName> {

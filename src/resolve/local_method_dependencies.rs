@@ -64,14 +64,18 @@ impl Checker<'_> {
                 &source,
                 crate::symbol_resolver::OverrideInputShape {
                     params: &candidate.semantic_params(),
-                    receiver: candidate.callable.source_receiver,
+                    receiver: candidate
+                        .semantic_receiver()
+                        .filter(|_| candidate.is_extension()),
                     formals: candidate_formals,
                     context_count: candidate.context_count,
                     suspend: candidate.flags.suspend,
                 },
                 crate::symbol_resolver::OverrideInputShape {
                     params: &implementation_parameters,
-                    receiver: implementation.callable.source_receiver,
+                    receiver: implementation
+                        .semantic_receiver()
+                        .filter(|_| implementation.is_extension()),
                     formals: implementation_formals,
                     context_count: implementation.context_count,
                     suspend: implementation.flags.suspend,

@@ -222,6 +222,23 @@ pub(in crate::resolve) fn compact_classifier_identity(
             crate::fir::classifier_identity(package, stub.id),
         ));
     }
+    // A nested classifier's stable identity follows its declaration owner, not the spelling stored
+    // on this stub. Source classifiers usually retain a dotted lookup path (`Outer.Inner`), but a
+    // frontend plugin has no parser path to preserve: its synthesized companion is deliberately
+    // published simply as `Companion`. The exact owner edge is common semantic state for both
+    // forms, so use it as the authority and retain only the final source segment as lookup input.
+    let enclosing_classifier = headers
+        .declarations
+        .anchor(stub.id)?
+        .owner
+        .and_then(|owner| headers.stub(owner))
+        .filter(|owner| owner.kind == crate::fir::DeclarationKind::Classifier)
+        .and_then(|owner| compact_classifier_identity(headers, owner));
+    if let Some((_, owner)) = enclosing_classifier {
+        let segment = source_name.rsplit(['.', '$']).next()?;
+        let identity = crate::types::type_name_nested_child(owner, segment);
+        return Some((source_name, identity));
+    }
     Some((
         source_name.clone(),
         crate::types::type_name_child(package, &source_name.replace('.', "$")),
@@ -431,5 +448,76 @@ pub(in crate::resolve) fn normalize_referenced_library_annotations(
             _ => continue,
         };
         table.annotation_retentions.insert(annotation, retention);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_companion_identities_follow_their_exact_classifier_owners() {
+        let source = "package sample\n\
+                      class First\n\
+                      class Second\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let file = crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let mut headers = crate::fir::inventory_parsed_source_headers(
+            &[crate::source::SourceInput::kotlin(source).with_file_stem("Companions")],
+            &[file],
+        );
+        let owners = headers
+            .stubs
+            .iter()
+            .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+            .map(|stub| stub.id)
+            .collect::<Vec<_>>();
+        for (sibling, owner) in owners.into_iter().enumerate() {
+            let anchor = headers
+                .declarations
+                .anchor(owner)
+                .expect("source classifier anchor");
+            let declaration = headers.declarations.intern(crate::fir::DeclarationAnchor {
+                source: anchor.source,
+                range: anchor.range,
+                owner: Some(owner),
+                kind: crate::fir::DeclarationKind::Classifier,
+                sibling: u32::try_from(sibling).expect("test sibling"),
+            });
+            let lookup_name = headers.lookup_names.intern("Companion");
+            headers.push_stub(crate::fir::DeclarationStub {
+                id: declaration,
+                source: anchor.source,
+                range: anchor.range,
+                lookup_name: Some(lookup_name),
+                body: None,
+                signature_inference: None,
+                initialization_order: None,
+                kind: crate::fir::DeclarationKind::Classifier,
+                visibility: crate::types::Visibility::Public,
+                flags: crate::fir::DeclarationFlags::default()
+                    .with(crate::fir::DeclarationFlags::COMPANION, true)
+                    .with(crate::fir::DeclarationFlags::COMPILER_GENERATED, true),
+            });
+        }
+        let companions = headers
+            .stubs
+            .iter()
+            .filter(|stub| {
+                stub.kind == crate::fir::DeclarationKind::Classifier
+                    && stub.flags.has(crate::fir::DeclarationFlags::COMPANION)
+            })
+            .map(|stub| compact_classifier_identity(&headers, stub).map(|(_, identity)| identity))
+            .collect::<Option<Vec<_>>>()
+            .expect("every companion must retain one compact identity");
+
+        assert_eq!(
+            companions,
+            [
+                crate::types::type_name("sample/First$Companion"),
+                crate::types::type_name("sample/Second$Companion"),
+            ]
+        );
     }
 }

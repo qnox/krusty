@@ -1602,7 +1602,10 @@ pub struct ResolvedModuleIndex {
     /// is checked in Pass 2.
     classifier_identities: HashMap<DeclarationId, TypeName>,
     classifiers: HashMap<DeclarationId, ResolvedClassifierHeader>,
-    classifier_declarations: HashMap<TypeName, DeclarationId>,
+    /// Reverse classifier identity index. `None` records a source-level duplicate, which remains a
+    /// frontend diagnostic rather than becoming an arbitrary declaration selection or an internal
+    /// assertion while the recovering signature pass publishes the rest of the module.
+    classifier_declarations: HashMap<TypeName, Option<DeclarationId>>,
     /// Complete applied semantic hierarchy for each source classifier, including the classifier
     /// itself at depth zero. Pass 1 computes this while providers are live; lowering and backends
     /// must consume this closed fact instead of reopening source/module/classpath lookup.
@@ -2345,7 +2348,10 @@ impl ResolvedModuleIndex {
     }
 
     pub fn classifier_declaration(&self, classifier: TypeName) -> Option<DeclarationId> {
-        self.classifier_declarations.get(&classifier).copied()
+        self.classifier_declarations
+            .get(&classifier)
+            .copied()
+            .flatten()
     }
 
     pub fn classifier_hierarchy(
@@ -2861,11 +2867,28 @@ impl ResolvedModuleIndex {
                 "a stable classifier declaration cannot change semantic identity"
             );
         }
-        if let Some(existing) = self.classifier_declarations.insert(classifier, declaration) {
-            assert_eq!(
-                existing, declaration,
-                "a stable classifier identity may have only one module declaration"
-            );
+        match self.classifier_declarations.get(&classifier).copied() {
+            None => {
+                self.classifier_declarations
+                    .insert(classifier, Some(declaration));
+            }
+            Some(Some(existing)) if existing == declaration => {}
+            Some(Some(existing)) => {
+                let is_source_classifier = |declaration| {
+                    self.declaration_headers
+                        .get(&declaration)
+                        .is_some_and(|header| {
+                            header.kind == DeclarationKind::Classifier
+                                && !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                        })
+                };
+                assert!(
+                    is_source_classifier(existing) && is_source_classifier(declaration),
+                    "distinct generated classifiers cannot share one stable semantic identity"
+                );
+                self.classifier_declarations.insert(classifier, None);
+            }
+            Some(None) => {}
         }
     }
 

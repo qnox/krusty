@@ -718,7 +718,9 @@ fn append_function_override_edges(
                 source,
                 crate::symbol_resolver::OverrideInputShape {
                     params: &applied_inputs,
-                    receiver: applied.callable.source_receiver,
+                    receiver: applied
+                        .semantic_receiver()
+                        .filter(|_| applied.is_extension()),
                     formals: applied_formals,
                     context_count: applied.context_count,
                     suspend: applied.flags.suspend,
