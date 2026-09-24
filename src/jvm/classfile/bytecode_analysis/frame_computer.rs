@@ -93,7 +93,15 @@ impl FrameComputation<'_> {
         name: &str,
         descriptor: &str,
     ) -> Result<ComputedFrames, Decline> {
-        let entry = entry_locals(access, name, descriptor, self.this_class)?;
+        self.compute_from(entry_locals(access, name, descriptor, self.this_class)?)
+    }
+
+    /// The frames for this body entered with `entry`, one local per slot: a body whose entry holds
+    /// more than the method's arguments, such as one read while it is still being emitted.
+    pub(crate) fn compute_from(
+        &self,
+        entry: Vec<VerificationType>,
+    ) -> Result<ComputedFrames, Decline> {
         let n = self.insns.len();
         let blocks = self.blocks()?;
         let block_of = {

@@ -4409,8 +4409,11 @@ shadow with no output change.
   load, store or `iinc` names, and every local-variable entry). kotlinc's bytecode rewrites
   (`method_rewrite`) start from and validate against computed frames, so the recorded-frame editing
   they carried (reference widenings, dropped temporaries, frame unification) is gone.
-- ☐ 2c. Delete the emitter's frame-recording sites (`add_frame_if_new`, the coroutine state
-  machine's merged frames, and inline-splice frame relocation), which are now unused by output.
+- ✅ 2c. The emitter records no frame. `add_frame_if_new`, `Emitter::frame`, `needs_stackmap`,
+  `build_stackmap`, the per-label frame merge, held-operand stack typing and the inline splice's
+  frame binding are gone. The coroutine machine reads the spill types from frames computed over the
+  body (`ClassWriter::builder_frames`). A non-empty emitted body the computation declines remains an
+  explicit backend invariant failure; removing recorded frames does not introduce a second path.
 - ☐ 3–6. Symbolic method body and assembler, `FrameMap`-style slot allocator, kotlinc's
   transformer order, and label-based line/local tables.
 

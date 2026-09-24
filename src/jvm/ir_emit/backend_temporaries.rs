@@ -19,7 +19,7 @@
 //! the single operation that does it — the previous arrangement had three frame builders, two of
 //! which silently omitted the temporaries and were right only by accident.
 
-use super::{VerifType, VerifType as _VerifType};
+use super::VerifType;
 use crate::types::Ty;
 
 /// Identity of a leased backend temporary slot. A newtype on purpose: it is not a value id and
@@ -85,16 +85,4 @@ pub(super) fn frame_slots(
         }
     }
     raw
-}
-
-/// Collapse a slot-indexed layout to the frame form, where a `long`/`double` occupies one entry.
-pub(super) fn collapse(raw: &[VerifType]) -> Vec<VerifType> {
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < raw.len() {
-        let wide = matches!(raw[index], _VerifType::Long | _VerifType::Double);
-        out.push(raw[index].clone());
-        index += if wide { 2 } else { 1 };
-    }
-    out
 }
