@@ -2713,6 +2713,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Callee::ClassStaticWithDefaults {
                 function, defaults, ..
             } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
+            // A member call whose defaults come from the member it overrides: the provider's
+            // wrapper fills them and dispatches to the override.
+            Callee::ModuleWithDefaults { defaults, .. } => {
+                match self.file.inherited_default_provider(callee) {
+                    Some(provider) => {
+                        self.defaulted_call(provider, defaults, dispatch_receiver, args)
+                    }
+                    None => Err(format!("a {} call", callee_kind(callee))),
+                }
+            }
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that

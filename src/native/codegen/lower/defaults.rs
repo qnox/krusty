@@ -40,6 +40,16 @@ impl<'a> FileLowering<'a> {
                 } => (*function, defaults.to_vec()),
                 // A defaulted call on a receiver arrives as a method call with holes in its
                 // argument list rather than as a callee of its own.
+                // A member call that INHERITS its defaults arrives naming the declaration they
+                // come from; see `inherited_default_provider`.
+                IrExpr::Call {
+                    callee: callee @ Callee::ModuleWithDefaults { defaults, .. },
+                    dispatch_receiver: Some(_),
+                    ..
+                } => match self.inherited_default_provider(callee) {
+                    Some(provider) => (provider, defaults.to_vec()),
+                    None => continue,
+                },
                 IrExpr::MethodCall {
                     class, index, args, ..
                 } if args.iter().any(Option::is_none) => {
@@ -96,6 +106,33 @@ impl<'a> FileLowering<'a> {
             self.default_wrappers.insert(key, id);
         }
         Ok(())
+    }
+
+    /// The method whose defaults a member call that leaves arguments out is filled from, when the
+    /// call arrives naming that declaration rather than as a method call with holes.
+    ///
+    /// An override cannot declare defaults of its own; `o.f()` on an override takes the ones the
+    /// member it overrides declares, and still runs the override. The frontend hands such a call
+    /// over as `ModuleWithDefaults`, naming the selected member and the `default_provider`. The
+    /// provider's wrapper is exactly the right one: it evaluates the provider's defaults in the
+    /// provider's frame and then dispatches through the slot the override shares, so it reaches
+    /// whatever the receiver implements. A provider this file does not realize, or one that
+    /// takes an extension receiver as well, is left to decline.
+    pub(super) fn inherited_default_provider(&self, callee: &Callee) -> Option<u32> {
+        let Callee::ModuleWithDefaults {
+            default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+            dispatch_receiver_ty: Some(_),
+            extension_receiver_parameter: None,
+            ..
+        } = callee
+        else {
+            return None;
+        };
+        let function = *self.ir.checked_callable_functions.get(provider)?;
+        self.ir.functions[function as usize]
+            .dispatch_receiver
+            .is_some()
+            .then_some(function)
     }
 
     /// Emit each wrapper: the callee's frame, the defaults evaluated into it, then the call.
