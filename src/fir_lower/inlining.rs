@@ -307,7 +307,14 @@ impl BodyLowering<'_> {
         // behind every successful tail promotion, which shifts every later local identity.
         let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
 
-        for (&source, &copy) in &cloned {
+        // Clone order, not map order: rewriting the copies allocates locals and records returns,
+        // and both orders reach the emitted code.
+        let mut copies = cloned
+            .iter()
+            .map(|(&source, &copy)| (source, copy))
+            .collect::<Vec<_>>();
+        copies.sort_by_key(|&(_, copy)| copy);
+        for &(source, copy) in &copies {
             let generated_zero = match self.ir.expr(source) {
                 IrExpr::Variable {
                     ty,
@@ -402,9 +409,9 @@ impl BodyLowering<'_> {
             }
         }
 
-        let inline_invocations = cloned
-            .values()
-            .copied()
+        let inline_invocations = copies
+            .iter()
+            .map(|&(_, copy)| copy)
             .filter(|expression| {
                 matches!(
                     self.ir.expr(*expression),

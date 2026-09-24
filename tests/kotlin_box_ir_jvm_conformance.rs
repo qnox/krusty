@@ -1295,6 +1295,7 @@ fn kotlin_codegen_box_conformance() {
 
     let no_run = env("KRUSTY_NO_RUN").is_some();
     let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
+    let class_dump = env("KRUSTY_CLASS_DUMP").map(PathBuf::from);
     let byte_diffs: Mutex<Vec<(PathBuf, ByteDiff)>> = Mutex::new(Vec::new());
 
     // Heap profiler (`--features dhat-heap`): its `Drop` at end of scope writes `dhat-heap.json` with
@@ -1368,6 +1369,14 @@ fn kotlin_codegen_box_conformance() {
                     };
                     t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     mark_box_case_phase(&active, tid, file, "post-compile");
+                    if let Some(dump) = &class_dump {
+                        if let Err(error) = dump_compiled_classes(dump, &stem, &src, &classes) {
+                            return (
+                                file.clone(),
+                                TestResult::Fail(format!("failed to dump classes: {error}")),
+                            );
+                        }
+                    }
                     if byte_diff_on {
                         let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
                         byte_diffs.lock().unwrap().push((file.clone(), outcome));
@@ -1962,6 +1971,26 @@ fn dump_class_sets(
         write("kotlinc", name, bytes)?;
     }
     fs::write(root.join("source.kt"), src)
+}
+
+/// `KRUSTY_CLASS_DUMP=<dir>`: write every compiled file's classes to `<dir>/<stem>-<hash>/`, with no
+/// reference compile. Two dumps from two builds show whether a change moved any output byte, which
+/// is how a refactor that must not change output is checked across the whole corpus.
+fn dump_compiled_classes(
+    dir: &Path,
+    stem: &str,
+    src: &str,
+    classes: &[(String, Vec<u8>)],
+) -> std::io::Result<()> {
+    let root = dir.join(format!("{stem}-{:016x}", fnv64(src.as_bytes())));
+    for (name, bytes) in classes {
+        let path = root.join(format!("{name}.class"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, bytes)?;
+    }
+    Ok(())
 }
 
 /// The full per-file byte-diff decision: gate un-mirrored shapes, reference-compile, compare.

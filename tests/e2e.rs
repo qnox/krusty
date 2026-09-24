@@ -522,6 +522,8 @@ mod deserialize_dispatch_shape_e2e;
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
 mod destructure_e2e;
+#[path = "deterministic_output_e2e.rs"]
+mod deterministic_output_e2e;
 #[path = "diagnostic_duplication_e2e.rs"]
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
