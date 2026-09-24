@@ -5,6 +5,7 @@ use crate::fir::{
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
+use super::source_calls::SameFileExtensionReceiverMode;
 use super::{BodyLowering, FirLoweringFailure};
 
 /// The checked pieces of one iterator-protocol loop, kept together across the FIR-to-IR boundary.
@@ -458,6 +459,7 @@ impl BodyLowering<'_> {
                     *target,
                     dispatch_receiver,
                     extension_receiver,
+                    SameFileExtensionReceiverMode::DirectWhenOrdered,
                     &arguments,
                     &context_parameter_types,
                     &[],

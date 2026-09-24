@@ -48,6 +48,12 @@ pub(super) enum SelectedDefaultMode {
     Materialize,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum SameFileExtensionReceiverMode {
+    Materialized,
+    DirectWhenOrdered,
+}
+
 pub(super) struct SelectedOperandRequest<'a> {
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
@@ -1366,6 +1372,7 @@ impl BodyLowering<'_> {
         target: CallableId,
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
+        extension_receiver_mode: SameFileExtensionReceiverMode,
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
@@ -1390,10 +1397,12 @@ impl BodyLowering<'_> {
             .owner
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
-        // An extension receiver is inserted among context/value parameters below. With no other
-        // arguments it is already in physical order and stays direct; when arguments compete for
-        // that position, the general spill path preserves their checked source evaluation order.
-        let direct = (extension_receiver.is_none() || arguments.is_empty())
+        // An extension receiver is inserted among context/value parameters below. The checked
+        // iterator-loop contract may keep its already-ordered, argument-free receiver direct;
+        // ordinary calls retain the materialized boundary recorded for general source evaluation.
+        let direct = (extension_receiver.is_none()
+            || (extension_receiver_mode == SameFileExtensionReceiverMode::DirectWhenOrdered
+                && arguments.is_empty()))
             && !declaration_flags.has(crate::fir::DeclarationFlags::TAILREC)
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
             && arguments_follow_parameter_order(arguments, None);

@@ -8,7 +8,7 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFunction,
 };
 
-use super::source_calls::ModuleConstructorRequest;
+use super::source_calls::{ModuleConstructorRequest, SameFileExtensionReceiverMode};
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
@@ -433,6 +433,7 @@ impl BodyLowering<'_> {
             callable.id,
             dispatch_receiver,
             extension_receiver,
+            SameFileExtensionReceiverMode::Materialized,
             &arguments,
             &signature_parameters,
             substitutions,
@@ -571,6 +572,7 @@ impl BodyLowering<'_> {
                     *target,
                     dispatch_receiver,
                     extension_receiver,
+                    SameFileExtensionReceiverMode::Materialized,
                     &arguments,
                     &parameter_types,
                     &call.substitutions,
