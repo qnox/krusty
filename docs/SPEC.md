@@ -2016,6 +2016,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   star bounds now come from the provider-normalized classifier (module or classpath), exactly as
   the body checker reads them. Tests: `tests/classpath_star_projection_bound_e2e.rs`, against both
   a krusty-built and a kotlinc-built dependency.
+- **A star projection contains every argument of its parameter; its readable bound never decides
+  containment or equality.** `A<B> <: A<*>` for every `B`, and two `*` in one argument slot are one
+  projection (kotlinc's `isSubtypeForSameConstructor` skips a star super-argument). `@Metadata`
+  records a star without a type, so a `Frame<*>` read out of a dependency member
+  (`holder.frames[0]` from `val frames: List<Frame<*>>` over `Frame<out T : Bound>`) carries the
+  reader's `Any?` bound while the `Frame<*>` this module writes carries `Bound`. Comparing the two
+  bounds rejected the read value as the receiver of a `Frame<*>` extension ("inferred type is
+  Frame<*> but Frame<*> was expected"), as a `Frame<*>` local's initializer, and inside an invariant
+  `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
+  against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
+  `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
