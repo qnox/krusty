@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ClassId, IrFile, IrLocalClassOwner, IrModuleSource};
+use crate::ir::{ClassId, IrFile, IrLocalClassNameProvenance, IrLocalClassOwner, IrModuleSource};
 use crate::types::{type_name_nested_child, TypeName};
 
 fn physical_name(
@@ -19,6 +19,19 @@ fn physical_name(
     let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
         return ir.classes[class as usize].fq_name;
     };
+    let name = provenance_name(provenance, facade, ir, cache);
+    cache.insert(class, name);
+    name
+}
+
+/// The JVM name a naming provenance describes: its lexical owner's physical name (or its source's
+/// facade), then its source segments and generated ordinal.
+fn provenance_name(
+    provenance: &IrLocalClassNameProvenance,
+    facade: &impl Fn(IrModuleSource) -> TypeName,
+    ir: &IrFile,
+    cache: &mut HashMap<ClassId, TypeName>,
+) -> TypeName {
     let mut name = match provenance.lexical_owner {
         Some(IrLocalClassOwner::Class(owner)) => physical_name(owner, facade, ir, cache),
         Some(IrLocalClassOwner::External(owner)) => owner,
@@ -30,12 +43,12 @@ fn physical_name(
     if let Some(ordinal) = provenance.ordinal {
         name = type_name_nested_child(name, &ordinal.to_string());
     }
-    cache.insert(class, name);
     name
 }
 
-/// Rename every local classifier to its JVM name. `facade` names the file facade of a source,
-/// which roots a local classifier declared outside any classifier.
+/// Rename every local classifier to its JVM name and name every source callable reference's
+/// class. `facade` names the file facade of a source, which roots a local classifier or reference
+/// declared outside any classifier.
 pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeName) {
     let classes = ir
         .local_class_name_provenance
@@ -46,9 +59,26 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
     for class in classes {
         physical_name(class, &facade, ir, &mut physical);
     }
+    let references = ir
+        .callable_reference_provenance
+        .iter()
+        .map(|(&expression, provenance)| {
+            (
+                expression,
+                provenance_name(provenance, &facade, ir, &mut physical),
+            )
+        })
+        .collect();
+    ir.callable_reference_names = references;
     let identities = physical
         .into_iter()
         .map(|(class, physical)| (ir.classes[class as usize].fq_name, physical))
         .collect();
     ir.remap_classifier_identities(&identities);
+}
+
+/// The class a source callable reference at `expression` compiles to, as [`realize`] named it.
+/// `None` for a reference the naming walk never saw, one lowering synthesized.
+pub(crate) fn callable_reference_name(ir: &IrFile, expression: u32) -> Option<TypeName> {
+    ir.callable_reference_names.get(&expression).copied()
 }

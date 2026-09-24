@@ -4350,8 +4350,9 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   through FIR/common IR; `jvm::local_class_names` combines it with the physical facade/class owner.
 - ☐ 1b. Suspend lambdas as `SuspendLambda` classes named from the walk (today a static method plus a
   `…$fir_…$1` continuation).
-- ☐ 1c. Function and property reference classes named from the walk (today `Facade$fir$function$N`
-  and `Facade$fir$property$N`), with kotlinc's direct `invoke` in place of the adapter.
+- ◐ 1c. Function and property reference classes are named from the walk's provenance, recorded on
+  the reference expression and realized by `jvm::local_class_names`. Still open: kotlinc's direct
+  `invoke` in place of the adapter, and the reference class's flags and attributes.
 - ☐ 1d. Local functions and lambda bodies named as `InventNamesForLocalFunctions` does
   (`box$local`, `box$lambda$0`), replacing `name$fir_A_B_C`.
 - ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass

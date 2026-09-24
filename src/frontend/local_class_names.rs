@@ -39,6 +39,8 @@ pub(super) struct InventedLocalNames {
     pub anonymous_enclosing_functions: HashMap<DeclId, AnonymousEnclosingFunction>,
     /// Suspend function → the ordinal its continuation takes in its own chain.
     pub continuations: HashMap<AnonymousEnclosingFunction, u32>,
+    /// Callable reference → its target-neutral lexical provenance.
+    pub references: HashMap<ExprId, LocalClassNameProvenance>,
 }
 
 /// One chain of enclosing names, and the source function it lies in.
@@ -345,6 +347,14 @@ impl Inventor<'_> {
             // A bound receiver is walked inside the reference, like the lambda body it becomes.
             Expr::CallableRef { receiver, .. } => {
                 let own = self.next(chain);
+                let ordinal = own
+                    .segments
+                    .last()
+                    .and_then(|ordinal| ordinal.parse().ok())
+                    .expect("a callable-reference position is an ordinal");
+                self.names
+                    .references
+                    .insert(expression, chain.provenance(Some(ordinal)));
                 if let Some(receiver) = receiver {
                     self.expr(*receiver, &own);
                 }
