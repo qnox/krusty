@@ -524,7 +524,7 @@ impl<'a> CommonIrBodySink<'a> {
         self.ir.foreign_inline_templates.insert(function);
         if dispatch_receiver.is_none() {
             let source = super::module_declarations::source(index, declaration)?;
-            self.ir.foreign_template_sources.insert(function, source);
+            self.ir.record_foreign_template_source(function, source);
         }
         if callable.shape.extension_receiver.is_some() && !companion_associated {
             self.ir.extension_receiver_fns.insert(function);

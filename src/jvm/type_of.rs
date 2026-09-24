@@ -137,7 +137,7 @@ impl<'a> TypeParameters<'a> {
             .flatten()
             .map(|property| (&property.type_params, property.getter, property.is_var))
             .chain(
-                ir.top_level_generic_properties
+                ir.top_level_generic_properties()
                     .iter()
                     .map(|property| (&property.type_params, property.getter, property.is_var)),
             );
@@ -468,7 +468,7 @@ impl Generator<'_, '_> {
             .find(|class| class.methods.contains(&function))
             .map(|class| class.fq_name_id())
             .or(declaration.dispatch_receiver);
-        let facade = ir.foreign_template_facades.get(&function).map_or_else(
+        let facade = ir.foreign_template_facade(function).map_or_else(
             || self.parameters.facade.to_owned(),
             |facade| crate::jvm::names::classfile_internal_name(&facade.render()),
         );
@@ -517,7 +517,7 @@ impl Generator<'_, '_> {
             .find(|property| property.getter == getter)
             .map(|property| property.name.clone())
             .or_else(|| {
-                ir.top_level_generic_properties
+                ir.top_level_generic_properties()
                     .iter()
                     .find(|property| property.getter == getter)
                     .map(|property| property.name.clone())

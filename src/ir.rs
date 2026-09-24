@@ -46,7 +46,9 @@ mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod intrinsic;
 mod references;
+mod type_reflection;
 mod value_class_constructors;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
@@ -54,69 +56,10 @@ pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use intrinsic::IrIntrinsic;
 pub use references::{FuncRef, PropRef};
-
-/// A compiler-supplied operation selected from a real semantic declaration. This is an operation
-/// identity, not a library name: backends implement it without recovering signature facts from text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrIntrinsic {
-    /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
-    /// optional zero-argument message function. A backend must guard/elide the whole operation
-    /// before evaluating either child according to `mode`.
-    Assert {
-        mode: crate::types::AssertionMode,
-    },
-    ArrayGet,
-    ArraySet,
-    ArraySize,
-    StringGet,
-    StringLength,
-    StringPlus,
-    NullableAnyToString,
-    /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
-    /// reified type parameter in the emitted inline template; call-site inline specialization turns
-    /// it into the exact enum classifier without reopening resolution.
-    EnumValueOf {
-        classifier: Ty,
-    },
-    /// Kotlin's compiler-supplied `typeOf<T>()`. `ty` is the complete selected type argument,
-    /// including nullability, arguments, and projections. It may name a declaration-owned reified
-    /// type parameter in an emitted inline template, which the target realizes as its reified
-    /// marker; any other type parameter it names is described to the runtime as a classifier.
-    TypeOf {
-        ty: Ty,
-    },
-    /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
-    /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
-    /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
-    /// even when its integer result is later compared with zero.
-    PrimitiveCompare {
-        operand: Ty,
-        relational_operator: bool,
-    },
-    /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
-    /// this operation with the continuation parameter's `Continuation.getContext()` call.
-    CoroutineContext,
-    UnsignedToString {
-        source: Ty,
-    },
-    PrimitiveArrayNew {
-        element: Ty,
-    },
-    /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
-    /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
-    DataClassFieldEquals {
-        ty: Ty,
-    },
-    /// Kotlin data-class hash contribution for one primary-constructor property.
-    DataClassFieldHash {
-        ty: Ty,
-    },
-    /// Kotlin's content rendering for an array stored in a data-class property.
-    DataClassArrayToString {
-        ty: Ty,
-    },
-}
+pub use type_reflection::IrGenericTopLevelProperty;
+use type_reflection::TypeReflectionFacts;
 
 /// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1477,17 +1420,6 @@ pub struct MemberExtProp {
     pub type_params: Vec<IrTypeParameter>,
 }
 
-/// A top-level generic extension property ([`IrFile::top_level_generic_properties`]): the
-/// declaration that owns the type parameters its accessor bodies see.
-#[derive(Clone, Debug)]
-pub struct IrGenericTopLevelProperty {
-    pub name: String,
-    pub is_var: bool,
-    pub getter: u32,
-    pub setter: Option<u32>,
-    pub type_params: Vec<IrTypeParameter>,
-}
-
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
@@ -2504,9 +2436,7 @@ pub struct IrFile {
     /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
-    /// Top-level extension properties declaring type parameters. A reflective description of such a
-    /// type parameter (`typeOf`) names the property as its container.
-    pub top_level_generic_properties: Vec<IrGenericTopLevelProperty>,
+    type_reflection: TypeReflectionFacts,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
@@ -2620,13 +2550,6 @@ pub struct IrFile {
     /// cloning templates in the active common-IR arena. They are never emitted as declarations in
     /// this file, and a non-inlined fallback keeps its stable module callable edge.
     pub foreign_inline_templates: std::collections::HashSet<u32>,
-    /// The JVM file facade declaring each top-level foreign inline template, resolved by the
-    /// JVM backend from the template's source unit. Reflective descriptions of the template (a
-    /// `typeOf` type parameter's container) name the declaring facade, not the host file's.
-    pub foreign_template_facades: std::collections::HashMap<u32, TypeName>,
-    /// The source unit declaring each top-level foreign inline template, kept until a backend
-    /// resolves it to its own naming (see [`Self::foreign_template_facades`]).
-    pub foreign_template_sources: std::collections::HashMap<u32, IrModuleSource>,
     /// Top-level functions declared `inline`. This is a source-semantic fact; each backend decides
     /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
     /// `$i$f$<name>` local marker to emitted non-suspend bodies).
@@ -3391,14 +3314,6 @@ impl IrFile {
 
     pub fn class_signature_name(&self, internal: crate::types::TypeName) -> Option<&IrGenericSig> {
         self.class_signatures.get(&internal)
-    }
-
-    pub fn class_signatures(
-        &self,
-    ) -> impl Iterator<Item = (crate::types::TypeName, &IrGenericSig)> + '_ {
-        self.class_signatures
-            .iter()
-            .map(|(classifier, signature)| (*classifier, signature))
     }
 
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {

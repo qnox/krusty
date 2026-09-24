@@ -661,14 +661,13 @@ fn materialize_top_level_property(
                 },
             );
         }
-        ir.top_level_generic_properties
-            .push(crate::ir::IrGenericTopLevelProperty {
-                name: property.name.clone(),
-                is_var: property.flags.has(DeclarationFlags::MUTABLE),
-                getter,
-                setter,
-                type_params,
-            });
+        ir.record_top_level_generic_property(crate::ir::IrGenericTopLevelProperty {
+            name: property.name.clone(),
+            is_var: property.flags.has(DeclarationFlags::MUTABLE),
+            getter,
+            setter,
+            type_params,
+        });
     }
     set_accessor_parameter_identities(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {

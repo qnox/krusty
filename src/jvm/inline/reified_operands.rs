@@ -4,6 +4,20 @@ use super::{methodref_target, set_pool_operand, utf8, Insn};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
 use crate::jvm::type_of::TYPE_OF_MARKER;
+use std::collections::HashMap;
+
+/// Reified arguments at one inline call site, in the forms dependency markers consume.
+#[derive(Clone, Debug, Default)]
+pub(in crate::jvm) struct ReifiedArguments {
+    pub(in crate::jvm) classes: HashMap<String, ReifiedArgument>,
+    pub(in crate::jvm) type_of: HashMap<String, Vec<crate::jvm::type_of::TypeOfInsn>>,
+}
+
+impl ReifiedArguments {
+    pub(super) fn is_empty(&self) -> bool {
+        self.classes.is_empty() && self.type_of.is_empty()
+    }
+}
 
 /// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
 /// `instanceof`, `multianewarray`.
@@ -122,6 +136,27 @@ impl ReifiedRepoint {
     }
 }
 
+/// Apply post-relocation marker rewrites and return instruction expansions plus required stack.
+pub(super) fn apply_repoints(
+    repoints: &[ReifiedRepoint],
+    arguments: &ReifiedArguments,
+    insns: &mut [Insn],
+    writer: &mut ClassWriter,
+) -> Option<(Vec<(usize, Vec<Insn>)>, u16)> {
+    let mut edits = Vec::new();
+    let mut stack_growth = 0;
+    for repoint in repoints {
+        if let ReifiedRepoint::TypeOf(at, argument) = repoint {
+            let realization = arguments.type_of.get(argument)?;
+            stack_growth = stack_growth.max(crate::jvm::type_of::max_stack(realization));
+            edits.push((*at, crate::jvm::type_of::encode_insns(realization, writer)));
+        } else if !repoint.apply(insns, writer) {
+            return None;
+        }
+    }
+    Some((edits, stack_growth))
+}
+
 /// The marker's operation kind, pushed by the instruction two before the call.
 fn marker_operation(insn: &Insn) -> Option<i32> {
     match insn {
@@ -216,7 +251,9 @@ pub(super) fn reify_markers(
 
 #[cfg(test)]
 mod tests {
-    use super::{reify_markers, set_reified_operand, ReifiedArgument, ReifiedRepoint};
+    use super::{
+        reify_markers, set_reified_operand, ReifiedArgument, ReifiedArguments, ReifiedRepoint,
+    };
     use crate::jvm::classfile::ClassWriter;
     use crate::jvm::classreader::C;
     use crate::jvm::inline::Insn;
@@ -260,10 +297,13 @@ mod tests {
     #[test]
     fn a_concrete_argument_removes_the_marker_and_repoints_the_type_operation() {
         let (pool, mut instructions) = array_marker();
-        let arguments = HashMap::from([(
-            "T".to_owned(),
-            ReifiedArgument::Class("java/lang/String".to_owned()),
-        )]);
+        let arguments = ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Class("java/lang/String".to_owned()),
+            )]),
+            ..Default::default()
+        };
 
         let repoints = reify_markers(&mut instructions, &pool, &arguments).expect("valid marker");
         assert_eq!(repoints.len(), 1);
@@ -288,13 +328,16 @@ mod tests {
     fn a_forwarded_argument_keeps_the_marker_and_renames_its_nullable_parameter() {
         let (pool, mut instructions) = array_marker();
         let original = instructions.clone();
-        let arguments = HashMap::from([(
-            "T".to_owned(),
-            ReifiedArgument::Forwarded {
-                name: "U".to_owned(),
-                nullable: false,
-            },
-        )]);
+        let arguments = ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Forwarded {
+                    name: "U".to_owned(),
+                    nullable: false,
+                },
+            )]),
+            ..Default::default()
+        };
 
         let repoints = reify_markers(&mut instructions, &pool, &arguments).expect("valid marker");
         assert_eq!(
@@ -318,7 +361,7 @@ mod tests {
         let (pool, mut instructions) = array_marker();
         let original = instructions.clone();
 
-        assert!(reify_markers(&mut instructions, &pool, &HashMap::new()).is_none());
+        assert!(reify_markers(&mut instructions, &pool, &ReifiedArguments::default()).is_none());
         assert_eq!(instructions, original);
     }
 
