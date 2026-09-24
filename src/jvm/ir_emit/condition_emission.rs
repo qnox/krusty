@@ -206,8 +206,9 @@ impl Emitter<'_> {
     }
 
     /// Read the operands from a provenance-tagged generic `when`. The lowering shape is an IR
-    /// invariant; only constant operands deliberately stay on ordinary `when` emission, whose
-    /// reachability handling already owns constant folding.
+    /// invariant. A constant operand is fused like any other: kotlinc's `jumpIfFalse(false)` is a
+    /// `goto`, so `a > 0 && false` jumps both ways to the shared `iconst_0` and the method passes
+    /// leave `ifle L; L: iconst_0`, not an ordinary `when`'s two materialized branches.
     fn short_circuit_operands(
         &self,
         expression: u32,
@@ -232,6 +233,6 @@ impl Emitter<'_> {
             Some(expected_sentinel),
             "short-circuit sentinel must agree with its recorded operator"
         );
-        (constant(*first).is_none() && constant(second).is_none()).then_some((*first, second, kind))
+        Some((*first, second, kind))
     }
 }
