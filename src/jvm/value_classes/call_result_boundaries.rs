@@ -43,7 +43,11 @@ fn physical_boundary(
     };
     let different_slots =
         crate::jvm::ir_emit::ir_ty_to_jvm(&physical) != crate::jvm::ir_emit::ir_ty_to_jvm(&target);
-    Some(different_slots.then_some(physical))
+    // A bare type parameter crosses the erased generic slot as a box even when that slot and the
+    // value class's carrier share the same descriptor (for example, `T` and `Slot(Any?)` are both
+    // `Object`). Preserve the physical slot as a representation fact; descriptor equality alone
+    // cannot express the box/carrier distinction.
+    Some((declared.is_ty_param() || different_slots).then_some(physical))
 }
 
 pub(super) fn realize(ir: &mut IrFile, underlying: &Under) {
@@ -97,6 +101,7 @@ mod tests {
         [
             (type_name("test/Tagged"), Ty::String),
             (type_name("test/Token"), Ty::String),
+            (type_name("test/Slot"), Ty::nullable(Ty::obj("kotlin/Any"))),
         ]
         .into_iter()
         .collect()
@@ -124,6 +129,18 @@ mod tests {
 
         assert_eq!(
             physical_boundary(declared, Some(erased), target, &underlying),
+            Some(Some(erased))
+        );
+    }
+
+    #[test]
+    fn a_bare_type_parameter_keeps_a_box_when_its_carrier_has_the_same_descriptor() {
+        let underlying = carriers();
+        let erased = Ty::nullable(Ty::obj("kotlin/Any"));
+        let declared = Ty::ty_param("T", erased);
+
+        assert_eq!(
+            physical_boundary(declared, Some(erased), Ty::obj("test/Slot"), &underlying),
             Some(Some(erased))
         );
     }

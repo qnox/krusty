@@ -843,6 +843,9 @@ fn specialize_expression_facts(
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
         specialize_tys(parameters, bindings);
     }
+    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
+        specialize_tys(parameters, bindings);
+    }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
         for (_, ty) in substitutions {
             specialize_ty(ty, bindings);
