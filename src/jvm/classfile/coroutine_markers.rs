@@ -49,7 +49,7 @@ pub fn markers_in(bytes: &[u8]) -> Option<Vec<(usize, CoroutineMarker, u16)>> {
     let mut found = Vec::new();
     let mut pc = 0;
     while pc < bytes.len() {
-        let len = crate::jvm::inline::instruction_len(bytes, pc)?;
+        let len = crate::jvm::bytecode::instruction_len(bytes, pc)?;
         if bytes[pc] == MARKER_OP {
             let kind = match bytes.get(pc + 1)? {
                 1 => CoroutineMarker::Suspension,

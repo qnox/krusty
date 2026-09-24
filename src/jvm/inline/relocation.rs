@@ -15,7 +15,8 @@
 //! The writer boundary is deliberately narrow: nothing here decides WHAT to emit. A `ClassWriter`
 //! is taken only to intern, and every function reports failure rather than emitting something
 //! approximate.
-use super::{class_name, instruction_len, name_and_type, pool_operand, utf8, utf8_value, Insn};
+use super::{class_name, name_and_type, pool_operand, utf8, utf8_value, Insn};
+use crate::jvm::bytecode::instruction_len;
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
 
