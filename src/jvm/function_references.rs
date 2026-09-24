@@ -47,9 +47,7 @@ pub(super) fn reference_class_name(
 ) -> crate::types::TypeName {
     u32::try_from(expression)
         .ok()
-        .and_then(|raw| {
-            crate::jvm::local_class_names::callable_reference_name(ir, current_facade, raw)
-        })
+        .and_then(|raw| crate::jvm::local_class_names::callable_reference_name(ir, raw))
         // A second node carrying the same source name is a copy of the first; it cannot share
         // the class.
         .filter(|name| ir.classes.iter().all(|class| class.fq_name != *name))

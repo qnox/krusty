@@ -1493,14 +1493,32 @@ impl BodyLowering<'_> {
         };
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
-                Some(&class) => Some(class),
-                None => return,
+                Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
+                None => match self
+                    .index
+                    .classifier_header(owner)
+                    .filter(|_| self.index.local_class_name_provenance(owner).is_none())
+                {
+                    Some(header) => Some(crate::ir::IrLocalClassOwner::External(header.classifier)),
+                    None => return,
+                },
             },
             None => None,
+        };
+        let Some(source) = self
+            .index
+            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
+            .map(|anchor| anchor.source)
+        else {
+            return;
+        };
+        let Some(package) = self.index.source_package(source) else {
+            return;
         };
         self.ir.callable_reference_provenance.insert(
             reference as u32,
             crate::ir::IrLocalClassNameProvenance {
+                source: crate::ir::IrModuleSource { source, package },
                 lexical_owner,
                 segments: provenance.segments.clone(),
                 ordinal: provenance.ordinal,
