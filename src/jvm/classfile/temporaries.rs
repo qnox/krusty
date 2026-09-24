@@ -1365,9 +1365,17 @@ mod tests {
             op(0x04), // iconst_1
             op(0xac), // ireturn
         ];
-        let rewritten = rewrite(&insns, &[6], &[]).expect("the temporary folds");
-        assert!(!rewritten.contains(&op(ASTORE_1)), "{rewritten:?}");
-        assert!(!rewritten.contains(&op(ALOAD_1)), "{rewritten:?}");
+        assert_eq!(
+            rewrite(&insns, &[6], &[]),
+            Some(vec![
+                op(ALOAD_0),
+                branch(IFNONNULL, 6),
+                op(0x03),
+                op(0xac),
+                op(0x04),
+                op(0xac),
+            ])
+        );
     }
 
     #[test]

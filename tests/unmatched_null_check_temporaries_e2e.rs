@@ -6,10 +6,7 @@
 //! kotlinc's matcher does not match either: `if (x == null) return` jumps to a label after a return,
 //! which kotlinc's dead `nop` also reaches. So `println(label(n))` after such a guard kept its
 //! `astore; getstatic System.out; aload` where kotlinc has `getstatic System.out; swap`.
-use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{self, compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "fun label(n: Int): String = \"n=\" + n\n\
     fun guarded(x: String?, n: Int) {\n\
