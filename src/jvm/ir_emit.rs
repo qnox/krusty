@@ -374,6 +374,20 @@ pub(super) struct EmitEnv<'a> {
     java_parameters: bool,
 }
 
+/// kotlinc's `IrClass.isLocal` for a declared classifier: a class declared in executable code (a
+/// local class or an anonymous object) or nested, at any depth, in one. kotlinc's lambda and
+/// callable-reference classes are local too; their writers here annotate nothing to begin with.
+fn is_local_classifier(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
+    class.is_local_class
+        || class.is_anonymous_object
+        || class
+            .fq_name_id()
+            .existing_nested_owners()
+            .into_iter()
+            .find_map(|owner| ir.class_id_by_name(owner))
+            .is_some_and(|owner| is_local_classifier(ir, &ir.classes[owner as usize]))
+}
+
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
 ///
 /// The two strategies produce different CLASS SETS, so this is an emitter selection rather than an
@@ -3254,9 +3268,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         }
     };
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
-    // (`result$1` when mangled away from a same-named hoisted companion static).
+    // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
+    // prefix's fields (the outer instance, lexical captures) are the compiler's own: kotlinc
+    // annotates no synthetic declaration.
+    let prefix = c.constructor_prefix_count as usize;
     if !c.is_interface {
-        for f in &c.fields {
+        for f in c.fields.iter().skip(prefix) {
             if let Some(a) = ann(&f.name, f.ty) {
                 cw.set_field_nullability(&instance_field_jvm_name(ir, c, f), a);
             }
@@ -3285,11 +3302,14 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
     // Primary constructor: one parameter annotation slot per property-backed parameter.
     // Constructor PARAMETERS only — a body property is a field, never an argument, so it must not
-    // contribute a parameter-annotation slot (an all-body-property class has a `()V` ctor).
+    // contribute a parameter-annotation slot (an all-body-property class has a `()V` ctor). The
+    // prefix takes no slot either: kotlinc sizes the table by the source parameters, so an inner
+    // class's first declared parameter is annotation parameter 0, as in javac's output.
     let ctor_params: Vec<Option<&str>> = c
         .fields
         .iter()
         .take(c.ctor_param_count as usize)
+        .skip(prefix)
         .map(|f| ann(&f.name, f.ty))
         .collect();
     let ctor_desc = format!("({})V", ctor_field_descs(c));
@@ -3684,6 +3704,7 @@ fn new_classifier_writer(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
+    cw.set_nullability_annotations(!is_local_classifier(ir, c));
     cw
 }
 
@@ -5905,20 +5926,20 @@ fn emit_class(
     // (kotlinc does the same) — for both normal classes and objects.
     // A static-storage object's field table leads with INSTANCE (kotlinc's order) — its backing
     // fields are added in the object block below, after the INSTANCE field.
-    let mut field_order: Vec<&crate::ir::IrField> = if static_storage(ir, c) {
+    let mut field_order: Vec<(usize, &crate::ir::IrField)> = if static_storage(ir, c) {
         Vec::new()
     } else {
-        c.fields.iter().collect()
+        c.fields.iter().enumerate().collect()
     };
     if is_continuation {
-        field_order.sort_by_key(|field| match field.name.as_str() {
+        field_order.sort_by_key(|(_, field)| match field.name.as_str() {
             "result" => 1,
             "this$0" => 2,
             "label" => 3,
             _ => 0,
         });
     }
-    for field in field_order {
+    for (field_index, field) in field_order {
         let name = &field.name;
         let ty = &field.ty;
         // Map the field's (platform-neutral) visibility to JVM access flags: a `private` field →
@@ -5987,7 +6008,10 @@ fn emit_class(
             // field's TYPE PARAMETER (and that parameter's bound) rather than the erased descriptor —
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
+            // The constructor prefix's fields (the outer instance, lexical captures) are the
+            // compiler's own, and kotlinc annotates no synthetic declaration.
             let field_ann = match field_nullability_kind(ir, &fq_name, name, *ty) {
+                _ if field_index < c.constructor_prefix_count as usize => None,
                 1 => Some("Lorg/jetbrains/annotations/NotNull;"),
                 2 => Some("Lorg/jetbrains/annotations/Nullable;"),
                 _ => None,
