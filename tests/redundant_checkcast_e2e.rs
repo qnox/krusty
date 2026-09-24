@@ -5,9 +5,7 @@
 //! as its declared type there. krusty's `n?.plus(1)` reloaded its `Integer` temporary through a
 //! `checkcast Integer` kotlinc does not write.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "fun next(n: Int?): Int? = n?.plus(1)\n\

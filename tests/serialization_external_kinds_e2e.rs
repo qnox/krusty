@@ -9,9 +9,8 @@
 //! sealed class or object failed with `NoClassDefFoundError: …$$serializer`, and one of a
 //! dependency's generic class was rejected as unsupported.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, member_body, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::{
     both_compilers_box_against_dependency, both_compilers_box_files, reference_dependency,
 };

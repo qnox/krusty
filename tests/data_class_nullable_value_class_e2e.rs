@@ -12,9 +12,7 @@
 //! kotlinc compares the two boxes with `Intrinsics.areEqual`, and hashes a non-null box through
 //! `unbox-impl` then `hashCode-impl`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const PRIMITIVE: &str = "@JvmInline\n\
     value class PrimitiveTicket(val value: Int)\n\

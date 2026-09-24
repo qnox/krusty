@@ -1935,6 +1935,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- A `for` loop using the iterator convention evaluates its subject once as the direct receiver of the
+  checker-selected `iterator()` call. The resulting iterator is the loop state reused by `hasNext()`
+  and `next()`; common IR does not invent a separate local for the subject.
+  Test: `tests/for_loop_iterable_slot_e2e.rs`.
 - **`vararg` and `Array` in `@Metadata`.** A `vararg`'s recorded `ValueParameter.type` is
   `Array<out E>` — the OUT projection is part of the record, and the unprojected element travels
   separately as `vararg_element_type`. Independently, `kotlin/Array` in ANY signature position

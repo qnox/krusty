@@ -5,9 +5,7 @@
 //! makes on a platform value it reads (`dup; ldc; invokestatic`), because that value comes from the
 //! callee's Java call, not the caller. krusty's splice deleted both kinds.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "fun upper(text: String): String = text.uppercase()\n\
     fun lower(text: String): String = text.lowercase()\n";
