@@ -412,17 +412,10 @@ impl<'a> FileLowering<'a> {
     ///
     /// Only the PACKAGE separator becomes a dot. A `$` is Kotlin's own nesting separator and stays
     /// one — `box$MyLocalObject` is the name Kotlin/Native gives a class local to `box`, and
-    /// flattening it to `box.MyLocalObject` reads as a package that does not exist.
+    /// flattening it to `box.MyLocalObject` reads as a package that does not exist. That name is
+    /// already this target's: `lower_ir_file` realized every local classifier from its provenance.
     fn kotlin_name(&self, class: ClassId) -> String {
-        let rendered = self.ir.classes[class as usize].fq_name().replace('/', ".");
-        // Drop the FILE FACADE a class nested in one is qualified by. `castAnonymousClassKt$box$1`
-        // is the JVM's binary name for an anonymous object inside a top-level `box`, and it is
-        // right there — but there is no facade class on this target at all: a top-level property
-        // is a global and a top-level function is a symbol, neither owned by anything. Kotlin/
-        // Native names that object `box$1`, and that is what a failed cast reports.
-        //
-        // Recognizing the facade is a JVM provider detail, so it lives in `native/intrinsics`.
-        super::super::super::intrinsics::without_file_facade(&rendered).unwrap_or(rendered)
+        self.ir.classes[class as usize].fq_name().replace('/', ".")
     }
 
     /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares

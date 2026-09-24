@@ -973,3 +973,79 @@ impl super::IrFile {
                 .collect();
     }
 }
+
+impl super::IrFile {
+    /// Rename every local classifier to the physical name a target gives it, from its provenance.
+    ///
+    /// A name is its lexical owner's physical name followed by its source segments and then its
+    /// ordinal, each a nested component. A classifier with no lexical owner starts from
+    /// `root(source, first)` instead, which names its FIRST component. That start is the only
+    /// thing targets disagree on: the JVM nests the whole path in the declaring file's facade
+    /// (`AKt$box$Local`), and a target without facade classes starts it in the package
+    /// (`box$Local`).
+    pub(crate) fn realize_local_class_names(
+        &mut self,
+        root: impl Fn(super::IrModuleSource, &str) -> TypeName,
+    ) {
+        let classes = self
+            .local_class_name_provenance
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut physical = HashMap::new();
+        for class in classes {
+            physical_name(class, &root, self, &mut physical);
+        }
+        let identities = physical
+            .into_iter()
+            .map(|(class, physical)| (self.classes[class as usize].fq_name, physical))
+            .collect();
+        self.remap_classifier_identities(&identities);
+    }
+
+    /// [`Self::realize_local_class_names`] for a target without facade classes: a local
+    /// classifier that no classifier owns starts in its declaring source's package, so the one
+    /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
+    pub(crate) fn realize_local_class_names_in_packages(&mut self) {
+        self.realize_local_class_names(|source, first| {
+            crate::types::type_name_child(source.package, first)
+        });
+    }
+}
+
+fn physical_name(
+    class: ClassId,
+    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    ir: &super::IrFile,
+    cache: &mut HashMap<ClassId, TypeName>,
+) -> TypeName {
+    if let Some(name) = cache.get(&class) {
+        return *name;
+    }
+    // An owner declared outside executable code (a top-level or member classifier) already has its
+    // physical identity; only local and anonymous classifiers are named from provenance.
+    let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
+        return ir.classes[class as usize].fq_name;
+    };
+    let ordinal = provenance.ordinal.map(|ordinal| ordinal.to_string());
+    let mut components = provenance
+        .segments
+        .iter()
+        .map(String::as_str)
+        .chain(ordinal.as_deref());
+    let mut name = match provenance.lexical_owner {
+        Some(IrLocalClassOwner::Class(owner)) => physical_name(owner, root, ir, cache),
+        Some(IrLocalClassOwner::External(owner)) => owner,
+        None => {
+            let first = components
+                .next()
+                .expect("a local classifier's provenance names at least one component");
+            root(provenance.source, first)
+        }
+    };
+    for component in components {
+        name = crate::types::type_name_nested_child(name, component);
+    }
+    cache.insert(class, name);
+    name
+}

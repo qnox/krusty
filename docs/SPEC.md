@@ -6461,6 +6461,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference it is handed Kotlin's `Unit` object rather than `null`.
   Tests: `tests/native_read_only_property_delegate_e2e.rs`
   (`a_unit_answering_delegate_reads_as_the_unit_object`).
+- **Native: a local classifier is named as Kotlin/Native names it.** The frontend gives a local or
+  anonymous classifier an opaque identity plus its naming provenance (lexical owner, source
+  segments, ordinal), and each target spells the name from that. The walk is shared
+  (`IrFile::realize_local_class_names`); a target supplies only where a name with no classifier
+  owner starts. The JVM nests it in the declaring file's facade (`AKt$box$Local`). Native has no
+  facade class, so it starts in the package: the class local to a top-level `box` is
+  `box$MyLocalObject`, the first anonymous object in it `box$1`, and that is the name a failed
+  cast reports.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does`); the box corpus's
+  `casts/nativeCCEMessage` cases in the native lane.
 - **An extension receiver constrains its declared formal through the receiver's supertypes.** In
   `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
   `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
