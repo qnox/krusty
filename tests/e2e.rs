@@ -1463,6 +1463,8 @@ mod secondary_constructor_member_order_e2e;
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]
 mod secondary_ctor_this_sibling_e2e;
+#[path = "self_call_type_variables_e2e.rs"]
+mod self_call_type_variables_e2e;
 #[path = "serialization_class_serial_name_e2e.rs"]
 mod serialization_class_serial_name_e2e;
 #[path = "serialization_companion_byte_parity_e2e.rs"]
