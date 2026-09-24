@@ -6191,6 +6191,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **A computed property default is an optional element's default too.** A defaulted property is
+  written only when the encoder asks for defaults or the value differs from the default:
+  `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,
+  so `val tags: List<String> = listOf("a")` or `val next: Int = x + 1` was written every time and
+  `Json.encodeToString` (whose `encodeDefaults` is `false`) produced a longer document than kotlinc's.
+  `write$Self` now evaluates the property's checked initializer again, as kotlinc does. It works on
+  a private copy of the default: each constructor parameter the copy reads becomes that property of
+  the object being written, and the copy's own locals move above the method's.
+  A property declared in the class body with an initializer (`val tags = listOf("a")`) has a
+  default too. kotlinc makes its element optional, compares it in `write$Self` in the same way, and
+  applies the initializer in the deserialization constructor when the element is absent. krusty
+  treated such an element as required, so it wrote it every time, and decoding a document that
+  left it out threw `MissingFieldException`. The descriptor, the missing-field mask, `write$Self`
+  and the deserialization constructor now take every default from one source: the constructor
+  parameter's default, or else the body property's initializer.
+  - The deserialization constructor reads an earlier property off the object it has already
+    stored, as kotlinc does, and moves the initializer's locals above its own parameters.
+  - A parameter's default sees only the parameters before it, and its locals are numbered right
+    after them. So a value past those is one of its locals, even where a later parameter has the
+    same number.
+  - An initializer that reads the receiver (another body property, a member call) has the object
+    being written stand in for it in `write$Self`.
+  - The inlined generic shape runs on the `$serializer`, which cannot reach the object's private
+    state, so a default there that reads the receiver keeps the file unsupported. So does a default
+    that reads a constructor parameter which is not a property.
+  Tests: `tests/serialization_default_element_guard_e2e.rs`
+  (`a_computed_default_is_guarded_the_way_kotlinc_guards_it` and
+  `a_body_property_initializer_is_a_default_the_way_kotlinc_treats_it`, instruction parity with
+  kotlinc, `a_computed_default_is_omitted_from_json_like_kotlinc` and
+  `a_body_property_initializer_is_omitted_and_restored_like_kotlinc`, the JSON under both
+  compilers).
 - **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
   extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
   `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for

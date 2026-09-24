@@ -222,19 +222,14 @@ pub(super) fn add_deserialization_constructor(
         .iter()
         .any(|ty| value_class_underlying(ir, ty).is_some());
 
-    let optional = ir.classes[class_id as usize]
-        .fields
-        .iter()
-        .take(fields.len())
-        .map(crate::ir::IrField::has_default)
+    // A property is optional when it declares a default: a constructor parameter's default or a
+    // body property's initializer.
+    let optional = (0..fields.len())
+        .map(|index| super::property_default::checked_default(ir, class_id, index).is_some())
         .collect::<Vec<_>>();
     let required_masks = required_masks(&optional);
     debug_assert_eq!(required_masks.len(), mask_count);
     let owner = ir.classes[class_id as usize].fq_name_id();
-    let constructor_defaults = ir
-        .class_ctor_defaults_name(owner)
-        .cloned()
-        .unwrap_or_default();
 
     let mut delegate_prelude = Vec::new();
     if mask_count == 1 {
@@ -299,13 +294,43 @@ pub(super) fn add_deserialization_constructor(
             index: index as u32,
             value: argument,
         });
+        // The default reads an earlier property off the object, which this constructor has
+        // already stored, as kotlinc does. Its own locals move above the constructor's parameters
+        // (the marker included).
         let default = optional.then(|| {
-            let default = constructor_defaults.get(index).copied().flatten().expect(
-                "a serializable field declaring a default must retain its lowered expression",
-            );
-            let (default, _) = crate::ir::clone_expression_dag(ir, default);
-            crate::ir::shift_value_indices(ir, default, 1, mask_count as u32);
-            default
+            let mut read_argument = |ir: &mut IrFile, field: usize| {
+                let receiver = ir.add_expr(IrExpr::GetValue(0));
+                Some(ir.add_expr(IrExpr::GetField {
+                    receiver,
+                    class: class_id,
+                    index: u32::try_from(field).ok()?,
+                }))
+            };
+            super::property_default::default_in_frame(
+                ir,
+                class_id,
+                index,
+                super::property_default::DefaultFrame {
+                    first_free_local: u32::try_from(mask_count + fields.len() + 2)
+                        .expect("a constructor's parameters fit u32"),
+                    read_field: &mut read_argument,
+                    receiver: Some(0),
+                    property_line: None,
+                    read_line: None,
+                },
+            )
+            // A default reading a constructor parameter that is not a property has no argument
+            // here. Keep an explicit plugin-owned residual so the file is declined with the
+            // unsupported-IR diagnostic rather than built with a default that was never applied.
+            .unwrap_or_else(|| {
+                ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "deserialization-default",
+                    exprs: Vec::new(),
+                    data: vec![owner],
+                    types: Vec::new(),
+                })
+            })
         });
         let Some(default) = default else {
             body_stmts.push(store_argument);
