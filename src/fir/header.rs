@@ -444,6 +444,7 @@ pub struct HeaderParameter {
     /// Lookup input only. Selected call arguments later use a stable callable and parameter ordinal.
     pub name: LookupNameId,
     pub ty: HeaderTypeId,
+    pub context_kind: crate::types::ContextParameterKind,
     pub flags: HeaderParameterFlags,
     pub span: Span,
     /// Declaration annotations attached to the value parameter.
@@ -526,6 +527,9 @@ pub enum HeaderDeclarationKind {
     Property {
         receiver: Option<HeaderTypeId>,
         context_parameters: HeaderParameterRange,
+        /// Exact source name of a written setter parameter. An absent/default setter has no source
+        /// parameter declaration and is projected separately by each target.
+        setter_parameter_name: Option<LookupNameId>,
         declared_type: Option<HeaderTypeId>,
         getter_type: Option<HeaderTypeId>,
         backing_field_type: Option<HeaderTypeId>,
@@ -2254,6 +2258,7 @@ pub fn extract_file_header_syntax(
             packed.push(HeaderParameter {
                 name: names.intern(&parameter.name),
                 ty: headers.add_type(&parameter.ty, names),
+                context_kind: parameter.context_kind,
                 flags: HeaderParameterFlags::default()
                     .with(HeaderParameterFlags::VARARG, parameter.is_vararg)
                     .with(HeaderParameterFlags::DEFAULT, parameter.default.is_some())
@@ -2290,6 +2295,7 @@ pub fn extract_file_header_syntax(
             packed.push(HeaderParameter {
                 name: names.intern(&parameter.name),
                 ty: headers.add_type(&parameter.ty, names),
+                context_kind: crate::types::ContextParameterKind::None,
                 flags: HeaderParameterFlags::default()
                     .with(HeaderParameterFlags::VARARG, parameter.is_vararg)
                     .with(HeaderParameterFlags::DEFAULT, parameter.default.is_some())
@@ -2455,6 +2461,11 @@ pub fn extract_file_header_syntax(
             &file.type_annotations,
         );
         let annotations = annotation_types(headers, names, &property.annotations);
+        let setter_parameter_name = property
+            .setter
+            .as_ref()
+            .and_then(|setter| setter.param.as_deref())
+            .map(|name| names.intern(name));
         let declared_type = property.ty.as_ref().map(|ty| headers.add_type(ty, names));
         let getter_type = property
             .getter_ty
@@ -2481,6 +2492,7 @@ pub fn extract_file_header_syntax(
             kind: HeaderDeclarationKind::Property {
                 receiver,
                 context_parameters,
+                setter_parameter_name,
                 declared_type,
                 getter_type,
                 backing_field_type,
@@ -2698,6 +2710,7 @@ pub fn extract_file_header_syntax(
                 kind: HeaderDeclarationKind::Property {
                     receiver: None,
                     context_parameters: HeaderParameterRange::default(),
+                    setter_parameter_name: None,
                     declared_type,
                     getter_type: None,
                     backing_field_type: None,

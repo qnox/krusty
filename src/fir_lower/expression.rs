@@ -345,6 +345,7 @@ impl BodyLowering<'_> {
                                 .iter()
                                 .map(|(_, ty)| crate::ir::IrCtorArg {
                                     name: None,
+                                    context_kind: crate::types::ContextParameterKind::None,
                                     ty: *ty,
                                     declared_ty: None,
                                     is_field: false,

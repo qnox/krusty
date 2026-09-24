@@ -6,7 +6,7 @@ mod return_labels;
 mod traversal;
 use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::types::Visibility;
+use crate::types::{ContextParameterKind, Visibility};
 use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
 use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
@@ -588,6 +588,10 @@ pub struct AnnotatedTypeParameter {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    /// Exact role written in a `context(...)` clause. This distinguishes Kotlin 2.4 anonymous
+    /// context parameters (`_: T`) from legacy unnamed context receivers (`T`); both lack a source
+    /// binding but have different target debug/reflection conventions.
+    pub context_kind: ContextParameterKind,
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,

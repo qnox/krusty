@@ -13,7 +13,22 @@ use crate::types::TypeName;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolvedParameterIdentity {
     Source(Box<str>),
-    CompilerGenerated(u32),
+    /// The declaration/provider publishes no source name for this parameter. The ordinal is stable
+    /// semantic position only; targets must not turn it into a fabricated `pN` spelling.
+    Unnamed {
+        ordinal: u32,
+    },
+    ContextValue {
+        ordinal: u32,
+        source_name: Box<str>,
+    },
+    AnonymousContextParameter {
+        ordinal: u32,
+    },
+    LegacyContextReceiver {
+        ordinal: u32,
+    },
+    ExtensionReceiver,
     PropertySetterValue,
     SuspendCompletion,
 }

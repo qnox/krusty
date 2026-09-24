@@ -1255,7 +1255,7 @@ pub struct IrFunction {
     /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
-    pub param_checks: Vec<Option<String>>,
+    pub param_checks: Vec<Option<IrParameterCheck>>,
 }
 
 /// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index
@@ -1413,6 +1413,9 @@ impl IrField {
 pub struct IrCtorArg {
     /// Source parameter name. Synthetic constructor parameters have no name.
     pub name: Option<String>,
+    /// Exact source role for a classifier context parameter. `None` means an ordinary or
+    /// compiler-generated constructor argument; targets must not infer this from `name`.
+    pub context_kind: crate::types::ContextParameterKind,
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
@@ -1472,7 +1475,7 @@ pub struct IrProperty {
     pub name: String,
     /// Named context parameters in source order. Metadata records these separately from ordinary
     /// value parameters, and checked call sites supply their operands implicitly.
-    pub context_params: Vec<(String, Ty)>,
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
     /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
     /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
     pub source_order: u32,
@@ -1959,7 +1962,8 @@ impl IrClass {
             .iter()
             .enumerate()
             .map(|(field, parameter)| IrCtorArg {
-                name: None,
+                name: parameter.name.as_deref().map(str::to_owned),
+                context_kind: parameter.kind,
                 ty: crate::types::stored_value_ty(parameter.ty.get()),
                 declared_ty: Some(parameter.ty.get()),
                 is_field: true,
@@ -2448,10 +2452,11 @@ pub struct IrFile {
     /// side table filled at lowering, where the AST member is still in hand. Only members that
     /// actually spell an alias get an entry.
     pub fn_declared_spellings: std::collections::HashMap<u32, crate::spelling::DeclaredSpellings>,
-    /// Source declaration name for a function whose target realization renamed it. Common lowering
-    /// initially keeps the Kotlin name on [`IrFunction`]; a backend records that name here before
-    /// replacing it with a physical spelling such as JVM `@JvmName` or a later value-class mangle.
-    /// Metadata/reflection consume this semantic name while calls use the realized function name.
+    /// Exact source declaration name for every checked function realization. Common lowering
+    /// publishes it while the stable declaration identity is live; a backend may then replace
+    /// [`IrFunction::name`] with a physical spelling such as JVM `@JvmName` or a value-class mangle.
+    /// Metadata, reflection, and receiver-name projection consume this semantic name and never
+    /// recover it from the realized function spelling.
     pub fn_source_names: std::collections::HashMap<u32, String>,
     /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
     /// bounds), keyed by the class's fully-qualified name.
@@ -2986,6 +2991,7 @@ pub struct IrPackageProperty {
     pub receiver: Option<Ty>,
     pub context_parameters: Vec<Ty>,
     pub context_parameter_names: Vec<String>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     pub is_const: bool,
     pub has_constant: bool,
     pub visibility: crate::types::Visibility,
@@ -3521,9 +3527,6 @@ impl IrFile {
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
-    pub fn param_names(&self, fid: u32) -> Option<&[String]> {
-        Some(&self.fn_params.get(&fid)?.names)
-    }
     pub(crate) fn set_debug_local_provenance(
         &mut self,
         declaration: ExprId,
@@ -3537,6 +3540,51 @@ impl IrFile {
     ) -> Option<IrDebugLocalProvenance> {
         self.debug_local_provenance.get(&declaration).copied()
     }
+    /// Is `expression` a declaration's initializer store that writes only what a freshly allocated
+    /// object's storage already holds, and so must not be emitted?
+    ///
+    /// `var x = 0` in a class body stores nothing: kotlinc omits an initializer that writes the
+    /// value fresh storage already holds (`null`, a zero of any width, `false`). The omission is
+    /// observable, not an optimization: a base-class constructor that dispatches to an override runs
+    /// BEFORE the subclass's initializers, so a value it wrote through that override survives
+    /// exactly because the declaration's own store was never emitted. A later `init { x = 0 }` is a
+    /// different statement with a different meaning, which is why the store's exact identity comes
+    /// from `property_initializer_stores` rather than from its shape.
+    ///
+    /// Every target krusty emits for clears an object's storage when it allocates, so this is one
+    /// rule for every backend.
+    pub fn is_elided_initializer_store(&self, expression: ExprId) -> bool {
+        self.property_initializer_stores.contains(&expression)
+            && matches!(self.expr(expression), IrExpr::SetField { value, .. }
+                if self.is_storage_default(*value))
+    }
+
+    /// Is `expression` the value a freshly allocated object's storage already holds: `null`, a zero
+    /// of any width (signed or unsigned, whose carrier is the same), or `false`?
+    pub fn is_storage_default(&self, expression: ExprId) -> bool {
+        match self.expr(expression) {
+            IrExpr::Const(IrConst::Boolean(false))
+            | IrExpr::Const(IrConst::Byte(0))
+            | IrExpr::Const(IrConst::Short(0))
+            | IrExpr::Const(IrConst::Int(0))
+            | IrExpr::Const(IrConst::Long(0))
+            | IrExpr::Const(IrConst::Char(0))
+            | IrExpr::Const(IrConst::UByte(0))
+            | IrExpr::Const(IrConst::UShort(0))
+            | IrExpr::Const(IrConst::UInt(0))
+            | IrExpr::Const(IrConst::ULong(0))
+            | IrExpr::Const(IrConst::Null) => true,
+            IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
+            IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.is_storage_default(*arg),
+            _ => false,
+        }
+    }
+
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
     }
@@ -3577,7 +3625,10 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod function_parameters;
-pub use function_parameters::FnParamInfo;
+pub use function_parameters::{
+    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
+    IrParameterProvenance, IrParameterRole,
+};
 mod traversal;
 pub use traversal::*;
 mod clone;

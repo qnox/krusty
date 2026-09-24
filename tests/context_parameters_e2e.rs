@@ -58,6 +58,24 @@ fn contextual_member_extension_retains_default_type_after_unnamed_context() {
 }
 
 #[test]
+fn named_and_anonymous_context_parameters_keep_their_declaration_positions() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        context(_: String, count: Int) fun inspect(): String = count.toString()\n\
+        fun box(): String = with(\"unused\") { with(42) {\n\
+        \x20 if (inspect() == \"42\") \"OK\" else \"fail\"\n\
+        } }\n";
+    let output = run(SRC).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(
+            SRC,
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        );
+        panic!("mixed context parameter kinds failed: {diagnostics:?}")
+    });
+    assert_eq!(output, "OK");
+}
+
+#[test]
 fn context_operator_get_and_set_receive_the_implicit_context() {
     const SRC: &str = "// LANGUAGE: +ContextParameters\n\
         class Box(var value: String)\n\
@@ -260,6 +278,42 @@ fn explicit_context_arguments_map_dependency_metadata() {
         fun box() = combine(first = "O", second = "K")
     "#;
     let out = common::expect_box_run_against_ref("explicitcontextdependency", LIBRARY, CALLER)
+        .expect("reference compiler unavailable");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn legacy_context_receivers_keep_their_metadata_shape_across_a_dependency() {
+    const LIBRARY: &str = r#"
+        // LANGUAGE: +ContextReceivers
+        package dependency
+        context(String)
+        fun read(): String = this@String
+    "#;
+    const CALLER: &str = r#"
+        // LANGUAGE: +ContextReceivers
+        import dependency.read
+        fun box(): String = with("OK") { read() }
+    "#;
+    let out = common::expect_box_run_against_ref("legacycontextmetadata", LIBRARY, CALLER)
+        .expect("reference compiler unavailable");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn anonymous_context_parameters_keep_their_metadata_shape_across_a_dependency() {
+    const LIBRARY: &str = r#"
+        // LANGUAGE: +ContextParameters
+        package dependency
+        context(_: String)
+        fun read(): String = "OK"
+    "#;
+    const CALLER: &str = r#"
+        // LANGUAGE: +ContextParameters
+        import dependency.read
+        fun box(): String = with("scope") { read() }
+    "#;
+    let out = common::expect_box_run_against_ref("anonymouscontextmetadata", LIBRARY, CALLER)
         .expect("reference compiler unavailable");
     assert_eq!(out, "OK");
 }
@@ -818,6 +872,17 @@ fn contextual_class_retains_context_for_member_bodies() {
         context(A)
         class B { fun result(): String = value }
         fun box(): String = with(A("OK")) { B() }.result()
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
+fn named_context_parameter_on_a_class_binds_its_member_body() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        context(label: String)
+        class Holder { fun result(): String = label }
+        fun box(): String = with("OK") { Holder() }.result()
     "#;
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
