@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "common/bytecode_comparison.rs"]
+mod bytecode_comparison_support;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]
@@ -12,6 +14,7 @@ mod e2e_support;
 mod recorded_support;
 
 mod common {
+    pub use super::bytecode_comparison_support::*;
     pub use super::common_core::*;
     pub use super::e2e_support::*;
     pub use super::recorded_support::{recorded, recorded_line, recorded_named};

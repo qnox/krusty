@@ -8,9 +8,7 @@
 //! call, as did the bare `return` a `Unit` member written `= unitCall(…)` ends with. Each such member
 //! got a continuation class and a one-state machine.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const LIBRARY: &str = "package dependency\n\
     @JvmInline value class ParcelId(val raw: Int)\n\

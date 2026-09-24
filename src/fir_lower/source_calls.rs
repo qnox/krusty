@@ -1390,10 +1390,10 @@ impl BodyLowering<'_> {
             .owner
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
-        // An extension receiver is inserted among context/value parameters below. Keep that rarer
-        // shape on the general spill path; an ordinary receiver plus already ordered value arguments
-        // maps directly to the JVM operand order without any temporary.
-        let direct = extension_receiver.is_none()
+        // An extension receiver is inserted among context/value parameters below. With no other
+        // arguments it is already in physical order and stays direct; when arguments compete for
+        // that position, the general spill path preserves their checked source evaluation order.
+        let direct = (extension_receiver.is_none() || arguments.is_empty())
             && !declaration_flags.has(crate::fir::DeclarationFlags::TAILREC)
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
             && arguments_follow_parameter_order(arguments, None);
@@ -1430,7 +1430,11 @@ impl BodyLowering<'_> {
             Some(receiver) => {
                 let ty = declared_extension_receiver?;
                 let specialized = crate::types::ty_subst_keep_unbound(ty.get(), &bindings);
-                let receiver = self.spill_call_operand(receiver, specialized, &mut statements);
+                let receiver = if direct {
+                    self.direct_call_operand(receiver, specialized)
+                } else {
+                    self.spill_call_operand(receiver, specialized, &mut statements)
+                };
                 Some(if !specialized.is_reference() && ty.get().is_reference() {
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,

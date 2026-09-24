@@ -5,9 +5,8 @@
 //! included. Only `java/lang/Object` is never cast to. krusty cast only an erased `Object`, so a
 //! `String` passed as a `CharSequence`, or a subclass returned as its base, had no `checkcast`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_files_with_kotlinc_plugin, compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
+use super::serialization_companion_byte_parity_e2e::compare_files_with_kotlinc_plugin;
 
 const SOURCE: &str = "open class Base\n\
     class Derived : Base()\n\

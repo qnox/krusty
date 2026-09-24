@@ -1,48 +1,144 @@
-//! A `for` loop over an iterable calls `iterator()` on the iterable value, taking no local for it.
+//! Iterator-protocol loops pass their checked subject directly to `iterator()`.
 //!
-//! kotlinc lowers `for (x in xs)` to `val it = xs.iterator(); while (it.hasNext()) …`. krusty first
-//! stored the iterable in a temporary and called `iterator()` on that. The bytecode pass folded the
-//! one store and load, but the temporary's slot stayed reserved, so the iterator, the loop variable
-//! and every later local sat one slot above kotlinc's.
-use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+//! Repository-owned protocol declarations keep this regression on the generic dispatch, extension,
+//! and member-extension paths rather than a stdlib classifier that may acquire specialized lowering.
 
-const SOURCE: &str = "fun words(): Sequence<String> = sequenceOf(\"a\", \"bb\")\n\
-    fun counted(): Int {\n\
-    \x20   var sum = 0\n\
-    \x20   for (word in words()) {\n\
-    \x20       sum += word.length\n\
-    \x20   }\n\
-    \x20   return sum\n\
-    }\n\
-    fun listed(xs: List<String>): Int {\n\
-    \x20   var n = 0\n\
-    \x20   for (x in xs) n += x.length\n\
-    \x20   return n\n\
-    }\n";
+use super::common::{self, compare_with_kotlinc_plugin, method_instructions};
+
+const SOURCE: &str = r#"
+var trace = 0
+
+fun mark(digit: Int) {
+    trace = trace * 10 + digit
+}
+
+class Cursor(private val end: Int) {
+    private var current = 0
+
+    operator fun hasNext(): Boolean = current < end
+
+    operator fun next(): Int {
+        val value = current
+        current++
+        return value
+    }
+}
+
+class DispatchRange(private val end: Int) {
+    operator fun iterator(): Cursor {
+        mark(2)
+        return Cursor(end)
+    }
+}
+
+fun dispatchSubject(): DispatchRange {
+    mark(1)
+    return DispatchRange(3)
+}
+
+fun dispatchLoop(): Int {
+    var sum = 0
+    for (value in dispatchSubject()) sum += value
+    return sum
+}
+
+class ExtensionRange(val end: Int)
+
+fun extensionSubject(): ExtensionRange {
+    mark(1)
+    return ExtensionRange(3)
+}
+
+operator fun ExtensionRange.iterator(): Cursor {
+    mark(2)
+    return Cursor(end)
+}
+
+fun extensionLoop(): Int {
+    var sum = 0
+    for (value in extensionSubject()) sum += value
+    return sum
+}
+
+class MemberRange(val end: Int)
+
+fun memberSubject(): MemberRange {
+    mark(1)
+    return MemberRange(3)
+}
+
+class RangeScope {
+    operator fun MemberRange.iterator(): Cursor {
+        mark(2)
+        return Cursor(end)
+    }
+
+    fun memberExtensionLoop(): Int {
+        var sum = 0
+        for (value in memberSubject()) sum += value
+        return sum
+    }
+}
+
+fun box(): String {
+    trace = 0
+    if (dispatchLoop() != 3 || trace != 12) return "FAIL dispatch: $trace"
+    trace = 0
+    if (extensionLoop() != 3 || trace != 12) return "FAIL extension: $trace"
+    trace = 0
+    if (RangeScope().memberExtensionLoop() != 3 || trace != 12) {
+        return "FAIL member extension: $trace"
+    }
+    return "OK"
+}
+"#;
+
+fn assert_methods_match(built: &common::ReferenceComparison, methods: &[&str]) {
+    for method in methods {
+        let reference = method_instructions(&built.reference, method);
+        assert!(
+            !reference.is_empty(),
+            "{method} not found in kotlinc output"
+        );
+        assert_eq!(
+            method_instructions(&built.krusty, method),
+            reference,
+            "{method}"
+        );
+    }
+}
 
 #[test]
-fn a_for_loop_iterator_takes_kotlincs_slot() {
-    let Some(built) = compare_with_kotlinc_plugin(
-        "ForLoopIterableSlot",
+fn iterator_protocol_receivers_take_kotlincs_slots() {
+    let classpath = [common::stdlib_jar()];
+    let Some(top_level) = compare_with_kotlinc_plugin(
+        "IteratorProtocolSlots",
         SOURCE,
-        "ForLoopIterableSlotKt",
-        &[common::stdlib_jar()],
+        "IteratorProtocolSlotsKt",
+        &classpath,
         "25",
         &[],
     ) else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    for member in ["int counted(", "int listed("] {
-        let reference = method_instructions(&built.reference, member);
-        assert!(!reference.is_empty(), "{member} not found");
-        assert_eq!(
-            method_instructions(&built.krusty, member),
-            reference,
-            "{member}"
-        );
-    }
+    assert_methods_match(&top_level, &["int dispatchLoop(", "int extensionLoop("]);
+
+    let Some(member_extension) = compare_with_kotlinc_plugin(
+        "IteratorProtocolSlots",
+        SOURCE,
+        "RangeScope",
+        &classpath,
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_methods_match(&member_extension, &["int memberExtensionLoop("]);
+}
+
+#[test]
+fn iterator_protocol_subject_is_evaluated_once_before_iterator() {
+    common::expect_box_same_as_kotlinc(SOURCE, "IteratorProtocolOrder");
 }

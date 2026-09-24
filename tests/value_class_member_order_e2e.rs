@@ -7,7 +7,7 @@
 //! krusty emitted `<init>` first and the representation members before the `Any` overrides, so no
 //! value class matched, and it marked a secondary constructor's `constructor-impl` `final`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::compare_with_kotlinc_plugin;
+use super::common::compare_with_kotlinc_plugin;
 
 /// The class's methods as `(access, name, descriptor)` in class-file order.
 fn members(bytes: &[u8]) -> Vec<(u16, String, String)> {

@@ -10,9 +10,7 @@
 //! again (`simplifyKnownSafeCallPatterns`): `aload x; ifnonnull L; …; L: aload x` becomes
 //! `aload x; dup; ifnonnull L; pop; …; L:`, and the jump target's frame carries the value.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "fun label(n: Int): String = \"n=\" + n\n\
     fun printed(n: Int) {\n\
