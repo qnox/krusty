@@ -873,13 +873,18 @@ impl<'a> CommonIrBodySink<'a> {
             }
         }
         for (class, provenance) in pending_local_names {
+            // An inline payload's local classifier may be owned by a classifier of its declaring
+            // source that this file does not realize; that owner is named by its identity.
             let lexical_owner = provenance
                 .lexical_owner
                 .map(|owner| {
-                    self.ir
-                        .checked_classifier_classes
-                        .get(&owner)
-                        .copied()
+                    if let Some(&class) = self.ir.checked_classifier_classes.get(&owner) {
+                        return Ok(crate::ir::IrLocalClassOwner::Class(class));
+                    }
+                    index
+                        .classifier_header(owner)
+                        .filter(|_| index.local_class_name_provenance(owner).is_none())
+                        .map(|header| crate::ir::IrLocalClassOwner::External(header.classifier))
                         .ok_or(FirFileLoweringFailure::MissingClassifier(owner))
                 })
                 .transpose()?;
@@ -889,6 +894,12 @@ impl<'a> CommonIrBodySink<'a> {
                     .insert(
                         class,
                         crate::ir::IrLocalClassNameProvenance {
+                            source: crate::ir::IrModuleSource {
+                                source: provenance.source,
+                                package: index.source_package(provenance.source).ok_or(
+                                    FirFileLoweringFailure::MissingSourcePackage(provenance.source),
+                                )?,
+                            },
                             lexical_owner,
                             segments: provenance.segments,
                             ordinal: provenance.ordinal,

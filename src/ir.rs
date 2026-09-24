@@ -58,7 +58,7 @@ pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use intrinsic::IrIntrinsic;
-pub(crate) use local_class_names::IrLocalClassNameProvenance;
+pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;

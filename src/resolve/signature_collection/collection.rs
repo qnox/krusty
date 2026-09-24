@@ -971,8 +971,17 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // package (or an alias/import), which would register this class's signature
                     // under the wrong internal. Only fall back to it for shapes whose internal
                     // isn't the plain `class_internal` form (e.g. remapped lexical nestings).
+                    // A compact classifier's stable identity is authoritative: a local
+                    // classifier's source path (`outer.Local`) is not unique across files, so a
+                    // spelling lookup could bind another file's local classifier.
                     let own_internal = class_internal(file, &c.name);
-                    let internal = if user_defined.contains(&type_name(&own_internal)) {
+                    let compact_identity = compact_headers
+                        .zip(compact_classifier)
+                        .and_then(|(headers, stub)| compact_classifier_identity(headers, stub))
+                        .map(|(_, identity)| identity.render());
+                    let internal = if let Some(identity) = compact_identity {
+                        identity
+                    } else if user_defined.contains(&type_name(&own_internal)) {
                         own_internal
                     } else {
                         class_names

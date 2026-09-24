@@ -8,10 +8,23 @@ use super::{
     Callee, ClassId, IrCallableReferenceTarget, IrCheckedArgument, IrCheckedOperation, IrExpr,
 };
 
+/// The classifier that lexically owns a local classifier's executable context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IrLocalClassOwner {
+    /// A classifier realized in this IR file.
+    Class(ClassId),
+    /// A classifier declared outside executable code in another source, reached when this file
+    /// realizes an inline payload's local classifier. Its identity is already its physical name.
+    External(TypeName),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IrLocalClassNameProvenance {
+    /// Source file whose facade roots the name when there is no lexical owner. An inline payload
+    /// classifier keeps its declaring source's facade, not the file that realizes the payload.
+    pub source: super::IrModuleSource,
     /// Exact source classifier that lexically owns this executable context, or the file facade.
-    pub lexical_owner: Option<ClassId>,
+    pub lexical_owner: Option<IrLocalClassOwner>,
     /// Source declaration identities below the owner (callable/property/local/class names).
     pub segments: Box<[String]>,
     /// Shared generated-artifact position for an unnamed classifier.

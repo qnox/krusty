@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ClassId, IrFile};
-use crate::types::{type_name, type_name_nested_child, TypeName};
+use crate::ir::{ClassId, IrFile, IrLocalClassOwner, IrModuleSource};
+use crate::types::{type_name_nested_child, TypeName};
 
 fn physical_name(
     class: ClassId,
-    facade: TypeName,
+    facade: &impl Fn(IrModuleSource) -> TypeName,
     ir: &IrFile,
     cache: &mut HashMap<ClassId, TypeName>,
 ) -> TypeName {
@@ -19,10 +19,11 @@ fn physical_name(
     let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
         return ir.classes[class as usize].fq_name;
     };
-    let mut name = provenance
-        .lexical_owner
-        .map(|owner| physical_name(owner, facade, ir, cache))
-        .unwrap_or(facade);
+    let mut name = match provenance.lexical_owner {
+        Some(IrLocalClassOwner::Class(owner)) => physical_name(owner, facade, ir, cache),
+        Some(IrLocalClassOwner::External(owner)) => owner,
+        None => facade(provenance.source),
+    };
     for segment in provenance.segments.iter() {
         name = type_name_nested_child(name, segment);
     }
@@ -33,8 +34,9 @@ fn physical_name(
     name
 }
 
-pub(crate) fn realize(ir: &mut IrFile, facade: &str) {
-    let facade = type_name(facade);
+/// Rename every local classifier to its JVM name. `facade` names the file facade of a source,
+/// which roots a local classifier declared outside any classifier.
+pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeName) {
     let classes = ir
         .local_class_name_provenance
         .keys()
@@ -42,7 +44,7 @@ pub(crate) fn realize(ir: &mut IrFile, facade: &str) {
         .collect::<Vec<_>>();
     let mut physical = HashMap::new();
     for class in classes {
-        physical_name(class, facade, ir, &mut physical);
+        physical_name(class, &facade, ir, &mut physical);
     }
     let identities = physical
         .into_iter()

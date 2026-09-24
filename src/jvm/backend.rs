@@ -913,7 +913,11 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
-        crate::jvm::local_class_names::realize(&mut file.ir, &facade);
+        let stems = &file.stems;
+        crate::jvm::local_class_names::realize(&mut file.ir, |source| {
+            crate::jvm::module_calls::facade_for(source, stems)
+                .expect("a local classifier's declaring source has a file stem")
+        });
         if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
             diags.error(
                 crate::diag::Span::new(0, 0),
