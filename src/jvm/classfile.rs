@@ -18,6 +18,7 @@ mod negated_jumps;
 mod null_checks;
 mod redundant_checkcasts;
 mod redundant_gotos;
+mod stack_maps;
 mod stack_peephole;
 mod temporaries;
 
@@ -2465,7 +2466,27 @@ impl ClassWriter {
         // computed when the method actually has frames — `append_param_verif_types` interns the
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
         let mut stackmap_baseline = None;
-        let stackmap = if code.has_frames() {
+        // The table the instructions imply, encoded now so its classes intern where kotlinc's writer
+        // interns them; `finish` recomputes it over the final body. Without a computation, the
+        // frames recorded while emitting.
+        let body = stack_maps::Body {
+            access,
+            name,
+            descriptor: desc,
+            code: &code.bytes,
+            exceptions: &code.resolved_exceptions(),
+            labels: stack_maps::builder_labels(
+                code.line_marks(),
+                code.local_entries(),
+                code.bytes.len(),
+            ),
+        };
+        let computed = if code.bytes.is_empty() {
+            None
+        } else {
+            self.compute_frames(&body).ok()
+        };
+        if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
             let mut initial_locals: Vec<VerifType> = Vec::new();
             if access & ACC_STATIC == 0 {
@@ -2475,11 +2496,13 @@ impl ClassWriter {
                     VerifType::ObjectName(self.internal_name.clone())
                 });
             }
-            let baseline =
+            stackmap_baseline =
                 Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
-            let stackmap = code.build_stackmap(baseline.as_deref(), &mut self.cp);
-            stackmap_baseline = baseline;
-            stackmap
+        }
+        let stackmap = if let Some(computed) = &computed {
+            self.encode_frames(&body, computed)
+        } else if code.has_frames() {
+            code.build_stackmap(stackmap_baseline.as_deref(), &mut self.cp)
         } else {
             None
         };
@@ -2727,6 +2750,8 @@ impl ClassWriter {
     pub fn finish(mut self) -> Vec<u8> {
         // Every method's tables are final now; kotlinc's bytecode rewrites run over them.
         self.rewrite_methods();
+        // Every body is final now: write the frames it implies.
+        self.compute_stack_maps();
         // A class that never attached `@Metadata` still realizes its deferred fields first —
         // kotlinc's field visit precedes every class-attribute window.
         self.intern_late_fields();

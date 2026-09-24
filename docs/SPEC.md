@@ -6621,6 +6621,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/java_member_flexible_return_e2e.rs` (`java_member_return_keeps_the_callers_type_arguments`
   and `jdk_collection_index_keeps_the_callers_type_arguments`, both run against kotlinc, and
   `java_member_return_callers_match_kotlinc_bytes`, byte-identical to kotlinc).
+- **Stack-map frames are computed from the written method, as kotlinc's writer computes them.**
+  kotlinc never records a frame: its class writer is ASM `ClassWriter(COMPUTE_MAXS |
+  COMPUTE_FRAMES)` whose `getCommonSuperClass` answers `java/lang/Object` for every pair. krusty
+  computes each method's `StackMapTable` the same way once the class is written, after its bytecode
+  rewrites (`jvm::classfile::stack_maps` over `bytecode_analysis::FrameComputation`): blocks split at
+  every jump, protected range, line number and local-range bound; references of different classes
+  meet at `Object`; a block nothing reaches becomes `nop`s ending in `athrow`, framed with a
+  `Throwable` and cut out of the exception table. A body the analysis cannot step (stacks of
+  different heights meeting) keeps the frames recorded while emitting. Because two classes join as
+  `Object`, kotlinc casts each value to the type the join has in Kotlin before it gets there
+  (`StackValue.coerce`: a `checkcast` whenever the JVM types differ and the target is not `Object`),
+  and so does krusty: a reassigned local is coerced to its declared type like its initializer, and a
+  boxed primitive from its wrapper to a wider target such as `Number` (the constant side of
+  `t ?: 42` over `T : Number?`). Tests: `tests/computed_frames_e2e.rs` (runs, byte-identical facades, and
+  every written table equal to the computed one), `tests/frame_computation_e2e.rs` (the computation
+  reproduces kotlinc's own tables).
 
 ## 8. Success criteria for the PoC
 

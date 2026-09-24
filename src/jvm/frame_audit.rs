@@ -163,7 +163,7 @@ fn audit_method(code: &MethodCode, access: u16, name: &str, descriptor: &str) ->
         pool: &pool,
     };
     let computed = match computation.compute(access, name, descriptor) {
-        Ok(frames) => frames,
+        Ok(computed) => computed.frames,
         Err(decline) => return declined(describe_decline(&decline, &offsets)),
     };
     let stored = match &code.stackmap {

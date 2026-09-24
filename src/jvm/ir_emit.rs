@@ -14116,7 +14116,10 @@ impl<'a> Emitter<'a> {
                     Some(d) if (-128..=127).contains(&d) => code.iinc(slot, d as i8),
                     _ => {
                         self.emit_value(value, code);
-                        emit_num_conv(self.value_ty(value), jt, code);
+                        // Coerced to the slot's type as the initializer is: a value of another
+                        // class is cast to the declared one, which is what a join of the two
+                        // stores reads back.
+                        self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
                         store(jt, slot, code);
                     }
                 }

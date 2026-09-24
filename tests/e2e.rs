@@ -387,6 +387,8 @@ mod comparison_under_operands_e2e;
 mod compound_index_assign_e2e;
 #[path = "compound_member_assign_lhs_caching_e2e.rs"]
 mod compound_member_assign_lhs_caching_e2e;
+#[path = "computed_frames_e2e.rs"]
+mod computed_frames_e2e;
 #[path = "computed_prop_e2e.rs"]
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
