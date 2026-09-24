@@ -65,7 +65,10 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
         declaration,
     );
     move_fact(&mut ir.fn_declared_spellings, implementation, declaration);
-    move_fact(&mut ir.fn_source_names, implementation, declaration);
+    // Both surfaces project parameter/debug names from the declaration spelling: the trampoline
+    // is the metadata declaration, while the static body carrier still owns the implementation's
+    // LocalVariableTable. Neither may derive it from the `$suspendImpl` physical name.
+    copy_fact(&mut ir.fn_source_names, implementation, declaration);
     move_fact(&mut ir.fn_context_counts, implementation, declaration);
     move_fact(&mut ir.fn_param_no_infer, implementation, declaration);
     move_fact(&mut ir.fn_equality_bounds, implementation, declaration);
@@ -183,6 +186,21 @@ pub(crate) fn lower_suspend_interface_impls(ir: &mut IrFile) {
             ir.fn_debug_locals.insert(trampoline);
             move_declaration_facts(ir, fid, trampoline);
             split_signature_facts(ir, fid, trampoline);
+            // The trampoline now IS the source declaration; the original id is only its JVM body
+            // carrier. Retarget the stable checked-callable edge at the same identity split so
+            // metadata and later exact call/reference consumers never infer declaration ownership
+            // from either generated method spelling.
+            let mut source_declaration_retargeted = false;
+            for realization in ir.checked_callable_functions.values_mut() {
+                if *realization == fid {
+                    *realization = trampoline;
+                    source_declaration_retargeted = true;
+                }
+            }
+            assert!(
+                source_declaration_retargeted,
+                "a suspend interface declaration retains its checked callable identity"
+            );
             ir.jvm_suspend_interface_bodies
                 .insert(fid, (owner, trampoline));
             // The original becomes the static, named `<name>$suspendImpl`, with the receiver as

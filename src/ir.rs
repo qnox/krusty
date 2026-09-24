@@ -2452,10 +2452,11 @@ pub struct IrFile {
     /// side table filled at lowering, where the AST member is still in hand. Only members that
     /// actually spell an alias get an entry.
     pub fn_declared_spellings: std::collections::HashMap<u32, crate::spelling::DeclaredSpellings>,
-    /// Source declaration name for a function whose target realization renamed it. Common lowering
-    /// initially keeps the Kotlin name on [`IrFunction`]; a backend records that name here before
-    /// replacing it with a physical spelling such as JVM `@JvmName` or a later value-class mangle.
-    /// Metadata/reflection consume this semantic name while calls use the realized function name.
+    /// Exact source declaration name for every checked function realization. Common lowering
+    /// publishes it while the stable declaration identity is live; a backend may then replace
+    /// [`IrFunction::name`] with a physical spelling such as JVM `@JvmName` or a value-class mangle.
+    /// Metadata, reflection, and receiver-name projection consume this semantic name and never
+    /// recover it from the realized function spelling.
     pub fn_source_names: std::collections::HashMap<u32, String>,
     /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
     /// bounds), keyed by the class's fully-qualified name.

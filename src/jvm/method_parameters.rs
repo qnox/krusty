@@ -199,13 +199,10 @@ pub(super) fn primary_constructor(
 pub(super) fn primary_constructor_identities(
     class: &IrClass,
     physical_parameters: &[Ty],
-) -> Vec<String> {
+) -> Vec<Option<String>> {
     let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
-        .into_iter()
-        .map(|name| name.expect("a marker constructor parameter needs a JVM local identity"))
-        .collect()
 }
 
 /// Everything a class KIND prepends to EVERY constructor it declares, ahead of what the
@@ -278,7 +275,7 @@ pub(super) fn secondary_constructor_identities(
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
     physical_parameters: &[Ty],
-) -> Vec<String> {
+) -> Vec<Option<String>> {
     assert_eq!(
         owner_prefix.len() + constructor.prefix_params.len() + constructor.named_params.len(),
         physical_parameters.len(),
@@ -292,10 +289,7 @@ pub(super) fn secondary_constructor_identities(
             .iter()
             .map(|(name, _)| parameter(name.clone(), 0)),
     );
-    parameters
-        .into_iter()
-        .map(|(name, _)| name.expect("a secondary constructor identity is named"))
-        .collect()
+    parameters.into_iter().map(|(name, _)| name).collect()
 }
 
 pub(super) fn enum_constructor(class: &IrClass) -> Vec<MethodParameter> {

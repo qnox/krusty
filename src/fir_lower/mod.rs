@@ -120,11 +120,7 @@ fn resolved_parameter_identity(
             IrParameterIdentity::context_receiver(*ordinal)
         }
         Resolved::ExtensionReceiver => IrParameterIdentity::extension_receiver(),
-        Resolved::PropertySetterValue => IrParameterIdentity {
-            source_name: None,
-            role: IrParameterRole::PropertySetterValue,
-            provenance: IrParameterProvenance::CompilerGenerated,
-        },
+        Resolved::PropertySetterValue => IrParameterIdentity::property_setter_value(),
         Resolved::SuspendCompletion => {
             IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
         }

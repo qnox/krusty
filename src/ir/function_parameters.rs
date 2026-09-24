@@ -96,6 +96,14 @@ impl IrParameterIdentity {
         }
     }
 
+    pub fn property_setter_value() -> Self {
+        Self {
+            source_name: None,
+            role: IrParameterRole::PropertySetterValue,
+            provenance: IrParameterProvenance::CompilerGenerated,
+        }
+    }
+
     pub fn captured_value(source_name: Option<String>, ordinal: u32) -> Self {
         Self {
             source_name,

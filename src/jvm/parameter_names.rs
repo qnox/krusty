@@ -49,18 +49,35 @@ pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
 /// unnamed; that absence is preserved for class-file surfaces that support `name_index = 0` and
 /// omitted LVT rows.
 pub(super) fn function_locals(ir: &IrFile, function: u32) -> Option<Vec<Option<String>>> {
-    let function_shape = ir.functions.get(function as usize)?;
-    let source_name = ir
-        .fn_source_names
-        .get(&function)
-        .map(String::as_str)
-        .unwrap_or(&function_shape.name);
     Some(
         ir.function_parameter_identities(function)?
             .iter()
-            .map(|identity| local_variable(identity, source_name))
+            .map(|identity| function_local_variable(ir, function, identity))
             .collect(),
     )
+}
+
+/// JVM local-table spelling for a parameter of one exact common-IR function.
+///
+/// A source extension declaration uses kotlinc's `$this$<function>` spelling. A receiver lambda's
+/// static implementation instead uses `<this>`; the typed lambda edge selects that ABI surface,
+/// without making common IR encode either JVM spelling.
+pub(super) fn function_local_variable(
+    ir: &IrFile,
+    function: u32,
+    identity: &IrParameterIdentity,
+) -> Option<String> {
+    if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
+        if ir.lambda_own_params_from.contains_key(&function) {
+            return Some("<this>".to_string());
+        }
+        let source_name = ir
+            .fn_source_names
+            .get(&function)
+            .expect("an extension receiver retains its declaration source name");
+        return Some(format!("$this${source_name}"));
+    }
+    local_variable(identity, "")
 }
 
 /// Kotlin metadata accepts only a declaration/producer-published semantic name.
@@ -273,12 +290,6 @@ pub(super) fn function_method_parameters(
     function: u32,
     types: &[crate::types::Ty],
 ) -> Option<Vec<Option<String>>> {
-    let shape = ir.functions.get(function as usize)?;
-    let source_name = ir
-        .fn_source_names
-        .get(&function)
-        .map(String::as_str)
-        .unwrap_or(&shape.name);
     let identities = ir.function_parameter_identities(function)?;
     let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
     let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
@@ -289,7 +300,7 @@ pub(super) fn function_method_parameters(
             .map(|(index, identity)| {
                 anonymous[index]
                     .clone()
-                    .or_else(|| method_parameter(identity, source_name))
+                    .or_else(|| function_local_variable(ir, function, identity))
             })
             .collect(),
     )
@@ -435,6 +446,75 @@ mod tests {
         assert_eq!(local_variable(&generated, "inspect"), None);
         assert_eq!(method_parameter(&generated, "inspect"), None);
         assert_eq!(metadata(&generated), None);
+    }
+
+    #[test]
+    fn receiver_lambda_uses_its_backend_debug_surface() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "transform$lambda$0".to_string(),
+            params: vec![crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
+        );
+        ir.lambda_own_params_from.insert(function, 0);
+
+        assert_eq!(
+            function_locals(&ir, function),
+            Some(vec![Some("<this>".to_string())])
+        );
+    }
+
+    #[test]
+    fn declared_extension_receiver_uses_only_its_published_source_name() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "renamed-physical".to_string(),
+            params: vec![crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
+        );
+        ir.fn_source_names.insert(function, "transform".to_string());
+
+        assert_eq!(
+            function_locals(&ir, function),
+            Some(vec![Some("$this$transform".to_string())])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "an extension receiver retains its declaration source name")]
+    fn declared_extension_receiver_never_uses_a_physical_function_name() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "renamed-physical".to_string(),
+            params: vec![crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
+        );
+
+        let _ = function_locals(&ir, function);
     }
 
     #[test]

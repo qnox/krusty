@@ -240,6 +240,7 @@ fn materialize_delegation(
                     member.call.result.get(),
                     result,
                 );
+                ir.fn_source_names.insert(function, member.name.to_string());
                 let parameter_identities = member
                     .overridden
                     .parameter_identities

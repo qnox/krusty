@@ -51,16 +51,11 @@ pub(super) fn attach_declared_function_debug(
         slot = 1;
     }
     let mut body_pc = 0u16;
-    let source_name = ir
-        .fn_source_names
-        .get(&fid)
-        .map(String::as_str)
-        .unwrap_or(&function.name);
     for (index, ty) in param_tys.iter().enumerate() {
         let identity = parameter_identities
             .and_then(|identities| identities.get(index))
             .expect("a debug-published parameter needs its canonical source identity");
-        let name = crate::jvm::parameter_names::local_variable(identity, source_name);
+        let name = crate::jvm::parameter_names::function_local_variable(ir, fid, identity);
         if function
             .param_checks
             .get(index)

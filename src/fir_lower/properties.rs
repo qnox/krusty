@@ -1128,7 +1128,7 @@ pub(super) fn add_accessor_function(
     };
     let parameter_count = params.len();
     let function = ir.add_fun(IrFunction {
-        name,
+        name: name.clone(),
         params,
         ret,
         body: Some(body),
@@ -1136,6 +1136,7 @@ pub(super) fn add_accessor_function(
         dispatch_receiver,
         param_checks: vec![None; parameter_count],
     });
+    ir.fn_source_names.insert(function, name);
     ir.fn_params.insert(
         function,
         crate::ir::FnParamInfo::identities(
@@ -1164,7 +1165,7 @@ fn add_abstract_accessor_function(
 ) -> FunId {
     let parameter_count = params.len();
     let function = ir.add_fun(IrFunction {
-        name,
+        name: name.clone(),
         params,
         ret,
         body: None,
@@ -1172,6 +1173,7 @@ fn add_abstract_accessor_function(
         dispatch_receiver: Some(owner),
         param_checks: vec![None; parameter_count],
     });
+    ir.fn_source_names.insert(function, name);
     ir.fn_params.insert(
         function,
         crate::ir::FnParamInfo::identities(

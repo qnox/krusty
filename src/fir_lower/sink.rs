@@ -505,11 +505,12 @@ impl<'a> CommonIrBodySink<'a> {
         let dispatch_receiver = index
             .enclosing_classifier(declaration)
             .map(|classifier| classifier.classifier);
+        let source_name = index
+            .callable_name(callable.id)
+            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+            .to_owned();
         let function = self.ir.add_fun(IrFunction {
-            name: index
-                .callable_name(callable.id)
-                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
-                .to_owned(),
+            name: source_name.clone(),
             param_checks: vec![None; params.len()],
             params,
             ret: signature.result.get(),
@@ -517,6 +518,7 @@ impl<'a> CommonIrBodySink<'a> {
             is_static: dispatch_receiver.is_none(),
             dispatch_receiver,
         });
+        self.ir.fn_source_names.insert(function, source_name);
         self.ir.inline_fns.insert(function);
         self.ir.inline_only_fns.insert(function);
         self.ir.foreign_inline_templates.insert(function);
@@ -1084,11 +1086,12 @@ impl<'a> CommonIrBodySink<'a> {
                     })
                 })
                 .transpose()?;
+            let source_name = index
+                .callable_name(callable.id)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                .to_owned();
             let function = self.ir.add_fun(IrFunction {
-                name: index
-                    .callable_name(callable.id)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
-                    .to_owned(),
+                name: source_name.clone(),
                 param_checks: vec![None; params.len()],
                 params,
                 ret: if compiler_generated {
@@ -1100,6 +1103,7 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            self.ir.fn_source_names.insert(function, source_name);
             self.ir.fn_source_order.insert(
                 function,
                 index

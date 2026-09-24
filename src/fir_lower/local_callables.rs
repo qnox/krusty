@@ -827,6 +827,9 @@ impl BodyLowering<'_> {
             is_static: true,
             dispatch_receiver: None,
         });
+        self.ir
+            .fn_source_names
+            .insert(function, source_name.to_owned());
         self.ir.private_methods.insert(function);
         let owner = if let Some(owner) = body.lexical_class_owner() {
             let class = self

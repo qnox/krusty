@@ -589,19 +589,10 @@ fn a_value_class_carrier_crosses_the_boundary_like_kotlinc() {
             "{member} agrees with kotlinc"
         );
     }
-    // kotlinc additionally null-checks the non-null `String` setter parameter; that parameter check
-    // is a separate gap, so the boxing is compared with it set aside.
     assert_eq!(
-        {
-            let reference = without_kproperty_carrier(body(&reference, "void setName-"));
-            let check = reference
-                .iter()
-                .position(|row| row.contains("checkNotNullParameter"))
-                .expect("kotlinc null-checks a non-null setter parameter");
-            reference[check + 1..].to_vec()
-        },
+        without_kproperty_carrier(body(&reference, "void setName-")),
         without_kproperty_carrier(body(&ours, "void setName-")),
-        "setName agrees with kotlinc once the parameter null-check is set aside"
+        "setName agrees with kotlinc, including the typed setter parameter guard"
     );
 }
 

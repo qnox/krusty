@@ -1144,13 +1144,26 @@ fn build_class_metadata(
         .iter()
         .flat_map(|property| property.getter.into_iter().chain(property.setter))
         .collect();
-    // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
-    // declared function — emit it (with derived flags) rather than declining the whole class.
+    let source_callable_fids = ir
+        .checked_callable_functions
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    // Metadata Function records come only from exact source-callable realizations. Accessors have
+    // Property records, while generated declarations use the explicit publication contract below.
     let mut declared_fids: Vec<u32> = c
         .methods
         .iter()
         .copied()
         .filter(|&fid| {
+            // A physical class method is not necessarily a Kotlin declaration. Lifted local
+            // functions and interface-delegation forwarders are implementation methods and have
+            // no Function entry in class metadata. Common lowering publishes the exact source
+            // callable -> function edge, so metadata consumes that identity instead of inferring
+            // declaration status from a name, descriptor, or parameter spelling.
+            if !source_callable_fids.contains(&fid) {
+                return false;
+            }
             if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {
                 return false;
             }
@@ -1663,13 +1676,13 @@ fn build_class_metadata(
                             .get(&fid)
                             .map(|(p, r)| (f.name.as_str(), p.as_slice(), *r))
                     });
-                let (realized_base_name, params, ret) =
+                let (_, params, ret) =
                     declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
                 let name = ir
                     .fn_source_names
                     .get(&fid)
                     .map(String::as_str)
-                    .unwrap_or(realized_base_name);
+                    .expect("a source metadata function retains its declaration name");
                 let semantic_signature = ir.signatures.get(&fid);
                 // A member mentioning an ENCLOSING-CLASS type parameter records its semantic shape
                 // separately (`member_semantic_sigs`) — the erased params would publish `Any`.
@@ -1719,20 +1732,26 @@ fn build_class_metadata(
                             .collect()
                     })
                     .unwrap_or_default();
-                // A member EXTENSION realized its receiver as `params[0]` — restore it to
-                // `Function.receiver_type` so the record's value parameters are the LOGICAL ones.
-                // Both parameter side tables use the physical IR order. An extension receiver is the
-                // first parameter, while Kotlin metadata exposes it separately from value parameters.
-                // The receiver's physical index is the function's context count, so it is NOT
-                // separable by a leading skip: `(contexts…, receiver, values…)` means the logical
-                // value parameters lie on BOTH sides of it.
+                // Restore an extension receiver to `Function.receiver_type` so metadata keeps only
+                // the declaration's logical value parameters. A value-class member's static
+                // `-impl` has one backend-generated carrier before that complete declaration list;
+                // the exact representation marker supplies that offset. Source-owned side tables
+                // remain indexed by the declaration list and never acquire the carrier slot.
                 let member_context_count = ir.fn_context_counts.get(&fid).copied().unwrap_or(0);
                 let is_ext = ir.extension_receiver_fns.contains(&fid)
                     && member_context_count < metadata_params.len();
                 let receiver_index = is_ext.then_some(member_context_count);
-                let apply_nullable = |i_full: usize, t: crate::types::Ty| {
+                let backend_parameter_prefix =
+                    usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
+                let parameter_identities = parameter_identities
+                    .expect("a metadata function retains exact parameter identities");
+                assert!(
+                    backend_parameter_prefix + metadata_params.len() <= parameter_identities.len(),
+                    "metadata declaration parameters retain their exact physical identities"
+                );
+                let apply_nullable = |source_index: usize, t: crate::types::Ty| {
                     if declared_nullable
-                        .and_then(|v| v.get(i_full))
+                        .and_then(|v| v.get(source_index))
                         .copied()
                         .unwrap_or(false)
                     {
@@ -1748,17 +1767,15 @@ fn build_class_metadata(
                         if receiver_index == Some(index) {
                             None
                         } else {
-                            Some((index, index))
+                            Some((index, backend_parameter_prefix + index))
                         }
                     })
                     .collect::<Vec<_>>();
                 let logical_params: Vec<(String, crate::types::Ty)> = logical_param_indices
                     .iter()
                     .map(|&(metadata_index, physical_index)| {
-                        // `fn_params` records the extension receiver (`$this$<fn>`) at that same
-                        // physical index, exactly like `param_defaults`; both are read positionally.
                         let identity = parameter_identities
-                            .and_then(|identities| identities.get(physical_index))
+                            .get(physical_index)
                             .expect("a metadata parameter carries an exact identity");
                         let n = if matches!(
                             identity.role,
@@ -1772,13 +1789,13 @@ fn build_class_metadata(
                         };
                         (
                             n,
-                            apply_nullable(physical_index, metadata_params[metadata_index]),
+                            apply_nullable(metadata_index, metadata_params[metadata_index]),
                         )
                     })
                     .collect();
                 let context_parameter_kinds = parameter_identities
-                    .expect("a metadata function retains exact parameter identities")
                     .iter()
+                    .skip(backend_parameter_prefix)
                     .take(member_context_count)
                     .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
@@ -1855,10 +1872,10 @@ fn build_class_metadata(
                     // `Continuation` is already dropped), so the side table lines up with it.
                     param_annotations: logical_param_indices
                         .iter()
-                        .map(|&(_, physical_index)| {
+                        .map(|&(metadata_index, _)| {
                             ir.fn_param_annotations
                                 .get(&fid)
-                                .and_then(|table| table.get(physical_index))
+                                .and_then(|table| table.get(metadata_index))
                                 .map(|annotations| {
                                     annotations
                                         .iter()
@@ -1870,10 +1887,10 @@ fn build_class_metadata(
                         .collect(),
                     no_infer_params: logical_param_indices
                         .iter()
-                        .map(|&(_, physical_index)| {
+                        .map(|&(metadata_index, _)| {
                             ir.fn_param_no_infer
                                 .get(&fid)
-                                .and_then(|flags| flags.get(physical_index))
+                                .and_then(|flags| flags.get(metadata_index))
                                 .copied()
                                 .unwrap_or(false)
                         })
@@ -11240,16 +11257,11 @@ fn emit_method_inner_with_holder(
             code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
-        let source_name = ir
-            .fn_source_names
-            .get(&fid)
-            .map(String::as_str)
-            .unwrap_or(&f.name);
         for (i, t) in param_tys.iter().enumerate() {
             let pname = parameter_identities
                 .and_then(|identities| identities.get(i))
                 .and_then(|identity| {
-                    crate::jvm::parameter_names::local_variable(identity, source_name)
+                    crate::jvm::parameter_names::function_local_variable(ir, fid, identity)
                 });
             if let Some(pname) = pname {
                 let pdesc = local_variable_desc(*t);
