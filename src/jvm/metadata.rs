@@ -3,6 +3,7 @@
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
 pub(super) mod builtin_bridge;
+mod class_identity;
 mod property_identity;
 
 use property_identity::{inline_underlying_property_name_id, parse_jvm_property_signature};
@@ -2258,11 +2259,11 @@ pub fn decode_metadata(
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
         class_qualified_name: if k == Some(1) {
-            class_qualified_name(&ctx)
+            class_identity::class_qualified_name(&ctx)
         } else {
             None
         },
-        companion_name: companion_name(&ctx),
+        companion_name: class_identity::companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
         inline: inline_class(&ctx),
         multifile_parts: Vec::new(),
@@ -3400,52 +3401,6 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
         }
     }
     Ok(out)
-}
-
-/// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
-/// `None` if the class has no companion.
-/// `Class.fq_name` (field 3) as a Kotlin qualified name. Metadata spells a class name with `/`
-/// between package segments and `.` between classes (`lib/Outer.Nested`); the qualified name dots
-/// both, and neither character can occur inside a JVM identifier.
-fn class_qualified_name(ctx: &MetaCtx) -> Option<String> {
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 0) => {
-                let id = pb.varint()?;
-                return resolve_class_name(ctx.records, ctx.d2, id as usize)
-                    .map(|name| name.replace('/', "."));
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    None
-}
-
-fn companion_name(ctx: &MetaCtx) -> Option<String> {
-    let records = ctx.records;
-    let d2 = ctx.d2;
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (4, 0) => {
-                let id = pb.varint()?;
-                return resolve_class_name(records, d2, id as usize);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    None
 }
 
 /// The direct subclasses of a `sealed` class, from its `@Metadata` — `Class.sealedSubclassFqName` (field

@@ -3031,17 +3031,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
                         classifier: internal,
                         companion: direct_companion,
-                        kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
-                            crate::libraries::TypeKind::Annotation
-                        } else if classifier_flags.has(ClassFlags::OBJECT) {
-                            crate::libraries::TypeKind::Object
-                        } else if classifier_is_enum {
-                            crate::libraries::TypeKind::Enum
-                        } else if classifier_flags.has(ClassFlags::INTERFACE) {
-                            crate::libraries::TypeKind::Interface
-                        } else {
-                            crate::libraries::TypeKind::Class
-                        },
+                        kind: frontend_class_kind(classifier_flags, classifier_is_enum),
                         is_sealed: classifier_flags.has(ClassFlags::SEALED),
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
