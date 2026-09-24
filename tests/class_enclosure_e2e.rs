@@ -63,8 +63,8 @@ const CARRIERS: &[&str] = &[
     "Registry$tag$1",
 ];
 
-/// Classes whose enclosure matches kotlinc's while other parts (their `@Metadata`, member
-/// nullability annotations) still differ.
+/// Classes whose enclosure matches kotlinc's while other parts (their `@Metadata`, how they store
+/// captured values) still differ.
 const ENCLOSED: &[&str] = &[
     "EnclosureKt$token$1",
     "EnclosureKt$factory$1$1",
