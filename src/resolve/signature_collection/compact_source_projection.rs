@@ -43,10 +43,19 @@ pub(in crate::resolve) fn compact_classifier_identity(
     // module-stable semantic identity; a backend consumes its declaration-keyed lexical provenance
     // and chooses the physical spelling later.
     let runtime_name = if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
+        // Only a member of a local classifier's own body is nested in it. A classifier declared
+        // in executable code of a member (`Owner.f { object {} }`) has that classifier as its
+        // lexical naming owner too, but it is not a nested member and must keep its own identity.
         let nested = headers
             .local_class_name_provenance
             .get(&stub.id)
             .and_then(|provenance| provenance.lexical_owner)
+            .filter(|owner| {
+                headers
+                    .declarations
+                    .anchor(stub.id)
+                    .is_some_and(|anchor| anchor.owner == Some(*owner))
+            })
             .and_then(|owner| headers.stub(owner))
             .filter(|owner| owner.kind == crate::fir::DeclarationKind::Classifier)
             .and_then(|owner| compact_classifier_identity(headers, owner))
