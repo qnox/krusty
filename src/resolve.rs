@@ -32,9 +32,11 @@ mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod checked_annotation_publication;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
+pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -7949,80 +7951,6 @@ fn publish_top_level_property_type(
     if published == Some(true) {
         if let Some(module_property) = table.props.get_mut(&property.name) {
             module_property.0 = ty;
-        }
-    }
-}
-
-/// Fold classifier annotations while their declaration scopes and expression arenas are live, then
-/// retain only named typed values under stable declaration identities. Bodies are deliberately not
-/// selected; this is declaration metadata needed across source files before backend facts freeze.
-pub(crate) fn publish_checked_classifier_annotations(
-    files: &[File],
-    table: &mut SymbolTable,
-    diags: &mut DiagSink,
-) {
-    for (file_index, file) in files.iter().enumerate() {
-        let declarations = table
-            .classes
-            .values()
-            .filter(|class| class.source_file == file_index as u32)
-            .filter_map(|class| Some((class.stable_declaration?, class.source_decl?)))
-            .collect::<Vec<_>>();
-        let selected = declarations
-            .iter()
-            .filter_map(|(_, declaration)| match file.decl(*declaration) {
-                Decl::Class(class) => Some(class.span),
-                _ => None,
-            })
-            .collect::<std::collections::HashSet<_>>();
-        if selected.is_empty() {
-            continue;
-        }
-        diags.set_file(file_index as u32);
-        let no_bodies = std::collections::HashSet::new();
-        let info = check_file_at_impl_mode(
-            file,
-            file_index as u32,
-            Some(files),
-            table,
-            diags,
-            false,
-            Some(&selected),
-            Some(&no_bodies),
-        );
-        let mut checked = Vec::new();
-        for (_, declaration) in declarations {
-            let Decl::Class(class) = file.decl(declaration) else {
-                continue;
-            };
-            let applications = class
-                .annotations
-                .iter()
-                .filter_map(|annotation| info.applied_annotation(annotation))
-                .map(|annotation| crate::types::ResolvedAnnotation {
-                    annotation: annotation.internal,
-                    arguments: annotation.values.clone(),
-                })
-                .collect::<Vec<_>>();
-            if applications.len() == class.annotations.len() {
-                if let Some(internal) = table.classes.values().find_map(|signature| {
-                    (signature.source_file == file_index as u32
-                        && signature.source_decl == Some(declaration))
-                    .then_some(signature.internal)
-                }) {
-                    checked.push((internal, applications));
-                }
-            } else if !diags.has_errors() {
-                diags.error(
-                    class.span,
-                    "internal error: checked classifier annotations were not fully published",
-                );
-            }
-        }
-        for (internal, applications) in checked {
-            if let Some(class) = table.classes.get_mut(&internal) {
-                class.applied_annotations = applications;
-            }
         }
     }
 }
