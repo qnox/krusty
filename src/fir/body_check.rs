@@ -2585,9 +2585,22 @@ impl BodyFirChecker<'_> {
                 Expr::Block { stmts, trailing } => self.block(expression, stmts, *trailing)?,
                 Expr::When { subject, arms } => {
                     let has_subject = subject.is_some();
+                    let subject_syntax = *subject;
                     let subject = subject
                         .map(|subject| self.expression(subject))
                         .transpose()?;
+                    // A predicate condition (`is`, `in`) is written over the subject expression
+                    // itself. Each one must read the subject's one checked value, not check (and so
+                    // evaluate) that expression again.
+                    let substituted = match (subject_syntax, subject) {
+                        (Some(syntax), Some(checked))
+                            if !self.expression_substitutions.contains_key(&syntax) =>
+                        {
+                            self.expression_substitutions.insert(syntax, checked);
+                            Some(syntax)
+                        }
+                        _ => None,
+                    };
                     let branches = arms
                         .iter()
                         .map(|arm| {
@@ -2619,10 +2632,13 @@ impl BodyFirChecker<'_> {
                                 result: self.expression(arm.body)?,
                             })
                         })
-                        .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
+                        .collect::<Result<Vec<_>, BodyCheckFailure>>();
+                    if let Some(syntax) = substituted {
+                        self.expression_substitutions.remove(&syntax);
+                    }
                     FirExprKind::When {
                         subject,
-                        branches: branches.into_boxed_slice(),
+                        branches: branches?.into_boxed_slice(),
                     }
                 }
                 Expr::Try {
