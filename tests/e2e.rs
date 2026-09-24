@@ -864,6 +864,8 @@ mod is_nullable_and_notnull_smartcast_e2e;
 mod is_nullable_primitive_e2e;
 #[path = "is_primitive_smartcast_e2e.rs"]
 mod is_primitive_smartcast_e2e;
+#[path = "java_abstract_override_e2e.rs"]
+mod java_abstract_override_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
@@ -1182,6 +1184,8 @@ mod omitted_default_generic_overload_e2e;
 mod one_armed_when_fallthrough_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "spliced_expression_null_check_e2e.rs"]
+mod spliced_expression_null_check_e2e;
 #[path = "temporary_elimination_e2e.rs"]
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
@@ -1247,6 +1251,8 @@ mod platform_map_index_assign_e2e;
 mod plugins_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
 mod postponed_bound_inference_e2e;
+#[path = "postponed_constructor_applicability_e2e.rs"]
+mod postponed_constructor_applicability_e2e;
 #[path = "postponed_lambda_probe_e2e.rs"]
 mod postponed_lambda_probe_e2e;
 #[path = "primitive_array_members_e2e.rs"]

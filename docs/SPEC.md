@@ -2123,6 +2123,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier-value-only tracking set; `scope.m { it.foo() }`
   therefore reports both the uninferable `T` and the unresolved body member. Test:
   `tests/postponed_lambda_probe_e2e.rs`.
+- **A postponed candidate still needs a type constructor that can fit.** While a call's lambda is
+  unshaped, an already-typed argument keeps an overload alive when SOME binding of the callee's type
+  variables could make it fit. The binding is postponed; the constructor around it is not. kotlinc
+  rejects `Iterable<T>.zip(other: Array<out R>, transform)` for a `List<Long>` argument before it
+  analyzes `{ a, b -> b - a }`. krusty kept every parameter that mentioned a formal alive (only a
+  function-typed parameter against a non-function value was declined). The array `zip` then shaped
+  the lambda with an unbound `R`, and under an outer expected type the provisional `List<Nothing>`
+  result became the lambda's expectation (`inferred type is Long but Nothing was expected`), for
+  stdlib and dependency overloads alike. `postponed_argument_fits` (`src/resolve/postponed_applicability.rs`)
+  now judges a class-typed parameter by assignability to its constructor shape: every type argument
+  that mentions a formal becomes `*`, the classifier and nullability stay. A bare formal still fits
+  anything. A function value against a class shape is left to final selection (SAM conversion).
+  Test: `tests/postponed_constructor_applicability_e2e.rs`.
 - **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
   packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
   instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
@@ -6236,6 +6249,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
   `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **An override of a Java member matches the platform type, and a Java class merges its members by
+  erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
+  bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
+  `J3.from(String!)`; and a Java class's own scope merges the members it inherits under Java's
+  erasure rule, so inside `java.util.AbstractList<E>` the inherited
+  `AbstractCollection.contains(Object)` implements `List<E>.contains(E)`. krusty compared the
+  substituted parameter types exactly, so every concrete class extending an abstract Java class
+  with a reference-typed parameter (Moshi's `JsonAdapter<T>`, the JDK's skeleton collections) was
+  rejected as "not abstract and does not implement all abstract members". The obligation check
+  (`src/resolve/abstract_obligations.rs`) now discharges an abstract member with a concrete one
+  whose parameters are the same modulo platform flexibility (`assignable::same_flexible_type`), or,
+  when one Java classifier of the hierarchy inherits both declaring classifiers, whose erased
+  declared parameters are equal. An erasure match that only meets in the Kotlin class
+  (`JBase.add(Object)` against `Sink<String>.add(String)`) still leaves the member unimplemented, as
+  in kotlinc. The inherited-member walk collapses the same flexible slot, so a call through the
+  subclass sees only the override's `String` parameter and `b.from(null)` is rejected as it is for a
+  Kotlin base. Remaining gap: an abstract Java map (`java.util.AbstractMap`), whose
+  `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
+  rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
+  for the plain override, JDK skeleton collections, and the shapes that stay rejected).
 
 ## 8. Success criteria for the PoC
 
