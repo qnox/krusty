@@ -45,13 +45,6 @@ pub(super) enum ElementSerializerPlan {
         serializer_class: ClassId,
         field: u32,
     },
-    /// An object declared outside this file: `ObjectSerializer(<serial name>, <object>.INSTANCE,
-    /// [])`, constructed here because the object has no serializer class.
-    ExternalObject {
-        object: TypeName,
-        serial_name: crate::kt_string::KtString,
-        serial_info_unsupported: bool,
-    },
     /// A classifier declared outside this file whose serializer its companion's generated
     /// `serializer(…)` returns, called with one argument serializer per type parameter.
     ExternalCompanion {
@@ -498,7 +491,7 @@ pub(super) fn element_serializer_plan_in(
             serial_name,
             serial_info_unsupported,
         }) if type_args.is_empty() => {
-            return Some(ElementSerializerPlan::ExternalObject {
+            return Some(ElementSerializerPlan::Object {
                 object: fq_name,
                 serial_name: serial_name.clone(),
                 serial_info_unsupported: *serial_info_unsupported,
@@ -692,39 +685,6 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 field: "INSTANCE".to_string(),
             })
         }
-        ElementSerializerPlan::ExternalObject {
-            object,
-            serial_name,
-            serial_info_unsupported,
-        } => {
-            if serial_info_unsupported {
-                return ir.add_expr(IrExpr::PluginPlaceholder {
-                    plugin: "serialization",
-                    kind: "external-object-serial-info-annotations",
-                    exprs: Vec::new(),
-                    data: vec![object],
-                    types: Vec::new(),
-                });
-            }
-            let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
-            let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: object,
-                ty: object,
-                field: "INSTANCE".to_string(),
-            });
-            // The provider proved that the object has no retained `@SerialInfo` applications, so
-            // kotlinc's empty annotation array is the complete value rather than a silent drop.
-            let annotations = ir.add_expr(IrExpr::Vararg {
-                array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Annotation")]),
-                spreads: Vec::new(),
-                elements: Vec::new(),
-            });
-            ir.new_external(
-                "kotlinx/serialization/internal/ObjectSerializer",
-                "(Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/annotation/Annotation;)V",
-                vec![name, instance, annotations],
-            )
-        }
         ElementSerializerPlan::ExternalCompanion {
             classifier,
             field,
@@ -809,23 +769,24 @@ mod tests {
         let mut ir = IrFile::default();
         let expression = emit_element_serializer(
             &mut ir,
-            ElementSerializerPlan::ExternalObject {
+            ElementSerializerPlan::Object {
                 object,
                 serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
                 serial_info_unsupported: true,
             },
         );
 
+        assert_eq!(expression, 3);
+        assert_eq!(ir.exprs.len(), 4);
         assert!(matches!(
-            ir.expr(expression),
+            ir.expr(2),
             IrExpr::PluginPlaceholder {
                 plugin: "serialization",
-                kind: "external-object-serial-info-annotations",
+                kind: "object-serial-info-annotations",
                 exprs,
                 data,
                 types,
             } if exprs.is_empty() && data.as_slice() == [object] && types.is_empty()
         ));
-        assert_eq!(ir.exprs.len(), 1);
     }
 }
