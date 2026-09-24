@@ -5282,19 +5282,24 @@ fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> 
             return crate::assignable::is_assignable(&cx, &oracle, recv, specialized);
         }
     }
-    let wildcard = |t: Ty| {
+    let erased_top = |t: Ty| {
         let t = t.projection_inner().unwrap_or(t);
-        t.is_ty_param()
-            || matches!(t.non_null(), Ty::Obj(n, _)
-                if crate::types::same(n, crate::types::wk::any())
-                    || crate::types::same(n, crate::types::wk::java_object()))
+        matches!(t.non_null(), Ty::Obj(n, _)
+            if crate::types::same(n, crate::types::wk::any())
+                || crate::types::same(n, crate::types::wk::java_object()))
     };
+    // Only the DECLARED side's type variables are wildcards: they are the callee's own formals,
+    // bound by this very call. A type parameter in the ACTUAL receiver belongs to the caller and is
+    // a fixed type there; `Iterable<T>` for a caller's `T : Comparable<T>` is not an
+    // `Iterable<Double>`, so it is checked through its bounds like any other argument.
+    let declared_wildcard =
+        |t: Ty| t.projection_inner().unwrap_or(t).is_ty_param() || erased_top(t);
     decl_recv
         .type_args()
         .iter()
         .zip(recv.type_args().iter())
         .all(|(&d, &r)| {
-            if wildcard(d) || wildcard(r) {
+            if declared_wildcard(d) || erased_top(r) {
                 return true;
             }
             match d {
