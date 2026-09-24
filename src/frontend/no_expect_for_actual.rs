@@ -563,7 +563,7 @@ impl UnmatchedActual {
 /// The modifier words a function writes between `actual` and `fun`, in the reference compiler's
 /// measured order: `external` precedes `override`, and `inline` precedes `operator`, `infix` and
 /// `suspend`. Each was measured alone and the ordering pairs that are legal Kotlin were measured
-/// together; see `docs/PARITY_PROTOCOL.md`.
+/// together; see `docs/SPEC.md`.
 fn callable_modifiers(function: &crate::ast::FunDecl) -> String {
     [
         ("external", function.is_external()),

@@ -1133,6 +1133,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   public member surface (`componentN`/`copy`/`equals`/`hashCode`/`toString` + accessors) matches the
   real kotlinc's exactly for `data class P(val x: Int, val y: String)`.
 
+## Known bytecode divergence — erased base-constructor slots  ⬜
+- **A `super(…)` argument in an ERASED base-constructor slot is not boxed — measured, and the
+  emitter is the WRONG place to fix it.** `open class Box<T>(val value: T)` declares `(Object)V`,
+  so `class LongBox : Box<Long>(42L)` emits `ldc2_w 42L; invokespecial Box."<init>":(Ljava/lang/Object;)V`
+  — `Type long_2nd … is not assignable to 'java/lang/Object'`. Corpus:
+  `codegen/box/delegatedProperty/genericSetValueViaSyntheticAccessor.kt` (where it masquerades as a
+  delegate-setter defect), and it is a plausible cause under
+  `closures/captureInSuperConstructorCall/`, `initializers/` and `classes/`.
+
+  Boxing at the emission site was tried and REVERTED: it fixed the isolated shape and cost 18 box
+  cases (6344 → 6326). The reason is that the emitter's `value_ty` reports the argument's SEMANTIC
+  type, so an argument the lowering already coerced reads as a scalar while the stack holds a box,
+  and the extra `box_prim_free` boxes a reference. Narrowing to a one-to-one parameter list and to
+  an exactly-`Object` slot recovered only 2 of the 18, which rules out prefix-parameter
+  misalignment as the cause. The coercion belongs in the LOWERING, beside the `super_args`, where
+  the physical type is still authoritative — the same conclusion the delegated-accessor result
+  reached (see `docs/SPEC.md`).
+
 ## Known bytecode divergence — `object` properties  ⬜
 - An `object`'s properties are emitted by krusty as **instance** fields (`private final int v`,
   `getfield`); the real kotlinc emits them as **static** fields on the singleton (`private static
