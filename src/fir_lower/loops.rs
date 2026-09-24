@@ -8,33 +8,6 @@ use crate::types::Ty;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    pub(super) fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
-        (0..self.body.statement_count()).any(|raw| {
-            let statement = self
-                .body
-                .statement(crate::fir::FirStatementId::from_raw(raw as u32))
-                .expect("FIR statement index");
-            match &statement.kind {
-                crate::fir::FirStatementKind::Local {
-                    target, mutable, ..
-                } => *target == value && *mutable,
-                crate::fir::FirStatementKind::Destructure { entries, .. } => {
-                    entries.iter().any(|entry| {
-                        matches!(
-                            entry,
-                            crate::fir::FirDestructureEntry::Binding {
-                                target,
-                                mutable: true,
-                                ..
-                            } if *target == value
-                        )
-                    })
-                }
-                _ => false,
-            }
-        })
-    }
-
     fn loop_variable_declaration(
         &mut self,
         variable: u32,

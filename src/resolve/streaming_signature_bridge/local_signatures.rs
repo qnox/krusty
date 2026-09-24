@@ -1172,6 +1172,7 @@ fn publish_checked_local_signatures_selected(
                                     false,
                                     false,
                                 )
+                                .with_context_kind(parameter.context_kind)
                                 .with_materialized_lambda(parameter.is_materialized_lambda),
                             )
                         }),
@@ -1199,13 +1200,19 @@ fn publish_checked_local_signatures_selected(
                             failed.push(declaration);
                             continue;
                         }
+                        let property_id = PropertyId::from_raw(declaration.raw());
                         index.publish_property_shape(
-                            PropertyId::from_raw(declaration.raw()),
+                            property_id,
                             declaration,
                             0,
                             0,
                             None,
                             parameter.is_var,
+                        );
+                        index.publish_property_parameter_identities(
+                            property_id,
+                            std::iter::empty(),
+                            None,
                         );
                         continue;
                     }
@@ -1260,13 +1267,25 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     };
+                    let property_id = PropertyId::from_raw(declaration.raw());
                     index.publish_property_shape(
-                        PropertyId::from_raw(declaration.raw()),
+                        property_id,
                         declaration,
                         property.context_params.len() as u32,
                         property.context_value_count() as u32,
                         receiver,
                         property.is_var,
+                    );
+                    index.publish_property_parameter_identities(
+                        property_id,
+                        property
+                            .context_params
+                            .iter()
+                            .map(|parameter| (parameter.name.as_str(), parameter.context_kind)),
+                        property
+                            .setter
+                            .as_ref()
+                            .and_then(|setter| setter.param.as_deref()),
                     );
                 }
                 DeclarationKind::Accessor => {
@@ -1361,6 +1380,7 @@ fn publish_checked_local_signatures_selected(
                             parameter.default.is_some(),
                             false,
                             false,
+                            parameter.context_kind,
                         ));
                     }
                     if parameter_failed {
@@ -1386,6 +1406,7 @@ fn publish_checked_local_signatures_selected(
                                 parameter.default.is_some(),
                                 parameter.is_property,
                                 parameter.is_var,
+                                crate::types::ContextParameterKind::None,
                             ));
                         }
                         if parameter_failed {
@@ -1404,6 +1425,7 @@ fn publish_checked_local_signatures_selected(
                                 false,
                                 true,
                                 false,
+                                crate::types::ContextParameterKind::None,
                             ));
                         }
                     } else {
@@ -1432,6 +1454,7 @@ fn publish_checked_local_signatures_selected(
                                 parameter.default.is_some(),
                                 false,
                                 false,
+                                crate::types::ContextParameterKind::None,
                             ));
                         }
                         if parameter_failed {
@@ -1467,7 +1490,10 @@ fn publish_checked_local_signatures_selected(
                             context_value_count: owner
                                 .context_params
                                 .iter()
-                                .filter(|parameter| parameter.name != "_")
+                                .filter(|parameter| {
+                                    parameter.context_kind
+                                        == crate::types::ContextParameterKind::Named
+                                })
                                 .count() as u32,
                             extension_receiver: None,
                         },
@@ -1482,7 +1508,8 @@ fn publish_checked_local_signatures_selected(
                                     parameter.2,
                                     parameter.3,
                                     parameter.4,
-                                ),
+                                )
+                                .with_context_kind(parameter.5),
                             )
                         }),
                     );
@@ -1720,13 +1747,42 @@ fn publish_checked_local_signatures_selected(
                                 false,
                                 false,
                             )
+                            .with_context_kind(parameter.context_kind)
                             .with_materialized_lambda(parameter.is_materialized_lambda),
                         )
                     }),
                 );
             }
             DeclarationKind::Constructor => {
-                let (parameters, mut source_parameters) = if anchor.sibling == 0 {
+                let mut context_parameters = Vec::with_capacity(owner.context_params.len());
+                let mut source_context_parameters = Vec::with_capacity(owner.context_params.len());
+                let mut context_parameter_failed = false;
+                for parameter in &owner.context_params {
+                    let Some(ty) = info
+                        .resolved_declaration_type(&parameter.ty)
+                        .or_else(|| info.resolved_type(&parameter.ty))
+                    else {
+                        context_parameter_failed = true;
+                        break;
+                    };
+                    context_parameters.push(crate::types::semantic_value_parameter_ty(
+                        ty,
+                        parameter.is_vararg,
+                    ));
+                    source_context_parameters.push((
+                        parameter.name.as_str(),
+                        parameter.is_vararg,
+                        parameter.default.is_some(),
+                        false,
+                        false,
+                        parameter.context_kind,
+                    ));
+                }
+                if context_parameter_failed {
+                    failed.push(declaration);
+                    continue;
+                }
+                let (mut parameters, mut source_parameters) = if anchor.sibling == 0 {
                     (
                         class
                             .ctor_param_shapes
@@ -1743,6 +1799,7 @@ fn publish_checked_local_signatures_selected(
                                     parameter.default.is_some(),
                                     parameter.is_property,
                                     parameter.is_var,
+                                    crate::types::ContextParameterKind::None,
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -1773,11 +1830,16 @@ fn publish_checked_local_signatures_selected(
                                     parameter.default.is_some(),
                                     false,
                                     false,
+                                    crate::types::ContextParameterKind::None,
                                 )
                             })
                             .collect::<Vec<_>>(),
                     )
                 };
+                context_parameters.append(&mut parameters);
+                parameters = context_parameters;
+                source_context_parameters.append(&mut source_parameters);
+                source_parameters = source_context_parameters;
                 if anchor.sibling == 0 && source_parameters.len() < parameters.len() {
                     let capture_count = parameters.len() - source_parameters.len();
                     source_parameters.extend(
@@ -1786,7 +1848,16 @@ fn publish_checked_local_signatures_selected(
                             .into_iter()
                             .flatten()
                             .take(capture_count)
-                            .map(|capture| (capture.name.as_str(), false, false, true, false)),
+                            .map(|capture| {
+                                (
+                                    capture.name.as_str(),
+                                    false,
+                                    false,
+                                    true,
+                                    false,
+                                    crate::types::ContextParameterKind::None,
+                                )
+                            }),
                     );
                 }
                 if !signature_published
@@ -1801,7 +1872,21 @@ fn publish_checked_local_signatures_selected(
                     continue;
                 }
                 let callable = CallableId::from_raw(declaration.raw());
-                index.publish_constructor(callable, declaration);
+                index.publish_constructor_shape(
+                    callable,
+                    declaration,
+                    ResolvedCallableShape {
+                        context_parameter_count: owner.context_params.len() as u32,
+                        context_value_count: owner
+                            .context_params
+                            .iter()
+                            .filter(|parameter| {
+                                parameter.context_kind == crate::types::ContextParameterKind::Named
+                            })
+                            .count() as u32,
+                        extension_receiver: None,
+                    },
+                );
                 index.publish_callable_parameters(
                     callable,
                     source_parameters.iter().map(|parameter| {
@@ -1812,7 +1897,8 @@ fn publish_checked_local_signatures_selected(
                                 parameter.2,
                                 parameter.3,
                                 parameter.4,
-                            ),
+                            )
+                            .with_context_kind(parameter.5),
                         )
                     }),
                 );
@@ -1930,13 +2016,33 @@ fn publish_checked_local_signatures_selected(
                     continue;
                 };
                 if index.property_for_declaration(declaration).is_none() {
+                    if property.is_none() && context_count != 0 {
+                        // Generated/local-table property records do not retain source context
+                        // identities. Decline the incomplete declaration instead of inventing names
+                        // or classifying roles from a legacy sentinel.
+                        failed.push(declaration);
+                        continue;
+                    }
+                    let property_id = PropertyId::from_raw(declaration.raw());
                     index.publish_property_shape(
-                        PropertyId::from_raw(declaration.raw()),
+                        property_id,
                         declaration,
                         context_count as u32,
                         context_value_count as u32,
                         receiver,
                         mutable,
+                    );
+                    index.publish_property_parameter_identities(
+                        property_id,
+                        property.into_iter().flat_map(|property| {
+                            property
+                                .context_params
+                                .iter()
+                                .map(|parameter| (parameter.name.as_str(), parameter.context_kind))
+                        }),
+                        property
+                            .and_then(|property| property.setter.as_ref())
+                            .and_then(|setter| setter.param.as_deref()),
                     );
                 }
             }
@@ -2027,20 +2133,31 @@ fn publish_checked_local_signatures_selected(
                 let mut parameter_names = property
                     .into_iter()
                     .flat_map(|property| property.context_params.iter())
-                    .map(|parameter| parameter.name.as_str())
+                    .map(|parameter| {
+                        (
+                            parameter.name.as_str(),
+                            ResolvedValueParameterFlags::new(false, false, false, false)
+                                .with_context_kind(parameter.context_kind),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 if is_setter {
-                    parameter_names.push("value");
-                }
-                index.publish_callable_parameters(
-                    callable,
-                    parameter_names.into_iter().map(|name| {
-                        (
+                    let setter_parameter_name = property
+                        .and_then(|property| property.setter.as_ref())
+                        .and_then(|setter| setter.param.as_deref());
+                    parameter_names.push(match setter_parameter_name {
+                        Some(name) => (
                             name,
                             ResolvedValueParameterFlags::new(false, false, false, false),
-                        )
-                    }),
-                );
+                        ),
+                        None => (
+                            "",
+                            ResolvedValueParameterFlags::new(false, false, false, false)
+                                .with_property_setter_value(true),
+                        ),
+                    });
+                }
+                index.publish_callable_parameters(callable, parameter_names);
             }
             DeclarationKind::Classifier
             | DeclarationKind::EnumEntry

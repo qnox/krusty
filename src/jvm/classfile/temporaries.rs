@@ -14,6 +14,18 @@
 //! - `astore t; aload t; ldc "…"; invokestatic Intrinsics.checkNotNullExpressionValue; aload t`
 //!   becomes `dup; ldc "…"; invokestatic …`.
 //!
+//! Before those, kotlinc's null-check rules (`simplifyKnownSafeCallPatterns`) keep a checked value
+//! on the stack for the path that loads it again:
+//!
+//! - `aload x; ifnonnull L; …; L: aload x` (L reached only by that jump) becomes
+//!   `aload x; dup; ifnonnull L; pop; …; L:`;
+//! - `aload x; ifnull L; aload x` becomes `aload x; dup; ifnull L`, when EVERY jump to L has that
+//!   shape and nothing falls into L, which then begins with a `pop`.
+//!
+//! Either load of `x` after the jump may instead follow an `aload y` or a one-word `getstatic`,
+//! which a `swap` then puts under the kept value. The jump target's frame gains that value on its
+//! stack.
+//!
 //! A value is a temporary when no `LocalVariableTable` range covers or begins after its store,
 //! it is not an exception handler's catch store, and every load it reaches reads only it. Patterns
 //! match raw adjacency, as kotlinc's do: a line number or a branch target between the instructions
@@ -60,6 +72,14 @@ pub(crate) struct Body<'a> {
     pub marks: &'a [bool],
     /// Named locals: `(start index, end index, slot)`, end exclusive.
     pub named: &'a [(usize, usize, u16)],
+    /// `true` for each `checkcast` kotlinc's redundant-cast pass removes. That pass runs before this
+    /// one, so selected instructions are gone before any rule here looks.
+    pub redundant_casts: &'a [bool],
+    /// The label each branch jumps to, by original index, where the builder recorded one. Several
+    /// labels can stand at one index; kotlinc's rules tell them apart.
+    pub branch_labels: &'a [Option<u32>],
+    /// The labels bound at each original index, in the order they stand (length `insns.len() + 1`).
+    pub labels_at: &'a [Vec<u32>],
     /// Whether a `getstatic` operand's field is one JVM word.
     pub one_word_static: &'a dyn Fn(u16) -> bool,
     /// Whether an `ldc`/`ldc_w` operand is a `String` constant.
@@ -74,6 +94,14 @@ pub(crate) struct Body<'a> {
 pub(crate) struct Rewrite {
     pub nodes: Vec<(Insn, Placement)>,
     pub eliminated: Vec<(usize, u16)>,
+    /// Branch targets a null-check rule left a value on the stack at: `(original index the
+    /// target stood at, original indices of the loads whose value arrives there)`. The value's type
+    /// is the loaded local's before each of those loads.
+    pub stack_at_target: Vec<(usize, Vec<usize>)>,
+    /// Labels that stand AFTER an instruction a rule inserted right behind an earlier label at their
+    /// index: kotlinc's `L: pop; E:`, where `L` is a null check's target and `E` a later label bound
+    /// at the same offset. Their branches and frames land after the inserted instruction.
+    pub late_labels: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +202,8 @@ const LDC_W: u8 = 0x13;
 const INVOKESTATIC: u8 = 0xb8;
 const IFNULL: u8 = 0xc6;
 const IFNONNULL: u8 = 0xc7;
+const GOTO: u8 = 0xa7;
+const ATHROW: u8 = 0xbf;
 
 /// Same 50 MiB-by-method complexity ceiling as kotlinc's optimizer. The product is deliberately
 /// conservative for this representation: a slot/store analysis cell is larger than one byte.
@@ -184,6 +214,25 @@ fn analysis_within_limit(instructions: usize, slots: usize, candidates: usize) -
         .checked_mul(slots)
         .and_then(|cells| cells.checked_mul(candidates.max(1)))
         .is_some_and(|cells| cells <= ANALYSIS_COMPLEXITY_LIMIT)
+}
+
+/// The opcode and original target index of a two-byte branch.
+fn jump(insn: &Insn) -> Option<(u8, usize)> {
+    match insn {
+        Insn::Branch {
+            op,
+            target: BranchTarget::Internal(to),
+        } => Some((*op, *to)),
+        _ => None,
+    }
+}
+
+/// Where an instruction inserted right after the node at `placement` goes.
+fn after(placement: Placement) -> Placement {
+    match placement {
+        Placement::Before(k) => Placement::Before(k),
+        Placement::Original(k) | Placement::After(k) => Placement::After(k),
+    }
 }
 
 /// A local's value at a program point: which temporary stores it may hold.
@@ -427,24 +476,136 @@ impl Working<'_> {
             .position(|(_, placement)| *placement == Placement::Original(original))
     }
 
-    /// Whether a label kotlinc keeps stands in front of node `at`: the first node of an original
-    /// group whose index carries an arrival or a mark.
-    fn labelled(&self, at: usize) -> bool {
+    /// Original instruction groups whose labels now stand in front of node `at`. Earlier passes can
+    /// remove a whole group, so this includes every skipped group since the preceding live node.
+    fn boundary_groups(&self, at: usize) -> std::ops::RangeInclusive<usize> {
         let group = self.nodes[at].1.group();
-        let first = at == 0 || self.nodes[at - 1].1.group() != group;
-        first && (self.body.arrivals[group] || self.body.marks[group])
+        let first = at.checked_sub(1).map_or(0, |previous| {
+            self.nodes[previous].1.group().saturating_add(1)
+        });
+        first..=group
+    }
+
+    /// Whether a label kotlinc keeps stands in front of node `at`.
+    fn labelled(&self, at: usize) -> bool {
+        self.boundary_groups(at)
+            .any(|group| self.body.arrivals[group] || self.body.marks[group])
     }
 
     /// Whether a label with non-trivial predecessors stands in front of node `at`.
     fn arrived(&self, at: usize) -> bool {
-        let group = self.nodes[at].1.group();
-        let first = at == 0 || self.nodes[at - 1].1.group() != group;
-        first && self.body.arrivals[group]
+        self.boundary_groups(at)
+            .any(|group| self.body.arrivals[group])
     }
 
     /// `nodes[at..at + ops.len()]` match `ops` with nothing kotlinc keeps between them.
     fn raw_sequence(&self, at: usize, len: usize) -> bool {
         at + len <= self.nodes.len() && (at + 1..at + len).all(|next| !self.labelled(next))
+    }
+
+    /// The first node a label at original index `group` lands on.
+    fn group_start(&self, group: usize) -> usize {
+        self.nodes
+            .iter()
+            .position(|(_, placement)| placement.group() >= group)
+            .unwrap_or(self.nodes.len())
+    }
+
+    /// Whether nothing kotlinc keeps in front of the node after `at` falls into it — its test for
+    /// a label's fall-through predecessor (`goto`, a return, `athrow`) as it applies to kotlinc's
+    /// own instruction list. kotlinc writes a `return` expression as `xreturn; nop` and removes the
+    /// dead `nop` only in a later pass, so a label right after a return has that `nop` as its
+    /// predecessor unless a `goto` (a `when` branch that is not the last) follows it; krusty does
+    /// not write that dead tail, so a return is taken to fall through. `athrow` has no tail.
+    fn ends_flow(&self, at: usize) -> bool {
+        match &self.nodes[at].0 {
+            Insn::Branch { op, .. } => *op == GOTO,
+            Insn::Plain { op, .. } => *op == ATHROW,
+            _ => false,
+        }
+    }
+
+    /// Every node that jumps to original index `target`, or `None` when something besides
+    /// two-byte branches reaches it: a switch, a handler, a protected range's bound, or the
+    /// fall-through of the node in front of it.
+    fn only_jumps_to(&self, target: usize) -> Option<Vec<usize>> {
+        let start = self.group_start(target);
+        if start == 0 || !self.ends_flow(start - 1) {
+            return None;
+        }
+        if self.body.handlers.iter().any(|handler| {
+            handler.start == target || handler.end == target || handler.handler == target
+        }) {
+            return None;
+        }
+        let mut jumps = Vec::new();
+        for (at, (insn, _)) in self.nodes.iter().enumerate() {
+            match insn {
+                Insn::Branch {
+                    target: BranchTarget::Internal(to),
+                    ..
+                } if *to == target => jumps.push(at),
+                Insn::BranchW {
+                    target: BranchTarget::Internal(to),
+                    ..
+                } if *to == target => return None,
+                Insn::TableSwitch {
+                    default, targets, ..
+                } if *default == target || targets.contains(&target) => return None,
+                Insn::LookupSwitch { default, pairs }
+                    if *default == target || pairs.iter().any(|&(_, to)| to == target) =>
+                {
+                    return None
+                }
+                _ => {}
+            }
+        }
+        Some(jumps)
+    }
+
+    /// Insert each `(position, insn, placement)` in front of the node now at `position`, in the
+    /// order given, and drop the nodes at `removed`.
+    fn apply(&mut self, mut inserts: Vec<(usize, Insn, Placement)>, removed: &[usize]) {
+        let mut nodes = Vec::with_capacity(self.nodes.len() + inserts.len());
+        // A stable sort: inserts at one position keep their order.
+        inserts.sort_by_key(|(position, _, _)| *position);
+        let mut pending = inserts.into_iter().peekable();
+        for (at, node) in std::mem::take(&mut self.nodes).into_iter().enumerate() {
+            while let Some((_, insn, placement)) =
+                pending.next_if(|(position, _, _)| *position == at)
+            {
+                nodes.push((insn, placement));
+            }
+            if !removed.contains(&at) {
+                nodes.push(node);
+            }
+        }
+        nodes.extend(pending.map(|(_, insn, placement)| (insn, placement)));
+        self.nodes = nodes;
+    }
+
+    /// The fall-through after the null check at `jump` reloads the checked slot: directly, or
+    /// after an `aload` or a one-word `getstatic` it can be swapped under. The reload's position,
+    /// and the node a `swap` goes after.
+    fn reload(&self, from: usize, slot: u16) -> Option<(usize, Option<usize>)> {
+        let reads = |at: usize| {
+            matches!(
+                self.nodes.get(at).and_then(|(insn, _)| var_op(insn)),
+                Some(VarOp::Load(Kind::Reference, s)) if s == slot
+            )
+        };
+        if from >= self.nodes.len() {
+            return None;
+        }
+        if reads(from) {
+            return Some((from, None));
+        }
+        let first = &self.nodes[from].0;
+        let swappable = matches!(var_op(first), Some(VarOp::Load(Kind::Reference, _)))
+            || (opcode(first) == Some(GETSTATIC)
+                && u2_operand(first).is_some_and(|field| (self.body.one_word_static)(field)));
+        (swappable && self.raw_sequence(from, 2) && reads(from + 1))
+            .then_some((from + 1, Some(from)))
     }
 
     fn remove(&mut self, positions: &mut [usize]) {
@@ -453,6 +614,189 @@ impl Working<'_> {
             self.nodes.remove(at);
         }
     }
+}
+
+/// kotlinc's `simplifyKnownSafeCallPatterns`: a null check whose value the path after it loads
+/// again keeps that value on the stack. Returns the original indices of the loads it removed; each
+/// jump target that now receives a value is added to `stack_at_target`.
+fn fold_null_checks(
+    working: &mut Working,
+    stack_at_target: &mut Vec<(usize, Vec<usize>)>,
+    late_labels: &mut BTreeSet<u32>,
+) -> Option<BTreeSet<usize>> {
+    let insns = working.body.insns;
+    let is_candidate = |pair: &[(Insn, Placement)]| {
+        matches!(var_op(&pair[0].0), Some(VarOp::Load(Kind::Reference, _)))
+            && matches!(jump(&pair[1].0), Some((IFNULL | IFNONNULL, _)))
+    };
+    let candidates = working
+        .nodes
+        .windows(2)
+        .filter(|pair| is_candidate(pair))
+        .count();
+    if candidates == 0 {
+        return Some(BTreeSet::new());
+    }
+    // Each candidate may inspect every branch into its target and rebuild the working list. Keep
+    // the same per-method ceiling as the temporary-value data-flow analysis rather than allowing
+    // a large generated method to turn this pre-pass quadratic without bound.
+    if !analysis_within_limit(insns.len(), candidates, 1) {
+        return None;
+    }
+    let mut removed = BTreeSet::new();
+    for (load, insn) in insns.iter().enumerate() {
+        if !matches!(var_op(insn), Some(VarOp::Load(Kind::Reference, _))) {
+            continue;
+        }
+        let Some(at) = working.position(load) else {
+            continue;
+        };
+        if !working.nodes.get(at..at + 2).is_some_and(is_candidate) {
+            continue;
+        }
+        let Some(VarOp::Load(_, slot)) = var_op(&working.nodes[at].0) else {
+            continue;
+        };
+        if !working.raw_sequence(at, 2) {
+            continue;
+        }
+        let Some((op, target)) = jump(&working.nodes[at + 1].0) else {
+            continue;
+        };
+        let Some(jumps) = working.only_jumps_to(target) else {
+            continue;
+        };
+        if op == IFNONNULL {
+            // The jump is the target's only predecessor, and the target reloads the value first
+            // thing: no line number or other label stands there.
+            let start = working.group_start(target);
+            if jumps != [at + 1]
+                || working.body.marks[target]
+                || working
+                    .nodes
+                    .get(start)
+                    .map(|(_, placement)| placement.group())
+                    != Some(target)
+            {
+                continue;
+            }
+            let Some((reload, swap_after)) = working.reload(start, slot) else {
+                continue;
+            };
+            let Placement::Original(reloaded) = working.nodes[reload].1 else {
+                continue;
+            };
+            let jump_placement = working.nodes[at + 1].1;
+            let mut inserts = vec![
+                (
+                    at + 1,
+                    plain(DUP),
+                    Placement::Before(jump_placement.group()),
+                ),
+                (at + 2, plain(POP), after(jump_placement)),
+            ];
+            if let Some(under) = swap_after {
+                inserts.push((under + 1, plain(SWAP), after(working.nodes[under].1)));
+            }
+            working.apply(inserts, &[reload]);
+            removed.insert(reloaded);
+            stack_at_target.push((target, vec![load]));
+            continue;
+        }
+        // `ifnull`: every jump to the target LABEL checks a local and reloads it on the
+        // fall-through. Of the labels at the target's offset, one bound before it is a predecessor
+        // that is not such a jump; one bound after it is not a predecessor at all, and lands after
+        // the `pop` inserted behind the target.
+        let label_of = |working: &Working, at: usize| match working.nodes[at].1 {
+            Placement::Original(index) => working.body.branch_labels.get(index).copied().flatten(),
+            _ => None,
+        };
+        let (jumps, later) = match label_of(working, at + 1) {
+            None => (jumps, Vec::new()),
+            Some(own) => {
+                let order = &working.body.labels_at[target];
+                let Some(rank) = order.iter().position(|&label| label == own) else {
+                    continue;
+                };
+                let mut to_own = Vec::new();
+                let mut foreign = false;
+                for &jump_at in &jumps {
+                    match label_of(working, jump_at) {
+                        Some(label) if label == own => to_own.push(jump_at),
+                        Some(label)
+                            if order.iter().position(|&other| other == label) > Some(rank) => {}
+                        _ => foreign = true,
+                    }
+                }
+                if foreign {
+                    continue;
+                }
+                (to_own, order[rank + 1..].to_vec())
+            }
+        };
+        let mut parts = Vec::with_capacity(jumps.len());
+        for &jump_at in &jumps {
+            let checked = jump_at.checked_sub(1).filter(|&checked| {
+                matches!(jump(&working.nodes[jump_at].0), Some((IFNULL, _)))
+                    && working.raw_sequence(checked, 2)
+            });
+            let Some(checked) = checked else {
+                break;
+            };
+            let (
+                Some(VarOp::Load(Kind::Reference, checked_slot)),
+                Placement::Original(checked_index),
+            ) = (var_op(&working.nodes[checked].0), working.nodes[checked].1)
+            else {
+                break;
+            };
+            if jump_at + 1 >= working.nodes.len() || working.labelled(jump_at + 1) {
+                break;
+            }
+            let Some((reload, swap_after)) = working.reload(jump_at + 1, checked_slot) else {
+                break;
+            };
+            let Placement::Original(reloaded) = working.nodes[reload].1 else {
+                break;
+            };
+            parts.push((jump_at, checked_index, reload, reloaded, swap_after));
+        }
+        if parts.len() != jumps.len() {
+            continue;
+        }
+        let mut inserts = Vec::new();
+        let mut reloads = Vec::new();
+        for &(jump_at, _, reload, reloaded, swap_after) in &parts {
+            let jump_placement = working.nodes[jump_at].1;
+            inserts.push((
+                jump_at,
+                plain(DUP),
+                Placement::Before(jump_placement.group()),
+            ));
+            if let Some(under) = swap_after {
+                inserts.push((under + 1, plain(SWAP), after(working.nodes[under].1)));
+            }
+            reloads.push(reload);
+            removed.insert(reloaded);
+        }
+        inserts.push((
+            working.group_start(target),
+            plain(POP),
+            Placement::Before(target),
+        ));
+        working.apply(inserts, &reloads);
+        late_labels.extend(later);
+        stack_at_target.push((
+            target,
+            parts.iter().map(|&(_, checked, ..)| checked).collect(),
+        ));
+    }
+    // The existing temporary/NOP cleanup must not apply only half of kotlinc's coupled safe-call
+    // transformation. If a candidate could not be proven foldable, preserve the original method.
+    if working.nodes.windows(2).any(is_candidate) {
+        return None;
+    }
+    Some(removed)
 }
 
 /// Decide kotlinc's rewrite of `body`, or `None` when nothing applies or the body is outside what
@@ -482,6 +826,22 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             .collect(),
     };
     let mut eliminated = Vec::new();
+    let casts_removed = body.redundant_casts.contains(&true);
+    working.nodes.retain(|(_, placement)| {
+        !matches!(placement, Placement::Original(index)
+            if body.redundant_casts.get(*index).copied().unwrap_or(false))
+    });
+    let earlier_pass_only = {
+        let nodes = working.nodes.clone();
+        move || {
+            casts_removed.then(|| Rewrite {
+                nodes,
+                eliminated: Vec::new(),
+                stack_at_target: Vec::new(),
+                late_labels: BTreeSet::new(),
+            })
+        }
+    };
     // `xload; pop` — the value loaded only to be discarded.
     let mut trivially_removed = BTreeSet::new();
     let mut at = 0;
@@ -522,8 +882,9 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             at += 1;
             continue;
         }
-        let group = working.nodes[at].1.group();
-        let protected_start = body.handlers.iter().any(|handler| handler.start == group);
+        let protected_start = working
+            .boundary_groups(at)
+            .any(|group| body.handlers.iter().any(|handler| handler.start == group));
         let meaningful_before = at > 0 && !working.labelled(at);
         let meaningful_after = at + 1 < working.nodes.len() && !working.labelled(at + 1);
         if !protected_start && (meaningful_before || meaningful_after) {
@@ -533,28 +894,18 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             at += 1;
         }
     }
-    // Safe-call rewriting runs after trivial NOP cleanup upstream. Detect that exact raw shape in
-    // the cleaned working list and preserve the original method rather than applying only half of
-    // the coupled transformation.
-    if (0..working.nodes.len().saturating_sub(1)).any(|at| {
-        working.raw_sequence(at, 2)
-            && matches!(
-                var_op(&working.nodes[at].0),
-                Some(VarOp::Load(Kind::Reference, _))
-            )
-            && matches!(
-                working.nodes[at + 1].0,
-                Insn::Branch {
-                    op: IFNULL | IFNONNULL,
-                    ..
-                }
-            )
-    }) {
-        return None;
-    }
-    let changed_trivially = !trivially_removed.is_empty() || removed_nop;
-    let temporaries = temporaries(body, &trivially_removed)?;
-    let mut changed = changed_trivially;
+    let mut stack_at_target = Vec::new();
+    let mut late_labels = BTreeSet::new();
+    let mut removed = trivially_removed;
+    let Some(folded) = fold_null_checks(&mut working, &mut stack_at_target, &mut late_labels)
+    else {
+        return earlier_pass_only();
+    };
+    removed.extend(folded);
+    let Some(temporaries) = temporaries(body, &removed) else {
+        return earlier_pass_only();
+    };
+    let mut changed = casts_removed || removed_nop || !removed.is_empty();
     for (store, loads) in temporaries {
         let Some(store_at) = working.position(store) else {
             continue;
@@ -658,6 +1009,8 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
     changed.then_some(Rewrite {
         nodes: working.nodes,
         eliminated,
+        stack_at_target,
+        late_labels,
     })
 }
 
@@ -676,11 +1029,81 @@ mod tests {
         }
     }
 
+    type Stacks = Vec<(usize, Vec<usize>)>;
+
+    fn rewrite_with_stacks(
+        insns: &[Insn],
+        arrivals: &[usize],
+        marks: &[usize],
+        named: &[(usize, usize, u16)],
+        handlers: &[Handler],
+    ) -> Option<(Vec<Insn>, Stacks)> {
+        let mut arrival = vec![false; insns.len() + 1];
+        for &index in arrivals {
+            arrival[index] = true;
+        }
+        let mut mark = vec![false; insns.len() + 1];
+        for &index in marks {
+            mark[index] = true;
+        }
+        let branch_labels = vec![None; insns.len()];
+        let labels_at = vec![Vec::new(); insns.len() + 1];
+        let redundant_casts = vec![false; insns.len()];
+        let body = Body {
+            insns,
+            handlers,
+            arrivals: &arrival,
+            marks: &mark,
+            named,
+            redundant_casts: &redundant_casts,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
+            one_word_static: &|field| field == 1,
+            string_constant: &|index| index == 7,
+            expression_null_check: &|method| method == 9,
+        };
+        eliminate(&body).map(|rewrite| {
+            (
+                rewrite.nodes.into_iter().map(|(insn, _)| insn).collect(),
+                rewrite.stack_at_target,
+            )
+        })
+    }
+
     fn rewrite_with(
         insns: &[Insn],
         arrivals: &[usize],
         marks: &[usize],
         named: &[(usize, usize, u16)],
+        handlers: &[Handler],
+    ) -> Option<Vec<Insn>> {
+        rewrite_with_stacks(insns, arrivals, marks, named, handlers).map(|(insns, _)| insns)
+    }
+
+    fn rewrite_stacks(
+        insns: &[Insn],
+        arrivals: &[usize],
+        marks: &[usize],
+    ) -> Option<(Vec<Insn>, Stacks)> {
+        rewrite_with_stacks(insns, arrivals, marks, &[], &[])
+    }
+
+    fn branch(op: u8, to: usize) -> Insn {
+        Insn::Branch {
+            op,
+            target: BranchTarget::Internal(to),
+        }
+    }
+
+    fn rewrite(insns: &[Insn], arrivals: &[usize], marks: &[usize]) -> Option<Vec<Insn>> {
+        rewrite_with(insns, arrivals, marks, &[], &[])
+    }
+
+    fn rewrite_after_casts(
+        insns: &[Insn],
+        casts: &[usize],
+        arrivals: &[usize],
+        marks: &[usize],
         handlers: &[Handler],
     ) -> Option<Vec<Insn>> {
         let mut arrival = vec![false; insns.len() + 1];
@@ -691,27 +1114,112 @@ mod tests {
         for &index in marks {
             mark[index] = true;
         }
+        let mut redundant_casts = vec![false; insns.len()];
+        for &index in casts {
+            redundant_casts[index] = true;
+        }
+        let branch_labels = vec![None; insns.len()];
+        let labels_at = vec![Vec::new(); insns.len() + 1];
         let body = Body {
             insns,
             handlers,
             arrivals: &arrival,
             marks: &mark,
-            named,
-            one_word_static: &|field| field == 1,
-            string_constant: &|index| index == 7,
-            expression_null_check: &|method| method == 9,
+            named: &[],
+            redundant_casts: &redundant_casts,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
+            one_word_static: &|_| false,
+            string_constant: &|_| false,
+            expression_null_check: &|_| false,
         };
         eliminate(&body).map(|rewrite| rewrite.nodes.into_iter().map(|(insn, _)| insn).collect())
-    }
-
-    fn rewrite(insns: &[Insn], arrivals: &[usize], marks: &[usize]) -> Option<Vec<Insn>> {
-        rewrite_with(insns, arrivals, marks, &[], &[])
     }
 
     const ALOAD_0: u8 = 0x2a;
     const ALOAD_1: u8 = 0x2b;
     const ASTORE_1: u8 = 0x4c;
     const ARETURN: u8 = 0xb0;
+
+    #[test]
+    fn a_cast_removal_survives_when_the_temporary_pass_declines() {
+        let cast = with(0xc0, &[0, 1]);
+        let insns = [
+            op(0x01), // aconst_null
+            cast,
+            op(POP),
+            op(ALOAD_0),
+            branch(IFNULL, 6),
+            op(0xb1),
+            op(0xb1),
+        ];
+        assert_eq!(
+            rewrite_after_casts(&insns, &[1], &[6], &[], &[]),
+            Some(vec![
+                op(0x01),
+                op(POP),
+                op(ALOAD_0),
+                branch(IFNULL, 6),
+                op(0xb1),
+                op(0xb1),
+            ])
+        );
+    }
+
+    fn safe_call_with_cast_boundary(arrivals: &[usize], marks: &[usize]) -> Vec<Insn> {
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            with(0xc0, &[0, 4]),
+            branch(IFNULL, 8),
+            op(ALOAD_1),
+            call.clone(),
+            branch(GOTO, 8),
+            op(0xb1),
+        ];
+        let rewritten = rewrite_after_casts(&insns, &[3], arrivals, marks, &[]).expect("cast");
+        assert_eq!(
+            rewritten,
+            vec![
+                op(ALOAD_0),
+                op(ASTORE_1),
+                op(ALOAD_1),
+                branch(IFNULL, 8),
+                op(ALOAD_1),
+                call,
+                branch(GOTO, 8),
+                op(0xb1),
+            ]
+        );
+        rewritten
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_debug_boundary_for_the_next_pass() {
+        safe_call_with_cast_boundary(&[8], &[3]);
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_branch_boundary_for_the_next_pass() {
+        safe_call_with_cast_boundary(&[3, 8], &[]);
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_handler_boundary_for_the_next_pass() {
+        let cast = with(0xc0, &[0, 1]);
+        let insns = [op(0x01), cast, op(NOP), op(POP), op(0xb1)];
+        let handler = Handler {
+            start: 1,
+            end: 4,
+            handler: 4,
+        };
+        assert_eq!(
+            rewrite_after_casts(&insns, &[1], &[1, 4], &[], &[handler]),
+            Some(vec![op(0x01), op(NOP), op(POP), op(0xb1)])
+        );
+    }
 
     #[test]
     fn a_store_followed_by_its_only_load_leaves_the_value_on_the_stack() {
@@ -958,5 +1466,221 @@ mod tests {
             op(ARETURN),
         ];
         assert_eq!(rewrite(&insns, &[5, 7], &[]), None);
+    }
+
+    #[test]
+    fn a_value_checked_non_null_stays_on_the_stack_for_its_target() {
+        // `s?.length`: 0 aload_0; 1 astore_1; 2 aload_1; 3 ifnonnull 6; 4 aconst_null; 5 goto 8;
+        // 6 aload_1; 7 invokevirtual; 8 areturn.
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            branch(IFNONNULL, 6),
+            op(0x01),
+            branch(GOTO, 8),
+            op(ALOAD_1),
+            call.clone(),
+            op(ARETURN),
+        ];
+        assert_eq!(
+            rewrite_stacks(&insns, &[6, 8], &[]),
+            Some((
+                vec![
+                    op(ALOAD_0),
+                    op(DUP),
+                    branch(IFNONNULL, 6),
+                    op(POP),
+                    op(0x01),
+                    branch(GOTO, 8),
+                    call,
+                    op(ARETURN),
+                ],
+                vec![(6, vec![2])],
+            ))
+        );
+    }
+
+    #[test]
+    fn a_line_number_at_the_non_null_target_keeps_the_reload() {
+        let insns = [
+            op(ALOAD_0),
+            branch(IFNONNULL, 4),
+            op(0x01),
+            op(ATHROW),
+            op(ALOAD_0),
+            op(ARETURN),
+        ];
+        assert_eq!(rewrite(&insns, &[4], &[4]), None);
+        assert!(rewrite(&insns, &[4], &[]).is_some());
+    }
+
+    #[test]
+    fn a_return_in_front_of_the_non_null_target_keeps_the_reload() {
+        // `if (s == null) return 0; return s.length`: kotlinc's `ireturn` is followed by a dead
+        // `nop` that falls into the target, so the jump is not its only predecessor.
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            branch(IFNONNULL, 4),
+            op(0x03),
+            op(0xac),
+            op(ALOAD_0),
+            call,
+            op(0xac),
+        ];
+        assert_eq!(rewrite(&insns, &[4], &[]), None);
+    }
+
+    #[test]
+    fn a_non_null_target_reloading_under_a_static_swaps_it_into_place() {
+        let field = with(GETSTATIC, &[0, 1]);
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            branch(IFNONNULL, 4),
+            op(0x01),
+            op(ATHROW),
+            field.clone(),
+            op(ALOAD_0),
+            call.clone(),
+            op(0xb1),
+        ];
+        assert_eq!(
+            rewrite(&insns, &[4], &[]),
+            Some(vec![
+                op(ALOAD_0),
+                op(DUP),
+                branch(IFNONNULL, 4),
+                op(POP),
+                op(0x01),
+                op(ATHROW),
+                field,
+                op(SWAP),
+                call,
+                op(0xb1),
+            ])
+        );
+    }
+
+    #[test]
+    fn null_checks_sharing_a_target_all_keep_their_values() {
+        // `b?.next?.name` folded onto one null label: 0 aload_0; 1 ifnull 10; 2 aload_0;
+        // 3 invokevirtual next; 4 astore_1; 5 aload_1; 6 ifnull 10; 7 aload_1; 8 invokevirtual name;
+        // 9 goto 11; 10 aconst_null; 11 areturn.
+        let next = with(0xb6, &[0, 3]);
+        let name = with(0xb6, &[0, 4]);
+        let insns = [
+            op(ALOAD_0),
+            branch(IFNULL, 10),
+            op(ALOAD_0),
+            next.clone(),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            branch(IFNULL, 10),
+            op(ALOAD_1),
+            name.clone(),
+            branch(GOTO, 11),
+            op(0x01),
+            op(ARETURN),
+        ];
+        assert_eq!(
+            rewrite_stacks(&insns, &[10, 11], &[]),
+            Some((
+                vec![
+                    op(ALOAD_0),
+                    op(DUP),
+                    branch(IFNULL, 10),
+                    next,
+                    op(DUP),
+                    branch(IFNULL, 10),
+                    name,
+                    branch(GOTO, 11),
+                    op(POP),
+                    op(0x01),
+                    op(ARETURN),
+                ],
+                vec![(10, vec![0, 5])],
+            ))
+        );
+    }
+
+    #[test]
+    fn a_null_target_also_reached_by_falling_through_is_left_alone() {
+        // `if (x != null) x.run()`: the call falls into the target the check jumps to.
+        let call = with(0xb6, &[0, 3]);
+        let insns = [op(ALOAD_0), branch(IFNULL, 4), op(ALOAD_0), call, op(0xb1)];
+        assert_eq!(rewrite(&insns, &[4], &[]), None);
+    }
+
+    #[test]
+    fn a_large_method_without_null_check_candidates_keeps_existing_cleanup() {
+        let mut insns = vec![op(ALOAD_0); 8_000];
+        insns.extend([op(ALOAD_0), op(POP), op(ARETURN)]);
+        let rewritten = rewrite(&insns, &[], &[]).expect("the load/pop cleanup still applies");
+        assert_eq!(rewritten.len(), 8_001);
+        assert_eq!(rewritten.last(), Some(&op(ARETURN)));
+    }
+
+    #[test]
+    fn a_label_bound_after_the_null_target_lands_after_its_pop() {
+        // `n?.touch()` as a statement: 0 aload_0; 1 astore_1; 2 aload_1; 3 ifnull L; 4 aload_1;
+        // 5 invokevirtual; 6 goto E; 7 return, with `L` (label 1) then `E` (label 0) bound at 7.
+        // The `goto` jumps to `E`, not to `L`, so `L`'s only predecessor is the null check.
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            branch(IFNULL, 7),
+            op(ALOAD_1),
+            call.clone(),
+            branch(GOTO, 7),
+            op(0xb1),
+        ];
+        let arrivals = {
+            let mut arrivals = vec![false; insns.len() + 1];
+            arrivals[7] = true;
+            arrivals
+        };
+        let marks = vec![false; insns.len() + 1];
+        let mut branch_labels = vec![None; insns.len()];
+        branch_labels[3] = Some(1);
+        branch_labels[6] = Some(0);
+        let mut labels_at = vec![Vec::new(); insns.len() + 1];
+        labels_at[7] = vec![1, 0];
+        let redundant_casts = vec![false; insns.len()];
+        let body = Body {
+            insns: &insns,
+            handlers: &[],
+            arrivals: &arrivals,
+            marks: &marks,
+            named: &[],
+            redundant_casts: &redundant_casts,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
+            one_word_static: &|_| false,
+            string_constant: &|_| false,
+            expression_null_check: &|_| false,
+        };
+        let rewrite = eliminate(&body).expect("folds");
+        assert_eq!(
+            rewrite
+                .nodes
+                .into_iter()
+                .map(|(insn, _)| insn)
+                .collect::<Vec<_>>(),
+            vec![
+                op(ALOAD_0),
+                op(DUP),
+                branch(IFNULL, 7),
+                call,
+                branch(GOTO, 7),
+                op(POP),
+                op(0xb1),
+            ]
+        );
+        assert_eq!(rewrite.late_labels, BTreeSet::from([0]));
     }
 }

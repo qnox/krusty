@@ -136,6 +136,29 @@ impl Checker<'_> {
                 crate::libraries::required_arity(parameters.len(), &defaults),
                 vararg_index,
             );
+            for (ordinal, parameter) in class.context_params.iter().enumerate() {
+                call_sig.parameter_identities[ordinal] = match parameter.context_kind {
+                    crate::types::ContextParameterKind::Named => {
+                        crate::fir::ResolvedParameterIdentity::ContextValue {
+                            ordinal: ordinal as u32,
+                            source_name: parameter.name.as_str().into(),
+                        }
+                    }
+                    crate::types::ContextParameterKind::Anonymous => {
+                        crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                            ordinal: ordinal as u32,
+                        }
+                    }
+                    crate::types::ContextParameterKind::LegacyReceiver => {
+                        crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                            ordinal: ordinal as u32,
+                        }
+                    }
+                    crate::types::ContextParameterKind::None => {
+                        unreachable!("a classifier context prefix must carry a context role")
+                    }
+                };
+            }
             call_sig.implicit_integer_coercion = std::iter::repeat_n(false, context_count)
                 .chain(source_coercions)
                 .collect();
@@ -606,6 +629,13 @@ impl Checker<'_> {
         let mut call_sig = constructor.call_sig.clone();
         if call_sig.param_names.len() != parameter_count {
             call_sig.param_names = vec![String::new(); parameter_count];
+        }
+        if call_sig.parameter_identities.len() != parameter_count {
+            call_sig.parameter_identities = (0..parameter_count)
+                .map(|ordinal| crate::fir::ResolvedParameterIdentity::Unnamed {
+                    ordinal: ordinal as u32,
+                })
+                .collect();
         }
         if call_sig.param_defaults.len() != parameter_count {
             call_sig.param_defaults = vec![false; parameter_count];

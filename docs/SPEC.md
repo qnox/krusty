@@ -1729,6 +1729,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(receiver, args…) -> receiver.m(args)` — bound captures the receiver into the closure (so its
   arity is the method's), unbound takes the receiver as the first parameter. Only user-class methods
   (resolvable in the IR class table) and non-`Unit`/`Nothing` returns are modeled.
+- A reference to a builtin scalar member (`Int::times`, `1L::shl`, `Char::minus`, `Double::toInt`,
+  `Boolean::not`, `Int::compareTo`) denotes the same primitive operation a call of that declaration
+  does, with the same operand promotion (`Int.plus(Long)` adds `Long`s) — there is no JVM method to
+  reference. The reference keeps the selected declaration identity (reflection still reports `times`);
+  the JVM backend realizes the adapter body, or the reflective carrier's static helper, as the
+  declaration's operation, unboxing a platform/erased operand first. Operand carriers come from one
+  provider rule shared with checked FIR (`builtin_member_realization::primitive_binary_operands`).
+  Passed to an inline stdlib function (`w.reduce(Int::times)`), stored as a function value, bound, or
+  used as a `KFunction` (`tests/callable_ref_e2e.rs::builtin_scalar_member_references_realize_their_primitive_operations`).
 - Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
   lambda, but the impl method handle points directly at the referenced function (no synthesized body).
   Exception: a `Unit`-returning `::foo` gets a synthesized wrapper `(params) -> { foo(params); Unit }`
@@ -2003,6 +2012,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (a bridge method's debug tables, constant-pool order) predate it. Test:
   `tests/star_projection_wildcard_e2e.rs` (a Java fixture with a wildcard result and parameter,
   declared, stubbed, and passed, run on the JVM).
+- **A star projection's readable bound is its parameter's declared bound, wherever the classifier
+  comes from.** `Discounted<*>` over `class Discounted<P : Product>` is `Discounted<out Product>`
+  in a declaration header and in a body alike. Compact Pass-1 signature resolution read the bound
+  only from classes of the module being compiled, so for a CLASSPATH classifier a header spelled it
+  `Discounted<out Any?>` while the body checker, reading the classifier through the provider,
+  spelled it `Discounted<out Product>`. The two spellings of one written type then disagreed: a
+  smart cast of `this` to `Discounted<*>` no longer matched a `Discounted<*>` parameter, so the call
+  lost its `checkcast` (`VerifyError`), and a local override taking `Discounted<*>` no longer
+  matched the interface member it overrides, so it got no bridge (`AbstractMethodError`). Header
+  star bounds now come from the provider-normalized classifier (module or classpath), exactly as
+  the body checker reads them. Tests: `tests/classpath_star_projection_bound_e2e.rs`, against both
+  a krusty-built and a kotlinc-built dependency.
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
@@ -2110,6 +2131,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier-value-only tracking set; `scope.m { it.foo() }`
   therefore reports both the uninferable `T` and the unresolved body member. Test:
   `tests/postponed_lambda_probe_e2e.rs`.
+- **A postponed candidate still needs a type constructor that can fit.** While a call's lambda is
+  unshaped, an already-typed argument keeps an overload alive when SOME binding of the callee's type
+  variables could make it fit. The binding is postponed; the constructor around it is not. kotlinc
+  rejects `Iterable<T>.zip(other: Array<out R>, transform)` for a `List<Long>` argument before it
+  analyzes `{ a, b -> b - a }`. krusty kept every parameter that mentioned a formal alive (only a
+  function-typed parameter against a non-function value was declined). The array `zip` then shaped
+  the lambda with an unbound `R`, and under an outer expected type the provisional `List<Nothing>`
+  result became the lambda's expectation (`inferred type is Long but Nothing was expected`), for
+  stdlib and dependency overloads alike. `postponed_argument_fits` (`src/resolve/postponed_applicability.rs`)
+  now judges a class-typed parameter by assignability to its constructor shape: every type argument
+  that mentions a formal becomes `*`, the classifier and nullability stay. A bare formal still fits
+  anything. A function value against a class shape is left to final selection (SAM conversion).
+  Test: `tests/postponed_constructor_applicability_e2e.rs`.
 - **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
   packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
   instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
@@ -4040,6 +4074,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
   `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
   `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
+- **A renamed-builtin bridge belongs to the first Kotlin CLASS that overrides the mapped member.**
+  kotlinc emits `size()` (for `Collection.size`), `intValue()` (for `Number.toInt`), `keySet()`,
+  `remove(int)` and the rest of the renamed family `public final` in the first Kotlin class of the
+  superclass chain whose declaration overrides the builtin — `kotlin.collections.AbstractCollection`
+  for every stdlib `AbstractList`/`AbstractSet` — and never again below it (measured: a subclass of
+  `AbstractList<T>` overriding `val size` publishes only an open `getSize()`). Redeclaring it in a
+  subclass overrides a final method, and the JVM rejects the class at load time with
+  `IncompatibleClassChangeError`. The frontend records, on each override edge, whether a Kotlin
+  superclass declaration among the implementation's other overridden members inherits the edge's
+  owner (`has_kotlin_superclass_override`); the JVM bridge pass skips a RENAMED bridge when that
+  fact is set. A Java superclass realizes the member under the JVM name itself, and a superclass
+  property that only shares the name does not override the builtin, so neither owns the bridge and
+  the implementation keeps emitting it. Ordinary erasure bridges are unaffected: kotlinc
+  regenerates those in every overriding class. The custom accessors of an overriding property are
+  also emitted without `final`, like the default accessors of a backing-field one. Tests:
+  `tests/renamed_builtin_bridge_owner_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type
@@ -5597,6 +5647,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
+  calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
+  arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and
+  the expected type exactly as for `java.util.LinkedHashMap(a)`. krusty handed the expansion, with the
+  alias formals still open, to constructor selection as if it had been written, which bound the
+  constructor's own `K`/`V` to the alias's unrelated `K`/`V`: `LinkedHashMap(a)` with `a: Map<K, V>`
+  was rejected against `Map<out K, out V>!`, and every such call was typed with the alias formals
+  (`HashMap(m)` as `HashMap<K, V>`). Only a target argument that mentions no open alias formal is
+  fixed by the alias (`String` in `typealias Keyed<V> = Entry<String, V>`, so `Keyed(1, 2)` is still
+  an argument mismatch); the others are inference positions, and the expansion decides where each
+  one lands (`typealias Flipped<X, Y> = Entry<Y, X>`). Owner:
+  `src/resolve/alias_constructor_application.rs`. Tests:
+  `tests/typealias_constructor_inference_e2e.rs::an_omitted_stdlib_alias_argument_is_inferred_from_the_constructor_arguments`,
+  `tests/typealias_constructor_inference_e2e.rs::an_omitted_source_alias_argument_is_inferred_through_the_alias_expansion`.
 - **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
@@ -6246,6 +6310,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference it is handed Kotlin's `Unit` object rather than `null`.
   Tests: `tests/native_read_only_property_delegate_e2e.rs`
   (`a_unit_answering_delegate_reads_as_the_unit_object`).
+- **An extension receiver constrains its declared formal through the receiver's supertypes.** In
+  `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
+  `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
+  The candidate's logical parameters used a structural-only match, so a `List<E>` receiver left
+  the `T` of `Collection<T>` open. The argument alone then fixed `plus(element: T)` at
+  `T := List<E>`. That parameter is a subtype of `Iterable<E>`, so the element overload won and
+  the call typed as `List<Any>`. Now the receiver is projected through its applied supertypes
+  first, as argument unification already was, so the element overload's `T` becomes the join of
+  `E` and `List<E>`, and `plus(elements: Iterable<T>)` is the most specific overload, as kotlinc
+  resolves it. Known gap: specificity still ranks instantiated parameters rather than the declared
+  generic shapes, so `List<List<E>> + List<E>` still picks the element overload (kotlinc chooses
+  `Iterable<T>` with `T := Any?`), and `List<List<X>> + List<List<X>>` is reported ambiguous.
+  Tests: `tests/ext_receiver_tparam_binding_e2e.rs`
+  (`a_subtype_receiver_over_a_caller_type_variable_binds_the_declared_receiver_formal`,
+  cross-checked against the reference compiler).
+- **An override of a Java member matches the platform type, and a Java class merges its members by
+  erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
+  bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
+  `J3.from(String!)`; and a Java class's own scope merges the members it inherits under Java's
+  erasure rule, so inside `java.util.AbstractList<E>` the inherited
+  `AbstractCollection.contains(Object)` implements `List<E>.contains(E)`. krusty compared the
+  substituted parameter types exactly, so every concrete class extending an abstract Java class
+  with a reference-typed parameter (Moshi's `JsonAdapter<T>`, the JDK's skeleton collections) was
+  rejected as "not abstract and does not implement all abstract members". The obligation check
+  (`src/resolve/abstract_obligations.rs`) now discharges an abstract member with a concrete one
+  whose parameters are the same modulo platform flexibility (`assignable::same_flexible_type`), or,
+  when one Java classifier of the hierarchy inherits both declaring classifiers, whose erased
+  declared parameters are equal. An erasure match that only meets in the Kotlin class
+  (`JBase.add(Object)` against `Sink<String>.add(String)`) still leaves the member unimplemented, as
+  in kotlinc. The inherited-member walk collapses the same flexible slot, so a call through the
+  subclass sees only the override's `String` parameter and `b.from(null)` is rejected as it is for a
+  Kotlin base. Remaining gap: an abstract Java map (`java.util.AbstractMap`), whose
+  `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
+  rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
+  for the plain override, JDK skeleton collections, and the shapes that stay rejected).
 
 ## 8. Success criteria for the PoC
 
@@ -8040,6 +8139,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   splicer patches it there; krusty's delegating stub left a live direct call in spliced output. The
   spurious `JvmMethodSignature` on plain inline facade records is gone (kotlinc emits none; suspend
   and type-parameter-mentioning signatures keep theirs).
+
+- **A forwarded reified argument keeps its marker.** When a reified inline body passes its OWN
+  reified parameter to another reified inline (`inline fun <reified T> List<Any?>.only() =
+  filterIsInstance<T>()`), kotlinc splices the callee and renames the callee's marker to the host
+  parameter: `reifiedOperationMarker(3, "T")` followed by the callee's erased `instanceof`. The
+  marker is spelled `T?` when the argument or the callee's own marker is nullable. krusty resolved
+  the forwarded `T` to its erased class while splicing, NOP'd the marker, and published `instanceof
+  java/lang/Object`, so every caller in another module received every element. The splice map is
+  now a `ReifiedArgument`: `Class` for a concrete argument (the marker is NOP'd and the type-bearing
+  op repointed, as before), or `Forwarded` for a substitution that is a reified type parameter of a
+  declaration in this file. For `Forwarded`, the marker triplet stays, its name `ldc` is repointed
+  after relocation (compact `ldc` when the host index fits), and the erased placeholder stays for
+  the host's own caller to reify. Test: `tests/reified_parameter_forwarding_e2e.rs`.
 
 - **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
   supertype declaration and the override the same physical shape — a trailing `Continuation`

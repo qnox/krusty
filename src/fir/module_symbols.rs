@@ -124,18 +124,62 @@ impl<'a> StreamedModuleSymbols<'a> {
         declaration: DeclarationId,
         context_count: usize,
     ) -> Vec<String> {
-        let property = self.index.property_for_declaration(declaration);
+        if context_count == 0 {
+            return Vec::new();
+        }
+        let property = self
+            .index
+            .property_for_declaration(declaration)
+            .expect("a published property retains its stable identity");
         (0..context_count)
             .map(|ordinal| {
-                property
-                    .and_then(|property| {
-                        self.index
-                            .property_context_parameter_name(property, ordinal as u32)
-                    })
-                    .unwrap_or("_")
-                    .to_owned()
+                let parameter = self
+                    .index
+                    .property_context_parameter(property, ordinal as u32)
+                    .expect("a published property getter retains every context identity");
+                match parameter.kind {
+                    crate::types::ContextParameterKind::Named
+                    | crate::types::ContextParameterKind::Anonymous => {
+                        parameter.source_name.to_string()
+                    }
+                    crate::types::ContextParameterKind::LegacyReceiver => String::new(),
+                    crate::types::ContextParameterKind::None => {
+                        panic!("a property context prefix cannot contain an ordinary parameter")
+                    }
+                }
             })
             .collect()
+    }
+
+    fn property_context_parameter_identities(
+        &self,
+        declaration: DeclarationId,
+        context_count: usize,
+    ) -> Vec<crate::fir::ResolvedParameterIdentity> {
+        if context_count == 0 {
+            return Vec::new();
+        }
+        let property = self
+            .index
+            .property_for_declaration(declaration)
+            .expect("a published property retains its stable identity");
+        self.index
+            .property_context_parameter_identities(property)
+            .expect("a published property retains every typed context identity")
+            .into_vec()
+    }
+
+    fn property_setter_parameter_name(
+        &self,
+        declaration: DeclarationId,
+        _context_count: usize,
+    ) -> Option<String> {
+        let property = self.index.property_for_declaration(declaration)?;
+        match self.index.property_setter_parameter_identity(property)? {
+            crate::fir::ResolvedParameterIdentity::Source(name) => Some(name.to_string()),
+            crate::fir::ResolvedParameterIdentity::PropertySetterValue => None,
+            _ => panic!("a property setter value must retain its exact semantic identity"),
+        }
     }
 
     pub(crate) fn annotation_retention(
@@ -565,9 +609,12 @@ impl<'a> StreamedModuleSymbols<'a> {
             ty: Ty::Error,
             context_count,
             context_param_names: self.property_context_parameter_names(declaration, context_count),
+            context_parameter_identities: self
+                .property_context_parameter_identities(declaration, context_count),
             getter,
             setter,
             setter_visibility,
+            setter_parameter_name: self.property_setter_parameter_name(declaration, context_count),
             is_const: header.flags.has(DeclarationFlags::CONST),
             implicit_integer_coercion: false,
             compile_time_constant: None,
@@ -737,6 +784,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             parameters.len().saturating_sub(trailing_defaults),
             vararg_index,
         );
+        shape.parameter_identities = (0..parameters.len())
+            .map(|ordinal| {
+                self.index
+                    .callable_parameter_identity(callable, ordinal as u32)
+                    .expect("a projected callable retains every typed parameter identity")
+            })
+            .collect();
         shape.exact_params = exact;
         shape.no_infer_params = no_infer;
         shape.implicit_integer_coercion = implicit_integer_coercion;
@@ -1098,9 +1152,13 @@ impl<'a> StreamedModuleSymbols<'a> {
                 context_count,
                 context_param_names: self
                     .property_context_parameter_names(declaration, context_count),
+                context_parameter_identities: self
+                    .property_context_parameter_identities(declaration, context_count),
                 getter,
                 setter,
                 setter_visibility,
+                setter_parameter_name: self
+                    .property_setter_parameter_name(declaration, context_count),
                 is_const: header.flags.has(DeclarationFlags::CONST),
                 implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
@@ -1498,9 +1556,13 @@ impl<'a> StreamedModuleSymbols<'a> {
                 context_count,
                 context_param_names: self
                     .property_context_parameter_names(declaration, context_count),
+                context_parameter_identities: self
+                    .property_context_parameter_identities(declaration, context_count),
                 getter,
                 setter,
                 setter_visibility,
+                setter_parameter_name: self
+                    .property_setter_parameter_name(declaration, context_count),
                 is_const: header.flags.has(DeclarationFlags::CONST),
                 implicit_integer_coercion: self
                     .index

@@ -419,6 +419,7 @@ fn block_body_parameters_and_returns_use_body_local_stable_targets() {
             name: &function.params[0].name,
             ty: parameter_ty,
             span: function.params[0].ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         }],
         streamed.module.index(),
         &mut origins,
@@ -511,6 +512,7 @@ fn selected_source_member_call_keeps_stable_target_receiver_and_default_mapping(
             name: &caller.params[0].name,
             ty: parameter_ty,
             span: caller.params[0].ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         }],
         streamed.module.index(),
         &mut origins,
@@ -593,6 +595,7 @@ fn selected_source_operator_is_a_stable_fir_call_not_a_spelling_based_binary() {
             )
             .expect("publishable Box parameter type"),
             span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -886,6 +889,7 @@ fn selected_compare_to_keeps_both_callable_identity_and_comparison_semantics() {
             name: &parameter.name,
             ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
             span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -966,6 +970,7 @@ fn selected_range_to_operator_is_a_stable_fir_call() {
             name: &parameter.name,
             ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
             span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1024,6 +1029,7 @@ fn indexed_reads_distinguish_builtin_storage_from_selected_get_calls() {
                     name: &parameter.name,
                     ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
                     span: parameter.ty.span,
+                    context_kind: crate::types::ContextParameterKind::None,
                 })
                 .collect::<Vec<_>>();
             check_expression_body_with_parameters(
@@ -1095,6 +1101,7 @@ fn builtin_index_assignment_is_an_explicit_checked_fir_write() {
             name: &parameter.name,
             ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
             span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1154,6 +1161,7 @@ fn selected_index_set_operator_is_a_stable_fir_call() {
         name: &function.params[0].name,
         ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
         span: function.params[0].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1207,6 +1215,7 @@ fn indexed_assignment_explicitly_discards_a_non_unit_set_result() {
         name: &function.params[0].name,
         ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
         span: function.params[0].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1266,6 +1275,7 @@ fn selected_statement_inc_operator_is_a_stable_fir_call_before_writeback() {
         name: &function.params[0].name,
         ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
         span: function.params[0].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1328,6 +1338,7 @@ fn custom_in_range_keeps_both_selected_convention_calls() {
             name: &parameter.name,
             ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
             span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1379,6 +1390,7 @@ fn floating_point_membership_carries_its_checked_comparison_type() {
         name: &function.params[0].name,
         ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
         span: function.params[0].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1428,6 +1440,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
             name: &function.params[0].name,
             ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
             span: function.params[0].ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
         };
         let mut origins = OriginStore::default();
         let body = check_expression_body_with_parameters(
