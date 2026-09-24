@@ -129,11 +129,49 @@ impl SerializationAbi {
     }
 }
 
+/// The kotlinx-serialization compiler plugin release krusty reproduces, from the `-Xplugin` jar's
+/// manifest (`2.4.10-release-377`). The plugin ships inside kotlinc and is released with it, so this
+/// is the kotlinc release the jar came from; its checkers' wording follows it, independent of the
+/// Kotlin version krusty targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PluginRelease {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl PluginRelease {
+    /// kotlinc 2.4.20's plugin ends its checker messages with a full stop.
+    pub const V2_4_20: PluginRelease = PluginRelease::new(2, 4, 20);
+
+    pub const fn new(major: u32, minor: u32, patch: u32) -> PluginRelease {
+        PluginRelease {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    /// Parse a release by its leading `major.minor.patch`, ignoring a build suffix
+    /// (`2.4.10-release-377`, `2.4.20`). `None` when the leading components are not numeric.
+    pub fn parse(release: &str) -> Option<PluginRelease> {
+        let numbers = release.split(['-', '+']).next()?;
+        let mut parts = numbers.split('.').map(str::parse::<u32>);
+        let major = parts.next()?.ok()?;
+        let minor = parts.next()?.ok()?;
+        let patch = parts.next().unwrap_or(Ok(0)).ok()?;
+        Some(PluginRelease::new(major, minor, patch))
+    }
+}
+
 /// The serialization extension, pinned to a target runtime ABI + the compilation's module name
 /// (needed for the >=1.6 `write$Self$<module>` mangling).
 pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
+    /// The compiler plugin jar's release, or `None` when no jar named one (an editor enabling every
+    /// native extension, `-P` without `-Xplugin`): the checkers then use the newest wording.
+    compiler_plugin: Option<PluginRelease>,
     write_self_methods: Mutex<HashMap<TypeName, u32>>,
     /// What each serialized class's `$childSerializers` cache is, published by the pass that builds
     /// it and consumed by every reader. Keyed by the SERIALIZED class, not the `$serializer`.
@@ -145,9 +183,16 @@ impl SerializationPlugin {
         Self {
             abi,
             module: module.into(),
+            compiler_plugin: None,
             write_self_methods: Mutex::new(HashMap::new()),
             child_serializer_caches: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Reproduce the compiler plugin of `release` (see [`PluginRelease`]).
+    pub fn with_compiler_plugin_release(mut self, release: Option<PluginRelease>) -> Self {
+        self.compiler_plugin = release;
+        self
     }
 
     /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
@@ -1304,7 +1349,10 @@ impl IrPlugin for SerializationPlugin {
         ctx: &crate::plugins::FrontendClassCheckContext<'_>,
         diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
     ) {
-        diagnostics.extend(transient_initializer::missing_initializers(ctx));
+        diagnostics.extend(transient_initializer::missing_initializers(
+            ctx,
+            self.compiler_plugin,
+        ));
     }
 
     fn plan_frontend_expressions(
@@ -2895,6 +2943,24 @@ mod tests {
         assert!(names(SerializationAbi::V1_6Plus).contains(&"write$Self$app".to_string()));
         // The two versions produce different helper names.
         assert!(!names(SerializationAbi::V1_0).contains(&"write$Self$app".to_string()));
+    }
+
+    #[test]
+    fn plugin_release_parses_its_leading_version() {
+        assert_eq!(
+            PluginRelease::parse("2.4.10-release-377"),
+            Some(PluginRelease::new(2, 4, 10))
+        );
+        assert_eq!(
+            PluginRelease::parse("2.4.20"),
+            Some(PluginRelease::new(2, 4, 20))
+        );
+        assert_eq!(
+            PluginRelease::parse("2.5"),
+            Some(PluginRelease::new(2, 5, 0))
+        );
+        assert_eq!(PluginRelease::parse("dev"), None);
+        assert!(PluginRelease::new(2, 4, 10) < PluginRelease::V2_4_20);
     }
 
     #[test]

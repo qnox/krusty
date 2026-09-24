@@ -6380,9 +6380,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after any KDoc. krusty ran no plugin frontend rule, so the class reached the backend, which
   declined the file with the generic unsupported-construct error at `1:1`. Native plugins now get
   a frontend class-check hook (`IrPlugin::check_frontend_class`), run by the checker on each class
-  with its checked annotation identities while the class's syntax is live. The wording is the one
-  every supported reference (2.4.0, 2.4.10) uses; kotlinc 2.4.20 appends a period. Without the
-  plugin the property needs no initializer under either compiler.
+  with its checked annotation identities while the class's syntax is live. The wording follows
+  the serialization plugin's release, not the Kotlin version krusty targets: the plugin ships inside
+  kotlinc, and 2.4.20's appends a full stop that 2.4.0 and 2.4.10's lack. krusty reads the release
+  from the `-Xplugin` jar's manifest (`Implementation-Version: 2.4.10-release-377`) and uses the
+  newest wording when no jar names one (`-P` alone, an editor enabling every native extension); the
+  e2e case records kotlinc's ledger per reference version, each run given that kotlinc's own plugin
+  jar. Without the plugin the property needs no initializer under either compiler.
   Tests: `tests/serialization_transient_diagnostics_e2e.rs`
   (`a_transient_property_without_an_initializer_is_rejected_like_kotlinc`, the exact error list of
   both compilers over three files: a constructor property, modifier-first and own-line annotations,
