@@ -586,32 +586,8 @@ impl BackendModuleFacts {
                 }
             }
             surface.sort_by_key(|(order, _)| *order);
-            // A source companion's exact classifier identity already owns its nested segment; do
-            // not recover that segment by trimming a rendered declaration name.
-            let companion = index
-                .companion_declaration(declaration)
-                .and_then(|companion| {
-                    let classifier = index.classifier_header(companion)?.classifier;
-                    Some((Box::from(classifier.nested_segment_ref()), classifier))
-                });
-            // Package and lexical-class boundaries are both dots, the spelling lowering records
-            // for this file's own classes.
-            let qualified_name = match (
-                index.declaration_name(declaration),
-                index
-                    .declaration_anchor(declaration)
-                    .and_then(|anchor| index.source_package(anchor.source)),
-            ) {
-                (Some(name), Some(package)) => {
-                    let package = package.render().replace('/', ".");
-                    Some(if package.is_empty() {
-                        Box::from(name)
-                    } else {
-                        format!("{package}.{name}").into_boxed_str()
-                    })
-                }
-                _ => None,
-            };
+            let companion = source_companion(index, declaration);
+            let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
@@ -729,6 +705,44 @@ impl BackendModuleFacts {
     pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
         &self.metadata_readable_value_classes
     }
+}
+
+/// A declared source companion's exact field spelling and classifier identity. The declaration
+/// name is authoritative even when it contains a character that also appears in a JVM nested name.
+fn source_companion(
+    index: &crate::fir::ResolvedModuleIndex,
+    owner: crate::fir::DeclarationId,
+) -> Option<(Box<str>, TypeName)> {
+    let declaration = index.companion_declaration(owner)?;
+    let classifier = index.classifier_header(declaration)?.classifier;
+    Some((Box::from(index.declaration_name(declaration)?), classifier))
+}
+
+/// The dotted Kotlin declaration name of a source classifier. Each lexical segment comes from its
+/// own stable declaration; an internal/JVM name cannot distinguish nesting from a legal `$`.
+fn source_qualified_name(
+    index: &crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> Option<Box<str>> {
+    let source = index.declaration_anchor(declaration)?.source;
+    let mut segments = Vec::new();
+    let mut current = Some(declaration);
+    while let Some(candidate) = current {
+        let anchor = index.declaration_anchor(candidate)?;
+        if anchor.kind != crate::fir::DeclarationKind::Classifier {
+            return None;
+        }
+        segments.push(index.declaration_name(candidate)?);
+        current = anchor.owner;
+    }
+    segments.reverse();
+    let package = index.source_package(source)?.render().replace('/', ".");
+    let declarations = segments.join(".");
+    Some(if package.is_empty() {
+        declarations.into_boxed_str()
+    } else {
+        format!("{package}.{declarations}").into_boxed_str()
+    })
 }
 
 /// A per-call view federating the frozen current module with dependency classifier metadata.
@@ -1220,5 +1234,35 @@ mod tests {
         let legacy = provider.classifier(classifier).expect("module classifier");
         let legacy = BackendClassifierFact::from_library(&legacy);
         assert_eq!(*stable, legacy);
+    }
+
+    #[test]
+    fn source_qualified_name_retains_each_lexical_classifier_segment() {
+        let source = r#"
+            package demo
+            class Outer { object Inner }
+        "#;
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Nested")],
+            Box::new(crate::libraries::EmptySymbolSource),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let inner = index
+            .classifier_declaration(crate::types::type_name("demo/Outer.Inner"))
+            .expect("nested classifier declaration");
+
+        assert_eq!(
+            source_qualified_name(index, inner).as_deref(),
+            Some("demo.Outer.Inner")
+        );
     }
 }

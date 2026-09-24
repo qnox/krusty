@@ -701,7 +701,7 @@ fn external_serializers(
                 *serial_info_unsupported = annotations.iter().any(|application| {
                     classifiers
                         .classifier_annotations(application.annotation)
-                        .is_some_and(|meta| {
+                        .map_or(true, |meta| {
                             meta.iter()
                                 .any(|annotation| annotation.annotation == serial_info)
                         })
@@ -1188,6 +1188,58 @@ mod tests {
                         arguments: Vec::new(),
                     }],
                 ),
+            ]),
+            declarations: std::collections::HashMap::from([(
+                object,
+                crate::types::ClassifierDeclarationFacts {
+                    kind: crate::types::ClassifierDeclarationKind::Object,
+                    is_abstract: false,
+                    own_type_parameter_count: 0,
+                    companion: None,
+                    qualified_name: Some(Box::from("fixtures.Singleton")),
+                    source: false,
+                },
+            )]),
+            ..FakeClassifierFacts::default()
+        };
+
+        assert_eq!(
+            external_serializers(&ir, &facts).get(&object),
+            Some(&serialization::ExternalSerializer::Object {
+                serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
+                serial_info_unsupported: true,
+            })
+        );
+    }
+
+    #[test]
+    fn an_external_object_with_unavailable_annotation_facts_fails_closed() {
+        let object = crate::types::type_name("fixtures/Singleton");
+        let unknown = crate::types::type_name("fixtures/UnknownMarker");
+        let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
+        let mut ir = IrFile::default();
+        let mut holder = synthetic_class("fixtures/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "value".to_owned(),
+            Ty::obj_name(object),
+        ));
+        ir.add_class(holder);
+        let facts = FakeClassifierFacts {
+            annotations: std::collections::HashMap::from([
+                (
+                    object,
+                    vec![
+                        crate::types::ResolvedAnnotation {
+                            annotation: serializable,
+                            arguments: Vec::new(),
+                        },
+                        crate::types::ResolvedAnnotation {
+                            annotation: unknown,
+                            arguments: Vec::new(),
+                        },
+                    ],
+                ),
+                (serializable, Vec::new()),
             ]),
             declarations: std::collections::HashMap::from([(
                 object,

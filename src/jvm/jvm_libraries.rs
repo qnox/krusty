@@ -5060,16 +5060,17 @@ impl SymbolSource for JvmLibraries {
         let owner = self.cp.find_name(classifier)?;
         let owner_name = owner.this_class();
         let generated_serializer = type_name("kotlinx/serialization/internal/GeneratedSerializer");
-        owner
+        let mut candidates = owner
             .inner_classes
             .iter()
             .filter(|nested| nested.outer.as_deref() == Some(owner_name.as_str()))
             .filter_map(|nested| self.cp.find(&nested.inner))
-            .find(|nested| {
+            .filter(|nested| {
                 nested.meta.class_kind == Some(crate::libraries::TypeKind::Object)
                     && nested.interfaces.contains_name(generated_serializer)
-            })
-            .map(|nested| nested.this_class)
+            });
+        let singleton = candidates.next()?.this_class;
+        candidates.next().is_none().then_some(singleton)
     }
 }
 

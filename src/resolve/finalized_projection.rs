@@ -503,9 +503,27 @@ pub(crate) fn publish_stable_declaration_metadata(
         let Some(accessor) = generated_accessor else {
             continue;
         };
+        let field = companion_class
+            .stable_declaration
+            .and_then(|declaration| index.declaration_name(declaration))
+            .map(Box::<str>::from)
+            .or_else(|| {
+                class
+                    .generated_nested_classifiers
+                    .iter()
+                    .find(|generated| {
+                        generated.classifier == companion
+                            && generated.purpose
+                                == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+                    })
+                    .map(|generated| generated.source_name.clone())
+            });
+        let Some(field) = field else {
+            continue;
+        };
         index.publish_serialization_companion_accessor(
             declaration,
-            companion.nested_segment_ref().into(),
+            field,
             companion,
             accessor.params.len(),
         );

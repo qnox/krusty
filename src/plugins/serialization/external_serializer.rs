@@ -89,7 +89,7 @@ fn class_serial_name(annotations: &[ResolvedAnnotation]) -> Option<Option<KtStri
         return Some(None);
     };
     match application.arguments.as_slice() {
-        [(_, AnnotationValue::String(value))] => Some(Some(value.clone())),
+        [(name, AnnotationValue::String(value))] if name == "value" => Some(Some(value.clone())),
         _ => None,
     }
 }
@@ -187,6 +187,25 @@ mod tests {
                 serial_name: KtString::from("custom"),
                 serial_info_unsupported: false,
             })
+        );
+    }
+
+    #[test]
+    fn a_serial_name_requires_the_checked_value_parameter() {
+        let misspelled = ResolvedAnnotation {
+            annotation: type_name(SERIAL_NAME_FQ),
+            arguments: vec![(
+                "other".to_owned(),
+                AnnotationValue::String(KtString::from("custom")),
+            )],
+        };
+        assert_eq!(
+            generated_external_serializer(
+                type_name("dep/Kind"),
+                &facts(ClassifierDeclarationKind::Object),
+                &[misspelled]
+            ),
+            None
         );
     }
 
