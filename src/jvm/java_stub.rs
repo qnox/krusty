@@ -70,17 +70,13 @@ pub fn stub_classes(
         })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
-    // This parser-owned graph is the only authority for lexical nesting. Walking encoded names by
-    // splitting `$` would make a legal `$` inside an identifier look like an enclosing declaration.
-    let declaration_outers = parsed
+    // This parser-owned graph is the only authority for lexical nesting and the type parameters
+    // visible through it. Walking encoded names by splitting `$` would make a legal `$` inside an
+    // identifier look like an enclosing declaration.
+    let declarations_by_internal = parsed
         .iter()
         .flat_map(|(_, declarations)| declarations)
-        .map(|declaration| {
-            (
-                declaration.internal.as_str(),
-                declaration.outer_internal.as_deref(),
-            )
-        })
+        .map(|declaration| (declaration.internal.as_str(), declaration))
         .collect::<HashMap<_, _>>();
     let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
 
@@ -98,9 +94,10 @@ pub fn stub_classes(
                 resolve: &resolve_all,
                 mode,
                 owner: Some(raw.internal.as_str()),
-                declaration_outers: &declaration_outers,
+                declarations_by_internal: &declarations_by_internal,
             };
-            match r.emit(raw) {
+            let type_variables = TypeVariables::for_declaration(raw, &declarations_by_internal);
+            match r.emit(raw, &type_variables) {
                 Some(bytes) => out.push((raw.internal.clone(), bytes)),
                 None if mode.is_lenient() => continue,
                 None => return None,
@@ -117,9 +114,9 @@ struct Resolver<'a> {
     /// Internal name of the declaration being emitted — member types of the enclosing chain
     /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
     owner: Option<&'a str>,
-    /// Parsed internal name → syntactic enclosing declaration. This is intentionally distinct from
-    /// the encoded `$` spelling, which is ambiguous for legal Java identifiers containing `$`.
-    declaration_outers: &'a HashMap<&'a str, Option<&'a str>>,
+    /// Parsed internal name → declaration. This supplies both the syntactic enclosing edge and the
+    /// enclosing type-parameter scope without interpreting the encoded JVM spelling.
+    declarations_by_internal: &'a HashMap<&'a str, &'a RawDecl>,
 }
 
 /// Type variables in scope at one source position: the class's, then a member's own. Each level is
@@ -131,10 +128,30 @@ struct TypeVariables<'a> {
 }
 
 impl<'a> TypeVariables<'a> {
-    fn of(declared: &'a [(String, Option<SrcType>)]) -> Self {
-        Self {
-            levels: vec![declared],
+    fn for_declaration(
+        declaration: &'a RawDecl,
+        declarations: &HashMap<&str, &'a RawDecl>,
+    ) -> Self {
+        let mut levels = Vec::new();
+        let mut current = declaration;
+        loop {
+            levels.push(current.tparams.as_slice());
+            if current.outer_internal.is_none()
+                || semantic_declaration_access(current) & ACC_STATIC != 0
+            {
+                break;
+            }
+            let Some(outer) = current
+                .outer_internal
+                .as_deref()
+                .and_then(|internal| declarations.get(internal).copied())
+            else {
+                break;
+            };
+            current = outer;
         }
+        levels.reverse();
+        Self { levels }
     }
 
     fn with<'b>(&self, declared: &'b [(String, Option<SrcType>)]) -> TypeVariables<'b>
@@ -236,7 +253,11 @@ impl Resolver<'_> {
                 if (self.resolve)(&candidate) {
                     return Some(candidate);
                 }
-                scope = self.declaration_outers.get(current).copied().flatten();
+                scope = self
+                    .declarations_by_internal
+                    .get(current)
+                    .copied()
+                    .and_then(|declaration| declaration.outer_internal.as_deref());
             }
         }
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
@@ -425,8 +446,7 @@ impl Resolver<'_> {
         Some(sig)
     }
 
-    fn emit(&self, d: &RawDecl) -> Option<Vec<u8>> {
-        let tp = TypeVariables::of(&d.tparams);
+    fn emit(&self, d: &RawDecl, tp: &TypeVariables<'_>) -> Option<Vec<u8>> {
         let is_enum = d.kind == DeclKind::Enum;
         let is_record = d.kind == DeclKind::Record;
         let super_internal = if is_enum {
@@ -468,7 +488,7 @@ impl Resolver<'_> {
             let mut signature = format!("Ljava/lang/Enum<L{};>;", d.internal);
             let mut complete = true;
             for interface in &d.interfaces {
-                match self.sig(interface, &tp) {
+                match self.sig(interface, tp) {
                     Some(interface) => signature.push_str(&interface),
                     None if self.mode.is_lenient() => {
                         complete = false;
@@ -494,7 +514,7 @@ impl Resolver<'_> {
                 } else {
                     "java/lang/Object"
                 };
-                match self.build_class_sig(d, &tp, default_super) {
+                match self.build_class_sig(d, tp, default_super) {
                     Some(sig) => w.set_signature(&sig),
                     None if self.mode.is_lenient() => {}
                     None => return None,
@@ -512,9 +532,9 @@ impl Resolver<'_> {
         }
 
         for (name, ty, acc, constant) in &d.fields {
-            let desc = self.desc(ty, &tp)?;
+            let desc = self.desc(ty, tp)?;
             let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
-                match self.sig(ty, &tp) {
+                match self.sig(ty, tp) {
                     Some(s) => Some(s),
                     None if self.mode.is_lenient() => None,
                     None => return None,
@@ -544,9 +564,9 @@ impl Resolver<'_> {
 
         if is_record {
             for (name, ty) in &d.record_components {
-                let desc = self.desc(ty, &tp)?;
+                let desc = self.desc(ty, tp)?;
                 let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
-                    match self.sig(ty, &tp) {
+                    match self.sig(ty, tp) {
                         Some(s) => Some(s),
                         None if self.mode.is_lenient() => None,
                         None => return None,
@@ -591,12 +611,11 @@ impl Resolver<'_> {
             has_annotation_default: false,
         };
         let ctors: Vec<&Member> = if is_record {
-            let canonical_descriptor =
-                self.erased_parameters(&record_canonical_ctor.params, &tp)?;
+            let canonical_descriptor = self.erased_parameters(&record_canonical_ctor.params, tp)?;
             let has_explicit_canonical = d
                 .ctors
                 .iter()
-                .filter_map(|member| self.erased_parameters(&member.params, &tp))
+                .filter_map(|member| self.erased_parameters(&member.params, tp))
                 .any(|descriptor| descriptor == canonical_descriptor);
             let mut v: Vec<&Member> = Vec::new();
             if !has_explicit_canonical {
@@ -640,7 +659,7 @@ impl Resolver<'_> {
             .chain(record_accessors.iter())
             .chain(d.methods.iter())
         {
-            self.emit_member(&mut w, d, m, &tp)?;
+            self.emit_member(&mut w, d, m, tp)?;
         }
         if is_enum {
             let arr = format!("()[L{};", d.internal);
@@ -1604,5 +1623,80 @@ mod tests {
             descriptors("shadow"),
             ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
         );
+    }
+
+    #[test]
+    fn a_non_static_member_class_inherits_its_enclosing_type_variable_scope() {
+        let out = stubs(
+            "public class Outer<T extends Number> {\n\
+                 public class Inner<U extends T> {\n\
+                     public T outer;\n\
+                     public U inner;\n\
+                     public T echo(T value) { return value; }\n\
+                     public <V extends U> V narrow(V value) { return value; }\n\
+                 }\n\
+                 public static class StaticMiddle<S extends CharSequence> {\n\
+                     public class Deep { public S value; }\n\
+                 }\n\
+             }",
+            &[
+                "java/lang/Object",
+                "java/lang/Number",
+                "java/lang/CharSequence",
+            ],
+        )
+        .expect("stub");
+        let class = |internal: &str| {
+            let bytes = &out
+                .iter()
+                .find(|(name, _)| name == internal)
+                .unwrap_or_else(|| panic!("missing {internal}"))
+                .1;
+            parse_class(bytes).unwrap_or_else(|error| panic!("parse {internal}: {error:?}"))
+        };
+
+        let inner = class("Outer$Inner");
+        assert_eq!(
+            inner
+                .fields
+                .iter()
+                .find(|field| field.name == "outer")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/Number;")
+        );
+        assert_eq!(
+            inner
+                .fields
+                .iter()
+                .find(|field| field.name == "inner")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/Number;")
+        );
+        assert!(inner
+            .method("echo", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+        assert!(inner
+            .method("narrow", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+
+        let deep = class("Outer$StaticMiddle$Deep");
+        assert_eq!(
+            deep.fields
+                .iter()
+                .find(|field| field.name == "value")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/CharSequence;")
+        );
+    }
+
+    #[test]
+    fn a_static_member_class_does_not_capture_an_enclosing_type_variable() {
+        assert!(stubs(
+            "public class Outer<T extends Number> {\n\
+                 public static class Nested { public T invalid; }\n\
+             }",
+            &["java/lang/Object", "java/lang/Number"],
+        )
+        .is_none());
     }
 }
