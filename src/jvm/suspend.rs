@@ -55,7 +55,7 @@ use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
 use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
-use call_operand_realization::{append_continuation, default_suspend_continuation_index};
+use call_operand_realization::append_continuation;
 use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
 use statement_normalization::{
@@ -269,10 +269,7 @@ pub(crate) fn lower_suspend(
                     let this_offset = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
                     // Capture runs BEFORE the CPS rewrite appends the `Continuation` — only strip a
                     // trailing continuation when it is already there.
-                    let has_cont = f.params.last().is_some_and(|t| {
-                        t.obj_internal()
-                            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
-                    });
+                    let has_cont = f.params.last().copied() == Some(continuation_ty());
                     let n_real = f.params.len().saturating_sub(usize::from(has_cont));
                     // ALL value parameters — kotlinc spills primitive params too (`Z$0` for a
                     // Boolean), per-kind counters decide the field family.
@@ -3559,7 +3556,8 @@ impl Flat<'_> {
         if !operands.iter().any(|&o| writes_local_in(self.ir, o, list)) {
             return true;
         }
-        let Some(operands) = typed_suspension_operands(self.ir, point) else {
+        let Some(operands) = typed_suspension_operands(self.ir, self.default_call_operands, point)
+        else {
             return false;
         };
         // A conditional suspension nested in an operand (`foo(if (c) susp() else 1)`) is left in place by
@@ -5749,11 +5747,16 @@ fn writes_local_in(ir: &IrFile, e: ExprId, list: &[(u32, Ty)]) -> bool {
 /// A `Callee::Virtual` may also be inline-spliced at emit (its descriptor form has an inline branch) and
 /// is deliberately NOT refused for it: splicing reads its operand nodes as values, and a `GetValue` of a
 /// temp is one.
-fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, Ty)>> {
+fn typed_suspension_operands(
+    ir: &IrFile,
+    default_call_operands: &crate::jvm::default_call_operands::DefaultCallOperands,
+    point: ExprId,
+) -> Option<Vec<(ExprId, Ty)>> {
     // Parameters are indexed before the continuation value is added. An ordinary suspend call's
     // continuation is the trailing surplus parameter. A `$default` call removes its descriptor-owned
     // continuation slot before this zip, leaving real arguments, masks, and marker aligned exactly.
     fn zip(args: &[ExprId], params: &[Ty], out: &mut Vec<(ExprId, Ty)>) -> Option<()> {
+        (args.len() == params.len()).then_some(())?;
         for (i, &a) in args.iter().enumerate() {
             out.push((a, *params.get(i)?));
         }
@@ -5788,15 +5791,13 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     params.clone()
                 }
                 Callee::Static {
-                    descriptor,
-                    name,
-                    inline,
-                    ..
+                    descriptor, inline, ..
                 } => {
                     (!inline.can_inline() && dispatch_receiver.is_none()).then_some(())?;
                     let mut params = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0;
-                    if name.ends_with("$default") {
-                        let continuation = default_suspend_continuation_index(&params)?;
+                    if let Some(continuation) = default_call_operands.abi_suffix_position(point) {
+                        (params.get(continuation).copied() == Some(continuation_ty()))
+                            .then_some(())?;
                         params.remove(continuation);
                     }
                     params
@@ -5819,13 +5820,11 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                 // Realized into `Callee::Special` before this pass runs.
                 Callee::Super { .. } => return None,
                 Callee::Special {
-                    owner,
-                    name,
-                    descriptor,
-                    ..
+                    owner, descriptor, ..
                 } => {
-                    // Same `$default` indexing rule as `Callee::Static` above.
-                    (!name.ends_with("$default")).then_some(())?;
+                    // A special default call has a descriptor-owned continuation slot but cannot
+                    // be safely rebound here; identify it from its operand plan, never its name.
+                    (!default_call_operands.contains(point)).then_some(())?;
                     out.push((
                         dispatch_receiver.as_ref().copied()?,
                         Ty::obj(&owner.render()),

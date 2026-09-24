@@ -5,7 +5,6 @@
 
 use super::{continuation_ty, object_ty};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
-use crate::types::Ty;
 
 /// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and
 /// erase the return to `Object`. A cross-unit suspend callee is resolved by its logical signature,
@@ -18,24 +17,6 @@ fn cps_descriptor(logical: &str) -> String {
         "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
         &logical[..close]
     )
-}
-
-/// Locate the continuation slot in a suspend `$default` descriptor. Its ABI suffix is
-/// `Continuation, int mask..., Object marker`; scanning the typed signature keeps both continuation
-/// insertion and operand spilling independent of source arity and of the number of mask words.
-pub(super) fn default_suspend_continuation_index(params: &[Ty]) -> Option<usize> {
-    let mut index = params.len().checked_sub(2)?;
-    let mut masks = 0;
-    while params.get(index).copied() == Some(Ty::Int) {
-        masks += 1;
-        index = index.checked_sub(1)?;
-    }
-    (masks > 0
-        && params
-            .get(index)
-            .and_then(|ty| ty.obj_internal())
-            .is_some_and(|name| name.matches("kotlin/coroutines/Continuation")))
-    .then_some(index)
 }
 
 /// Append the CPS continuation expected by the already-selected callable and record the physical
@@ -76,23 +57,21 @@ pub(super) fn append_continuation(
                     );
                     return false;
                 };
-                let Some(index) = default_suspend_continuation_index(&params) else {
+                // The default-operand plan owns this ABI boundary. The descriptor is checked only
+                // for consistency with that recorded role; it never rediscovers the role by name.
+                if params.len() != args.len() + 1
+                    || params.get(planned_index).copied() != Some(continuation_ty())
+                    || planned_index > args.len()
+                {
                     crate::trace_compiler!(
                         "suspend",
-                        "default suspend call={call} has no continuation slot descriptor={descriptor} params={params:?}"
-                    );
-                    return false;
-                };
-                if planned_index != index || index > args.len() {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "append continuation BAIL: operand-plan boundary mismatch call={call} planned={planned_index} descriptor={index} args={} descriptor_text={descriptor}",
+                        "append continuation BAIL: operand-plan/descriptor mismatch call={call} planned={planned_index} args={} descriptor_text={descriptor} params={params:?}",
                         args.len()
                     );
                     return false;
                 }
-                args.insert(index, continuation);
-                index
+                args.insert(planned_index, continuation);
+                planned_index
             } else {
                 *descriptor = cps_descriptor(descriptor);
                 let index = args.len();

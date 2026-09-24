@@ -91,6 +91,15 @@ impl DefaultCallOperands {
         self.entries.contains_key(&call)
     }
 
+    /// The recorded boundary before the JVM-only mask/marker suffix. A suspend continuation is
+    /// inserted at this exact position; consumers must not recover it from descriptor spelling.
+    pub(super) fn abi_suffix_position(&self, call: ExprId) -> Option<usize> {
+        self.entries
+            .get(&call)?
+            .iter()
+            .position(|operand| operand.abi_suffix)
+    }
+
     pub(super) fn record_continuation(&mut self, call: ExprId, position: usize) -> bool {
         match self.continuation_positions.entry(call) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -228,6 +237,7 @@ mod tests {
             ],
         );
 
+        assert_eq!(plans.abi_suffix_position(7), Some(2));
         assert_eq!(plans.insert_continuation(7, 99), Ok(Some(2)));
         assert!(plans.record_continuation(7, 2));
         assert!(plans.matching(7, &[10, 11, 99, 12, 13]).is_some());
