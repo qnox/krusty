@@ -363,9 +363,9 @@ impl ClassWriter {
         let entry = expand_slots(&entry);
         let original_graph = ControlGraph::build(&insns, &handlers)?;
         // The verifier's types before each original instruction, computed at most once.
-        let original_types_cell = std::cell::OnceCell::new();
-        let original_types = || -> Option<&FrameTypes> {
-            original_types_cell
+        let original_analysis_cell = std::cell::OnceCell::new();
+        let original_analysis = || {
+            original_analysis_cell
                 .get_or_init(|| {
                     let original_frames = self
                         .merged_frames(&source.builder)
@@ -374,10 +374,18 @@ impl ClassWriter {
                             Some((index_of(at)?, expand_slots(&locals), stack))
                         })
                         .collect::<Option<Vec<_>>>()?;
-                    FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)
+                    let types = FrameTypes::analyze(
+                        &insns,
+                        &original_graph,
+                        &entry,
+                        &original_frames,
+                        self,
+                    )?;
+                    Some((types, original_frames))
                 })
                 .as_ref()
         };
+        let original_types = || original_analysis().map(|(types, _)| types);
         let redundant_casts =
             redundant_checkcasts::select(self, method, &insns, &offsets, &original_types);
         // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
@@ -799,7 +807,14 @@ impl ClassWriter {
             })
             .collect::<Option<Vec<_>>>()?;
         let types = FrameTypes::analyze(&new_insns, &new_graph, &entry, &merged, self)?;
-        if !types.frames_hold(&new_insns, &new_graph, &merged, self) {
+        // The reference widenings the method as emitted already makes at its frames are ones the
+        // verifier accepts; the rewritten method may make them again.
+        let known_widenings = original_analysis()
+            .and_then(|(original, frames)| {
+                original.reference_widenings(&insns, &original_graph, frames, self)
+            })
+            .unwrap_or_default();
+        if !types.frames_hold(&new_insns, &new_graph, &merged, self, &known_widenings) {
             return None;
         }
         let mut max_stack = 0usize;
