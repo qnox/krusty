@@ -6636,7 +6636,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxed primitive from its wrapper to a wider target such as `Number` (the constant side of
   `t ?: 42` over `T : Number?`). Tests: `tests/computed_frames_e2e.rs` (runs, byte-identical facades, and
   every written table equal to the computed one), `tests/frame_computation_e2e.rs` (the computation
-  reproduces kotlinc's own tables).
+  reproduces kotlinc's own tables). `max_stack` and `max_locals` are ASM's `COMPUTE_MAXS` over the
+  same final body: the deepest stack the dataflow reaches (at least 1 when a block is dead, for its
+  `athrow`), and the argument words plus every slot an instruction or a local-variable entry names.
 
 ## 8. Success criteria for the PoC
 

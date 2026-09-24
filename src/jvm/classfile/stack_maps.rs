@@ -29,8 +29,9 @@ use super::bytecode_analysis::{
     entry_frame, ComputedFrame, ComputedFrames, Decline, FrameComputation, Handler, PoolView,
     TypedHandler, VerificationType,
 };
+use super::method_rewrite::var_slot;
 use super::{u2, ClassWriter, ConstPool, LvtEntry};
-use crate::jvm::inline::{disassemble, insn_offsets_at};
+use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
 
 const NOP: u8 = 0x00;
 const ATHROW: u8 = 0xbf;
@@ -48,13 +49,19 @@ pub(super) struct Body<'a> {
     pub labels: Vec<usize>,
 }
 
-/// The computed frames of a body, with the byte offset of each instruction.
+/// The computed frames of a body, with its instructions and the byte offset of each.
 pub(super) struct Computed {
     frames: ComputedFrames,
+    insns: Vec<Insn>,
     offsets: Vec<usize>,
 }
 
 impl Computed {
+    /// The frames to write, in instruction order.
+    pub(super) fn frames(&self) -> &[ComputedFrame] {
+        &self.frames.frames
+    }
+
     /// The byte ranges of the unreachable blocks, each ending before the next block starts.
     fn unreachable_bytes(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         self.frames
@@ -105,7 +112,32 @@ impl ClassWriter {
             pool: self,
         }
         .compute(body.access, body.name, body.descriptor)?;
-        Ok(Computed { frames, offsets })
+        Ok(Computed {
+            frames,
+            insns,
+            offsets,
+        })
+    }
+
+    /// The local slots `body` uses as ASM's `COMPUTE_MAXS` counts them: its arguments, every slot a
+    /// load, store or `iinc` names, and every local-variable entry.
+    fn max_locals(&self, body: &Body<'_>, computed: &Computed, lvt: &[LvtEntry]) -> Option<usize> {
+        let entry =
+            entry_frame(body.access, body.name, body.descriptor, &self.internal_name).ok()?;
+        let mut max = entry.iter().map(words).sum::<usize>();
+        for insn in &computed.insns {
+            if let Some((slot, width)) = var_slot(insn) {
+                max = max.max(usize::from(slot) + usize::from(width));
+            }
+        }
+        for &(_, descriptor, slot, _, _) in lvt {
+            let width = match self.cp.utf8_at(descriptor)? {
+                "J" | "D" => 2,
+                _ => 1,
+            };
+            max = max.max(usize::from(slot) + width);
+        }
+        Some(max)
     }
 
     /// Encode `computed` as a `StackMapTable` body, interning the classes the written entries name
@@ -211,9 +243,16 @@ impl ClassWriter {
                 labels: Vec::new(),
             };
             let stackmap = self.encode_frames(&body, &computed);
+            let max_locals = self.max_locals(&body, &computed, &self.methods[index].lvt);
             let method = &mut self.methods[index];
+            // kotlinc's writer computes both maxima from the final body (`COMPUTE_MAXS`).
+            if let Ok(max_stack) = u16::try_from(computed.frames.max_stack) {
+                method.max_stack = max_stack;
+            }
+            if let Some(max_locals) = max_locals.and_then(|max| u16::try_from(max).ok()) {
+                method.max_locals = max_locals;
+            }
             if !dead.is_empty() {
-                method.max_stack = method.max_stack.max(1);
                 method.code = Some(code);
                 method.exceptions = exceptions;
             }
@@ -223,7 +262,7 @@ impl ClassWriter {
 }
 
 /// The byte offsets a method's line numbers and local ranges put a label at.
-fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize) -> Vec<usize> {
+pub(super) fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize) -> Vec<usize> {
     let mut labels: Vec<usize> = lnt.iter().map(|&(pc, _)| usize::from(pc)).collect();
     for &(_, _, _, start, length) in lvt {
         let start = usize::from(start.unwrap_or(0));
@@ -336,6 +375,14 @@ fn encode(
         previous_locals = locals;
     }
     body
+}
+
+/// The words a value takes in the locals or on the stack.
+fn words(value: &VerificationType) -> usize {
+    match value {
+        VerificationType::Long | VerificationType::Double => 2,
+        _ => 1,
+    }
 }
 
 fn write_type(value: &VerificationType, offsets: &[usize], out: &mut Vec<u8>, cp: &mut ConstPool) {
