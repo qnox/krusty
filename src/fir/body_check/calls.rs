@@ -101,6 +101,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
+        | crate::libraries::CompilerIntrinsic::TypeOf
         | crate::libraries::CompilerIntrinsic::IsEmpty
         | crate::libraries::CompilerIntrinsic::IsNotEmpty
         | crate::libraries::CompilerIntrinsic::Count

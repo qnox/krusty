@@ -3,8 +3,8 @@
 use super::element_serializer::unsupported_element_serializer;
 use super::{
     build_field_serializer_instance, class_ty, contextual_serializer_for, decode_element_method,
-    element_serializer_expr, element_serializer_plan, field_serializer_of, inline_prim_methods,
-    is_nullable, property_is_contextual, value_class_underlying, virtual_iface,
+    field_serializer_of, inline_prim_methods, is_nullable, property_is_contextual,
+    value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -15,9 +15,8 @@ use crate::types::Ty;
 /// sequential fast path and in the index-driven loop, so it is built once and used twice.
 struct ElementDecode<'a> {
     serialized_class: ClassId,
-    serializer_class: ClassId,
     fields: &'a [(String, Ty)],
-    type_parameter_serializer_fields: &'a [Option<u32>],
+    type_parameter_serializers: super::type_parameter_serializers::TypeParameterSerializers<'a>,
     descriptor_local: u32,
     field_locals: &'a [u32],
     seen_locals: &'a [u32],
@@ -119,15 +118,6 @@ impl ElementDecode<'_> {
         ) {
             // Contextual element: `ContextualSerializer(<type>::class)`.
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
-        } else if let Some(fidx) = self.type_parameter_serializer_fields[k] {
-            // Type-parameter element: `this.typeSerialK`, the ctor-supplied serializer.
-            let this_s = ir.add_expr(IrExpr::GetValue(0));
-            let inst = ir.add_expr(IrExpr::GetField {
-                receiver: this_s,
-                class: self.serializer_class,
-                index: fidx,
-            });
-            self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if let Some(internal) =
             field_serializer_of(ctx, ir, self.serialized_class, &self.fields[k].0)
         {
@@ -141,7 +131,14 @@ impl ElementDecode<'_> {
             // for a JSON-null element.
             let inst = self
                 .cached_slot(ir, k)
-                .or_else(|| element_serializer_expr(ir, ctx, &ty))
+                .or_else(|| {
+                    super::element_serializer::element_serializer_expr_in(
+                        ir,
+                        ctx,
+                        &ty,
+                        self.type_parameter_serializers,
+                    )
+                })
                 .unwrap_or_else(|| unsupported_element_serializer(ir, ty));
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else {
@@ -190,7 +187,9 @@ pub(super) struct DeserializeBody<'a> {
     pub(super) serializer_class: ClassId,
     pub(super) serialized_class: ClassId,
     pub(super) fields: &'a [(String, Ty)],
-    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serializers of the class's type parameters, on the generic `$serializer`.
+    pub(super) type_parameter_serializers:
+        super::type_parameter_serializers::TypeParameterSerializers<'a>,
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache. Passed in
     /// rather than rediscovered: the builder's answer about which properties have a slot is the
     /// only one, so a reader cannot believe in a slot that was never written.
@@ -204,7 +203,7 @@ impl DeserializeBody<'_> {
             serializer_class,
             serialized_class: foo_id,
             fields,
-            type_parameter_serializer_fields: tp_field,
+            type_parameter_serializers,
             cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
@@ -285,9 +284,8 @@ impl DeserializeBody<'_> {
             ir.functions[fid as usize].body = Some(body);
             return;
         }
-        let decodable = fields.iter().enumerate().all(|(i, (pname, t))| {
-            if tp_field[i].is_some()
-                || property_is_contextual(ctx, ir, class_id, pname)
+        let decodable = fields.iter().all(|(pname, t)| {
+            if property_is_contextual(ctx, ir, class_id, pname)
                 || field_serializer_of(ctx, ir, class_id, pname).is_some()
             {
                 return true;
@@ -301,7 +299,13 @@ impl DeserializeBody<'_> {
             if !is_nullable(t) && decode_element_method(t).is_some() {
                 return true;
             }
-            element_serializer_plan(ir, ctx, t).is_some()
+            super::element_serializer::element_serializer_plan_in(
+                ir,
+                ctx,
+                t,
+                type_parameter_serializers,
+            )
+            .is_some()
         });
         if !decodable {
             let message = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
@@ -369,9 +373,8 @@ impl DeserializeBody<'_> {
             |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(composite_local)) };
         let elements = ElementDecode {
             serialized_class: class_id,
-            serializer_class: ser_cid,
             fields,
-            type_parameter_serializer_fields: tp_field,
+            type_parameter_serializers,
             descriptor_local: serial_desc_local,
             field_locals: &field_locals,
             seen_locals: &seen_locals,

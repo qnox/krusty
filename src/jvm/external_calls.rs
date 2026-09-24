@@ -718,6 +718,21 @@ pub(super) fn realize(
                     classifier: semantic_ret,
                 })
             }
+            // The declaration's only type parameter is the whole operand. Its checked value keeps
+            // nullability and projections, which the runtime `KType` has to reproduce.
+            Some(crate::libraries::CompilerIntrinsic::TypeOf) => {
+                let argument = substitutions.iter().find_map(|substitution| {
+                    matches!(
+                        substitution.parameter,
+                        crate::fir::FirTypeParameterRef::External { callable, ordinal: 0 }
+                            if callable == target
+                    )
+                    .then_some(substitution.value)
+                });
+                Some(crate::ir::IrIntrinsic::TypeOf {
+                    ty: argument.ok_or(target)?,
+                })
+            }
             Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)
@@ -967,7 +982,7 @@ fn publish_reified_substitutions(
 
 /// The provider owns physical erasure; checked FIR owns the final semantic result. Preserve both by
 /// wrapping the realized physical call at its original expression identity.
-fn bridge_external_result(
+pub(super) fn bridge_external_result(
     ir: &mut IrFile,
     index: usize,
     physical: crate::types::Ty,

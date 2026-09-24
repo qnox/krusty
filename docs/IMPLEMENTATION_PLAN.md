@@ -4074,6 +4074,35 @@ property references, and the harness does supply `kotlin-reflect.jar`); what was
   exists nowhere), and a generic function's `@Metadata` recorded an INFERRED type-parameter return as
   `Any` with no JVM signature handle, which left reflection unable to identify the method.
 
+## Phase — `typeOf<T>()` as a compiler intrinsic  ◐
+
+The box corpus goes from 6405 to 6454 passing, with no case newly failing. Of the 61 applicable box
+cases that call `typeOf`, 50 pass now; before this, one did. The semantics are in `docs/SPEC.md`.
+
+- The call boundary (`jvm::external_calls`) routes `kotlin.reflect.typeOf` to
+  `IrIntrinsic::TypeOf { ty }`. `jvm::type_of` generates kotlinc's `generateTypeOf` sequence as a
+  small instruction list. The emitter encodes it directly. The bytecode splicer encodes it in place of a
+  `reifiedOperationMarker(6, …)` placeholder, and its stack growth is added to the host's max stack.
+- IR inline expansion substitutes only the callee's reified parameters into dependency calls. A
+  non-reified one stays a type parameter and is described by its declaring container.
+- A foreign inline template records its declaring source, and the JVM backend resolves that to a file
+  facade. A top-level generic extension property records its type parameters so that a `typeOf` in its
+  accessors names the property.
+- Signature publication resolves a classifier or property bound against the enclosing declarations'
+  published type parameters. Before, it used only the declaration's own parameters.
+
+- A generic top-level extension property's accessors carry their generic `Signature`
+  (`<P:Ljava/lang/Object;>(TP;)…`), as a member extension property's already did.
+
+Remaining:
+- Six `typeErasure/*InsideClass` cases. A reified MEMBER inline function is called, not inlined, so it
+  throws whatever its body does. That is not specific to `typeOf`.
+- Reified parameters in anonymous objects regenerated per call site (`reifiedAsNestedArgument`,
+  `localClass`).
+- Reified intersection-type arguments (`intersectionType`,
+  `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
+- Typealias use-site projections (`typeAliasedType`).
+
 ## Phase — local classifiers and type parameters in the lexical scope chain  ◐
 
 Removing the parser's local-class hoisting hack in favour of proper lexical scoping. Two of the five
@@ -4416,3 +4445,24 @@ each one lowering more and declining less:
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host
   (`one_host_links_a_static_executable_for_every_supported_architecture`).
+
+## Byte-identical box conformance, item 1 — local-class naming  ◐
+
+Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
+kotlinc names local classes (`InventNamesForLocalClasses`): one walk numbers every lambda, function
+expression, callable reference, anonymous object, delegated property and suspend continuation in a
+single sequence per enclosing name. On master cb2dded, krusty's internal names reach the output in
+1,207 box files.
+
+- ✅ 1a. `frontend::local_class_names` records source ownership segments and shared sequence
+  ordinals without formatting a target name. Stable declaration identities carry that provenance
+  through FIR/common IR; `jvm::local_class_names` combines it with the physical facade/class owner.
+- ☐ 1b. Suspend lambdas as `SuspendLambda` classes named from the walk (today a static method plus a
+  `…$fir_…$1` continuation).
+- ☐ 1c. Function and property reference classes named from the walk (today `Facade$fir$function$N`
+  and `Facade$fir$property$N`), with kotlinc's direct `invoke` in place of the adapter.
+- ☐ 1d. Local functions and lambda bodies named as `InventNamesForLocalFunctions` does
+  (`box$local`, `box$lambda$0`), replacing `name$fir_A_B_C`.
+- ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
+  realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
+  same provenance with their own separators and container rules.

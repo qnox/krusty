@@ -35,8 +35,9 @@ fn a_printed_value_stays_on_the_stack_like_kotlincs() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    // `counted` folds too, but krusty spills an inline argument twice where kotlinc spills it once;
-    // the folded copy's slot stays taken (kotlinc does not renumber), so its locals differ.
+    // `counted` folds too, but the JVM splice still stores its inline parameter once; that separate
+    // in-place-argument responsibility lands in the stacked backend change. This pass owns the
+    // ordinary call below, whose complete instruction stream already matches kotlinc.
     let member = "void printed(int)";
     let reference = method_instructions(&built.reference, member);
     assert!(!reference.is_empty(), "{member} not found");

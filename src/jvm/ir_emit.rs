@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrDataClassMemberRole, IrExpr, IrField, IrFile,
-    IrFunction, IrTypeOp,
+    Callee, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile, IrFunction,
+    IrTypeOp,
 };
 use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
@@ -33,15 +33,19 @@ mod coroutine_machine;
 mod data_class_pool_seed;
 mod data_class_value_classes;
 mod debug_lines;
+mod declaration_types;
 mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
 mod implicit_reference_coercion;
+mod in_place_arguments;
 mod inline_body_emission;
+mod inline_call;
 mod interface_compatibility;
 mod member_schedule;
+mod object_static_initialization;
 mod operand_stack;
 mod property_access;
 mod property_reference_values;
@@ -56,23 +60,21 @@ mod vararg;
 mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
+pub(crate) use declaration_types::jvm_tys;
+pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
+use declaration_types::{field_jvm_tys, jvm_declared_ty};
+use declaration_types::{
+    ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
+};
 use inline_body_emission::collect_body_var_types;
+use inline_call::{
+    bind_inline_handlers, parse_descriptor_params, vtype_to_verif, InlineStaticTarget,
+};
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
-
-struct InlineStaticTarget<'a> {
-    owner: &'a str,
-    name: &'a str,
-    descriptor: &'a str,
-    splice_desc: &'a str,
-    /// An `@InlineOnly` callee, which contributes NO debug information to the caller: the reference
-    /// compiler gives such a body no inline-depth marker, no locals, no line entries and no source
-    /// map, so that it is invisible in a stack trace. Splicing one must be equally invisible.
-    inline_only: bool,
-}
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
 /// object class: accessors read/write `getstatic`/`putstatic`, initializers run in `<clinit>` after
@@ -4900,10 +4902,6 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     })
 }
 
-/// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
-/// their initializers in declaration order.
-/// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
-/// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_unified` bails on them).
 /// A method's `StackMapTable` frames resolved to byte offsets: `(offset, locals, stack)` each.
 type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
 
@@ -4917,34 +4915,6 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
             Some(crate::jvm::names::classfile_internal_name(&n.render()))
         }
         _ => None,
-    }
-}
-
-fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
-    use crate::jvm::inline::VType;
-    match v {
-        VType::Top => VerifType::Top,
-        VType::Int => VerifType::Integer,
-        VType::Float => VerifType::Float,
-        VType::Long => VerifType::Long,
-        VType::Double => VerifType::Double,
-        VType::Null => VerifType::Null,
-        VType::Object(idx) => VerifType::Object(*idx),
-        VType::UninitThis | VType::Uninit(_) => VerifType::Top,
-    }
-}
-
-/// Attach exception-table entries returned by the bytecode inliner. The offsets are already
-/// absolute in the caller's code buffer; labels are needed only because `CodeBuilder` owns the
-/// eventual exception-table serialization.
-fn bind_inline_handlers(code: &mut CodeBuilder, handlers: &[(usize, usize, usize, u16)]) {
-    for &(start, end, handler, catch_type) in handlers {
-        let (start_label, end_label, handler_label) =
-            (code.new_label(), code.new_label(), code.new_label());
-        code.bind_at(start_label, start);
-        code.bind_at(end_label, end);
-        code.bind_at(handler_label, handler);
-        code.add_exception(start_label, end_label, handler_label, catch_type);
     }
 }
 
@@ -6014,8 +5984,11 @@ fn emit_class(
                 _ => None,
             })
             .flatten();
+        // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
+        let synthetic = ir.is_compiler_generated_static(static_index);
+        let acc = if synthetic { acc | 0x1000 } else { acc };
         // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
+        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
             if s.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
             } else {
@@ -6679,170 +6652,17 @@ fn emit_class(
             }
         }
     }
-    // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
-    // also matches its constant-pool interning sequence): a `public static final INSTANCE` built in `<clinit>`.
+    // A singleton object's JVM storage and initializer form one backend-owned responsibility.
     if static_storage(ir, c) {
-        let clinit_statics: Vec<&crate::ir::IrStatic> = ir
-            .statics
-            .iter()
-            .filter(|property| {
-                property.owner_matches(&fq_name)
-                    && !(property.is_const
-                        && static_fields::const_value_idx_peek(ir, property.init))
-            })
-            .collect();
-        // An INTERFACE's companion self-hosts its singleton: a package-private `static final
-        // $$INSTANCE` on the companion (the interface's `Companion` field aliases it in the
-        // interface `<clinit>`), with the companion's properties as statics here — kotlinc's
-        // interface-companion layout. A plain object uses `public static final INSTANCE`.
-        // `is_object` describes the Kotlin declaration itself and is true for a companion object
-        // in the production FIR path. The JVM singleton layout depends on the enclosing classifier,
-        // so use that exact relationship instead of treating `!is_object` as a proxy.
-        let interface_companion = companion_of_interface(ir, c);
-        let (instance_name, instance_access) = if interface_companion {
-            ("$$INSTANCE", 0x1018) // STATIC | FINAL | SYNTHETIC (package-private)
-        } else {
-            ("INSTANCE", 0x0019) // PUBLIC | STATIC | FINAL
-        };
-        let self_desc = format!("L{};", fq_name);
-        // kotlinc reaches `<clinit>` before the INSTANCE field, so the pool follows its BODY: the
-        // method name, the `<init>` Methodref of `new demo/O`, then the field entries at the
-        // `putstatic`, and only then the field's `@NotNull`.
-        cw.reserve_method_name("<clinit>");
-        let ci = cw.class_ref(&fq_name);
-        let init = cw.methodref(&fq_name, "<init>", "()V");
-        let fref = cw.fieldref(&fq_name, instance_name, &self_desc);
-        cw.add_field(instance_access, instance_name, &self_desc);
-        if !interface_companion {
-            cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
-        }
-        // The backing fields FOLLOW the INSTANCE entry in the field table (kotlinc's order); their
-        // Utf8s were interned by the accessor bodies, so the pool is undisturbed.
-        if static_storage(ir, c) {
-            for field in &c.fields {
-                let private = field.is_private();
-                let acc = jvm_field_visibility(c, &field.name).unwrap_or(if private {
-                    0x0002
-                } else {
-                    0x0001
-                }) | if field.is_final() { 0x0010 } else { 0 }
-                    | 0x0008;
-                let type_parameter = ir
-                    .field_signatures(&fq_name)
-                    .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                    .map(|(_, parameter)| parameter.as_str())
-                    .or(field.type_param.as_deref());
-                let field_sig =
-                    property_jvm_signatures(&signature_formatter, &field.ty, type_parameter).field;
-                let physical_name = instance_field_jvm_name(ir, c, field);
-                cw.add_field_sig(
-                    acc,
-                    &physical_name,
-                    &ir_type_desc(&field.ty),
-                    field_sig.as_deref(),
-                );
-            }
-        }
-        let init_body = c.init_body;
-        let mut e = Emitter::new(
+        object_static_initialization::emit(
             ir,
-            &mut cw,
-            env,
-            &fq_name,
+            c,
             facade,
-            Ty::Unit,
-            clinit_statics
-                .iter()
-                .map(|property| property.init)
-                .chain(init_body),
+            env,
+            &signature_formatter,
+            &fq_name,
+            &mut cw,
         );
-        e.generated_initializer = !c.is_source_declared;
-        let mut clinit = CodeBuilder::new(0);
-        clinit.new_obj(ci);
-        clinit.dup();
-        clinit.invokespecial(init, 0, 0);
-        clinit.putstatic(fref, 1);
-        // A delegated member property contributes backend-owned static support storage (for
-        // example its KProperty reference) as well as the instance-shaped delegate field in the
-        // common IR class. A named object has one JVM class initializer: realize those statics
-        // after INSTANCE exists and before the property initializer that consumes them.
-        for property in &clinit_statics {
-            e.emit_static_initializer_store(&fq_name, property, &mut clinit);
-        }
-        // A static-storage object runs its property initializers + `init {}` blocks HERE, after the
-        // INSTANCE store (kotlinc's shape — `<init>` is a bare super() call). `this` references in
-        // initializer expressions read the just-stored INSTANCE; a pure list of own-field stores
-        // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
-        let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
-        if let Some(init_body) = init_body {
-            let body_start = clinit.bytes.len() as u16;
-            if init_body_reads_this(ir, init_body) {
-                let iref = e.cw.fieldref(&fq_name, instance_name, &self_desc);
-                clinit.getstatic(iref, 1);
-                store(Ty::obj(&fq_name), 0, &mut clinit);
-                e.slots.insert(0, (0, Ty::obj(&fq_name)));
-                e.next_slot = 1;
-            }
-            // Per-initializer line numbers (kotlinc maps each store to its property's source line;
-            // applied after add_method below) — only for the pure store-list shape.
-            let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-            let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
-                crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
-                    .iter()
-                    .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
-                    .then(|| stmts.clone()),
-                _ => None,
-            };
-            match stmts {
-                Some(stmts) => {
-                    for st in stmts {
-                        let pc = clinit.bytes.len() as u16;
-                        if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
-                            let name = &c.fields[*index as usize].name;
-                            if let Some(&pl) =
-                                ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
-                            {
-                                if pl != 0 {
-                                    clinit_lines.push((pc, pl));
-                                }
-                            }
-                        }
-                        e.emit(st, &mut clinit);
-                    }
-                }
-                None => e.emit(init_body, &mut clinit),
-            }
-            clinit_lines.dedup_by_key(|(_, l)| *l);
-            clinit_line_entries = clinit_lines;
-            // A GENERATED class has no per-statement source to map: its whole initializer belongs to
-            // the declaration it was generated for. kotlinc gives such a `<clinit>` two entries — the
-            // body at the declaration line, the trailing `return` at the declaration's closing line.
-            // A source-declared object keeps the per-property mapping above, which is what kotlinc
-            // emits there (measured: a plain `object` gets no closing-line entry at all).
-            if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
-                // The body maps to where the DECLARATION starts — annotations included — exactly as
-                // the primary constructor's `super()` does; the closing line is pushed after the
-                // trailing `return` below.
-                let start = if c.decl_start_line == 0 {
-                    c.decl_line
-                } else {
-                    c.decl_start_line
-                };
-                clinit_line_entries = vec![(body_start, start)];
-            }
-        }
-        let clinit_max = e.next_slot;
-        let clinit_return = clinit.bytes.len() as u16;
-        clinit.ret_void();
-        clinit.ensure_locals(clinit_max);
-        clinit.link();
-        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-        if !c.is_source_declared && c.decl_end_line != 0 && !clinit_line_entries.is_empty() {
-            clinit_line_entries.push((clinit_return, c.decl_end_line));
-        }
-        if !clinit_line_entries.is_empty() {
-            cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
-        }
     }
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
@@ -12885,10 +12705,6 @@ struct Emitter<'a> {
     generated_initializer: bool,
 }
 
-fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
-    parse_physical_method_desc(desc).map(|(params, _)| params)
-}
-
 impl<'a> Emitter<'a> {
     fn new(
         ir: &'a IrFile,
@@ -12987,7 +12803,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -13022,7 +12838,7 @@ impl<'a> Emitter<'a> {
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
         // compiler reuses slots belonging to host locals that are not written yet.
         let spliced_frame =
-            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, base);
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, None, base);
         let top_local = spliced_frame
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
@@ -13285,7 +13101,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            &lam_splices,
+            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
             0,
             self.cw,
             reified,
@@ -13342,7 +13158,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack + lam_max_stack,
+                body.max_stack + lam_max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -13359,7 +13175,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            &lam_splices,
+            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
             splice_start,
             self.cw,
             reified,
@@ -13421,7 +13237,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack + lam_max_stack,
+            body.max_stack + lam_max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -13939,7 +13755,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let InlineStaticTarget {
             owner,
@@ -14035,14 +13851,37 @@ impl<'a> Emitter<'a> {
             return false;
         }
         let ret_words = descriptor_ret_words(descriptor);
-        let top_local = base + body.max_locals;
+        // kotlinc reads an `@InlineOnly` callee's arguments in place when its body passes
+        // `canInlineArgumentsInPlace` and no argument's code stores a local or jumps out of itself
+        // (`InplaceArgumentsMethodTransformer`): no parameter slot is written, and the slots close.
+        // An argument is only admitted when its code cannot contain either.
+        let in_place = match in_place_arguments::Selection::for_call(
+            self.ir,
+            call_expression,
+            args,
+            inline_only,
+            &body,
+            splice_desc,
+            base,
+        ) {
+            Some(selection) => selection,
+            None => return false,
+        };
+        let binding = in_place.binding();
+        let top_local = in_place.top_local();
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
         // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
         // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
         // any `tableswitch`/`lookupswitch` pads correctly.
-        let Some(probe) =
-            crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw, reified)
-        else {
+        let Some(probe) = crate::jvm::inline::splice_unified(
+            &body,
+            splice_desc,
+            base,
+            binding,
+            0,
+            self.cw,
+            reified,
+        ) else {
             crate::trace_compiler!(
                 "splice",
                 "splice_unified probe failed for {owner}.{name}{descriptor} (splice_desc={splice_desc})"
@@ -14070,7 +13909,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack,
+                body.max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -14097,7 +13936,7 @@ impl<'a> Emitter<'a> {
             &body,
             splice_desc,
             base,
-            &[],
+            binding,
             splice_start,
             self.cw,
             reified,
@@ -14120,7 +13959,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack,
+            body.max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -16140,6 +15979,14 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::Assert { mode } => {
                         self.emit_assertion(*mode, args, code)
                     }
+                    crate::ir::IrIntrinsic::TypeOf { ty } => {
+                        let parameters = super::type_of::TypeParameters::new(self.ir, &self.facade);
+                        let mut instructions = Vec::new();
+                        match super::type_of::generate(*ty, &parameters, &mut instructions) {
+                            Ok(()) => super::type_of::encode(&instructions, code, self.cw),
+                            Err(error) => self.run.set_emit_error(error.to_string()),
+                        }
+                    }
                     crate::ir::IrIntrinsic::ArrayGet => {
                         self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
                     }
@@ -16193,6 +16040,14 @@ impl<'a> Emitter<'a> {
                         self.mark_inline_call_site_line(e, code);
                         match classifier.non_null() {
                             Ty::TyParam(identity, _) => {
+                                // `enumValueOf` is not `@InlineOnly`, so kotlinc's inliner stores
+                                // its argument once, into the parameter's slot, before the body
+                                // runs; the body then reads that slot.
+                                self.emit_value(args[0], code);
+                                let name = self.next_slot;
+                                self.next_slot += 1;
+                                store(Ty::String, name, code);
+                                let lease = self.lease_temporary(name, Ty::String);
                                 // Kotlin's public inline template keeps the reified classifier as
                                 // the standard mode-5 marker plus a null Class placeholder. A
                                 // consuming compiler replaces that placeholder at the call site.
@@ -16208,7 +16063,8 @@ impl<'a> Emitter<'a> {
                                 );
                                 code.invokestatic(marker, 2, 0);
                                 code.aconst_null();
-                                self.emit_value(args[0], code);
+                                load(Ty::String, name, code);
+                                self.release_temporary(lease);
                                 let method = self.cw.methodref(
                                     "java/lang/Enum",
                                     "valueOf",
@@ -16428,7 +16284,8 @@ impl<'a> Emitter<'a> {
                         "resolve",
                         "emit static {owner}.{name}{descriptor} inline={inline:?}"
                     );
-                    let reified = crate::jvm::reified_operations::splice_type_map(self.ir, e);
+                    let reified =
+                        crate::jvm::reified_operations::splice_arguments(self.ir, e, &self.facade);
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
@@ -20026,108 +19883,6 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // concrete JVM type.
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
-    }
-}
-
-/// The physical JVM type of a declaration slot (parameter, field, constructor argument, or return).
-/// Semantic `Nothing` remains [`Ty::Nothing`] through expression lowering so a call with that result
-/// still terminates control flow, but a declaration descriptor names the uninhabited reference as
-/// `java/lang/Void` and therefore occupies one JVM slot.
-fn jvm_declared_ty(t: &Ty) -> Ty {
-    fn is_nothing(t: &Ty) -> bool {
-        match t {
-            Ty::Nothing => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_nothing(inner),
-            Ty::Obj(name, _) => name.matches("kotlin/Nothing"),
-            _ => false,
-        }
-    }
-
-    if is_nothing(t) {
-        return Ty::obj("java/lang/Void");
-    }
-    match ir_ty_to_jvm(t) {
-        Ty::Nothing => Ty::obj("java/lang/Void"),
-        other => other,
-    }
-}
-
-pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter()
-        .map(|ty| {
-            // `Unit` is `void` only in result position. As a parameter it is the singleton
-            // reference `kotlin.Unit`, exactly like any other semantic object value.
-            if *ty == Ty::Unit {
-                Ty::obj("kotlin/Unit")
-            } else {
-                jvm_declared_ty(ty)
-            }
-        })
-        .collect()
-}
-
-/// Realize one common-IR function's semantic parameter list for the JVM. Mutable captures remain
-/// ordinary element types in common IR; their sparse semantic marker selects the backend-owned
-/// `Ref$*Ref` holder representation here. Every descriptor consumer uses this function so a lifted
-/// lambda declaration, its method handle, and its call sites cannot disagree.
-fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Vec<Ty> {
-    let mut parameters = jvm_tys(&ir.functions[function as usize].params);
-    for (parameter, physical) in parameters.iter_mut().enumerate() {
-        let ordinal = u32::try_from(parameter).expect("too many JVM function parameters");
-        if !ir
-            .shared_capture_parameters
-            .contains_key(&(function, ordinal))
-        {
-            continue;
-        }
-        // Descriptor-sensitive backend passes may already have erased a value-class or type-
-        // parameter element in the declaration. Select the holder from that current physical
-        // element, while the sparse marker itself remains the logical common-IR fact.
-        *physical = Ty::obj(ref_class(physical).0);
-    }
-    parameters
-}
-
-/// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
-/// an `Object[]` a generic `Array<T>` erases to (recursively). A value of this type is a candidate for the
-/// narrowing `checkcast` at a consumption site; a concrete type (`String`, `Integer`, `IntArray`, a value
-/// class) is not.
-fn jvm_is_erased_top(t: Ty) -> bool {
-    match t.obj_internal() {
-        Some(n) if n.matches("java/lang/Object") || n.matches("kotlin/Any") => true,
-        _ => t.array_elem().is_some_and(jvm_is_erased_top),
-    }
-}
-
-fn ir_type_desc(t: &Ty) -> String {
-    type_descriptor(jvm_declared_ty(t))
-}
-
-fn local_variable_desc(t: Ty) -> String {
-    type_descriptor(if t == Ty::Unit {
-        Ty::obj("kotlin/Unit")
-    } else {
-        t
-    })
-}
-
-fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
-    method_descriptor(&jvm_tys(params), jvm_declared_ty(ret))
-}
-
-fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
-    fields.iter().map(|f| jvm_declared_ty(&f.ty)).collect()
-}
-
-fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
-    args.iter().map(|a| jvm_declared_ty(&a.ty)).collect()
-}
-
-pub(super) fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
-    if c.ctor_args.is_empty() {
-        field_jvm_tys(&c.fields[..c.ctor_param_count as usize])
-    } else {
-        ctor_arg_jvm_tys(&c.ctor_args)
     }
 }
 

@@ -339,6 +339,7 @@ impl StreamedHeaderModule {
         }
         index.publish_source_inventory(&self.inventory, &self.declarations);
         index.publish_declarations(self.declarations.clone());
+        index.publish_local_classifier_lexical_roots(self.local_classifier_lexical_roots.clone());
     }
 
     /// Find the declaration whose live lexical traversal reaches one default provider. This query
@@ -484,8 +485,8 @@ impl StreamedHeaderModule {
         if !index.declarations_published() {
             index.publish_source_inventory(&inventory, &declarations);
             index.publish_declarations(declarations);
+            index.publish_local_classifier_lexical_roots(local_classifier_lexical_roots);
         }
-        index.publish_local_classifier_lexical_roots(local_classifier_lexical_roots);
         (
             index,
             sources,

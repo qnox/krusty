@@ -16,6 +16,9 @@ mod tests {
                 "lexer",
                 "libraries",
                 "parser",
+                // The native compiler plugins a compilation selected are an analysis input: signature
+                // collection and body checking host them, so the facade takes the selection.
+                "plugins",
                 "resolve",
                 "source",
                 "trace_compiler",
@@ -74,7 +77,9 @@ mod tests {
         // The streaming handoff owns one common-IR unit plus a classifier-only semantic view.
         // `CheckedIrFile` cannot expose parser arenas, source maps, resolver entry points, or the
         // frontend symbol table.
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir"]);
+        // It also names the native plugins the frontend ran (a selection, not a plugin's state), so
+        // the backend runs exactly those.
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir", "plugins"]);
         assert_allowed_crate_modules_in_tree(
             "src/backend",
             &[
@@ -110,6 +115,8 @@ mod tests {
 
     #[test]
     fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
+        // `plugins` is in budget for the analysis entry point alone: an editor reads no plugin
+        // switches, so it selects every native extension from the registry explicitly.
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-lsp/src/compiler_analysis",
             &[
@@ -132,6 +139,7 @@ mod tests {
                 "fir",
                 "frontend",
                 "libraries",
+                "plugins",
                 "source",
                 "symbol_source",
                 "types",
@@ -162,9 +170,13 @@ mod tests {
 
     #[test]
     fn compiler_cli_uses_only_public_compiler_layers() {
+        // `plugins` is the compiler-plugin surface, in budget as `features` is: the CLI reads
+        // kotlinc's `-Xplugin`/`-P` switches and resolves them against the extension registry.
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
-            &["compiler", "diag", "features", "frontend", "jvm", "source"],
+            &[
+                "compiler", "diag", "features", "frontend", "jvm", "plugins", "source",
+            ],
         );
     }
 

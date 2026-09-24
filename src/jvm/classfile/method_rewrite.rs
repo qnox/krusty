@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::temporaries::{self, Body};
-use super::{negated_jumps, redundant_checkcasts, redundant_gotos};
+use super::{negated_jumps, redundant_checkcasts, redundant_gotos, stack_peephole};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
@@ -363,9 +363,9 @@ impl ClassWriter {
         let entry = expand_slots(&entry);
         let original_graph = ControlGraph::build(&insns, &handlers)?;
         // The verifier's types before each original instruction, computed at most once.
-        let original_types_cell = std::cell::OnceCell::new();
-        let original_types = || -> Option<&FrameTypes> {
-            original_types_cell
+        let original_analysis_cell = std::cell::OnceCell::new();
+        let original_analysis = || {
+            original_analysis_cell
                 .get_or_init(|| {
                     let original_frames = self
                         .merged_frames(&source.builder)
@@ -374,12 +374,28 @@ impl ClassWriter {
                             Some((index_of(at)?, expand_slots(&locals), stack))
                         })
                         .collect::<Option<Vec<_>>>()?;
-                    FrameTypes::analyze(&insns, &original_graph, &entry, &original_frames, self)
+                    let types = FrameTypes::analyze(
+                        &insns,
+                        &original_graph,
+                        &entry,
+                        &original_frames,
+                        self,
+                    )?;
+                    Some((types, original_frames))
                 })
                 .as_ref()
         };
+        let original_types = || original_analysis().map(|(types, _)| types);
         let redundant_casts =
             redundant_checkcasts::select(self, method, &insns, &offsets, &original_types);
+        // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
+        // nullability analysis proves non-null goes (see `null_checks`).
+        let redundant_null_checks = self.redundant_null_checks(
+            &insns,
+            &original_graph,
+            &arrivals,
+            usize::from(method.max_locals),
+        );
         // Which label each branch jumps to, and the labels bound at each index in the order they
         // stand: kotlinc's rules see labels, and several can share one offset.
         let mut branch_labels: Vec<Option<u32>> = vec![None; n];
@@ -415,6 +431,7 @@ impl ClassWriter {
             marks: &marks,
             named: &named,
             redundant_casts: &redundant_casts,
+            redundant_null_checks: &redundant_null_checks,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| {
@@ -460,21 +477,52 @@ impl ClassWriter {
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
         let rewrite_late = rewrite.late_labels.clone();
-        let gotos_changed = redundant_gotos::remove(
+        let no_late_branch = |_: usize| false;
+        let peephole_tables = redundant_gotos::Tables {
+            lines: &lines,
+            variable_bounds: &variable_bounds,
+            protected_starts: &protected_starts,
+            // The peephole only uses the tables for NOP retention.
+            late_branch: &no_late_branch,
+        };
+        // kotlinc's stack peephole runs after the temporaries pass and before the `goto` cleanup.
+        let handler_entries: Vec<usize> = handlers.iter().map(|handler| handler.handler).collect();
+        let peephole = stack_peephole::optimize(
             &mut rewrite.nodes,
-            &redundant_gotos::Tables {
-                lines: &lines,
-                variable_bounds: &variable_bounds,
-                protected_starts: &protected_starts,
-                late_branch: &|index| {
-                    branch_labels
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .is_some_and(|label| rewrite_late.contains(&label))
+            &peephole_tables,
+            &handler_entries,
+            &stack_peephole::Pool {
+                unit_instance: &|field| {
+                    matches!(
+                        self.cp.fieldref_parts(field),
+                        Some(("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;"))
+                    )
+                },
+                compare_int: &|method| {
+                    matches!(
+                        self.methodref_parts(method),
+                        Some(("kotlin/jvm/internal/Intrinsics", "compare", "(II)I"))
+                    )
                 },
             },
         );
+        for &(from, to) in &peephole.moved_branches {
+            branch_labels[to] = branch_labels[from].take();
+        }
+        let late_branch = |index: usize| {
+            branch_labels
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(|label| rewrite_late.contains(&label))
+        };
+        let tables = redundant_gotos::Tables {
+            lines: &lines,
+            variable_bounds: &variable_bounds,
+            protected_starts: &protected_starts,
+            late_branch: &late_branch,
+        };
+        let gotos_changed = redundant_gotos::remove(&mut rewrite.nodes, &tables);
         let mut labelled: Vec<bool> = lines
             .iter()
             .zip(&variable_bounds)
@@ -492,7 +540,7 @@ impl ClassWriter {
                 .flatten()
                 .is_some_and(|label| rewrite_late.contains(&label))
         });
-        if !folded_any && !gotos_changed && !jumps_negated {
+        if !folded_any && !peephole.changed && !gotos_changed && !jumps_negated {
             return None;
         }
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
@@ -790,7 +838,14 @@ impl ClassWriter {
             })
             .collect::<Option<Vec<_>>>()?;
         let types = FrameTypes::analyze(&new_insns, &new_graph, &entry, &merged, self)?;
-        if !types.frames_hold(&new_insns, &new_graph, &merged, self) {
+        // The reference widenings the method as emitted already makes at its frames are ones the
+        // verifier accepts; the rewritten method may make them again.
+        let known_widenings = original_analysis()
+            .and_then(|(original, frames)| {
+                original.reference_widenings(&insns, &original_graph, frames, self)
+            })
+            .unwrap_or_default();
+        if !types.frames_hold(&new_insns, &new_graph, &merged, self, &known_widenings) {
             return None;
         }
         let mut max_stack = 0usize;

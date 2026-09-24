@@ -16,11 +16,11 @@ use super::*;
 pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
+    frontend_plugins: &crate::plugins::PluginHost,
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
 ) -> SymbolTable {
-    let frontend_plugins = crate::plugins::enabled_plugins("main");
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -291,6 +291,11 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // inference is independent of declaration order. These are the exact flags later moved onto
     // each canonical `ClassSig`, not a parallel simple-name object index.
     if let Some(headers) = compact_headers {
+        publish_compact_parser_classifier_identities(
+            compact_local_contexts,
+            files.len(),
+            &mut table,
+        );
         for stub in headers
             .stubs
             .iter()
@@ -356,12 +361,18 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             file_index: i as u32,
             attempted: &mut declaration_annotation_resolution_attempts,
         };
-        for (declaration_sibling, &d) in file.decls.iter().enumerate() {
+        let projected_parser_classifier = |parser| {
+            projected_parser_classifier_identity(
+                file,
+                compact_headers,
+                compact_local_contexts,
+                i,
+                parser,
+            )
+        };
+        for &d in &file.decls {
             let compact_declaration = compact_headers.and_then(|headers| {
-                let declaration = *headers
-                    .source_declarations(crate::fir::SourceFileId::from_raw(i as u32))
-                    .get(declaration_sibling)?;
-                headers.stub(declaration)
+                compact_parser_declaration_stub(headers, compact_local_contexts, i, d)
             });
             if compact_headers.is_some() && compact_declaration.is_none() {
                 continue;
@@ -941,24 +952,18 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
                         },
                     );
-                    // The declaration's OWN internal name is definitional (`pkg/Name`); the
-                    // simple-name `class_names` lookup can bind a SAME-NAMED class from another
-                    // package (or an alias/import), which would register this class's signature
-                    // under the wrong internal. Only fall back to it for shapes whose internal
-                    // isn't the plain `class_internal` form (e.g. remapped lexical nestings).
-                    let own_internal = class_internal(file, &c.name);
-                    let internal = if user_defined.contains(&type_name(&own_internal)) {
-                        own_internal
-                    } else {
-                        class_names
-                            .get(&c.name)
-                            .map(TypeName::render)
-                            .unwrap_or_else(|| class_internal(file, &c.name))
-                    };
+                    // A compact classifier's stable identity is authoritative. Its source path is
+                    // lookup input and need not be unique across files.
+                    let internal = projected_classifier_identity(
+                        file,
+                        compact_headers,
+                        compact_classifier,
+                        &c.name,
+                        &user_defined,
+                        &class_names,
+                    );
                     if anonymous_object {
-                        table
-                            .anonymous_object_types
-                            .insert((i as u32, d), type_name(&internal));
+                        table.anonymous_object_types.insert((i as u32, d), internal);
                     }
                     // A parser-hoisted body-local classifier has its explicit header types
                     // captured on the compact signature graph while the exact lexical type-alias
@@ -1039,21 +1044,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // SomeInterface<SomeClass>`). This adds only the declaration itself; own nested
                     // body declarations remain excluded as required by the header-scope rule above.
                     if let Some(simple) = c.name.rsplit('.').next() {
-                        header_class_names.insert_name(simple.to_owned(), type_name(&internal));
+                        header_class_names.insert_name(simple.to_owned(), internal);
                     }
-                    let stable_siblings = compact_classifier.and_then(|stub| {
-                        compact_local_contexts
-                            .and_then(|contexts| contexts.get(i))
-                            .and_then(|context| context.sibling_classifiers.get(&stub.id))
-                    });
+                    let stable_siblings = projected_sibling_classifiers(
+                        compact_headers,
+                        compact_local_contexts,
+                        i,
+                        compact_classifier,
+                    );
                     let legacy_siblings = legacy_local_class_siblings
                         .as_ref()
                         .and_then(|contexts| contexts.get(i))
-                        .and_then(|context| context.get(&d));
+                        .and_then(|context| context.get(&d))
+                        .cloned();
                     for (simple, internal) in
                         stable_siblings.or(legacy_siblings).into_iter().flatten()
                     {
-                        header_class_names.insert_name(simple.clone(), *internal);
+                        header_class_names.insert_name(simple, internal);
                     }
                     let mut lexical_inheritors = match (compact_headers, compact_classifier) {
                         (Some(headers), Some(stub)) => compact_declaration_lexical_class_names(
@@ -1102,7 +1109,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let header_lexical_owner_ranks = lexical_inheritors
                         .iter()
                         .copied()
-                        .filter(|owner| *owner != type_name(&internal))
+                        .filter(|owner| *owner != internal)
                         .enumerate()
                         .map(|(rank, owner)| (owner, rank))
                         .collect::<HashMap<_, _>>();
@@ -1206,7 +1213,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let header_inheritors = lexical_inheritors
                         .iter()
                         .copied()
-                        .filter(|owner| *owner != type_name(&internal))
+                        .filter(|owner| *owner != internal)
                         .collect::<Vec<_>>();
                     extend_inherited_names(&mut header_class_names, &header_inheritors, false);
                     // The classifier's own inherited nested classifiers form a later header rung:
@@ -1216,7 +1223,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // existing package classifier spuriously ambiguous.
                     extend_inherited_names(
                         &mut header_class_names,
-                        std::slice::from_ref(&type_name(&internal)),
+                        std::slice::from_ref(&internal),
                         true,
                     );
                     let lexical_owner_ranks = lexical_inheritors
@@ -1248,11 +1255,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         // nested classifiers now precede those of enclosing receivers and the file
                         // scope, while declarations owned directly by the class are added below and
                         // retain the nearest lexical priority.
-                        extend_inherited_names(
-                            &mut ext,
-                            std::slice::from_ref(&type_name(&internal)),
-                            false,
-                        );
+                        extend_inherited_names(&mut ext, std::slice::from_ref(&internal), false);
                         // Own nested classifiers from every lexical owner are in scope inside a nested
                         // class. For `Outer { inner class First; inner class Second(val first: First) }`,
                         // `First` belongs to `Outer`, not `Outer.Second`, so probing only `c.name` loses
@@ -1664,12 +1667,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .zip(&ctor_params)
                             .map(|(p, &ty)| (p.name.clone(), ty, p.is_mutable_property)),
                     );
-                    let direct_companion = c.companion.and_then(|companion| {
-                        let Decl::Class(companion) = file.decl(companion) else {
-                            return None;
-                        };
-                        Some(type_name(&class_internal(file, &companion.name)))
-                    });
+                    let direct_companion = c.companion.and_then(projected_parser_classifier);
                     // Publish explicitly typed members before any property/getter initializer asks
                     // for them. This is not a spelling-to-return shortcut: the temporary class
                     // header is consumed through ModuleSymbols, so overload selection, generic
@@ -1729,9 +1727,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             diags,
                         );
                     table.insert_class_sig(
-                        type_name(&internal),
+                        internal,
                         ClassSig::with_declared_callable_headers(DeclaredCallableClassHeader {
-                            internal: type_name(&internal),
+                            internal,
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: d,
@@ -1742,7 +1740,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             member_ext_funs: declared_member_extensions,
                             companion_internal: direct_companion,
                             direct_supertypes: source_direct_supertypes
-                                .get(&type_name(&internal))
+                                .get(&internal)
                                 .cloned()
                                 .unwrap_or_default()
                                 .into(),
@@ -1922,7 +1920,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    let member_this = Ty::obj_name(type_name(&internal));
+                    let member_this = Ty::obj_name(internal);
                     // Parser-hoisted local/anonymous classifiers are still body-local semantic
                     // units. Their inferred properties depend on lexical values and receiver rungs
                     // that exist only when Pass 2 reparses/checks the enclosing body, so they must
@@ -2144,7 +2142,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         backing_field: false,
                                         expression: Some(de),
                                         scope: property_scope.clone(),
-                                        kind: DeferredKind::Member(type_name(&internal)),
+                                        kind: DeferredKind::Member(internal),
                                     });
                                     Ty::Pending
                                 }
@@ -2173,7 +2171,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                             backing_field: false,
                                             expression: Some(*g),
                                             scope: property_scope.clone(),
-                                            kind: DeferredKind::Member(type_name(&internal)),
+                                            kind: DeferredKind::Member(internal),
                                         });
                                     }
                                     inferred
@@ -2199,7 +2197,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                                 backing_field: false,
                                                 expression: Some(expression),
                                                 scope: property_scope.clone(),
-                                                kind: DeferredKind::Member(type_name(&internal)),
+                                                kind: DeferredKind::Member(internal),
                                             });
                                         }
                                         inferred
@@ -2257,7 +2255,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                                 backing_field: true,
                                                 expression: Some(init),
                                                 scope: property_scope.clone(),
-                                                kind: DeferredKind::Member(type_name(&internal)),
+                                                kind: DeferredKind::Member(internal),
                                             });
                                             Ty::Pending
                                         })
@@ -2638,7 +2636,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .map(|receiver| ty_of_ref(receiver, &class_names, &mtp, diags));
                             table
                                 .source_generic_member_value_operand_slots
-                                .entry(type_name(&internal))
+                                .entry(internal)
                                 .or_default()
                                 .entry(method_header.name.clone())
                                 .or_default()
@@ -2717,7 +2715,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .with_is_override(true)
                                     .with_is_final(true),
                                 annotations: Vec::new(),
-                                equality_bound: (name == "equals").then(|| Ty::obj(&internal)),
+                                equality_bound: (name == "equals").then(|| Ty::obj_name(internal)),
                                 vararg_index: None,
                                 required: parameter_count,
                                 param_defaults: vec![false; parameter_count],
@@ -2753,9 +2751,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // destructurable constructor state and Kotlin deliberately declares neither;
                     // a user-written `copy` on one must remain the sole overload.
                     if classifier_is_data && !classifier_flags.has(ClassFlags::OBJECT) {
-                        let self_ty = Ty::obj(&internal);
+                        let self_ty = Ty::obj_name(internal);
                         let self_shape = Ty::obj_args_name(
-                            type_name(&internal),
+                            internal,
                             &classifier_header
                                 .type_parameters
                                 .iter()
@@ -2877,7 +2875,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     }
                     if classifier_is_enum {
                         table.enums.insert(
-                            type_name(&internal),
+                            internal,
                             c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                         );
                     }
@@ -3031,7 +3029,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .cloned()
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
-                        classifier: type_name(&internal),
+                        classifier: internal,
                         kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
                             crate::libraries::TypeKind::Annotation
                         } else if classifier_flags.has(ClassFlags::OBJECT) {
@@ -3404,28 +3402,26 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // `inner_of` is the semantic enclosing receiver, not necessarily the lexical name
                     // prefix. They differ for an inner class declared in an enum-entry body:
                     // `E.ENTRY.Inner` is named `E$ENTRY$Inner` but captures an `E` value.
-                    let inner_of = c
-                        .inner_of
-                        .as_deref()
-                        .map(|outer| class_internal(file, outer));
+                    let inner_of_ref = c.inner_of.as_deref().and_then(|outer| {
+                        projected_enclosing_classifier_identity(
+                            file,
+                            compact_headers,
+                            compact_classifier,
+                            outer,
+                        )
+                    });
                     // A `value class` is represented unboxed as its sole property's type.
                     let value_field = if classifier_is_value {
                         props.first().map(|(n, t, _)| (n.clone(), *t))
                     } else {
                         None
                     };
-                    let internal_ref = type_name(&internal);
-                    let explicit_companion = c.companion.and_then(|companion| {
-                        let Decl::Class(companion) = file.decl(companion) else {
-                            return None;
-                        };
-                        Some(type_name(&class_internal(file, &companion.name)))
-                    });
+                    let internal_ref = internal;
+                    let explicit_companion = c.companion.and_then(projected_parser_classifier);
                     let companion_internal_ref = explicit_companion.or_else(|| {
                         (!contributed_companion_methods.is_empty())
                             .then(|| type_name_nested_child(internal_ref, "Companion"))
                     });
-                    let inner_of_ref = inner_of.as_ref().map(|inner| type_name(inner));
                     let interfaces_ref: crate::types::TypeNameList = interfaces.into();
                     let callable_signatures = classifier_header
                         .supertypes

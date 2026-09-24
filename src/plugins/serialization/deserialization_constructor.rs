@@ -1,5 +1,6 @@
 //! Construction of the synthetic constructor used by serialization deserialization.
 
+use super::serial_elements::SerialElements;
 use super::{class_ty, value_class_underlying};
 use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, DeclarationAnnotations, IrConst, IrExpr, IrFile,
@@ -199,42 +200,44 @@ const MARKER_PARAMETER: &str = "serializationConstructorMarker";
 
 /// Add the deserialization constructor for a plain serializable data class. It is synthetic in the
 /// class file but published as an internal Kotlin secondary constructor.
+///
+/// It takes one argument per serial element and initializes every backing field in declaration
+/// order: an element from its argument (or its default when the element was absent), and a
+/// `@Transient` property — which is not an element — from its initializer, as kotlinc does.
 pub(super) fn add_deserialization_constructor(
     ir: &mut IrFile,
     class_id: ClassId,
     serializer_id: ClassId,
     named_fields: &[(String, Ty)],
+    elements: &SerialElements,
     cached_descriptor: Option<u32>,
 ) {
-    let fields = named_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+    let element_fields = elements.select(named_fields);
     // The deserialization ABI retains a value-class field's BOXED source type. The extra default
     // marker below disambiguates this constructor from the physical primary constructor; the body
     // performs the representation conversion when storing the field.
-    let field_tys = fields.to_vec();
-    // kotlinc keeps one mask slot past every complete 32-field group.
-    let mask_count = fields.len() / 32 + 1;
+    let field_tys = element_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+    // kotlinc keeps one mask slot past every complete 32-element group.
+    let mask_count = element_fields.len() / 32 + 1;
     let mut params = vec![Ty::Int; mask_count];
-    params.extend(field_tys);
+    params.extend(field_tys.iter().copied());
     params.push(class_ty(
         "kotlinx/serialization/internal/SerializationConstructorMarker",
     ));
-    let has_value_field = fields
+    let has_value_field = field_tys
         .iter()
         .any(|ty| value_class_underlying(ir, ty).is_some());
 
-    let optional = ir.classes[class_id as usize]
-        .fields
+    // An element is optional when its property declares a default: a constructor parameter's
+    // default or a body property's initializer.
+    let optional = elements
+        .fields()
         .iter()
-        .take(fields.len())
-        .map(crate::ir::IrField::has_default)
+        .map(|&field| super::property_default::checked_default(ir, class_id, field).is_some())
         .collect::<Vec<_>>();
     let required_masks = required_masks(&optional);
     debug_assert_eq!(required_masks.len(), mask_count);
     let owner = ir.classes[class_id as usize].fq_name_id();
-    let constructor_defaults = ir
-        .class_ctor_defaults_name(owner)
-        .cloned()
-        .unwrap_or_default();
 
     let mut delegate_prelude = Vec::new();
     if mask_count == 1 {
@@ -283,37 +286,88 @@ pub(super) fn add_deserialization_constructor(
     }
 
     let this = ir.add_expr(IrExpr::GetValue(0));
-    let mut body_stmts = Vec::with_capacity(fields.len());
-    for (index, optional) in optional.iter().copied().enumerate() {
-        // `this` is slot 0; masks occupy 1..=mask_count; field arguments follow them.
-        let argument = ir.add_expr(IrExpr::GetValue(index as u32 + 1 + mask_count as u32));
-        if value_class_underlying(ir, &fields[index]).is_some() {
-            // Unlike ordinary source-constructor parameters, this ABI slot carries the value-class
-            // BOX. Publish that exact expression representation so JVM lowering inserts
-            // `unbox-impl` at the erased backing-field store.
-            ir.physical_types.insert(argument, fields[index]);
-        }
-        let store_argument = ir.add_expr(IrExpr::SetField {
-            receiver: this,
-            class: class_id,
-            index: index as u32,
-            value: argument,
+    let mut body_stmts = Vec::with_capacity(named_fields.len());
+    for (field, (field_name, field_ty)) in named_fields.iter().enumerate() {
+        let element = elements.fields().iter().position(|&serial| serial == field);
+        // `this` is slot 0; masks occupy 1..=mask_count; element arguments follow them.
+        let store_argument = element.map(|element| {
+            let argument = ir.add_expr(IrExpr::GetValue(element as u32 + 1 + mask_count as u32));
+            if value_class_underlying(ir, field_ty).is_some() {
+                // Unlike ordinary source-constructor parameters, this ABI slot carries the
+                // value-class BOX. Publish that exact expression representation so JVM lowering
+                // inserts `unbox-impl` at the erased backing-field store.
+                ir.physical_types.insert(argument, *field_ty);
+            }
+            ir.add_expr(IrExpr::SetField {
+                receiver: this,
+                class: class_id,
+                index: field as u32,
+                value: argument,
+            })
         });
-        let default = optional.then(|| {
-            let default = constructor_defaults.get(index).copied().flatten().expect(
-                "a serializable field declaring a default must retain its lowered expression",
-            );
-            let (default, _) = crate::ir::clone_expression_dag(ir, default);
-            crate::ir::shift_value_indices(ir, default, 1, mask_count as u32);
-            default
+        // An element takes its default only when it is optional; a transient property always takes
+        // its initializer. A `lateinit` transient property has none and stays unset, as kotlinc
+        // leaves it: the frontend rejects every other transient property without an initializer
+        // (`serialization::transient_initializer`), so none reaches this constructor.
+        let applies_default = match element {
+            Some(element) => optional[element],
+            None => !ir.classes[class_id as usize].fields[field].is_lateinit(),
+        };
+        // The default reads an earlier property off the object, which this constructor has
+        // already stored, as kotlinc does. Its own locals move above the constructor's parameters
+        // (the marker included).
+        let default = applies_default.then(|| {
+            let mut read_argument = |ir: &mut IrFile, field: usize| {
+                let receiver = ir.add_expr(IrExpr::GetValue(0));
+                Some(ir.add_expr(IrExpr::GetField {
+                    receiver,
+                    class: class_id,
+                    index: u32::try_from(field).ok()?,
+                }))
+            };
+            super::property_default::default_in_frame(
+                ir,
+                class_id,
+                field,
+                super::property_default::DefaultFrame {
+                    first_free_local: u32::try_from(mask_count + element_fields.len() + 2)
+                        .expect("a constructor's parameters fit u32"),
+                    read_field: &mut read_argument,
+                    receiver: Some(0),
+                    property_line: None,
+                    read_line: None,
+                },
+            )
+            // A default reading a constructor parameter that is not a property has no argument
+            // here. Keep an explicit plugin-owned residual so the file is declined with the
+            // unsupported-IR diagnostic rather than built with a default that was never applied.
+            .unwrap_or_else(|| {
+                ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "deserialization-default",
+                    exprs: Vec::new(),
+                    data: vec![owner],
+                    types: Vec::new(),
+                })
+            })
         });
-        let Some(default) = default else {
-            body_stmts.push(store_argument);
+        let (Some(default), Some(store_argument), Some(element)) =
+            (default, store_argument, element)
+        else {
+            // At most one of the two exists: a required element, a transient property's
+            // initializer, or nothing for a `lateinit` transient property.
+            let store = store_argument.or_else(|| {
+                let value = default?;
+                Some(store_field_default(
+                    ir, class_id, this, field, field_name, value,
+                ))
+            });
+            body_stmts.extend(store);
             continue;
         };
-        let seen = ir.add_expr(IrExpr::GetValue((index / 32 + 1) as u32));
+        let seen = ir.add_expr(IrExpr::GetValue((element / 32 + 1) as u32));
         let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
-            1i32.wrapping_shl((index % 32) as u32),
+            1i32.wrapping_shl((element % 32) as u32),
         )));
         let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::BitAnd,
@@ -326,28 +380,7 @@ pub(super) fn add_deserialization_constructor(
             lhs: masked,
             rhs: zero,
         });
-        let store_default = ir.add_expr(IrExpr::SetField {
-            receiver: this,
-            class: class_id,
-            index: index as u32,
-            value: default,
-        });
-        // kotlinc attributes the DEFAULT VALUE to the property's own declaration line and the store
-        // that follows it back to the class's start line, so stepping through the constructor lands
-        // on the property whose default is being applied. The value is a nested expression and the
-        // store is a statement, which is why the two go through different maps.
-        let property_line = ir
-            .prop_decl_lines
-            .get(&(owner, named_fields[index].0.clone()))
-            .copied()
-            .filter(|line| *line != 0);
-        if let Some(line) = property_line {
-            ir.expr_source_lines.insert(default, line);
-            let start_line = ir.classes[class_id as usize].decl_start_line;
-            if start_line != 0 {
-                ir.expr_lines.insert(store_default, start_line);
-            }
-        }
+        let store_default = store_field_default(ir, class_id, this, field, field_name, default);
         let defaulted = ir.add_expr(IrExpr::Block {
             stmts: vec![store_default],
             value: None,
@@ -380,7 +413,7 @@ pub(super) fn add_deserialization_constructor(
             params,
             named_params: (0..mask_count)
                 .map(|word| (format!("seen{word}"), Ty::Int))
-                .chain(named_fields.iter().cloned())
+                .chain(element_fields.iter().cloned())
                 .chain(std::iter::once((
                     MARKER_PARAMETER.to_string(),
                     Ty::nullable(class_ty(
@@ -414,6 +447,40 @@ pub(super) fn add_deserialization_constructor(
         IrSecondaryConstructorRole::SerializationDeserialization,
         ordinal,
     );
+}
+
+/// Store property `field`'s default. kotlinc attributes the DEFAULT VALUE to the property's own
+/// declaration line and the store that follows it back to the class's start line, so stepping
+/// through the constructor lands on the property whose default is being applied. The value is a
+/// nested expression and the store is a statement, which is why the two go through different maps.
+fn store_field_default(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    this: u32,
+    field: usize,
+    field_name: &str,
+    default: u32,
+) -> u32 {
+    let store = ir.add_expr(IrExpr::SetField {
+        receiver: this,
+        class: class_id,
+        index: field as u32,
+        value: default,
+    });
+    let owner = ir.classes[class_id as usize].fq_name_id();
+    let property_line = ir
+        .prop_decl_lines
+        .get(&(owner, field_name.to_string()))
+        .copied()
+        .filter(|line| *line != 0);
+    if let Some(line) = property_line {
+        ir.expr_source_lines.insert(default, line);
+        let start_line = ir.classes[class_id as usize].decl_start_line;
+        if start_line != 0 {
+            ir.expr_lines.insert(store, start_line);
+        }
+    }
+    store
 }
 
 #[cfg(test)]
