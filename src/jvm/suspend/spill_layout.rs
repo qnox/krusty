@@ -2,9 +2,76 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{is_rematerialized_null, is_suspension_point, object_ty, spill_kind};
+use super::{is_suspension_point, object_ty};
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
+
+/// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
+/// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces,
+/// and the live value across the suspension is the `Unit` singleton.
+pub(super) fn spill_field_ty(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        ty
+    }
+}
+
+/// The per-kind spill field letter (kotlinc: references `L$`, ints `I$`, longs `J$`, …).
+fn spill_kind(ty: &Ty) -> char {
+    if ty.is_reference() {
+        'L'
+    } else {
+        match *ty {
+            Ty::Long => 'J',
+            Ty::Float => 'F',
+            Ty::Double => 'D',
+            Ty::Boolean => 'Z',
+            Ty::Char => 'C',
+            Ty::Byte => 'B',
+            Ty::Short => 'S',
+            _ => 'I',
+        }
+    }
+}
+
+/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
+/// every other spill in the order it was spilled; field layout instead groups by kind, in the
+/// first-spill order recorded by [`SpillLayout`].
+pub(super) const REFERENCE_SPILL_KIND: char = 'L';
+
+/// A local of the BOTTOM type (`var x = null` — `Ty::Null`) has exactly ONE possible value, so kotlinc
+/// gives it no continuation field and REMATERIALIZES it (`aconst_null; astore`) in every resume arm.
+/// Keeping it out of the spill layout is also what keeps its verification type `null` — assignable to
+/// any reference — where restoring it from an `Object`-typed field would widen the slot and break the
+/// next typed use of it (`bar(x: String?, …)` → "Bad type on operand stack").
+pub(super) fn is_rematerialized_null(ty: &Ty) -> bool {
+    matches!(ty.non_null(), Ty::Null)
+}
+
+/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
+pub(super) fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
+    list.iter()
+        .filter(|(_, ty)| is_rematerialized_null(ty))
+        .map(|&(local, _)| local)
+        .collect()
+}
+
+/// Annotate each scope-list entry with its kind and position within that kind (kotlinc's
+/// per-suspension positional slot).
+pub(super) fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
+    let mut counts = HashMap::<char, u32>::new();
+    list.iter()
+        .filter(|(_, ty)| !is_rematerialized_null(ty))
+        .map(|&(local, ty)| {
+            let kind = spill_kind(&ty);
+            let count = counts.entry(kind).or_insert(0);
+            let position = *count;
+            *count += 1;
+            (local, ty, kind, position)
+        })
+        .collect()
+}
 
 /// Suspension points in final-body evaluation order. Spill field groups follow the first store of
 /// each representation kind, so folding their layout through a `HashMap` would make class layout
