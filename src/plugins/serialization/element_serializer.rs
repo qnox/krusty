@@ -1,9 +1,11 @@
 //! Select and emit one complete serializer for a property element type.
 
+use super::constructed_standard_serializers::constructed_standard_serializer;
+use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
-    collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
-    serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
+    generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
+    type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
@@ -15,8 +17,8 @@ pub(super) enum ElementSerializerPlan {
         classifier: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
-    Collection {
-        builder: TypeName,
+    ConstructedStandard {
+        serializer: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
@@ -28,8 +30,19 @@ pub(super) enum ElementSerializerPlan {
     },
     Contextual(TypeName),
     Polymorphic(TypeName),
+    /// A `@Serializable object`: `ObjectSerializer(<serial name>, <object>.INSTANCE, [])`.
+    Object {
+        object: TypeName,
+        serial_name: crate::kt_string::KtString,
+        serial_info_unsupported: bool,
+    },
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
+    /// A class type parameter's serializer, which the generic `$serializer` holds in `field`.
+    TypeParameter {
+        serializer_class: ClassId,
+        field: u32,
+    },
     Builtin(TypeName),
 }
 
@@ -41,21 +54,30 @@ pub(super) struct UnderivableChildCacheElement;
 /// Select the one serializer plan a child-cache slot will emit.
 ///
 /// `Ok(None)` means the type does not use the cache. `Err` means it does require a cache (a
-/// collection or same-file enum), but its complete serializer is underivable. The cache builder
-/// publishes that invalid state as an unsupported residual rather than trying an uncached path.
+/// constructed standard type or same-file enum), but its complete serializer is underivable. The
+/// cache builder publishes that invalid state as an unsupported residual rather than trying an
+/// uncached path.
 pub(super) fn child_cache_element_plan(
     ir: &IrFile,
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
+    // A static cache cannot hold a serializer built from an instance's type-parameter serializers;
+    // kotlinc builds such an element in `childSerializers` itself.
+    if ty.mentions_ty_param() {
+        return Ok(None);
+    }
     let Some(classifier) = ty.kotlin_class_internal() else {
         return Ok(None);
     };
-    let cacheable = collection_serializer_builder(classifier).is_some()
+    // kotlinc caches every element whose serializer is a constructed instance rather than a
+    // singleton: a collection's, an enum's and an object's `ObjectSerializer`.
+    let cacheable = constructed_standard_serializer(classifier).is_some()
         || ir
             .classes
             .iter()
-            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty());
+            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty())
+        || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some();
     if !cacheable {
         return Ok(None);
     }
@@ -213,7 +235,29 @@ pub(super) fn element_serializer_plan(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ElementSerializerPlan> {
+    element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+}
+
+/// [`element_serializer_plan`] where the class type parameters in `scope` have serializers: an
+/// element of such a parameter's type reads the one its `$serializer` was constructed with.
+pub(super) fn element_serializer_plan_in(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ElementSerializerPlan> {
     let nn = ty.non_null();
+    // A type parameter's serializer is the one supplied for it, never its bound's: `T : Base`
+    // holds whatever subtype the caller serialized. Outside a scope that supplies one, there is
+    // none to use.
+    if let Some(identity) = nn.ty_param_name() {
+        return scope
+            .field(identity)
+            .map(|field| ElementSerializerPlan::TypeParameter {
+                serializer_class: scope.serializer_class(),
+                field,
+            });
+    }
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
     // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
     // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
@@ -241,6 +285,15 @@ pub(super) fn element_serializer_plan(
     if type_is_contextual(ctx, ir, fq_name) {
         return Some(ElementSerializerPlan::Contextual(fq_name));
     }
+    // A `@Serializable object` has no `$serializer` either: its serializer is an `ObjectSerializer`
+    // over its `INSTANCE`, which kotlinc constructs at the use site.
+    if let Some(object) = super::cached_serializer::local_serializable_object(ir, ctx, fq_name) {
+        return Some(ElementSerializerPlan::Object {
+            object: fq_name,
+            serial_name: super::annotations::class_serial_name(ir, object),
+            serial_info_unsupported: super::annotations::class_has_serial_info(ctx, ir, object),
+        });
+    }
     // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
     // the serializer at run time (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), so an
     // element reads it through the enum's own `serializer()` — `Level.Companion.serializer()`. The
@@ -256,25 +309,21 @@ pub(super) fn element_serializer_plan(
             arguments: Vec::new(),
         });
     }
-    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes
-    // through the kotlinx collection serializer class over its element serializer(s). The element
-    // serializers are derived recursively; if any cannot be, the whole collection cannot.
-    if let Some((builder, n)) = collection_serializer_builder(fq_name) {
-        if type_args.len() >= n {
-            let mut arguments = Vec::with_capacity(n);
-            for a in type_args.iter().take(n) {
-                // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
-                // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
-                // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                let element = element_serializer_plan(ir, ctx, a)?;
-                arguments.push(if is_nullable(a) {
-                    ElementSerializerPlan::Nullable(Box::new(element))
-                } else {
-                    element
-                });
-            }
-            return Some(ElementSerializerPlan::Collection { builder, arguments });
+    // A constructed standard type (`List<T>`, `Pair<A, B>`, `Map.Entry<K, V>`, …) serializes
+    // through the runtime serializer selected for its classifier. Its operands come from every
+    // checked semantic type argument; the classifier-to-serializer ABI table owns no arity fact.
+    if let Some(serializer) = constructed_standard_serializer(fq_name) {
+        if type_args.is_empty() {
+            return None;
         }
+        let arguments = type_args
+            .iter()
+            .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(ElementSerializerPlan::ConstructedStandard {
+            serializer,
+            arguments,
+        });
     }
     // A field with OPEN-polymorphic dispatch serializes via `PolymorphicSerializer(<type>::class)`
     // (descriptor serialName `kotlinx.serialization.Polymorphic<T>`), not a generated `$serializer`. Two
@@ -326,12 +375,7 @@ pub(super) fn element_serializer_plan(
         // An in-projection has no readable element type from which a serializer can be derived.
         let mut arguments = Vec::with_capacity(n_tp);
         for argument in type_args.iter().take(n_tp) {
-            let readable = match argument {
-                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
-                Ty::InProjection(_) => return None,
-                _ => *argument,
-            };
-            arguments.push(element_serializer_plan(ir, ctx, &readable)?);
+            arguments.push(type_argument_serializer_plan(ir, ctx, argument, scope)?);
         }
         if arguments.len() != n_tp {
             return None;
@@ -382,11 +426,7 @@ pub(super) fn element_serializer_plan(
                 let serializer = &ir.classes[serializer_id];
                 let readable_arguments = type_args
                     .iter()
-                    .map(|argument| match argument {
-                        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
-                        Ty::InProjection(_) => None,
-                        _ => Some(*argument),
-                    })
+                    .map(readable_type_argument)
                     .collect::<Option<Vec<_>>>()?;
                 // Each constructor parameter must be `KSerializer<P>` for a distinct DECLARED type
                 // parameter. Inspect the resolved `TyParam` identity carried by the type; the strings
@@ -411,7 +451,7 @@ pub(super) fn element_serializer_plan(
                 if parameters_match {
                     let arguments = readable_arguments
                         .iter()
-                        .map(|argument| element_serializer_plan(ir, ctx, argument))
+                        .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
                         .collect::<Option<Vec<_>>>()?;
                     return Some(ElementSerializerPlan::LocalConstructed {
                         serializer: serializer_id as ClassId,
@@ -450,33 +490,51 @@ pub(super) fn element_serializer_plan(
     None
 }
 
-fn emit_collection_serializer(
+/// Select a serializer passed as one generic serializer factory's type argument. A nullable
+/// argument needs its own `.nullable` wrapper; the nullable-element encode/decode methods apply to
+/// the containing property and cannot provide this nested argument's null semantics.
+fn type_argument_serializer_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    argument: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ElementSerializerPlan> {
+    let readable = readable_type_argument(argument)?;
+    let plan = element_serializer_plan_in(ir, ctx, &readable, scope)?;
+    Some(if is_nullable(&readable) {
+        ElementSerializerPlan::Nullable(Box::new(plan))
+    } else {
+        plan
+    })
+}
+
+/// The checked read type of one projected serializer argument. An `in` projection has no readable
+/// value type, so it cannot supply a serializer operand.
+fn readable_type_argument(argument: &Ty) -> Option<Ty> {
+    match argument {
+        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
+        Ty::InProjection(_) => None,
+        _ => Some(*argument),
+    }
+}
+
+fn emit_constructed_standard_serializer(
     ir: &mut IrFile,
-    builder: TypeName,
+    serializer: TypeName,
     arguments: Vec<ElementSerializerPlan>,
-    narrow_arguments: bool,
 ) -> ExprId {
     let arity = arguments.len();
     let arguments = arguments
         .into_iter()
         .map(|argument| {
             let argument = emit_element_serializer(ir, argument);
-            if narrow_arguments {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: argument,
-                    type_operand: class_ty(KSERIALIZER_FQ),
-                })
-            } else {
-                argument
-            }
+            narrow_to_kserializer(ir, argument)
         })
         .collect();
-    // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the same
-    // thing: `ListSerializer(x)` is an inline stdlib function over `ArrayListSerializer(x)`, and
-    // kotlinc's plugin emits the construction.
+    // Constructed directly, not obtained from the `BuiltinSerializersKt` factory that returns the
+    // same value. kotlinc's plugin emits the runtime serializer construction itself.
     ir.add_expr(IrExpr::New {
-        internal: builder,
+        internal: serializer,
         args: arguments,
         ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
         ctor_desc: Some(format!(
@@ -486,6 +544,18 @@ fn emit_collection_serializer(
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
+    })
+}
+
+/// kotlinc passes every serializer operand of a serializer factory (a constructed standard
+/// serializer, the `nullable` extension) as a `KSerializer`: the cast is a `checkcast` wherever the
+/// operand's static type is a concrete serializer class (`StringSerializer.INSTANCE`) and vanishes
+/// where it already is `KSerializer` (a type parameter's serializer, another factory's result).
+fn narrow_to_kserializer(ir: &mut IrFile, serializer: ExprId) -> ExprId {
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(KSERIALIZER_FQ),
     })
 }
 
@@ -508,11 +578,13 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 arguments,
             )
         }
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments, false)
-        }
+        ElementSerializerPlan::ConstructedStandard {
+            serializer,
+            arguments,
+        } => emit_constructed_standard_serializer(ir, serializer, arguments),
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
+            let inner = narrow_to_kserializer(ir, inner);
             wrap_nullable_serializer(ir, inner)
         }
         ElementSerializerPlan::Contextual(classifier) => {
@@ -540,6 +612,25 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 default_prefix_count: 0,
             })
         }
+        ElementSerializerPlan::Object {
+            object,
+            serial_name,
+            serial_info_unsupported,
+        } => {
+            let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
+            super::cached_serializer::object_serializer(ir, object, name, serial_info_unsupported)
+        }
+        ElementSerializerPlan::TypeParameter {
+            serializer_class,
+            field,
+        } => {
+            let this = ir.add_expr(IrExpr::GetValue(0));
+            ir.add_expr(IrExpr::GetField {
+                receiver: this,
+                class: serializer_class,
+                index: field,
+            })
+        }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,
             ty: class,
@@ -562,24 +653,15 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
 
 /// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
 ///
-/// kotlinc narrows each direct collection-constructor operand and the resulting serializer to
-/// `KSerializer`. Keeping that representation detail here lets the emitter build the intended IR
-/// once; callers never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
+/// kotlinc narrows the resulting serializer to `KSerializer`, as it does each of its operands.
+/// Keeping that representation detail here lets the emitter build the intended IR once; callers
+/// never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
 pub(super) fn emit_cached_element_serializer(
     ir: &mut IrFile,
     plan: ElementSerializerPlan,
 ) -> ExprId {
-    let serializer = match plan {
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments, true)
-        }
-        plan => emit_element_serializer(ir, plan),
-    };
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(KSERIALIZER_FQ),
-    })
+    let serializer = emit_element_serializer(ir, plan);
+    narrow_to_kserializer(ir, serializer)
 }
 
 pub(super) fn element_serializer_expr(
@@ -587,6 +669,17 @@ pub(super) fn element_serializer_expr(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ExprId> {
-    let plan = element_serializer_plan(ir, ctx, ty)?;
+    element_serializer_expr_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+}
+
+/// [`element_serializer_expr`] inside a generic `$serializer`, whose type-parameter serializers
+/// `scope` names.
+pub(super) fn element_serializer_expr_in(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ExprId> {
+    let plan = element_serializer_plan_in(ir, ctx, ty, scope)?;
     Some(emit_element_serializer(ir, plan))
 }

@@ -646,6 +646,29 @@ fn materialize_top_level_property(
             None,
         )
     });
+    let type_params = declaration_type_parameters(index, declaration);
+    if !type_params.is_empty() {
+        // The accessors are generic methods (`<P>getP(TP;)`), as a member extension's are.
+        for function in std::iter::once(getter).chain(setter) {
+            let signature = &ir.functions[function as usize];
+            ir.signatures.insert(
+                function,
+                crate::ir::IrGenericSig {
+                    type_params: type_params.clone(),
+                    params: signature.params.clone(),
+                    ret: Some(signature.ret),
+                    supers: Vec::new(),
+                },
+            );
+        }
+        ir.record_top_level_generic_property(crate::ir::IrGenericTopLevelProperty {
+            name: property.name.clone(),
+            is_var: property.flags.has(DeclarationFlags::MUTABLE),
+            getter,
+            setter,
+            type_params,
+        });
+    }
     set_accessor_parameter_identities(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, declaration, true, setter, ir)?;

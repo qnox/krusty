@@ -27,6 +27,13 @@ pub enum SkipReason {
     SuperCalls,
 }
 
+/// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
+/// compilation, and the module name their output is mangled with.
+pub(crate) struct BackendPassPlugins<'a> {
+    pub(crate) native_plugins: &'a crate::plugins::registry::NativePlugins,
+    pub(crate) module_name: &'a str,
+}
+
 /// JVM-only products accumulated by the post-lowering representation pipeline and consumed by
 /// emission.
 #[derive(Default)]
@@ -90,13 +97,19 @@ pub(crate) struct BackendPassFacts {
 pub(crate) fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     facade: &str,
-    module_name: &str,
+    plugins: BackendPassPlugins<'_>,
     classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
+    crate::plugins::run_enabled(
+        ir,
+        plugins.native_plugins,
+        plugins.module_name,
+        jvm_plugin_type_descriptor,
+        classifiers,
+    );
     run_backend_passes_after_plugins(ir, facade, classifiers, classpath, Some(stems), facts)
 }
 
@@ -156,6 +169,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     if let Some(stems) = stems {
+        crate::jvm::module_calls::resolve_foreign_template_facades(ir, stems);
         crate::jvm::module_calls::realize_default_calls(
             ir,
             stems,
@@ -164,12 +178,15 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    let null_out_dead_spills =
+        crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(
         ir,
         facade,
         &mut facts.continuation_metadata,
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
+        null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
     }
@@ -713,6 +730,7 @@ impl JvmBackend {
             mut ir,
             source,
             classifiers,
+            native_plugins,
             module_name,
             stems,
         } = file;
@@ -727,7 +745,10 @@ impl JvmBackend {
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
-            module_name,
+            BackendPassPlugins {
+                native_plugins,
+                module_name,
+            },
             &classifiers,
             &self.cp,
             stems,
@@ -892,6 +913,11 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
+        let stems = &file.stems;
+        crate::jvm::local_class_names::realize(&mut file.ir, |source| {
+            crate::jvm::module_calls::facade_for(source, stems)
+                .expect("a local classifier's declaring source has a file stem")
+        });
         if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -933,15 +959,6 @@ impl Backend for JvmBackend {
         crate::jvm::annotation_constructions::lower_annotation_constructions(&mut file.ir, &facade);
         let mut default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
-        if let Err(target) =
-            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                format!("internal error: missing JVM dependency realization for {target}"),
-            );
-            return Vec::new();
-        }
         let mut property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
         if let Err(target) =
@@ -962,6 +979,15 @@ impl Backend for JvmBackend {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: missing JVM module layout for {target:?}"),
+            );
+            return Vec::new();
+        }
+        if let Err(target) =
+            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: missing JVM dependency realization for {target}"),
             );
             return Vec::new();
         }

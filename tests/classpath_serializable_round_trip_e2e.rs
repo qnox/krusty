@@ -70,6 +70,20 @@ fn runtime() -> Vec<PathBuf> {
 /// Build the dependency with the REFERENCE compiler and its serialization plugin, then hand back the
 /// output directory. A real dependency presents class files and `@Metadata` produced by kotlinc, and
 /// the behaviour under test is how krusty READS one — so the dependency must not come from krusty.
+/// `-Xplugin=` naming the reference distribution's serialization plugin, the switch a serialization
+/// build hands every compiler.
+fn serialization_plugin_switch() -> String {
+    let plugin = common::kotlinc_lib_dir()
+        .expect("no reference compiler lib directory")
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    assert!(
+        plugin.is_file(),
+        "the reference serialization plugin is missing at {}",
+        plugin.display()
+    );
+    format!("-Xplugin={}", plugin.display())
+}
+
 fn dependency_dir(tag: &str, source: &str, cp: &[PathBuf]) -> PathBuf {
     let work = common::scratch_dir()
         .unwrap_or_else(|| panic!("{tag}: cannot allocate a scratch directory"))
@@ -78,16 +92,8 @@ fn dependency_dir(tag: &str, source: &str, cp: &[PathBuf]) -> PathBuf {
     let lib = work.join("Lib.kt");
     std::fs::write(&lib, source).expect("write dependency source");
     let out = work.join("classes");
-    let plugin = common::kotlinc_lib_dir()
-        .unwrap_or_else(|| panic!("{tag}: no reference compiler lib directory"))
-        .join("kotlinx-serialization-compiler-plugin.jar");
-    assert!(
-        plugin.is_file(),
-        "{tag}: the reference serialization plugin is missing at {}",
-        plugin.display()
-    );
     let mut args = vec![
-        format!("-Xplugin={}", plugin.display()),
+        serialization_plugin_switch(),
         "-jvm-target".to_string(),
         "25".to_string(),
         "-d".to_string(),
@@ -199,7 +205,11 @@ import kotlinx.serialization.json.Json\n\
 \n\
 fun read(json: Json, text: String): InfraConfig = json.decodeFromString<InfraConfig>(text)\n\
 fun write(json: Json, value: InfraConfig): String = json.encodeToString(value)\n";
-    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &cp);
+    let result = common::compiler_diagnostics_with_shared_args(
+        &[("Main.kt", MAIN)],
+        &cp,
+        &[serialization_plugin_switch()],
+    );
     assert_eq!(
         result.reference_code, 0,
         "kotlinc rejected the fixture: {}",

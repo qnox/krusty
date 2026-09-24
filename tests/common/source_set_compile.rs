@@ -10,6 +10,17 @@ pub fn compile_in_process_files(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_in_process_files_target(sources, cp_jars, jdk_modules, None)
+}
+
+/// [`compile_in_process_files`] emitting class files of major version `class_major` (`None` keeps
+/// the backend's default), for a byte comparison with kotlinc's `-jvm-target` output.
+pub fn compile_in_process_files_target(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    class_major: Option<u16>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     let _pg = super::ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     let stems = sources
@@ -28,12 +39,12 @@ pub fn compile_in_process_files(
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        super::with_native_plugins(platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(cp);
+    let backend = krusty::jvm::JvmBackend::new(cp).with_class_major(class_major);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()

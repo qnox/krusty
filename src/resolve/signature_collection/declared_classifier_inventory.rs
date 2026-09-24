@@ -6,6 +6,7 @@
 //! a classifier declared in another and the walk must not reopen that question per declaration.
 
 use super::*;
+use crate::resolve::local_class_scope::{local_class_enclosing_tparams, local_class_sibling_names};
 
 /// Enclosing type parameters of one file's local classes, by declaration.
 type LocalClassEnclosingTParams = HashMap<DeclId, Vec<EnclosingTypeParameterDeclaration>>;
@@ -104,13 +105,8 @@ pub(in crate::resolve) fn declared_classifier_inventory(
             // import table. Extend this compact header-only view with classifiers from the
             // declaration's lexical body before recording hierarchy edges.
             let mut names = file_class_names[source].clone();
-            for (simple, internal) in context
-                .sibling_classifiers
-                .get(&stub.id)
-                .into_iter()
-                .flatten()
-            {
-                names.insert_name(simple.clone(), *internal);
+            for (simple, internal) in context.sibling_classifiers(headers, stub.id) {
+                names.insert_name(simple, internal);
             }
             let classifier_header = streamed_classifier_header_by_declaration(headers, stub.id)
                 .expect("a production classifier must have a compact header");

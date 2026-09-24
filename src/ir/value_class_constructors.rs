@@ -15,6 +15,31 @@ pub(super) struct ValueClassConstructorFacts {
     parameter_constructions: HashSet<ExprId>,
 }
 
+impl ValueClassConstructorFacts {
+    pub(super) fn remap_classifier_identities(
+        &mut self,
+        names: &HashMap<TypeName, TypeName>,
+        remap_ty: impl Fn(Ty) -> Ty,
+    ) {
+        self.primary_owners = std::mem::take(&mut self.primary_owners)
+            .into_iter()
+            .map(|owner| names.get(&owner).copied().unwrap_or(owner))
+            .collect();
+        self.primary_declared_params = std::mem::take(&mut self.primary_declared_params)
+            .into_iter()
+            .map(|(owner, parameters)| {
+                (
+                    names.get(&owner).copied().unwrap_or(owner),
+                    parameters
+                        .into_iter()
+                        .map(|value| remap_ty(value))
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+}
+
 impl IrFile {
     pub fn mark_value_param_ctor(&mut self, internal: &str) {
         self.mark_value_param_ctor_name(crate::types::type_name(internal));

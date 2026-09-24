@@ -5,18 +5,36 @@ use crate::types::{type_name, GeneratedClassifierFact, GeneratedClassifierKind, 
 
 use super::{SERIALIZABLE_FQ, SERIALIZER_OBJECT_NAME};
 
+/// Whether `@Serializable` is among `annotations` WITHOUT a custom serializer: the plugin, not a
+/// user `KSerializer`, then serializes the class. A custom serializer is `@Serializable`'s explicit
+/// class-literal argument (`with = S::class`).
+pub(super) fn serializable_by_plugin(
+    annotations: &[crate::types::TypeName],
+    annotation_class_arguments: &[(u32, crate::types::TypeName)],
+) -> bool {
+    let Some(serializable_ordinal) = annotations
+        .iter()
+        .position(|annotation| *annotation == type_name(SERIALIZABLE_FQ))
+    else {
+        return false;
+    };
+    !annotation_class_arguments
+        .iter()
+        .any(|(ordinal, _)| *ordinal as usize == serializable_ordinal)
+}
+
 pub(super) fn generated_serializer_classifier_fact(
     ctx: &FrontendClassContext<'_>,
 ) -> Option<GeneratedClassifierFact> {
-    let serializable_ordinal = ctx
-        .annotations
-        .iter()
-        .position(|annotation| *annotation == type_name(SERIALIZABLE_FQ))?;
-    let custom_serializer = ctx
-        .annotation_class_arguments
-        .iter()
-        .any(|(ordinal, _)| *ordinal as usize == serializable_ordinal);
-    if custom_serializer || ctx.kind == crate::libraries::TypeKind::Enum || ctx.is_sealed {
+    // An enum, a sealed base and an object build their serializer at run time (`EnumSerializer`,
+    // `SealedClassSerializer`, `ObjectSerializer`); only an ordinary class gets a `$serializer`.
+    if !serializable_by_plugin(ctx.annotations, ctx.annotation_class_arguments)
+        || matches!(
+            ctx.kind,
+            crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Object
+        )
+        || ctx.is_sealed
+    {
         return None;
     }
     Some(GeneratedClassifierFact {
