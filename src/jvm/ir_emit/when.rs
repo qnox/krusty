@@ -1,7 +1,7 @@
 //! Type joins and JVM integer-switch emission for `when` expressions.
 
 use super::{
-    type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, Label, Ty, VerifType,
+    type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Label, Ty, VerifType,
 };
 
 /// A switch subject, constant cases in source order, and the optional final `else` body.
@@ -137,6 +137,77 @@ impl Emitter<'_> {
             cases,
             default,
         })
+    }
+
+    /// A safe call's guard laid out as kotlinc writes it: `ifnull` to the null path, the selector
+    /// falling through — `aload t; ifnull N; <selector>; goto E; N: <null result>; E:`. A guard
+    /// inside a chain (see `link_safe_call_chain`) jumps to the chain's null exit and leaves
+    /// its selector's value for the next guard.
+    pub(super) fn emit_safe_call_guard(
+        &mut self,
+        expression: u32,
+        (guard, null_result, selector): (u32, u32, u32),
+        emission: Emission<'_>,
+        code: &mut CodeBuilder,
+    ) {
+        let exit = self.safe_call_null_exits.remove(&expression);
+        let null_path = exit.map_or_else(|| code.new_label(), |(label, _)| label);
+        // A guard folded to a constant `null` receiver jumps unconditionally: the selector is dead
+        // and is not laid down, as `emit_when` treats a constant-false arm.
+        let always_null = self.emit_cond_branch(guard, null_path, true, code);
+        let emit_arm = |emitter: &mut Self, arm: u32, code: &mut CodeBuilder| {
+            if emission.is_stmt {
+                // A discarded value is never materialized: its implicit conversion (boxing into the
+                // safe call's nullable result) is not written, and a discarded constant is nothing
+                // at all, not a push and a `pop`.
+                let mut arm = arm;
+                while let IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } = emitter.ir.expr(arm)
+                {
+                    arm = *arg;
+                }
+                if !matches!(
+                    emitter.ir.expr(arm),
+                    IrExpr::Const(_) | IrExpr::UnitInstance
+                ) {
+                    emitter.emit(arm, code);
+                }
+                emitter.discarding_diverges(arm)
+            } else {
+                emitter.emit_value(arm, code);
+                emitter.adapt_physical_operand_for(
+                    arm,
+                    emitter.value_ty(arm),
+                    emission.result_ty,
+                    code,
+                );
+                emitter.diverges(arm)
+            }
+        };
+        let selector_diverges = always_null || emit_arm(self, selector, code);
+        if matches!(exit, Some((_, false))) {
+            return;
+        }
+        let mut end_targeted = false;
+        if !selector_diverges {
+            self.frame(emission.end, emission.result_stack.to_vec(), code);
+            code.goto(emission.end);
+            end_targeted = true;
+        }
+        self.bind(null_path, code);
+        // A chain's inner guards jumped here before its later receiver temporaries were stored.
+        if let Some(temporaries) = self.safe_call_exit_temporaries.remove(&null_path) {
+            self.unassigned_values.extend(temporaries);
+        }
+        code.set_stack(emission.entry_height);
+        let null_diverges = emit_arm(self, null_result, code);
+        if end_targeted && !null_diverges {
+            self.frame(emission.end, emission.result_stack.to_vec(), code);
+        }
+        self.bind(emission.end, code);
     }
 
     /// Emit case bodies in source order with `else` last, using kotlinc's switch-density rule.

@@ -67,7 +67,12 @@ impl ClassWriter {
     }
 
     /// Attach one exact reflection name/flag pair per physical descriptor parameter.
-    pub fn set_method_parameters(&mut self, name: &str, desc: &str, params: &[(String, u16)]) {
+    pub fn set_method_parameters(
+        &mut self,
+        name: &str,
+        desc: &str,
+        params: &[(Option<String>, u16)],
+    ) {
         if params.is_empty() {
             return;
         }
@@ -95,7 +100,14 @@ impl ClassWriter {
             .expect("MethodParameters must target an emitted method");
         let entries = params
             .iter()
-            .map(|(parameter, flags)| (self.cp.utf8(parameter), *flags))
+            .map(|(parameter, flags)| {
+                (
+                    parameter
+                        .as_deref()
+                        .map_or(0, |parameter| self.cp.utf8(parameter)),
+                    *flags,
+                )
+            })
             .collect();
         assert!(
             self.methods[method].method_parameters.is_empty(),
@@ -108,12 +120,34 @@ impl ClassWriter {
 #[cfg(test)]
 mod tests {
     use super::ClassWriter;
+    use crate::jvm::classfile::CodeBuilder;
+
+    #[test]
+    fn preserves_an_unnamed_parameter_as_name_index_zero() {
+        let mut writer = ClassWriter::new("Example", "java/lang/Object");
+        writer.reserve_method_pool("f", "(II)V", None, &[]);
+        let mut code = CodeBuilder::new(2);
+        code.ret_void();
+        writer.add_method(0x0009, "f", "(II)V", &code);
+
+        writer.set_method_parameters(
+            "f",
+            "(II)V",
+            &[(None, 0), (Some("named".to_string()), 0x1000)],
+        );
+
+        assert_eq!(writer.methods.len(), 1);
+        assert_eq!(writer.methods[0].method_parameters.len(), 2);
+        assert_eq!(writer.methods[0].method_parameters[0], (0, 0));
+        assert_ne!(writer.methods[0].method_parameters[1].0, 0);
+        assert_eq!(writer.methods[0].method_parameters[1].1, 0x1000);
+    }
 
     #[test]
     #[should_panic(expected = "MethodParameters must describe every physical descriptor parameter")]
     fn rejects_partial_physical_parameter_lists() {
         let mut writer = ClassWriter::new("Example", "java/lang/Object");
-        writer.set_method_parameters("f", "(II)V", &[("first".to_string(), 0)]);
+        writer.set_method_parameters("f", "(II)V", &[(Some("first".to_string()), 0)]);
     }
 
     #[test]
@@ -121,6 +155,6 @@ mod tests {
     fn rejects_a_reserved_but_missing_method() {
         let mut writer = ClassWriter::new("Example", "java/lang/Object");
         writer.reserve_method_pool("f", "(I)V", None, &[]);
-        writer.set_method_parameters("f", "(I)V", &[("value".to_string(), 0)]);
+        writer.set_method_parameters("f", "(I)V", &[(Some("value".to_string()), 0)]);
     }
 }

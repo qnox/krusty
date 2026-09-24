@@ -330,6 +330,7 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) mutable: bool,
     pub(in crate::resolve) setter_visibility: Visibility,
+    pub(in crate::resolve) setter_parameter_name: Option<String>,
     pub(in crate::resolve) annotations: Vec<TypeRef>,
 }
 
@@ -372,6 +373,8 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         type_parameters,
         bounds,
         mutable,
+        setter_parameter_name,
+        ..
     } = declaration.kind
     else {
         return None;
@@ -386,6 +389,9 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
             .collect::<Option<Vec<_>>>()
     };
     let annotations = materialize_range(declaration.annotations)?;
+    let setter_parameter_name = setter_parameter_name
+        .and_then(|name| headers.lookup_names.get(name))
+        .map(str::to_owned);
     let (receiver, receiver_source_spelling) = match receiver {
         Some(receiver_id) => {
             let receiver = materialize(receiver_id)?;
@@ -450,6 +456,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         bounds,
         mutable,
         setter_visibility,
+        setter_parameter_name,
         annotations,
     })
 }
@@ -531,6 +538,10 @@ pub(in crate::resolve) fn legacy_property_header(property: &PropDecl) -> Streame
                     property.visibility
                 }
             }),
+        setter_parameter_name: property
+            .setter
+            .as_ref()
+            .and_then(|setter| setter.param.clone()),
         annotations: property
             .annotations
             .iter()

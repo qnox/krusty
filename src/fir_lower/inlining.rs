@@ -40,7 +40,7 @@ enum InlineOperandRole {
 /// One physical operand position of an inline expansion: the local it would materialize, and what
 /// the callee says that position is.
 struct InlineOperand {
-    name: String,
+    source_name: Option<String>,
     local_role: IrInlineLocalRole,
     role: InlineOperandRole,
 }
@@ -60,7 +60,7 @@ enum InlineOperandPlan {
 impl InlineOperand {
     fn receiver(name: String, local_role: IrInlineLocalRole) -> Self {
         Self {
-            name,
+            source_name: Some(name),
             local_role,
             role: InlineOperandRole::Receiver,
         }
@@ -129,27 +129,10 @@ impl BodyLowering<'_> {
                 IrInlineLocalRole::DispatchReceiver,
             ));
         }
-        // An EXTENSION receiver is a leading physical parameter whose recorded name already carries
-        // the receiver spelling, so passing it through as a value would escape its `$`s. Hand it to
-        // debug naming as the callable's own name in the extension-receiver ROLE instead.
-        //
-        // WHERE it sits is a semantic coordinate, not position zero: Kotlin signs a context
-        // extension `(contexts…, receiver, values…)`, so the receiver follows the context
-        // parameters the callable declares.
-        let extension_receiver_position =
-            self.ir.extension_receiver_fns.contains(&function).then(|| {
-                self.ir
-                    .fn_context_counts
-                    .get(&function)
-                    .copied()
-                    .unwrap_or(0)
-            });
-        if let Some(names) = self.ir.param_names(function) {
-            // The extension receiver is a physical parameter the lowerer inserted, so it consumes a
-            // position without consuming a declared ordinal. Everything after it shifts back by one.
+        if let Some(identities) = self.ir.function_parameter_identities(function) {
             let mut ordinal = 0;
-            for (position, name) in names.iter().enumerate() {
-                if extension_receiver_position == Some(position) {
+            for identity in identities {
+                if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
                     parameter_names.push(InlineOperand::receiver(
                         self.ir.functions[function as usize].name.clone(),
                         IrInlineLocalRole::ExtensionReceiver,
@@ -157,7 +140,7 @@ impl BodyLowering<'_> {
                     continue;
                 }
                 parameter_names.push(InlineOperand {
-                    name: name.clone(),
+                    source_name: identity.source_name.clone(),
                     local_role: IrInlineLocalRole::Value,
                     // `noinline` is the callee's own statement that this argument is a real
                     // closure rather than a body spliced at each use.
@@ -244,9 +227,9 @@ impl BodyLowering<'_> {
                         named: true,
                     });
                     if let Some(parameter) = parameter_names.get(index) {
-                        self.ir
-                            .value_names
-                            .insert(declaration, parameter.name.clone());
+                        if let Some(source_name) = parameter.source_name.clone() {
+                            self.ir.value_names.insert(declaration, source_name);
+                        }
                         self.ir.set_debug_local_provenance(
                             declaration,
                             IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
@@ -369,6 +352,7 @@ impl BodyLowering<'_> {
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
                     }
@@ -566,7 +550,10 @@ impl BodyLowering<'_> {
         // a lambda written at source level renders its parameter bare, and cloning the body into an
         // enclosing expansion is what raises the typed inline depth the JVM boundary formats.
         let capture_count = captures.len();
-        let lambda_parameter_names = self.ir.param_names(impl_fn).map(<[String]>::to_vec);
+        let lambda_parameter_identities = self
+            .ir
+            .function_parameter_identities(impl_fn)
+            .map(<[crate::ir::IrParameterIdentity]>::to_vec);
         for (parameter, (value, ty)) in captures
             .into_iter()
             .chain(args)
@@ -593,10 +580,10 @@ impl BodyLowering<'_> {
             } else {
                 let source_name = (parameter as usize >= capture_count)
                     .then(|| {
-                        lambda_parameter_names
+                        lambda_parameter_identities
                             .as_ref()
-                            .and_then(|names| names.get(parameter as usize))
-                            .cloned()
+                            .and_then(|identities| identities.get(parameter as usize))
+                            .and_then(|identity| identity.source_name.clone())
                     })
                     .flatten();
                 match (self.ir.expr(value), &source_name) {

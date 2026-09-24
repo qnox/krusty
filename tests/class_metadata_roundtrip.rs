@@ -252,6 +252,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     };
     let methods = vec![FnMeta {
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "pair".to_string(),
         equality_bound: None,
@@ -332,6 +333,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "triple".to_string(),
         equality_bound: None,
@@ -460,6 +462,7 @@ fn package_value_param_defaults_round_trip() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
@@ -509,6 +512,7 @@ fn package_function_type_parameter_bound_round_trips() {
         semantic_type_params: vec!["T".to_string()],
         type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
@@ -560,6 +564,7 @@ fn package_extension_receiver_round_trips() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
@@ -629,6 +634,7 @@ fn package_receiver_function_type_param_round_trips() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        context_parameter_kinds: Vec::new(),
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
