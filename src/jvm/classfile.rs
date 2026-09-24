@@ -2534,9 +2534,7 @@ impl ClassWriter {
             stackmap_baseline =
                 Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
         }
-        let stackmap = if let Some(computed) = &computed {
-            let named: Vec<u16> = code.local_entries().iter().map(|entry| entry.2).collect();
-            self.intern_frame_classes(&body, computed, &named);
+        let stackmap = if computed.is_some() {
             None
         } else if code.has_frames() {
             code.build_stackmap(stackmap_baseline.as_deref(), &mut self.cp)
@@ -2609,6 +2607,9 @@ impl ClassWriter {
             annotation_default: false,
             method_parameters: Vec::new(),
         });
+        if let Some(computed) = &computed {
+            self.intern_frame_classes(&body, computed);
+        }
     }
 
     /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
