@@ -2159,6 +2159,26 @@ fn tail_forward_call(
             } => match stmts.last() {
                 Some(&last) => match ir.exprs[last as usize] {
                     IrExpr::Return(Some(e)) => e,
+                    // A `Unit` fn written `= unitCall(…)` lowers to the call statement followed by
+                    // a bare `return`: the call is still the tail, as kotlinc forwards it.
+                    IrExpr::Return(None) if unit_ret && stmts.len() >= 2 => {
+                        let call = stmts[stmts.len() - 2];
+                        let peeled = match ir.exprs[call as usize] {
+                            IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg,
+                                type_operand: Ty::Unit,
+                            } => arg,
+                            _ => call,
+                        };
+                        if is_suspension_point(ir, peeled, set)
+                            && suspension_ret_unit(ir, peeled, set, orig_rets)
+                        {
+                            peeled
+                        } else {
+                            return None;
+                        }
+                    }
                     // A `Unit` fn whose LAST statement is a BARE `Unit` suspend call
                     // (`suspend fun delete(id) { repository.delete(id) }`) — kotlinc forwards it identically
                     // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
@@ -2257,6 +2277,28 @@ fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
             value: None,
         } if stmts.last() == Some(&call) => {
             stmts.pop();
+            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
+        }
+        // `= unitCall(…)`: the call statement (possibly coerced to `Unit`) and a bare `return`.
+        IrExpr::Block {
+            mut stmts,
+            value: None,
+        } if stmts.len() >= 2
+            && matches!(
+                ir.exprs[*stmts.last().expect("guard proved statements") as usize],
+                IrExpr::Return(None)
+            )
+            && {
+                let statement = stmts[stmts.len() - 2];
+                statement == call
+                    || matches!(
+                        ir.exprs[statement as usize],
+                        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, .. } if arg == call
+                    )
+            } =>
+        {
+            stmts.truncate(stmts.len() - 2);
             stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
         }

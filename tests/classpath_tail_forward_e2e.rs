@@ -5,7 +5,8 @@
 //! machine: kotlinc passes `$completion` to the callee and returns its `Object` result
 //! (`invokeinterface …; areturn`). krusty did this for a callee compiled in the same module, but a
 //! dependency call's erased result carries a coercion to its declared type, which hid the tail
-//! call. Each such member got a continuation class and a one-state machine.
+//! call, as did the bare `return` a `Unit` member written `= unitCall(…)` ends with. Each such member
+//! got a continuation class and a one-state machine.
 use super::common;
 use super::serialization_companion_byte_parity_e2e::{
     compare_with_kotlinc_plugin, method_instructions,
@@ -16,12 +17,14 @@ const LIBRARY: &str = "package dependency\n\
     interface Engine {\n\
     \x20   suspend fun diff(config: String): Answer\n\
     \x20   suspend fun count(): Int\n\
+    \x20   suspend fun forget(id: String)\n\
     }\n";
 
 const SOURCE: &str = "import dependency.*\n\
     class Forwarding(private val delegate: Engine) : Engine {\n\
     \x20   override suspend fun diff(config: String): Answer = delegate.diff(config)\n\
     \x20   override suspend fun count(): Int = delegate.count()\n\
+    \x20   override suspend fun forget(id: String) = delegate.forget(id)\n\
     }\n";
 
 #[test]
@@ -42,7 +45,11 @@ fn a_tail_call_to_a_dependency_forwards_its_continuation_like_kotlinc() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    for member in ["java.lang.Object diff(", "java.lang.Object count("] {
+    for member in [
+        "java.lang.Object diff(",
+        "java.lang.Object count(",
+        "java.lang.Object forget(",
+    ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
         assert_eq!(
@@ -64,6 +71,7 @@ fn a_forwarded_suspension_still_resumes() {
          \x20   override suspend fun diff(config: String): Answer =\n\
          \x20       suspendCoroutineUninterceptedOrReturn {{ parked = it; COROUTINE_SUSPENDED }}\n\
          \x20   override suspend fun count(): Int = 7\n\
+         \x20   override suspend fun forget(id: String) {{}}\n\
          }}\n\
          fun box(): String {{\n\
          \x20   var result = \"none\"\n\
