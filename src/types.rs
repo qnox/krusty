@@ -236,6 +236,21 @@ pub(crate) fn declaration_type_parameter(
     semantic
 }
 
+/// The call-owned inference variable standing for declaration formal `declared` at one call site.
+/// It keeps the declaration's source spelling for diagnostics and never equals a declaration-owned
+/// identity, so the enclosing declaration's own `declared` stays a fixed type while the call's
+/// variable is solved.
+pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
+    let fresh = intern(&format!("\0call:{declared}"));
+    let mut sources = TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let source = sources.get(declared).copied().unwrap_or(declared);
+    sources.insert(fresh, source);
+    fresh
+}
+
 impl TypeName {
     pub const ROOT: TypeName = TypeName(NameId(0));
 

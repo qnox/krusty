@@ -42,6 +42,7 @@ pub(crate) use checked_constant_publication::publish_checked_compile_time_consta
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
+mod call_result_templates;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
@@ -19083,6 +19084,7 @@ impl<'a> Checker<'a> {
         self.resolved_calls.remove(&call);
         self.unbound_value_lambda_call_formals.remove(&call);
         self.resolved_constructors.remove(&call);
+        self.record_call_site_lexical_formals(scope, call);
         if expected.is_some() {
             self.postponed_diagnostics.discard(call);
         }
@@ -37688,6 +37690,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         checked_local_methods: HashMap::new(),
         body_local_default_providers: HashMap::new(),
         checked_local_constructors: HashMap::new(),
+        call_site_lexical_formals: HashMap::new(),
         local_method_dependencies: HashMap::new(),
         checking_local_method_dependencies: std::collections::HashSet::new(),
         checked_local_method_dependencies: std::collections::HashSet::new(),
@@ -40627,6 +40630,9 @@ struct Checker<'a> {
     /// constructor selector and are discarded with this checker after their stable declarations
     /// have been copied into checked FIR/the transient module index.
     checked_local_constructors: HashMap<TypeName, Vec<crate::libraries::LibraryMember>>,
+    /// Type-parameter identities lexically in scope at each checked call; see
+    /// `call_result_templates`.
+    call_site_lexical_formals: HashMap<ExprId, Vec<String>>,
     /// Body-local methods whose result may be demanded before source order reaches their body.
     /// The entries are stable-identity keyed and live only for this bounded Pass-2 checker.
     local_method_dependencies:
@@ -43121,6 +43127,14 @@ impl<'a> Checker<'a> {
         let actual = self.expr_types[call.0 as usize];
         let resolved = self.resolved_call_type_args.get(&call);
         let lexical_formals = scope.lexical_tparam_identities();
+        // A formal lexically in scope here resolved to the enclosing declaration's own type is a
+        // complete solution of this call's fresh variable, not an uninferred occurrence.
+        let open_formals = signature
+            .formals
+            .iter()
+            .filter(|formal| !lexical_formals.contains(formal))
+            .cloned()
+            .collect::<Vec<_>>();
         let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
         let call_arguments = match self.file.expr(call) {
             Expr::Call { args, .. } => args.as_slice(),
@@ -43159,7 +43173,7 @@ impl<'a> Checker<'a> {
                         .and_then(|arguments| arguments.get(*index))
                         .copied()
                         .flatten()
-                        .is_none_or(|argument| ty_mentions_param(argument, &signature.formals))
+                        .is_none_or(|argument| ty_mentions_param(argument, &open_formals))
                     // A star-projected receiver can leave the selected method result bounded by a
                     // non-lexical classifier parameter. That stable symbolic bound is the captured
                     // result Kotlin chooses; it is neither an uninferred method formal nor a
@@ -44317,6 +44331,11 @@ impl<'a> Checker<'a> {
             let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
             let mut identity_bindings = crate::symbol_resolver::GSigBinds::new();
             let source = self.fed_source();
+            // Inside the callee's own declaration (a recursive `f(x)` in `fun <T> f`), its formals
+            // are fixed lexical types; this call solves fresh variables for them.
+            let lexical_formals = scope.lexical_tparam_identities();
+            let at_call_site =
+                |formal: &str| lexical_formals.iter().any(|identity| identity == formal);
             let argument_kinds = self.checked_call_arg_kinds(scope, args);
             let receiver_expression = match self.file.expr(call) {
                 Expr::Call { callee, .. } => match self.file.expr(*callee) {
@@ -44458,26 +44477,27 @@ impl<'a> Checker<'a> {
             // the lambda's independent `A = Long` constraint with a premature `A = Int` to `Any`.
             // With no other evidence the literal remains in the ordinary solver and still infers
             // `Int` for calls such as `identity(0)`.
-            let preliminary =
-                crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
-                    &source,
-                    &signature,
-                    inference_receiver,
-                    inference_actuals.iter().filter_map(
-                        |&(argument, parameter, actual, whole_array)| {
-                            (!matches!(
-                                argument_kinds[argument],
-                                CallArgKind::IntegerLiteral { .. }
-                            ))
-                            .then_some((
-                                parameter,
-                                actual,
-                                whole_array,
-                            ))
-                        },
-                    ),
-                    candidate.call_sig.vararg_index,
-                );
+            let preliminary = crate::symbol_resolver::CallSiteVariables::solve(
+                &signature,
+                at_call_site,
+                |signature| {
+                    crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                        &source,
+                        signature,
+                        inference_receiver,
+                        inference_actuals.iter().filter_map(
+                            |&(argument, parameter, actual, whole_array)| {
+                                (!matches!(
+                                    argument_kinds[argument],
+                                    CallArgKind::IntegerLiteral { .. }
+                                ))
+                                .then_some((parameter, actual, whole_array))
+                            },
+                        ),
+                        candidate.call_sig.vararg_index,
+                    )
+                },
+            );
             let adapted_inference_actuals = inference_actuals
                 .iter()
                 .filter_map(|&(argument, parameter, actual, whole_array)| {
@@ -44492,13 +44512,18 @@ impl<'a> Checker<'a> {
                     if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
                         return Some(actual);
                     }
-                    let literal =
-                        crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
-                            &source,
-                            &signature,
-                            [actual],
-                            candidate.call_sig.vararg_index,
-                        );
+                    let literal = crate::symbol_resolver::CallSiteVariables::solve(
+                        &signature,
+                        at_call_site,
+                        |signature| {
+                            crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                                &source,
+                                signature,
+                                [actual],
+                                candidate.call_sig.vararg_index,
+                            )
+                        },
+                    );
                     let adapts_to_existing = !literal.bindings.is_empty()
                         && literal.bindings.keys().all(|formal| {
                             preliminary.bindings.get(formal).is_some_and(|&target| {
@@ -44533,14 +44558,19 @@ impl<'a> Checker<'a> {
                     Some(actual)
                 })
                 .collect::<Vec<_>>();
-            let mut inferred =
-                crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
-                    &source,
-                    &signature,
-                    inference_receiver,
-                    adapted_inference_actuals.iter().copied(),
-                    candidate.call_sig.vararg_index,
-                );
+            let mut inferred = crate::symbol_resolver::CallSiteVariables::solve(
+                &signature,
+                at_call_site,
+                |signature| {
+                    crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                        &source,
+                        signature,
+                        inference_receiver,
+                        adapted_inference_actuals.iter().copied(),
+                        candidate.call_sig.vararg_index,
+                    )
+                },
+            );
             // Function subtyping makes a stored function value's parameter types upper
             // constraints. A lambda literal's *written* parameter annotations are different: they
             // are declaration-site equalities that participate in builder/call inference. Collect
@@ -44635,14 +44665,19 @@ impl<'a> Checker<'a> {
             if let Some((formal, upper, coerced)) = unit_coerced_receiver {
                 bindings.insert(formal.clone(), upper);
                 receiver_bindings.insert(formal, upper);
-                inferred =
-                    crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
-                        &source,
-                        &signature,
-                        Some(coerced),
-                        adapted_inference_actuals.iter().copied(),
-                        candidate.call_sig.vararg_index,
-                    );
+                inferred = crate::symbol_resolver::CallSiteVariables::solve(
+                    &signature,
+                    at_call_site,
+                    |signature| {
+                        crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                            &source,
+                            signature,
+                            Some(coerced),
+                            adapted_inference_actuals.iter().copied(),
+                            candidate.call_sig.vararg_index,
+                        )
+                    },
+                );
             }
             let inferred_lower_inputs = inferred.lower_inputs.clone();
             let upper_argument_bindings = if candidate.projected_return_hazard {
@@ -44808,13 +44843,18 @@ impl<'a> Checker<'a> {
                     generic_sig.ret,
                     &nested_bindings,
                 );
-                let nested_constraints =
-                    crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
-                        &source,
-                        &signature,
-                        [(parameter, nested_actual, false)],
-                        candidate.call_sig.vararg_index,
-                    );
+                let nested_constraints = crate::symbol_resolver::CallSiteVariables::solve(
+                    &signature,
+                    at_call_site,
+                    |signature| {
+                        crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                            &source,
+                            signature,
+                            [(parameter, nested_actual, false)],
+                            candidate.call_sig.vararg_index,
+                        )
+                    },
+                );
                 let mut inferred_nested = nested_constraints.bindings;
                 // A formal reached only through an input projection has no lower/equality
                 // evidence. The nested producer contributes Kotlin's most-specific bottom
@@ -65246,241 +65286,6 @@ impl<'a> Checker<'a> {
         ty
     }
 
-    /// The semantic generic signature retained by one checker-selected call. Declaration origin and
-    /// call spelling do not affect expected-result inference.
-    fn selected_generic_call_signature(&self, expression: ExprId) -> Option<&GenericSig> {
-        match self.resolved_calls.get(&expression)? {
-            ResolvedCall::Member(member) => member.member.generic_sig.as_ref(),
-            ResolvedCall::TopLevel(call) => call.callable.generic_sig.as_deref(),
-            ResolvedCall::Companion(member) => member.generic_sig.as_ref(),
-            ResolvedCall::Extension(call) => call.callable.generic_sig.as_deref(),
-            ResolvedCall::LocalFunction(call) => call.sig.generic_sig.as_ref(),
-            ResolvedCall::MemberExtension { .. } => None,
-        }
-    }
-
-    /// Generic result shape that an enclosing selected parameter may constrain. A call whose own
-    /// arguments produced a concrete probe is still contextual (`Item(0)` can become `Item<Any>`
-    /// when consumed by an invariant outer result), so this is intentionally broader than
-    /// [`Self::unbound_call_result_signature`]. Constructor targets carry their stable selected
-    /// identity separately from ordinary calls; rebuild only the classifier-owned result template
-    /// from the normalized class model, without looking at the callee spelling.
-    fn expected_type_callable_signature(&self, expression: ExprId) -> Option<GenericSig> {
-        if self
-            .file
-            .call_type_args
-            .get(&expression.0)
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return None;
-        }
-        if let Some(signature) = self.contextual_constructor_signatures.get(&expression) {
-            return Some(signature.clone());
-        }
-        if let Some(signature) = self.selected_generic_call_signature(expression) {
-            return ty_mentions_param(signature.ret, &signature.formals).then(|| signature.clone());
-        }
-        let owner = self.resolved_constructors.get(&expression)?.owner();
-        let classifier = self.resolved_type_name(owner)?;
-        if classifier.type_params().is_empty() {
-            return None;
-        }
-        let arguments = classifier
-            .type_params()
-            .iter()
-            .enumerate()
-            .map(|(index, formal)| {
-                let bound = classifier
-                    .type_param_bounds()
-                    .get(index)
-                    .and_then(|bounds| bounds.first())
-                    .copied()
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Ty::ty_param(formal, bound)
-            })
-            .collect::<Vec<_>>();
-        Some(GenericSig {
-            formals: classifier.type_params().clone(),
-            formal_bounds: classifier.type_param_bounds().clone(),
-            receiver: None,
-            params: Vec::new(),
-            ret: Ty::obj_args_name(owner, &arguments),
-            return_policy: GenericReturnPolicy::Exact,
-        })
-    }
-
-    /// A selected call whose generic result still contains declaration-owned variables. Expected-type
-    /// inference consumes this retained declaration; it never repeats lookup from the callee syntax.
-    fn unbound_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
-        if self
-            .file
-            .call_type_args
-            .get(&expression.0)
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return None;
-        }
-        let selected = self.selected_generic_call_signature(expression);
-        crate::trace_compiler!(
-            "expected_call",
-            "unbound call expression={expression:?} actual={:?} signature={:?} bounds={:?} resolved={:?}",
-            self.expr_types[expression.0 as usize],
-            selected.map(|signature| (&signature.formals, signature.ret)),
-            selected.map(|signature| &signature.formal_bounds),
-            self.resolved_call_type_args.get(&expression),
-        );
-        let signature =
-            selected.filter(|signature| ty_mentions_param(signature.ret, &signature.formals))?;
-        let actual = self.expr_types[expression.0 as usize];
-        if self
-            .resolved_call_type_args
-            .get(&expression)
-            .is_some_and(|resolved| {
-                signature
-                    .formals
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, formal)| {
-                        ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-                    })
-                    .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
-            })
-            // Rechecking may have replaced a formerly contextual call with an expectation-free
-            // probe. A retained type-argument record is not proof of completion when the current
-            // semantic result again contains this callee's declaration variables; the enclosing
-            // constraint round must be allowed to solve that live result.
-            && !ty_mentions_param(actual, &signature.formals)
-        {
-            return None;
-        }
-        let provisional = crate::symbol_resolver::ty_subst(
-            signature.ret,
-            &crate::symbol_resolver::GSigBinds::new(),
-        );
-        (matches!(actual, Ty::Error) || ty_mentions_param(actual, &signature.formals))
-            .then_some(signature)
-            .or_else(|| (actual == provisional).then_some(signature))
-    }
-
-    /// A selected generic producer whose provisional result is only its declaration fallback.
-    ///
-    /// Ordinary calls retain their selected [`GenericSig`] directly. Constructors retain a stable
-    /// constructor target instead, so rebuild their classifier-owned result template through
-    /// [`Self::expected_type_callable_signature`]. When the checked probe is exactly that template's
-    /// fallback substitution (`TypeToken<Any?>` for `TypeToken<T>`), it is not real argument
-    /// evidence: an enclosing selected parameter may still complete `T`. Keeping that probe out of
-    /// the outer call's first constraint round lets independent sibling arguments bind the outer
-    /// formal before the constructor is rechecked against its exact parameter type.
-    fn unbound_contextual_result_signature(&self, expression: ExprId) -> Option<GenericSig> {
-        if let Some(signature) = self.unbound_call_result_signature(expression) {
-            return Some(signature.clone());
-        }
-        if !self.resolved_constructors.contains_key(&expression) {
-            return None;
-        }
-        let signature = self.expected_type_callable_signature(expression)?;
-        let actual = self.expr_types[expression.0 as usize];
-        let shape_mentions_result_formal = |shape: Ty| {
-            signature
-                .formals
-                .iter()
-                .any(|formal| ty_mentions_param(shape, std::slice::from_ref(formal)))
-        };
-        let has_input_evidence = match self.resolved_constructors.get(&expression)? {
-            ResolvedConstructor::Source {
-                params,
-                argument_slots,
-                ..
-            } => argument_slots.iter().any(|&slot| {
-                params
-                    .get(slot)
-                    .copied()
-                    .is_some_and(shape_mentions_result_formal)
-            }),
-            ResolvedConstructor::Plain { member, args, .. } => {
-                member.generic_sig.as_ref().is_some_and(|generic| {
-                    generic
-                        .params
-                        .iter()
-                        .take(args.len())
-                        .copied()
-                        .any(shape_mentions_result_formal)
-                })
-            }
-            ResolvedConstructor::PlainSlots { member, slots, .. } => {
-                member.generic_sig.as_ref().is_some_and(|generic| {
-                    slots.iter().enumerate().any(|(parameter, argument)| {
-                        argument.is_some()
-                            && generic
-                                .params
-                                .get(parameter)
-                                .copied()
-                                .is_some_and(shape_mentions_result_formal)
-                    })
-                })
-            }
-            ResolvedConstructor::Synthetic { ctor, args, .. } => ctor
-                .declaration
-                .generic_sig
-                .as_ref()
-                .is_some_and(|generic| {
-                    generic
-                        .params
-                        .iter()
-                        .take(args.len())
-                        .copied()
-                        .any(shape_mentions_result_formal)
-                }),
-        };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
-            match (symbolic, actual) {
-                (Ty::TyParam(formal, bound), actual)
-                    if formals.iter().any(|declared| declared == formal) =>
-                {
-                    // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
-                    // bounded by `Any?`; the Java target completes the same position from its own
-                    // flexible bound `Any!`. Both are the declaration fallback.
-                    actual == *bound
-                        || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
-                }
-                (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
-                    symbolic_name == actual_name
-                        && (actual_args.is_empty()
-                            && symbolic_args.iter().any(|&argument| {
-                                formals.iter().any(|formal| {
-                                    ty_mentions_param(argument, std::slice::from_ref(formal))
-                                })
-                            })
-                            || symbolic_args.len() == actual_args.len()
-                                && symbolic_args.iter().zip(actual_args.iter()).all(
-                                    |(&symbolic, &actual)| {
-                                        is_declaration_fallback(symbolic, actual, formals)
-                                    },
-                                ))
-                }
-                (Ty::Nullable(symbolic), Ty::Nullable(actual))
-                | (Ty::PlatformNullable(symbolic), Ty::PlatformNullable(actual))
-                | (Ty::InProjection(symbolic), Ty::InProjection(actual))
-                | (Ty::OutProjection(symbolic), Ty::OutProjection(actual))
-                | (Ty::StarProjection(symbolic), Ty::StarProjection(actual)) => {
-                    is_declaration_fallback(*symbolic, *actual, formals)
-                }
-                _ => symbolic == actual,
-            }
-        }
-        let declaration_fallback = !has_input_evidence
-            && is_declaration_fallback(signature.ret, actual, &signature.formals);
-        crate::trace_compiler!(
-            "expected_call",
-            "unbound constructor expression={expression:?} actual={actual:?} input_evidence={has_input_evidence} declaration_fallback={declaration_fallback} signature={:?}",
-            (&signature.formals, signature.ret),
-        );
-        (actual == Ty::Error
-            || ty_mentions_param(actual, &signature.formals)
-            || declaration_fallback)
-            .then_some(signature)
-    }
-
     fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
         let expression = conditional_branch::branch_value_expression(self.file, expression);
         if let Some(signature) = self.unbound_call_result_signature(expression) {
@@ -76256,6 +76061,9 @@ impl<'a> Checker<'a> {
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
+                // Inside the constructed class (or an inner class that sees its formals), the
+                // class's own `T` is a fixed type, while this call infers a fresh `T`.
+                let lexical = scope.lexical_tparam_identities();
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
@@ -76280,13 +76088,18 @@ impl<'a> Checker<'a> {
                             .map(move |input| (source_argument, parameter, input, whole_array))
                     })
                     .collect::<Vec<_>>();
-                let constraints =
-                    crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
-                        &source,
-                        signature,
-                        inference_actuals,
-                        call_sig.vararg_index,
-                    );
+                let constraints = crate::symbol_resolver::CallSiteVariables::solve(
+                    signature,
+                    |formal| lexical.iter().any(|identity| identity == formal),
+                    |signature| {
+                        crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
+                            &source,
+                            signature,
+                            inference_actuals,
+                            call_sig.vararg_index,
+                        )
+                    },
+                );
                 if let Some(violation) = constraints.bound_violation {
                     let source_argument = violation.argument;
                     if args.get(source_argument).is_none() {
