@@ -332,10 +332,7 @@ impl SerializeBody<'_> {
             // object being written, which is what kotlinc's `write$Self` does.
             let constant_default = field_defaults.get(i).cloned().flatten();
             let computed_default = constant_default.is_none()
-                && ir.classes[foo_id as usize]
-                    .fields
-                    .get(i)
-                    .is_some_and(crate::ir::IrField::has_default);
+                && super::property_default::checked_default(ir, foo_id, i).is_some();
             if (constant_default.is_some() || computed_default) && stmts.len() == n_before + 1 {
                 let enc_stmt = stmts.pop().unwrap();
                 let cd = if delegate {
@@ -381,21 +378,26 @@ impl SerializeBody<'_> {
                         def
                     }
                     None => {
-                        let mut read_parameter = |ir: &mut IrFile, parameter: usize| {
-                            let (name, ty) = fields.get(parameter)?;
-                            read_property(ir, parameter, name, ty)
+                        let mut read_field = |ir: &mut IrFile, field: usize| {
+                            let (name, ty) = fields.get(field)?;
+                            read_property(ir, field, name, ty)
                         };
-                        let Some(def) = super::property_default::default_in_write_frame(
+                        let Some(def) = super::property_default::default_in_frame(
                             ir,
-                            serialized_name,
+                            foo_id,
                             i,
-                            super::property_default::WriteFrame {
+                            super::property_default::DefaultFrame {
                                 first_free_local: if delegate {
                                     cache_local + u32::from(plan.is_some())
                                 } else {
                                     encoder_slot + 1
                                 },
-                                read_property: &mut read_parameter,
+                                read_field: &mut read_field,
+                                // `write$Self` is a static member of the class, so the object it
+                                // writes stands in for the receiver the default was checked
+                                // against. The inlined shape lives on the `$serializer`, which
+                                // cannot reach the object's private state.
+                                receiver: delegate.then_some(value_slot),
                                 property_line: ir
                                     .prop_decl_lines
                                     .get(&(serialized_name, pname.clone()))

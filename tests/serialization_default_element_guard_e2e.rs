@@ -167,3 +167,121 @@ fn a_computed_default_is_omitted_from_json_like_kotlinc() {
          Computed(x=1, tags=[a], next=2, label=n1)"
     );
 }
+
+/// A property declared in the class body with an initializer is a default too. kotlinc marks its
+/// element optional in the descriptor, leaves it out of the missing-field mask, applies the
+/// initializer in the deserialization constructor when the element is absent (reading an earlier
+/// property off the object it is building), and compares against it in `write$Self`.
+#[test]
+fn a_body_property_initializer_is_a_default_the_way_kotlinc_treats_it() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               fun seed() = 5\n\
+               @Serializable\n\
+               class Counted(val x: Int, val step: Int = x + 1) {\n\
+               \x20   var hits: Int = x * 2\n\
+               \x20   val limit: Long = seed() + 10L\n\
+               \x20   val tags = listOf(\"a\")\n\
+               }\n";
+    for class in ["Counted", "Counted$$serializer"] {
+        let Some(built) =
+            compare_with_kotlinc_plugin("BodyInitializerDefault", src, class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        let methods: &[&str] = if class == "Counted" {
+            &["SerializationConstructorMarker"]
+        } else {
+            // The descriptor: each body property's element is optional.
+            &["Counted$$serializer()"]
+        };
+        for &method in methods {
+            let want = method_body(&built.reference, method);
+            assert!(want.len() > 1, "{class}: the reference declares {method}");
+            assert_eq!(
+                method_body(&built.krusty, method),
+                want,
+                "{class}: {method}"
+            );
+        }
+        if class != "Counted" {
+            continue;
+        }
+        // `write$Self`, up to the `tags` guard: the primitive comparisons are exact. `tags` is
+        // compared with `Intrinsics.areEqual`, whose negation is emitted differently (a separate
+        // gap), so past its guard only the re-evaluated initializer is checked.
+        let before_tags = |rows: Vec<String>| -> Vec<String> {
+            let tags = rows
+                .iter()
+                .position(|row| row.contains("Intrinsics.areEqual"))
+                .expect("the tags element is compared");
+            let guard = rows[..tags]
+                .iter()
+                .rposition(|row| row.contains("shouldEncodeElementDefault"))
+                .expect("the tags element is guarded");
+            rows[..guard].to_vec()
+        };
+        let want = method_body(&built.reference, "write$Self$main");
+        let got = method_body(&built.krusty, "write$Self$main");
+        assert_eq!(
+            want.iter()
+                .filter(|row| row.contains("shouldEncodeElementDefault"))
+                .count(),
+            4,
+            "one guard per defaulted element: {want:?}"
+        );
+        assert_eq!(
+            before_tags(got.clone()),
+            before_tags(want),
+            "Counted.write$Self$main"
+        );
+        assert!(
+            got.iter().any(|row| row.contains("CollectionsKt.listOf")),
+            "write$Self compares tags with its re-evaluated initializer: {got:?}"
+        );
+    }
+}
+
+/// The observable half: an untouched body property is left out of the document, a changed one is
+/// written, and decoding a document without it runs its initializer, reading earlier properties
+/// and the receiver as the primary constructor does.
+#[test]
+fn a_body_property_initializer_is_omitted_and_restored_like_kotlinc() {
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.json.Json\n\
+               \n\
+               @Serializable\n\
+               class Profile(val id: Int, val name: String = \"n$id\") {\n\
+               \x20   val tags = listOf(\"a\", name)\n\
+               \x20   var score: Int = id * 2\n\
+               \x20   val label: String = run { val t = tags.size; \"$name:$t\" }\n\
+               \x20   val alias = tags.firstOrNull() ?: \"none\"\n\
+               \x20   val size = run { val n = name.length; if (n == 0) -1 else n + score }\n\
+               \x20   override fun toString() = \"$id $name $tags $score $label $alias $size\"\n\
+               }\n\
+               \n\
+               fun box(): String {\n\
+               \x20   val profile = Profile(3)\n\
+               \x20   val untouched = Json.encodeToString(Profile.serializer(), profile)\n\
+               \x20   profile.score = 9\n\
+               \x20   val changed = Json.encodeToString(Profile.serializer(), profile)\n\
+               \x20   val all = Json { encodeDefaults = true }.encodeToString(Profile.serializer(), profile)\n\
+               \x20   val restored = Json.decodeFromString(Profile.serializer(), \"{\\\"id\\\":4}\")\n\
+               \x20   val partial = Json.decodeFromString(\n\
+               \x20       Profile.serializer(), \"{\\\"id\\\":4,\\\"name\\\":\\\"q\\\",\\\"score\\\":1}\",\n\
+               \x20   )\n\
+               \x20   return listOf(untouched, changed, all, restored, partial).joinToString(\" | \")\n\
+               }\n";
+    let outcome = super::serialization_test_support::both_compilers_box(src, "body_initializer");
+    assert_eq!(
+        outcome,
+        "{\"id\":3} | {\"id\":3,\"score\":9,\"size\":8} | \
+         {\"id\":3,\"name\":\"n3\",\"tags\":[\"a\",\"n3\"],\"score\":9,\"label\":\"n3:2\",\
+         \"alias\":\"a\",\"size\":8} | 4 n4 [a, n4] 8 n4:2 a 10 | 4 q [a, q] 1 q:2 a 2"
+    );
+}

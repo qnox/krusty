@@ -1627,13 +1627,12 @@ impl IrPlugin for SerializationPlugin {
                 .iter()
                 .map(|f| (f.name.clone(), f.ty.clone()))
                 .collect();
-            // Per-property signature default. Optionality is independent of whether its checked
+            // A property is optional when it declares a default: a constructor parameter's default
+            // or a body property's initializer. Optionality is independent of whether that
             // expression is a constant; the constant payload is used separately during body
             // generation for equality/fill operations that can represent it directly.
-            let foo_optional: Vec<bool> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(crate::ir::IrField::has_default)
+            let foo_optional: Vec<bool> = (0..foo_fields.len())
+                .map(|index| property_default::checked_default(ir, class_id, index).is_some())
                 .collect();
             // A generic `$serializer` stores one `KSerializer` per type parameter; a non-generic
             // serializer keeps the singleton-object form.
