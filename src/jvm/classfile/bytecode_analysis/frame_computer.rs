@@ -126,11 +126,7 @@ impl FrameComputation<'_> {
             };
             jump_target[to] = true;
             let caught = VerificationType::Reference(
-                handler
-                    .catch_type
-                    .as_deref()
-                    .unwrap_or(THROWABLE)
-                    .to_string(),
+                handler.catch_type.as_deref().unwrap_or(THROWABLE).into(),
             );
             for (b, block) in blocks.iter().enumerate() {
                 if block.start >= handler.range.start && block.start < handler.range.end {
@@ -226,7 +222,7 @@ impl FrameComputation<'_> {
                     frames.push(ComputedFrame {
                         index: block.start,
                         locals: Vec::new(),
-                        stack: vec![VerificationType::Reference(THROWABLE.to_string())],
+                        stack: vec![VerificationType::Reference(THROWABLE.into())],
                     });
                     unreachable.push(block.start..block.end);
                     max_stack = max_stack.max(1);
@@ -351,7 +347,7 @@ fn entry_locals(
         locals.push(if name == "<init>" {
             VerificationType::UninitializedThis
         } else {
-            VerificationType::Reference(this_class.to_string())
+            VerificationType::Reference(this_class.into())
         });
     }
     let (params, _) = method_types(descriptor).ok_or(Decline::Descriptor)?;
@@ -424,7 +420,7 @@ fn merge_one(dst: &mut VerificationType, src: &VerificationType) -> bool {
     let merged = match (&*dst, src) {
         (Null, Reference(_)) => src.clone(),
         (Reference(_), Null) => return false,
-        (Reference(a), Reference(b)) => Reference(merge_references(a, b)),
+        (Reference(a), Reference(b)) => Reference(merge_references(a, b).into()),
         _ => Top,
     };
     if merged == *dst {
@@ -528,7 +524,7 @@ mod tests {
     }
 
     fn reference(name: &str) -> VerificationType {
-        VerificationType::Reference(name.to_string())
+        VerificationType::Reference(name.into())
     }
 
     #[test]
@@ -661,9 +657,9 @@ mod tests {
         let mut dst = VerificationType::Null;
         assert!(merge_one(
             &mut dst,
-            &VerificationType::Reference("[I".to_string())
+            &VerificationType::Reference("[I".into())
         ));
-        assert_eq!(dst, VerificationType::Reference("[I".to_string()));
+        assert_eq!(dst, VerificationType::Reference("[I".into()));
         assert!(!merge_one(&mut dst, &VerificationType::Null));
         let mut dst = VerificationType::Integer;
         assert!(merge_one(&mut dst, &VerificationType::Float));
