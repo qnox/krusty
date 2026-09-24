@@ -2,7 +2,7 @@
 name = "krusty"
 version = "0.0.1"
 edition = "2021"
-description = "A Kotlin compiler written in Rust: compiles Kotlin to JVM bytecode that aims to match kotlinc byte for byte"
+description = "Kotlin compiler written in Rust: a drop-in replacement for kotlinc with byte-for-byte identical JVM bytecode"
 license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
 readme = "README.md"

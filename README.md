@@ -11,8 +11,9 @@
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
-**krusty** is a memory-conscious **Kotlin compiler written in Rust**: it compiles Kotlin source to
-JVM bytecode, with a `kotlinc`-compatible command line. Its frontend builds a module-wide source and
+**krusty** is a memory-conscious **Kotlin compiler written in Rust**, built as a **drop-in
+replacement for `kotlinc`** on the JVM: the same command-line flags in, and `.class` files that are
+byte-for-byte identical to `kotlinc`'s out. Its frontend builds a module-wide source and
 symbol view. Its backend lowers one checked file per call while carrying the state needed to
 finalize module metadata. It emits `.class` files,
 `@kotlin.Metadata`, and `META-INF/*.kotlin_module` for the supported language subset.
