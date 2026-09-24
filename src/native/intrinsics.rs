@@ -907,25 +907,6 @@ pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<Colle
     }
 }
 
-/// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it
-/// names no facade.
-///
-/// `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
-/// `box`, and it is right there — but there is no facade class on the native target at all: a
-/// top-level property is a global and a top-level function is a symbol, neither owned by anything.
-/// Kotlin/Native names that object `box$1`.
-///
-/// A facade is recognized by its `Kt` suffix, which is the same test [`declaration_package`] makes for
-/// the same reason. That spelling is a JVM provider detail, which is why the test lives here.
-pub(super) fn without_file_facade(qualified: &str) -> Option<String> {
-    let (package, tail) = match qualified.rfind('.') {
-        Some(at) => (&qualified[..=at], &qualified[at + 1..]),
-        None => ("", qualified),
-    };
-    let (facade, nested) = tail.split_once('$')?;
-    (facade.ends_with("Kt") && !nested.is_empty()).then(|| format!("{package}{nested}"))
-}
-
 /// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
 ///
 /// It wears a runtime descriptor for the reason `Number` and `Comparable` do: no instances of its
