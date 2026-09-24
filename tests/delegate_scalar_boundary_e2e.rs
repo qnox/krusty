@@ -241,7 +241,7 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
             "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
             "lreturn".to_string(),
         ],
-        "krusty's getX ledger: only the independently owned KProperty carrier differs"
+        "krusty's getX ledger: kotlinc's unbox; only the independently owned KProperty carrier differs"
     );
     assert_eq!(
         body(&ours, "void setX(long)"),
@@ -475,6 +475,7 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
         ],
         "both the extension receiver and the written value are boxed"
     );
+    // kotlinc's own ledgers.
     assert_eq!(
         without_kproperty_carrier(body(&reference, "long getExt(int)")),
         without_kproperty_carrier(body(&ours, "long getExt(int)")),
