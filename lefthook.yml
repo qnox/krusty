@@ -12,6 +12,12 @@
 #
 # Bypass in a genuine emergency only: `git commit --no-verify` / `git push --no-verify`.
 
+commit-msg:
+  commands:
+    # AGENTS.md "Authorship and attribution": no assistant identity, trailer, or footer in a commit.
+    attribution:
+      run: scripts/check-attribution.sh --message {1}
+
 pre-commit:
   commands:
     # Auto-format only the staged Rust files (not the whole tree), then re-stage them so the commit
