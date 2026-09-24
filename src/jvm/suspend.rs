@@ -39,8 +39,8 @@ use live_scopes::{
 };
 mod spill_layout;
 use spill_layout::{
-    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty,
-    suspension_points_in_order, SpillLayout, REFERENCE_SPILL_KIND,
+    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
+    suspension_points_in_order, SpillLayout,
 };
 mod statement_normalization;
 mod value_liveness;
@@ -3023,13 +3023,12 @@ fn build_state_machine(
         let mut state_indices = Vec::new();
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
-            let mut positions = kind_positions(&scope.values);
+            let positions = spill_order(&scope.values);
             // `@DebugMetadata`'s `n`/`s` lists hoist the REFERENCE spills ahead of the rest and
             // otherwise keep the order the locals were spilled in. They are not grouped by kind:
             // kotlinc lists `J$0` between `I$0` and `I$1` when the `long` was declared between the
             // two `int`s. Nor do they follow the class's field layout, which groups by kind — the
             // two orders are independent and only look alike when they agree.
-            positions.sort_by_key(|&(_, _, kind, _)| u8::from(kind != REFERENCE_SPILL_KIND));
             for (slot, _ty, kind, pos) in positions {
                 let name = scope
                     .names
@@ -3174,7 +3173,7 @@ fn build_state_machine(
         // delivering a failed resume: a catch state executes in this invocation and must observe the
         // captured locals rather than the null/zero placeholders passed by `invokeSuspend`.
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, cont_for_f, fld);
@@ -3578,7 +3577,7 @@ fn build_lambda_state_machine(
         let mut ss = Vec::new();
         // A RESUME arm restores exactly ITS suspension's scope list (kotlinc: per-arm restores).
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let this_f = k(ir, IrExpr::GetValue(0));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, this_f, fld);
@@ -3832,7 +3831,7 @@ impl Flat<'_> {
     /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
     /// in-scope vars at per-kind positions; different states reuse the same fields).
     fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)], dead: &HashSet<u32>) {
-        for (l, ty, kind, pos) in kind_positions(list) {
+        for (l, ty, kind, pos) in spill_order(list) {
             let f = 2 + self.layout.slot(kind, pos);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
