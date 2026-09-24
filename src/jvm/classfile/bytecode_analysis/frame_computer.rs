@@ -46,6 +46,15 @@ pub(crate) struct ComputedFrame {
     pub stack: Vec<VerificationType>,
 }
 
+/// What the computation found: the frames to write, in instruction order, and the blocks nothing
+/// reaches, which ASM rewrites to `nop`s ending in `athrow` and cuts out of every protected range.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ComputedFrames {
+    pub frames: Vec<ComputedFrame>,
+    /// Instruction-index ranges of the unreachable blocks, in order; each is non-empty.
+    pub unreachable: Vec<std::ops::Range<usize>>,
+}
+
 /// Why no frames could be computed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Decline {
@@ -80,7 +89,7 @@ impl FrameComputation<'_> {
         access: u16,
         name: &str,
         descriptor: &str,
-    ) -> Result<Vec<ComputedFrame>, Decline> {
+    ) -> Result<ComputedFrames, Decline> {
         let entry = entry_locals(access, name, descriptor, self.this_class)?;
         let n = self.insns.len();
         let blocks = self.blocks()?;
@@ -183,6 +192,7 @@ impl FrameComputation<'_> {
         }
 
         let mut frames = Vec::new();
+        let mut unreachable = Vec::new();
         for (b, block) in blocks.iter().enumerate() {
             match &input[b] {
                 Some(state) if jump_target[b] => frames.push(ComputedFrame {
@@ -192,15 +202,21 @@ impl FrameComputation<'_> {
                 }),
                 Some(_) => {}
                 // Unreachable: ASM rewrites the block to `nop`s and an `athrow`, and frames it.
-                None if block.start < block.end => frames.push(ComputedFrame {
-                    index: block.start,
-                    locals: Vec::new(),
-                    stack: vec![VerificationType::Reference(THROWABLE.to_string())],
-                }),
+                None if block.start < block.end => {
+                    frames.push(ComputedFrame {
+                        index: block.start,
+                        locals: Vec::new(),
+                        stack: vec![VerificationType::Reference(THROWABLE.to_string())],
+                    });
+                    unreachable.push(block.start..block.end);
+                }
                 None => {}
             }
         }
-        Ok(frames)
+        Ok(ComputedFrames {
+            frames,
+            unreachable,
+        })
     }
 
     /// Basic blocks in instruction order, split where ASM splits them: at every label, and after
@@ -486,6 +502,7 @@ mod tests {
         }
         .compute(0x0008, "f", descriptor)
         .expect("frames compute")
+        .frames
     }
 
     fn reference(name: &str) -> VerificationType {
@@ -556,7 +573,17 @@ mod tests {
     fn an_unreachable_block_is_framed_as_asm_rewrites_it() {
         // static f()V: return; nop; return
         let insns = [plain(0xb1), plain(0x00), plain(0xb1)];
-        let frames = compute(&insns, &[], "()V");
+        let computed = FrameComputation {
+            insns: &insns,
+            handlers: &[],
+            labels: &[],
+            this_class: "p/K",
+            pool: &Pool,
+        }
+        .compute(0x0008, "f", "()V")
+        .expect("frames compute");
+        assert_eq!(computed.unreachable, vec![1..3]);
+        let frames = computed.frames;
         assert_eq!(
             frames,
             vec![ComputedFrame {

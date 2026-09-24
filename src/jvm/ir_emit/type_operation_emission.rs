@@ -311,6 +311,13 @@ impl Emitter<'_> {
                 code,
                 semantic_scalar_adapter(semantic, physical_arg),
             );
+            // kotlinc materializes the box at its wrapper type and coerces that to the target, so a
+            // target between the wrapper and `Object` (`Number`, `Comparable`) is a `checkcast`.
+            if !semantic.is_unsigned() {
+                if let Some(wrapper) = semantic.non_null().boxed_ref() {
+                    self.coerce_reference_on_stack(wrapper, target, code);
+                }
+            }
         } else if physical_arg.is_reference() && target.is_jvm_scalar() {
             unbox_prim_from(
                 self.cw,
