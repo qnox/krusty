@@ -2143,6 +2143,22 @@ impl IrStatic {
     }
 }
 
+/// One sequence of lifted local callables: the source file that declares it, the lexical owner,
+/// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct IrLiftingSequence {
+    pub source: crate::fir::SourceFileId,
+    pub owner: Box<str>,
+    pub container: Box<str>,
+}
+
+/// One position of an [`IrLiftingSequence`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IrLiftingEntry {
+    pub name: Option<Box<str>>,
+    pub lifted: bool,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2210,6 +2226,18 @@ pub struct IrFile {
     /// The executable scope each source callable-reference node is written in, by expression id. A
     /// target that realizes the reference as a class of its own records that class's enclosure.
     pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
+    /// Every lifting site the file's bodies declare (see [`crate::fir::FirLiftingSite`]), by
+    /// sequence and source position: the step's source name, and whether it is lifted at all.
+    pub(crate) lifting_sequences: std::collections::HashMap<
+        IrLiftingSequence,
+        std::collections::BTreeMap<u32, IrLiftingEntry>,
+    >,
+    /// The sequence and lifting site of each function lowered from a lambda or local function.
+    pub(crate) lifted_functions:
+        std::collections::HashMap<FunId, (IrLiftingSequence, crate::fir::FirLiftingSite)>,
+    /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
+    /// callables are all lifted, once a target has numbered the sequences.
+    pub(crate) lifted_names: std::collections::HashMap<FunId, String>,
     /// The class name a target chose for each source callable reference, by expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.

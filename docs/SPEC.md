@@ -1649,6 +1649,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-Xlambdas=class -Xsam-conversions=class -jvm-target 1.6` compiles (that pairing is the point of
   the mode) and stamps major version 50. Tests: `tests/indy_lambda_parity_e2e.rs`,
   `tests/class_lambda_e2e.rs`.
+- **Lifted method names (kotlinc's `LocalDeclarationsLowering`).** A lambda or local function is
+  lifted into a method named after the declarations around it, joined by `$`: the outermost
+  declaration (a function's or property's name; `_init_` for constructors, `init` blocks, parameter
+  defaults, superclass and enum entry arguments; `_get_x_`/`_set_x_` for accessors; `x_delegate`
+  for a property delegate), then one segment per enclosing local callable, then its own:
+  `measure$scale$unit`, `measure$lambda$1$inner`. A lambda's segment is `lambda$N`; a local
+  function's is its name, or `name$N` when that name is already taken in the sequence. `N` counts
+  one sequence per class and outermost declaration NAME, in source order, over the lambdas and the
+  name-clashing local functions: overloads share it, as do constructors and `init` blocks; a lambda
+  spliced at an inline call site still takes its number, and so does each accessor of a local
+  delegated property. A suspend lambda becomes a class of its own and takes none. A local class or
+  anonymous object starts sequences of its own. The frontend walk
+  (`frontend::local_function_names`) records each callable's position; checking decides whether a
+  lambda is lifted (its type); the JVM backend numbers every sequence of the file whole and renames
+  the lowered functions once they are placed, keeping a method's previous name only where the
+  lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
+  lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
+  with the enum's) (`tests/lifted_callable_names_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

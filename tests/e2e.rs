@@ -972,6 +972,8 @@ mod lib_dep_harness_e2e;
 mod lib_fixture_parallel_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
 mod library_fun_type_lambda_param_e2e;
+#[path = "lifted_callable_names_e2e.rs"]
+mod lifted_callable_names_e2e;
 #[path = "list_fold_e2e.rs"]
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
