@@ -26,6 +26,33 @@ pub(crate) fn unresolved_member_message(
 }
 
 impl Checker<'_> {
+    /// The span selected by one versioned diagnostic positioning strategy.
+    pub(super) fn anchored_span(
+        &self,
+        anchor: crate::diagnostic_wording::Anchor,
+        call: ExprId,
+        value_arguments: impl FnOnce() -> Span,
+    ) -> Span {
+        match anchor {
+            crate::diagnostic_wording::Anchor::ValueArguments => value_arguments(),
+            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
+                self.call_callee_name_span(call)
+            }
+        }
+    }
+
+    pub(super) fn call_callee_name_span(&self, call: ExprId) -> Span {
+        let callee = match self.file.expr(call) {
+            Expr::Call { callee, .. } => callee,
+            Expr::SafeCall { name, .. } => return self.member_name_span(call, name),
+            _ => return self.span(call),
+        };
+        match self.file.expr(*callee) {
+            Expr::Member { name, .. } => self.member_name_span(*callee, name),
+            _ => self.span(*callee),
+        }
+    }
+
     /// A classifier qualifier (`Limits.MAX` through a companion or `Obj.x`) is not a receiver value,
     /// so kotlinc does not append a receiver type to its unresolved-reference diagnostic.
     pub(super) fn unresolved_member_diagnostic(

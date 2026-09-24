@@ -5,7 +5,7 @@
 2.4.0..2.4.10:
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
   no value passed for parameter 'first'.
-2.4.20..:
+2.4.20:
   no value passed for parameter 'first'.
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
 
@@ -13,7 +13,7 @@
 2.4.0..2.4.10:
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
   no value passed for parameter 'first'.
-2.4.20..:
+2.4.20:
   no value passed for parameter 'first'.
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
 
@@ -21,7 +21,7 @@
 2.4.0..2.4.10:
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
   no value passed for parameter 'first'.
-2.4.20..:
+2.4.20:
   no value passed for parameter 'first'.
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
 
@@ -29,6 +29,6 @@
 2.4.0..2.4.10:
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
   no value passed for parameter 'first'.
-2.4.20..:
+2.4.20:
   no value passed for parameter 'first'.
   mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.

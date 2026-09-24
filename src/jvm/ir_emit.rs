@@ -2925,9 +2925,8 @@ fn attach_synth_debug_tables(
             guard_slot += slot_size(argument.ty);
         }
     }
-    // Only physical constructor parameters are locals. Before Kotlin 2.4.20 an anonymous context
-    // parameter has no LVT row even though its MethodParameters/assertion surfaces have a generated
-    // label; since then that label names its row too.
+    // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
+    // reflection/assertion label names the physical constructor local too.
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
@@ -9122,13 +9121,8 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        di.set_kotlin_metadata(
-            3,
-            &[2, 4, 0],
-            synthetic_class_xi(SYNTHETIC_PUBLIC),
-            &[],
-            &[],
-        );
+        let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
+        di.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
         extra.push((holder, di.finish()));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);

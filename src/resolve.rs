@@ -35,6 +35,8 @@ mod annotation_applications;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
+mod call_constraints;
+mod call_diagnostics;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -106,6 +108,8 @@ mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
+use call_constraints::CallConstraints;
+use call_diagnostics::RejectedCallOwner;
 use call_result_constraint::CallResultConstraint;
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
@@ -40965,82 +40969,6 @@ struct ExtensionRungSelection {
     overloads: Vec<crate::libraries::FunctionInfo>,
 }
 
-/// What a receiver call fixes about a candidate's type parameters independently of its value
-/// arguments: explicit type arguments, the receiver it is called on, and the type its result is
-/// expected to have. When no candidate is applicable, kotlinc still reports a mismatched argument
-/// against the parameter type under those constraints (`s.let(1)` expects `(String) -> Int` where
-/// `Int` is expected), so the diagnostic seeds its bindings from them.
-/// The rejected candidate that owns a receiver call's failure; see `rejected_call_owner`.
-enum RejectedCallOwner {
-    Member,
-    Extension(Box<crate::libraries::FunctionInfo>),
-    Joined(Vec<crate::libraries::FunctionInfo>),
-}
-
-/// The value-parameter types a rejected candidate's arguments map to, in argument order. A rejected
-/// call has no complete mapping, so an argument that names no parameter, or overflows a candidate
-/// without a vararg, contributes nothing, as in kotlinc's flat signature of a partial mapping.
-fn rejected_candidate_argument_shape(
-    candidate: &crate::libraries::FunctionInfo,
-    argument_count: usize,
-    argument_names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-) -> Vec<Ty> {
-    let context_count = candidate
-        .context_count
-        .min(candidate.semantic_params().len());
-    let signature = candidate.call_sig.suffix(context_count);
-    let parameters = candidate.value_params();
-    (0..argument_count)
-        .filter_map(|argument| {
-            let parameter = match argument_names
-                .and_then(|names| names.get(argument))
-                .and_then(Option::as_deref)
-            {
-                Some(name) => signature.param_names.iter().position(|param| param == name),
-                None if trailing_lambda && argument + 1 == argument_count => {
-                    parameters.len().checked_sub(1)
-                }
-                None if argument < parameters.len() => Some(argument),
-                None => signature.vararg_index,
-            };
-            parameter.and_then(|parameter| parameters.get(parameter).copied())
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-struct CallConstraints<'a> {
-    type_args: &'a [Ty],
-    receiver: Ty,
-    expected: Option<Ty>,
-}
-
-impl CallConstraints<'_> {
-    fn bindings(
-        self,
-        signature: &crate::libraries::GenericSig,
-    ) -> crate::symbol_resolver::GSigBinds {
-        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(signature, self.type_args);
-        if !self.type_args.is_empty() {
-            return bindings;
-        }
-        let mut seeded = crate::symbol_resolver::GSigBinds::new();
-        if let Some(declared) = signature.receiver {
-            crate::symbol_resolver::unify_ty(declared, self.receiver, &mut seeded);
-        }
-        if let Some(expected) = self.expected {
-            crate::symbol_resolver::unify_ty(signature.ret, expected, &mut seeded);
-        }
-        for (formal, ty) in seeded {
-            if signature.formals.contains(&formal) && !ty.mentions_pending() && ty != Ty::Error {
-                bindings.entry(formal).or_insert(ty);
-            }
-        }
-        bindings
-    }
-}
-
 struct MemberMappingFailure {
     failure: CallArgMappingFailure,
     candidate: crate::libraries::FunctionInfo,
@@ -43029,138 +42957,6 @@ impl<'a> Checker<'a> {
             message.push_str(&display);
         }
         message
-    }
-
-    /// Report a receiver call whose member exists but rejected the arguments, after every extension
-    /// rung also failed. The member owns the failure unless the target release lets a more specific
-    /// extension take it over, or reports the tied candidates together.
-    fn report_owned_member_failure(
-        &mut self,
-        call_args: CallArgs<'_>,
-        name: &str,
-        receiver: Ty,
-        failure: MemberMappingFailure,
-    ) -> Option<Ty> {
-        let candidates = self
-            .stable_receiver_callables(receiver, name)
-            .functions()
-            .to_vec();
-        match self.rejected_call_owner(call_args.call, call_args.args, &candidates) {
-            RejectedCallOwner::Extension(_) => return None,
-            RejectedCallOwner::Member => {
-                self.report_retained_member_mapping_failure(
-                    call_args.call,
-                    name,
-                    call_args.args,
-                    failure,
-                );
-            }
-            RejectedCallOwner::Joined(contenders) => {
-                self.report_joined_rejection(call_args.call, name, &contenders);
-            }
-        }
-        Some(Ty::Error)
-    }
-
-    /// Which of a receiver call's rejected candidates own its failure.
-    ///
-    /// kotlinc 2.4.20 keeps climbing the tower past a member that rejected the call and, when every
-    /// same-name extension is rejected too, chooses among all of them as it would among applicable
-    /// overloads: the most specific by the parameters the arguments map to, then a non-generic
-    /// declaration over a generic one. A single survivor reports its own errors; tied survivors are
-    /// reported together (NONE_APPLICABLE). Earlier releases always let the member own the failure
-    /// ([`crate::diagnostic_wording::inapplicable_member_joins_extensions`]).
-    fn rejected_call_owner(
-        &self,
-        call: ExprId,
-        args: &[ExprId],
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> RejectedCallOwner {
-        let contested = crate::diagnostic_wording::inapplicable_member_joins_extensions()
-            && candidates.iter().any(|candidate| !candidate.is_extension())
-            && candidates.iter().any(|candidate| candidate.is_extension());
-        if !contested {
-            return RejectedCallOwner::Member;
-        }
-        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut contenders = candidates
-            .iter()
-            .map(|candidate| {
-                let shape = rejected_candidate_argument_shape(
-                    candidate,
-                    args.len(),
-                    argument_names,
-                    trailing_lambda,
-                );
-                let generic = candidate
-                    .generic_sig
-                    .as_ref()
-                    .is_some_and(|signature| !signature.formals.is_empty());
-                (candidate, shape, generic)
-            })
-            .collect::<Vec<_>>();
-        crate::symbol_resolver::retain_most_specific_declarations(
-            &self.fed_source(),
-            &mut contenders,
-            |(candidate, shape, generic)| {
-                let receiver = candidate
-                    .is_extension()
-                    .then(|| candidate.semantic_receiver())
-                    .flatten();
-                (receiver, shape.as_slice(), *generic)
-            },
-        );
-        crate::trace_compiler!(
-            "resolve",
-            "rejected call owner call={call:?} candidates={} contenders={:?}",
-            candidates.len(),
-            contenders
-                .iter()
-                .map(|(candidate, shape, generic)| (candidate.is_extension(), shape, generic))
-                .collect::<Vec<_>>(),
-        );
-        match contenders.as_slice() {
-            [(only, _, _)] if only.is_extension() => {
-                RejectedCallOwner::Extension(Box::new((*only).clone()))
-            }
-            [_] => RejectedCallOwner::Member,
-            _ => RejectedCallOwner::Joined(
-                contenders
-                    .into_iter()
-                    .map(|(candidate, _, _)| candidate.clone())
-                    .collect(),
-            ),
-        }
-    }
-
-    /// NONE_APPLICABLE over tied rejected candidates, when [`Self::rejected_call_owner`] joins them.
-    fn report_member_and_extensions_inapplicable(
-        &mut self,
-        call: ExprId,
-        name: &str,
-        args: &[ExprId],
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> bool {
-        match self.rejected_call_owner(call, args, candidates) {
-            RejectedCallOwner::Joined(contenders) => {
-                self.report_joined_rejection(call, name, &contenders);
-                true
-            }
-            RejectedCallOwner::Member | RejectedCallOwner::Extension(_) => false,
-        }
-    }
-
-    fn report_joined_rejection(
-        &mut self,
-        call: ExprId,
-        name: &str,
-        contenders: &[crate::libraries::FunctionInfo],
-    ) {
-        self.diags.error(
-            self.call_callee_name_span(call),
-            self.inapplicable_member_candidates_message(name, contenders),
-        );
     }
 
     /// Report an argument-MAPPING failure shared by every declaration named at a member call.
@@ -49235,34 +49031,6 @@ impl<'a> Checker<'a> {
             literals.push((parameter, value));
         }
         (!literals.is_empty()).then_some(literals)
-    }
-
-    /// The span kotlinc's positioning strategy `anchor` gives `call`; `value_arguments` computes
-    /// the argument-list position, which depends on the failure being reported.
-    fn anchored_span(
-        &self,
-        anchor: crate::diagnostic_wording::Anchor,
-        call: ExprId,
-        value_arguments: impl FnOnce() -> Span,
-    ) -> Span {
-        match anchor {
-            crate::diagnostic_wording::Anchor::ValueArguments => value_arguments(),
-            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
-                self.call_callee_name_span(call)
-            }
-        }
-    }
-
-    fn call_callee_name_span(&self, call: ExprId) -> Span {
-        let callee = match self.file.expr(call) {
-            Expr::Call { callee, .. } => callee,
-            Expr::SafeCall { name, .. } => return self.member_name_span(call, name),
-            _ => return self.span(call),
-        };
-        match self.file.expr(*callee) {
-            Expr::Member { name, .. } => self.member_name_span(*callee, name),
-            _ => self.span(*callee),
-        }
     }
 
     fn nullable_receiver_call_span(&self, call: ExprId) -> Span {

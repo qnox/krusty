@@ -933,26 +933,38 @@ mod tests {
                       fun invalid(): Int = pair(b = 2, 1)";
         let analysis = analyze_standalone_source_set(&[source]);
         let diagnostics = &analysis.files[0].diagnostics;
-        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-        // Their order follows the reference version's positions (front_end_errors_more_e2e).
-        let by_message = |message: &str| {
+        let positional = source.rfind('1').expect("positional argument") as u32;
+        let callee = source.rfind("pair").expect("callee") as u32;
+        let mixing = (
+            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+            krusty::diag::Span::new(positional, positional + 1),
+        );
+        let missing = (
+            "no value passed for parameter 'a'.",
+            krusty::diag::Span::new(callee, callee + 4),
+        );
+        // The LSP boundary consumes the compiler's alternate editor span, but preserves the
+        // reference compiler's diagnostic order for the selected Kotlin version.
+        let expected =
+            if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
+                vec![missing, mixing]
+            } else {
+                vec![mixing, missing]
+            };
+        assert_eq!(
             diagnostics
                 .iter()
-                .find(|diagnostic| diagnostic.msg == message)
-                .unwrap_or_else(|| panic!("no `{message}` in {diagnostics:?}"))
-        };
-        let mixing = by_message(
-            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+                .map(|diagnostic| {
+                    assert_eq!(diagnostic.editor_span, None);
+                    assert_eq!(diagnostic.severity, krusty::diag::Severity::Error);
+                    assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
+                    assert_eq!(diagnostic.identity, None);
+                    assert_eq!(diagnostic.file, 0);
+                    (diagnostic.msg.as_str(), diagnostic.span)
+                })
+                .collect::<Vec<_>>(),
+            expected,
         );
-        let positional = source.rfind('1').expect("positional argument") as u32;
-        assert_eq!(
-            mixing.span,
-            krusty::diag::Span::new(positional, positional + 1)
-        );
-        let missing = by_message("no value passed for parameter 'a'.");
-        let callee = source.rfind("pair").expect("callee") as u32;
-        assert_eq!(missing.span, krusty::diag::Span::new(callee, callee + 4));
-        assert_eq!(missing.editor_span, None);
     }
 
     #[test]
