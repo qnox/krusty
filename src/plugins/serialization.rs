@@ -11,6 +11,8 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod cached_serializer;
+mod constructed_standard_serializers;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
@@ -18,7 +20,11 @@ pub(super) mod element_serializer;
 mod enum_serializer;
 mod generated_classifier;
 mod generated_members;
+mod property_default;
+mod serial_elements;
 mod serialize_body;
+mod transient_initializer;
+mod type_parameter_serializers;
 mod value_class_types;
 
 use crate::ir::{
@@ -32,14 +38,17 @@ use crate::plugins::{
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
+use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
-use element_serializer::{element_serializer_expr, element_serializer_plan};
+use element_serializer::element_serializer_expr;
 use generated_classifier::generated_serializer_classifier_fact;
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
+use serial_elements::{SerialElements, SerializedProperties};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use type_parameter_serializers::TypeParameterSerializers;
 use value_class_types::{inline_prim_methods, value_class_underlying};
 
 mod child_serializer_cache;
@@ -58,6 +67,8 @@ use signatures::generated_serializer_signature;
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
+/// `@kotlinx.serialization.Transient`: the property is not a serial element.
+const TRANSIENT_FQ: &str = "kotlinx/serialization/Transient";
 const GENERATED_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/GeneratedSerializer";
 
 /// `StringFormat.encodeToString(SerializationStrategy, value): String` — the 2-arg member a reified
@@ -244,14 +255,6 @@ fn complete_frontend_serializer_accessor(
         "a frontend plugin declaration may receive one generated body"
     );
     Some(function)
-}
-
-/// The `@Serializable` serial name is the declaration's qualified Kotlin source name. Common
-/// lowering records it from stable declaration ownership while that information is available; the
-/// plugin must not reinterpret `$` in a JVM/internal name because it is also a legal identifier.
-fn serial_name(ir: &IrFile, class: ClassId) -> KtString {
-    ir.class_source_qualified_name(class)
-        .expect("a serializable source classifier has a qualified declaration name")
 }
 
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
@@ -505,8 +508,9 @@ fn call_external_companion_serializer(
 }
 
 /// The serialized type a reified round-trip call names, flattened into the placeholder's name
-/// payload. A `@Serializable` classifier is one name; a supported collection over `@Serializable`
-/// arguments is its own classifier followed by them. That is as much shape as `Vec<TypeName>`
+/// payload. A `@Serializable` classifier is one name; a supported constructed standard type over
+/// `@Serializable` arguments is its own classifier followed by them. That is as much shape as
+/// `Vec<TypeName>`
 /// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
 /// inline path.
 fn serialized_type_spelling(
@@ -518,14 +522,16 @@ fn serialized_type_spelling(
     if ctx.has_classifier_annotation(classifier, serializable) {
         return Some(vec![classifier]);
     }
-    // Only a collection whose every argument is itself annotated is planned. A wider gate would
-    // capture calls the generic path already compiles correctly and turn a working file into a
-    // declined placeholder.
-    let (_, arity) = collection_serializer_builder(classifier)?;
+    // Only a constructed standard type whose every argument is itself annotated is planned. A
+    // wider gate would capture calls the generic path already compiles correctly and turn a working
+    // file into a declined placeholder.
+    constructed_standard_serializer(classifier)?;
     let Ty::Obj(_, arguments) = ty.non_null() else {
         return None;
     };
-    if arguments.len() != arity {
+    // Every currently mapped serializer is constructed over at least one checked type argument.
+    // The argument count comes from this selected semantic type, never from the classifier's name.
+    if arguments.is_empty() {
         return None;
     }
     let mut spelling = vec![classifier];
@@ -685,6 +691,9 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
     let fq = ty.kotlin_class_internal()?;
     Some(if fq.matches("kotlin/Int") {
         (
@@ -735,6 +744,9 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
 fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
     let fq = ty.kotlin_class_internal()?;
     let d = "Lkotlinx/serialization/descriptors/SerialDescriptor;";
     Some(if fq.matches("kotlin/Int") {
@@ -816,53 +828,6 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
         dispatch_receiver: None,
         args: vec![base],
     })
-}
-
-/// The kotlinx collection serializer CLASS for a standard collection type, and its type-argument
-/// count.
-///
-/// kotlinc's plugin CONSTRUCTS these directly rather than calling the `BuiltinSerializersKt`
-/// factory that returns the same thing — `ListSerializer(x)` is an inline stdlib function over
-/// `ArrayListSerializer(x)`. The two serialize identically and differ in every byte of the method
-/// that builds them.
-fn collection_serializer_builder(classifier: TypeName) -> Option<(TypeName, usize)> {
-    if [
-        "kotlin/collections/List",
-        "kotlin/collections/MutableList",
-        "kotlin/collections/Collection",
-        "kotlin/collections/MutableCollection",
-        "kotlin/collections/Iterable",
-        "kotlin/collections/MutableIterable",
-    ]
-    .into_iter()
-    .map(type_name)
-    .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/ArrayListSerializer"),
-            1,
-        ))
-    } else if ["kotlin/collections/Set", "kotlin/collections/MutableSet"]
-        .into_iter()
-        .map(type_name)
-        .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/LinkedHashSetSerializer"),
-            1,
-        ))
-    } else if ["kotlin/collections/Map", "kotlin/collections/MutableMap"]
-        .into_iter()
-        .map(type_name)
-        .any(|candidate| candidate == classifier)
-    {
-        Some((
-            type_name("kotlinx/serialization/internal/LinkedHashMapSerializer"),
-            2,
-        ))
-    } else {
-        None
-    }
 }
 
 /// The element serializer for property `name` of type `ty` IF it is contextual (`name` ∈ `contextual`):
@@ -1003,21 +968,11 @@ impl SerializationPlugin {
         // kotlinc maps every generated member, and the delegate's `<clinit>` store, to where the
         // declaration begins, annotations included.
         let owner_line = ir.classes[class_id as usize].decl_start_line;
-        // The delegate's DECLARED type carries its arguments so the field gets kotlinc's generic
-        // `Signature` (`Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`);
-        // the descriptor still erases to `Lkotlin/Lazy;`.
-        let lazy_ty = Ty::obj_args(
-            "kotlin/Lazy",
-            &[Ty::obj_args(
-                "kotlinx/serialization/KSerializer",
-                // `kotlin/Any`, not `java/lang/Object`: the checked-symbol validation only knows
-                // Kotlin classifiers, and the signature formatter maps this to `Ljava/lang/Object;`.
-                &[class_ty("kotlin/Any")],
-            )],
-        );
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(
+            annotations::class_serial_name(ir, class_id),
+        )));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: type_name(class_fq),
@@ -1036,76 +991,8 @@ impl SerializationPlugin {
             type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
         });
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
-        // kotlinc does not build the delegate eagerly with `lazyOf`. It compiles the initializer to
-        // a private static `_init_$_anonymous_()` holding `EnumSerializer(name, values())`, binds it
-        // with an `invokedynamic` `Function0`, and passes that to
-        // `LazyKt.lazy(LazyThreadSafetyMode.PUBLICATION, …)` — so the serializer is constructed on
-        // first use, and the class carries a `BootstrapMethods` attribute.
-        let anon_ret = ir.add_expr(IrExpr::Return(Some(enum_ser)));
-        let anon_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![anon_ret],
-            value: None,
-        });
-        let anonymous = ir.add_fun(IrFunction {
-            name: "_init_$_anonymous_".to_string(),
-            params: vec![],
-            ret: Ty::obj("kotlinx/serialization/KSerializer"),
-            body: Some(anon_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        // kotlinc emits every standalone lambda impl `private static final` — reachable only through
-        // the same-class `invokedynamic`, never part of the public ABI.
-        ir.private_methods.insert(anonymous);
-        // Compiler-invented, like the companion's cached-serializer helper: ACC_SYNTHETIC, and
-        // therefore absent from `@Metadata`.
-        ir.synthetic_methods.insert(anonymous);
-        ir.classes[class_id as usize].methods.push(anonymous);
-        // Generated in the BACKEND, past the frontend's declaration-line transfer, so the emitter
-        // would attach no debug tables without a line of its own. kotlinc maps it to the annotated
-        // owner's declaration line, which the class already carries by now.
-        if owner_line != 0 {
-            ir.fn_decl_lines.insert(anonymous, owner_line);
-            ir.fn_sig_lines.insert(anonymous, owner_line);
-        }
-        let block = ir.add_expr(IrExpr::Lambda {
-            impl_fn: anonymous,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: None,
-        });
-        let mode = ir.add_expr(IrExpr::EnumEntry {
-            classifier: type_name("kotlin/LazyThreadSafetyMode"),
-            name: "PUBLICATION".into(),
-        });
-        let lazy = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: type_name("kotlin/LazyKt"),
-                name: "lazy".to_string(),
-                descriptor:
-                    "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
-                        .to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![mode, block],
-        });
-        ir.statics.push(crate::ir::IrStatic {
-            name: "$cachedSerializer$delegate".to_string(),
-            ty: lazy_ty,
-            init: lazy,
-            is_var: false,
-            is_const: false,
-            owner: Some(type_name(class_fq)),
-            visibility: crate::types::Visibility::Private,
-            setter_jvm_name: None,
-            erased_declared_ty: None,
-            custom_accessor: true,
-            line: owner_line,
-            source_order: u32::MAX,
-        });
+        let class_name = ir.classes[class_id as usize].fq_name_id();
+        cached_serializer::add_cached_serializer_delegate(ir, class_id, class_name, enum_ser);
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
         let read =
             ir.external_static_field(class_fq, "$cachedSerializer$delegate", "Lkotlin/Lazy;");
@@ -1266,7 +1153,9 @@ impl SerializationPlugin {
             })
             .collect();
 
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(
+            annotations::class_serial_name(ir, class_id),
+        )));
         let base_kclass = Self::kclass_literal(ir, class_fq);
         let sub_kclasses: Vec<ExprId> = subs
             .iter()
@@ -1275,7 +1164,24 @@ impl SerializationPlugin {
         let sub_serializers: Vec<ExprId> = subs
             .iter()
             .map(|&cid| {
-                let s = ir.classes[cid as usize].fq_name();
+                let subtype = ir.classes[cid as usize].fq_name_id();
+                // An `object` case is serialized by an `ObjectSerializer` kotlinc constructs in
+                // place, as it does for any element of an object type.
+                if let Some(object) = cached_serializer::local_serializable_object(ir, ctx, subtype)
+                {
+                    let name = ir.add_expr(IrExpr::Const(IrConst::String(
+                        annotations::class_serial_name(ir, object),
+                    )));
+                    let serial_info_unsupported =
+                        annotations::class_has_serial_info(ctx, ir, object);
+                    return cached_serializer::object_serializer(
+                        ir,
+                        subtype,
+                        name,
+                        serial_info_unsupported,
+                    );
+                }
+                let s = subtype.render();
                 serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
             })
             .collect();
@@ -1391,6 +1297,14 @@ impl IrPlugin for SerializationPlugin {
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
         classifiers.extend(generated_serializer_classifier_fact(ctx));
+    }
+
+    fn check_frontend_class(
+        &self,
+        ctx: &crate::plugins::FrontendClassCheckContext<'_>,
+        diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
+    ) {
+        diagnostics.extend(transient_initializer::missing_initializers(ctx));
     }
 
     fn plan_frontend_expressions(
@@ -1542,7 +1456,8 @@ impl IrPlugin for SerializationPlugin {
             .clear();
         let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
-            let class_fq = ir.classes[class_id as usize].fq_name();
+            let class_name = ir.classes[class_id as usize].fq_name_id();
+            let class_fq = class_name.render();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
             // instance of the explicit serializer `X` (`new X(C::class)`), the way kotlinc compiles it.
             if let Some(custom) = custom_serializer_of(ctx, ir, class_id) {
@@ -1553,6 +1468,12 @@ impl IrPlugin for SerializationPlugin {
             // `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a `Lazy`.
             if !ir.classes[class_id as usize].enum_entries.is_empty() {
                 Self::add_enum_serializer_companion(ir, class_id, &class_fq);
+                continue;
+            }
+            // A `@Serializable object`: no generated `$serializer` — `serializer()` is a member of
+            // the object returning a cached `ObjectSerializer` over its `INSTANCE`.
+            if ir.classes[class_id as usize].is_object {
+                cached_serializer::add_object_serializer(ir, ctx, class_id, class_name);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —
@@ -1624,15 +1545,19 @@ impl IrPlugin for SerializationPlugin {
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
                 .iter()
-                .map(|f| (f.name.clone(), f.ty.clone()))
+                .map(|f| (f.name.clone(), f.ty))
                 .collect();
-            // Per-property signature default. Optionality is independent of whether its checked
+            // A property is optional when it declares a default: a constructor parameter's default
+            // or a body property's initializer. Optionality is independent of whether that
             // expression is a constant; the constant payload is used separately during body
             // generation for equality/fill operations that can represent it directly.
-            let foo_optional: Vec<bool> = ir.classes[class_id as usize]
-                .fields
+            // A `@Transient` property is a field but not an element (`serial_elements`).
+            let elements = SerialElements::of(ir, class_id);
+            let element_fields = elements.select(&foo_fields);
+            let foo_optional: Vec<bool> = elements
+                .fields()
                 .iter()
-                .map(crate::ir::IrField::has_default)
+                .map(|&field| property_default::checked_default(ir, class_id, field).is_some())
                 .collect();
             // A generic `$serializer` stores one `KSerializer` per type parameter; a non-generic
             // serializer keeps the singleton-object form.
@@ -1792,7 +1717,7 @@ impl IrPlugin for SerializationPlugin {
             // primitive/String — the same condition the inline serialize/deserialize arms require, so an
             // unsupported underlying falls back consistently to the PGSD path (never a mismatched mix).
             let is_value = ir.classes[class_id as usize].is_value
-                && foo_fields
+                && element_fields
                     .first()
                     .and_then(|(_, t)| inline_prim_methods(t))
                     .is_some();
@@ -1804,8 +1729,10 @@ impl IrPlugin for SerializationPlugin {
             if is_value {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
                 // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
-                let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
-                let under_ser = foo_fields
+                let name = ir.add_expr(IrExpr::Const(IrConst::String(
+                    annotations::class_serial_name(ir, class_id),
+                )));
+                let under_ser = element_fields
                     .first()
                     .and_then(|(_, t)| element_serializer::always_available_builtin_serializer(t));
                 let ser_inst = match under_ser {
@@ -1834,8 +1761,9 @@ impl IrPlugin for SerializationPlugin {
                     named: false,
                 })];
             } else {
-                let pgsd_name =
-                    ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+                let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(
+                    annotations::class_serial_name(ir, class_id),
+                )));
                 // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
                 // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
                 //
@@ -1853,7 +1781,7 @@ impl IrPlugin for SerializationPlugin {
                         field: "INSTANCE".to_string(),
                     })
                 };
-                let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
+                let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(element_fields.len() as i32)));
                 let pgsd = ir.new_external(
                     pgsd_internal,
                     "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V",
@@ -1866,7 +1794,7 @@ impl IrPlugin for SerializationPlugin {
                     named: false,
                 });
                 init_stmts = vec![dvar];
-                for (i, (pname, _)) in foo_fields.iter().enumerate() {
+                for (i, (pname, _)) in element_fields.iter().enumerate() {
                     let d = ir.add_expr(IrExpr::GetValue(desc_local));
                     let element_name = serial_name_of(ctx, ir, class_id, pname)
                         .unwrap_or_else(|| KtString::from(pname.clone()));
@@ -2061,7 +1989,7 @@ impl IrPlugin for SerializationPlugin {
 
             if plain_data_class {
                 let cached_descriptor = if is_generic {
-                    let elements = foo_fields
+                    let descriptor_elements = element_fields
                         .iter()
                         .enumerate()
                         .map(|(index, (name, _))| {
@@ -2072,13 +2000,13 @@ impl IrPlugin for SerializationPlugin {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let descriptor_name = serial_name(ir, class_id);
+                    let descriptor_name = annotations::class_serial_name(ir, class_id);
                     let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
                     Some(add_cached_descriptor(
                         ir,
                         descriptor_owner,
                         descriptor_name,
-                        &elements,
+                        &descriptor_elements,
                     ))
                 } else {
                     None
@@ -2088,6 +2016,7 @@ impl IrPlugin for SerializationPlugin {
                     class_id,
                     ser_id,
                     &foo_fields,
+                    &elements,
                     cached_descriptor,
                 );
             }
@@ -2098,7 +2027,7 @@ impl IrPlugin for SerializationPlugin {
                 pending_caches.push((
                     class_id,
                     ir.classes[class_id as usize].fq_name_id(),
-                    foo_fields.clone(),
+                    element_fields.clone(),
                 ));
             }
         }
@@ -2130,46 +2059,15 @@ impl IrPlugin for SerializationPlugin {
             {
                 continue;
             }
-            // krusty UNBOXES a `@JvmInline value class`-typed field to its underlying (`Holder.f: Foo`
-            // is emitted as `int`, `getF()I`, `new Holder(int)`). So serialize/deserialize must treat
-            // such a field AS its underlying type — encode/decode the primitive directly (same JSON as
-            // kotlinc's inline serializer), not via the (boxed) `<Foo>$serializer` which would store a
-            // `Foo` reference into the unboxed slot (VerifyError).
-            let fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(|field| {
-                    (
-                        field.name.clone(),
-                        value_class_underlying(ir, &field.ty).unwrap_or(field.ty),
-                    )
-                })
-                .collect();
-            let serializer_field_types: Vec<Ty> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(index, field)| {
-                    let declared = ir.classes[class_id as usize]
-                        .properties
-                        .iter()
-                        .find(|property| property.backing_field == Some(index as u32))
-                        .map(|property| property.ty)
-                        .unwrap_or(field.ty);
-                    value_class_underlying(ir, &declared).unwrap_or(declared)
-                })
-                .collect();
+            let properties = SerializedProperties::of(ir, class_id);
+            let elements = SerialElements::of(ir, class_id);
+            let fields = &properties.fields;
             crate::trace_compiler!(
                 "lower",
-                "serialization fields class_id={class_id} types={serializer_field_types:?}"
+                "serialization fields class_id={class_id} types={:?} elements={:?}",
+                properties.serializer_types,
+                elements.fields(),
             );
-            // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
-            // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
-            let field_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(|f| f.default.clone())
-                .collect();
             let class_classifier = ir.classes[class_id as usize].fq_name_id();
             let serializer_classifier = serializer_name(class_classifier);
             let Some(ser_idx) = ir
@@ -2181,39 +2079,9 @@ impl IrPlugin for SerializationPlugin {
             };
             // The serialized class's ClassId (for constructing it in `deserialize`).
             let foo_id = class_id;
-            // For each field: the ClassId of its element `$serializer` if the field's type is itself a
-            // `@Serializable` class krusty generated a serializer for (nested/composite), else None.
-            let nested: Vec<Option<u32>> = fields
-                .iter()
-                .map(|(_, ty)| match ty.non_null().obj_internal() {
-                    Some(fq_name) => ir
-                        .classes
-                        .iter()
-                        .position(|class| class.fq_name_id() == serializer_name(fq_name))
-                        .map(|i| i as u32),
-                    None => None,
-                })
-                .collect();
-            // For each field: the `$serializer` field index (`1..=N`) holding its element serializer when
-            // the property's declared type IS a class type parameter (`val boxed: T` on a generic class).
-            // `None` for a concrete-typed field. Lets serialize/deserialize/childSerializers route a
-            // type-param element through the ctor-supplied `this.typeSerialK` instead of a fixed serializer.
-            let class_type_params: Vec<String> = ir.classes[class_id as usize].type_params.clone();
-            let field_tps: Vec<Option<String>> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(|f| f.type_param.clone())
-                .collect();
-            let tp_field: Vec<Option<u32>> = (0..fields.len())
-                .map(|i| {
-                    field_tps.get(i).and_then(|o| o.as_ref()).and_then(|tp| {
-                        class_type_params
-                            .iter()
-                            .position(|t| t == tp)
-                            .map(|k| 1 + k as u32)
-                    })
-                })
-                .collect();
+            let type_parameter_identities = type_parameter_serializers::identities(ir, class_id);
+            let type_parameter_serializers =
+                TypeParameterSerializers::new(ser_idx as u32, &type_parameter_identities);
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
                     "getDescriptor" => {
@@ -2294,10 +2162,11 @@ impl IrPlugin for SerializationPlugin {
                             function: fid,
                             serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
-                            fields: &fields,
-                            field_defaults: &field_defaults,
-                            nested_serializers: &nested,
-                            type_parameter_serializer_fields: &tp_field,
+                            fields,
+                            elements: elements.fields(),
+                            field_defaults: &properties.constant_defaults,
+                            nested_serializers: &properties.nested_serializers,
+                            type_parameter_serializers,
                             write_self: self
                                 .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
                             write_self_name: self.write_self_name(),
@@ -2311,8 +2180,8 @@ impl IrPlugin for SerializationPlugin {
                             function: fid,
                             serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
-                            fields: &fields,
-                            type_parameter_serializer_fields: &tp_field,
+                            fields: &elements.select(fields),
+                            type_parameter_serializers,
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
@@ -2321,12 +2190,11 @@ impl IrPlugin for SerializationPlugin {
                     "childSerializers" => {
                         ChildSerializersBody {
                             function: fid,
-                            serializer_class: ser_idx as u32,
                             serialized_class: foo_id,
                             declaring_class: class_id,
-                            fields: &fields,
-                            serializer_field_types: &serializer_field_types,
-                            type_parameter_serializer_fields: &tp_field,
+                            fields: &elements.select(fields),
+                            serializer_field_types: &elements.select(&properties.serializer_types),
+                            type_parameter_serializers,
                             plan: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
@@ -2334,28 +2202,8 @@ impl IrPlugin for SerializationPlugin {
                     }
                     // A serializer without type parameters keeps the semantic interface-default
                     // delegation installed when its member was declared.
-                    "typeParametersSerializers" if !class_type_params.is_empty() => {
-                        let elements: Vec<ExprId> = (1..=class_type_params.len() as u32)
-                            .map(|fidx| {
-                                let this = ir.add_expr(IrExpr::GetValue(0));
-                                ir.add_expr(IrExpr::GetField {
-                                    receiver: this,
-                                    class: ser_idx as u32,
-                                    index: fidx,
-                                })
-                            })
-                            .collect();
-                        let arr = ir.add_expr(IrExpr::Vararg {
-                            array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
-                            spreads: vec![false; elements.len()],
-                            elements,
-                        });
-                        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![ret],
-                            value: None,
-                        });
-                        ir.functions[fid as usize].body = Some(body);
+                    "typeParametersSerializers" if !type_parameter_identities.is_empty() => {
+                        type_parameter_serializers.install_member_body(ir, fid);
                     }
                     _ => {}
                 }
@@ -2897,6 +2745,21 @@ mod tests {
         c.ctor_param_count = 1;
         let id = ir.add_class(c);
         ir.record_class_source_qualified_name(id, "demo.Box");
+        ir.insert_class_signature(
+            "demo/Box",
+            crate::ir::IrGenericSig {
+                type_params: vec![crate::ir::IrTypeParameter {
+                    name: "T".to_string(),
+                    semantic_name: "T".to_string(),
+                    bounds: Vec::new(),
+                    variance: crate::types::TypeVariance::Invariant,
+                    reified: false,
+                }],
+                params: Vec::new(),
+                ret: None,
+                supers: Vec::new(),
+            },
+        );
         let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(id, vec![type_name(SERIALIZABLE_FQ)]);

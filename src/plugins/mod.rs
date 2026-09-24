@@ -115,10 +115,49 @@ pub struct FrontendClassContext<'a> {
     pub annotation_class_arguments: &'a [(u32, TypeName)],
 }
 
+/// A source class as a frontend plugin CHECKER sees it: the resolved identities of its
+/// annotations and the declaration facts of its properties. The checker builds it while the class's
+/// syntax is live, from the same checked annotation applications lowering consumes, so a plugin
+/// never resolves a spelling and an alias names the class it aliases.
+pub struct FrontendClassCheckContext<'a> {
+    pub kind: crate::libraries::TypeKind,
+    pub annotations: &'a [TypeName],
+    /// Explicit class-literal arguments grouped by the ordinal of the annotation occurrence, as in
+    /// [`FrontendClassContext::annotation_class_arguments`].
+    pub annotation_class_arguments: &'a [(u32, TypeName)],
+    /// The class's properties in declaration order: primary-constructor properties first, then
+    /// the properties declared in its body.
+    pub properties: &'a [FrontendPropertyFacts],
+}
+
+/// One property of a [`FrontendClassCheckContext`].
+pub struct FrontendPropertyFacts {
+    /// Resolved annotation identities, in source order.
+    pub annotations: Vec<TypeName>,
+    /// Whether the property stores a value: not abstract, delegated or external, and either
+    /// accessor-less or with a getter that reads `field`.
+    pub has_backing_field: bool,
+    /// An initializer, or a primary-constructor property's default value.
+    pub has_initializer: bool,
+    pub is_lateinit: bool,
+    /// The whole declaration, modifiers and annotations included.
+    pub declaration_span: crate::diag::Span,
+}
+
+/// An error a frontend plugin checker reports against a source declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendPluginDiagnostic {
+    pub span: crate::diag::Span,
+    pub message: &'static str,
+}
+
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
 /// Contexts are built exclusively from checked common IR: plugins never resolve source spelling.
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
+    /// Annotation classifiers whose resolved declaration carries kotlinx.serialization's
+    /// `@SerialInfo` meta-annotation.
+    serial_info_annotations: std::collections::HashSet<TypeName>,
     target_type_descriptor: fn(Ty) -> Option<String>,
     /// Types this compilation does NOT declare, mapped to the serializer that already exists for
     /// them: another file's or a dependency's generated `$serializer`, or the one a class names for
@@ -140,6 +179,7 @@ impl Default for PluginContext {
     fn default() -> Self {
         Self {
             class_annotations: HashMap::new(),
+            serial_info_annotations: std::collections::HashSet::new(),
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
@@ -152,6 +192,7 @@ impl Clone for PluginContext {
     fn clone(&self) -> Self {
         Self {
             class_annotations: self.class_annotations.clone(),
+            serial_info_annotations: self.serial_info_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
@@ -161,6 +202,18 @@ impl Clone for PluginContext {
 }
 
 impl PluginContext {
+    fn with_serial_info_annotations(
+        mut self,
+        annotations: std::collections::HashSet<TypeName>,
+    ) -> Self {
+        self.serial_info_annotations = annotations;
+        self
+    }
+
+    pub(crate) fn is_serial_info_annotation(&self, annotation: TypeName) -> bool {
+        self.serial_info_annotations.contains(&annotation)
+    }
+
     pub fn with_target_type_descriptor(mut self, f: fn(Ty) -> Option<String>) -> Self {
         self.target_type_descriptor = f;
         self
@@ -422,6 +475,15 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// Report a source class the plugin rejects, as kotlinc's plugin checkers do. This runs in the
+    /// frontend, so a rejected class never reaches backend generation.
+    fn check_frontend_class(
+        &self,
+        _ctx: &FrontendClassCheckContext<'_>,
+        _diagnostics: &mut Vec<FrontendPluginDiagnostic>,
+    ) {
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -432,14 +494,19 @@ pub trait IrPlugin {
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
-/// Run native backend plugins from frontend-checked common IR. Annotation names and values have
-/// already been resolved and folded, so neither reparsed source nor spelling participates.
+/// Run this compilation's native backend plugins over frontend-checked common IR. Annotation names
+/// and values have already been resolved and folded, so neither reparsed source nor spelling
+/// participates. `plugins` is the same selection the frontend ran; with none selected this is a no-op.
 pub fn run_enabled(
     ir: &mut IrFile,
+    plugins: &registry::NativePlugins,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
     classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
+    if plugins.is_empty() {
+        return;
+    }
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     let uses_serialization = ir.exprs.iter().any(|expression| {
         matches!(
@@ -470,10 +537,44 @@ pub fn run_enabled(
         .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
         .collect();
     let ctx = ctx
+        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
         .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
-    enabled_plugins(module_name).run(ir, &ctx);
+    plugins.host(module_name).run(ir, &ctx);
+}
+
+fn serial_info_annotations(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> std::collections::HashSet<TypeName> {
+    let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+    let local_classes = ir
+        .classes
+        .iter()
+        .map(|class| (class.fq_name_id(), class))
+        .collect::<std::collections::HashMap<_, _>>();
+    ir.classes
+        .iter()
+        .flat_map(|class| class.applied_annotations.applications())
+        .map(|application| application.internal)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .filter(|&annotation| {
+            local_classes.get(&annotation).is_some_and(|class| {
+                class
+                    .applied_annotations
+                    .applications()
+                    .any(|meta| meta.internal == serial_info)
+            }) || classifiers
+                .classifier_annotations(annotation)
+                .is_some_and(|annotations| {
+                    annotations
+                        .iter()
+                        .any(|meta| meta.annotation == serial_info)
+                })
+        })
+        .collect()
 }
 
 /// Publish the value classes this file's fields refer to without declaring into common IR's one
@@ -649,15 +750,6 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
     external.into_iter()
 }
 
-pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {
-    let mut host = PluginHost::new();
-    host.register(Box::new(serialization::SerializationPlugin::new(
-        serialization::SerializationAbi::default(),
-        module_name,
-    )));
-    host
-}
-
 /// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,
 /// then all body transforms.
 #[derive(Default)]
@@ -705,6 +797,17 @@ impl PluginHost {
         for plugin in &self.plugins {
             plugin.publish_frontend_generated_classifiers(ctx, classifiers);
         }
+    }
+
+    pub fn check_frontend_class(
+        &self,
+        ctx: &FrontendClassCheckContext<'_>,
+    ) -> Vec<FrontendPluginDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for plugin in &self.plugins {
+            plugin.check_frontend_class(ctx, &mut diagnostics);
+        }
+        diagnostics
     }
 
     pub fn plan_frontend_expressions(
@@ -796,6 +899,38 @@ mod tests {
         assert_eq!(ctx.classes_with(crate::types::type_name("c/D")), vec![0]);
         assert!(ctx.has_annotation(0, crate::types::type_name("c/D")));
         assert!(!ctx.has_annotation(1, crate::types::type_name("c/D")));
+    }
+
+    #[test]
+    fn serial_info_roles_come_from_resolved_classifier_facts() {
+        let stamp = crate::types::type_name("fixtures/SchemaStamp");
+        let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+        let mut object = synthetic_class("sample/StampedObject");
+        object.applied_annotations =
+            crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
+                retention: crate::types::AnnotationRetention::Runtime,
+                annotation: crate::ir::AppliedAnnotation {
+                    internal: stamp,
+                    values: vec![],
+                },
+            }]);
+        let mut ir = IrFile::default();
+        ir.add_class(object);
+        let facts = FakeClassifierFacts {
+            annotations: std::collections::HashMap::from([(
+                stamp,
+                vec![crate::types::ResolvedAnnotation {
+                    annotation: serial_info,
+                    arguments: vec![],
+                }],
+            )]),
+            ..FakeClassifierFacts::default()
+        };
+
+        assert_eq!(
+            serial_info_annotations(&ir, &facts),
+            std::collections::HashSet::from([stamp])
+        );
     }
 
     #[test]

@@ -206,7 +206,21 @@ Extensions have **two registration layers**, mirroring kotlinc exactly:
 `PluginRegistry::resolve(Activation)` **joins them** — registry × this unit's switches → the plugins
 to run. Drop-in rules it enforces:
 
-- **Activation = a jar on `-Xplugin`** (or `-P` under the plugin id), never a krusty flag.
+- **A jar is identified by what it declares, never by its name.** kotlinc finds a plugin through the
+  registrar class listed in the jar's `META-INF/services/org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar`
+  (or the legacy `…ComponentRegistrar`, which KSP1 uses); each `RegisteredExtension` records that
+  class, and `registry::declared_registrars` reads it from the jar or directory. A jar named like the
+  serialization plugin but declaring another registrar is that other plugin. A readable jar declaring
+  no registrar holds no plugin — kotlinc loads nothing from it and compiles as without it — so it is
+  accepted; an entry that cannot be read cannot be identified and is `Unsupported`.
+- **Activation = a jar on `-Xplugin`** (or `-P` under the plugin id), never a krusty flag. Nothing
+  runs by default: kotlinc without the serialization plugin synthesizes no serializer, so krusty's
+  serialization pass runs only when the plugin is requested (`docs/SPEC.md` §7, "A compiler plugin
+  runs only when the command line requests it").
+- **kotlinc's syntax exactly.** `-Xplugin=<jar>,<jar>` is repeatable and split on `,` (a `:` is part
+  of the path); `-P plugin:<id>:<key>=<value>` and `-P=…`; the experimental
+  `-Xcompiler-plugin=<jars>[=<key>=<value>,…]`, which kotlinc refuses to mix with the legacy pair. A
+  missing jar and a malformed `-P` are kotlinc's own errors, in its words.
 - **Versions are not flags.** Serialization's ABI comes from the `kotlinx-serialization-core` jar on
   `-classpath` (`SerializationAbi::from_classpath`); KSP's from its jar coordinate (`KspToolchain`,
   tied to the targeted kotlinc version). Same inputs as kotlinc → same codegen.
@@ -220,11 +234,32 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 |---|---|---|
 | native reimpl (serialization) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
-| unknown `-Xplugin` jar (Compose, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
+| `-Xplugin` jar declaring a registrar no extension answers to (Compose, all-open, no-arg, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
+| `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |
 
 So a build that pulls in Compose fails loudly with a clear message ("remove the plugin or compile this
 module with kotlinc") instead of producing a silently-broken artifact, and a serialization build is
 told plainly that krusty substituted its own implementation for the original plugin.
+
+### Where the selection is made and carried
+
+`resolve` returns the active native extensions as one `NativePlugins` value. The analysis carries it
+(`frontend::PlatformProvider::with_native_plugins`) into signature collection (generated
+declarations), body checking (expression plans such as `serializer<T>()`, and class rules such as
+serialization's `@Transient` initializer check, `IrPlugin::check_frontend_class`) and, through
+`CheckedIrFile::native_plugins`, the backend's plugin pass; each phase builds its `PluginHost` from
+that one value, so they cannot disagree. Callers choose it explicitly:
+
+| Caller | Selection |
+|---|---|
+| `krusty` CLI (`crates/krusty-cli`) | `resolve` over the command line's `-Xplugin`/`-P`/`-Xcompiler-plugin`; prints `info:` for a substitution, fails with `error:` otherwise. It starts no codegen host, so KSP is `HostUnavailable`. |
+| Bazel persistent worker | the same CLI path; the worker refuses Bazel's plugin flags, so no plugin runs |
+| `krusty-build` | invokes the CLI and refuses `-Xplugin`, so no plugin runs |
+| language server | `PluginRegistry::every_native_extension()` — its project model reports no plugin classpath, and editor resolution of `Foo.serializer()` matters more than kotlinc's no-plugin behaviour |
+| in-process test helpers (`tests/common::with_native_plugins`) | every native extension, as a serialization build selects |
+| any other embedder | nothing unless it calls `with_native_plugins` |
 
 ## Reusing kotlinc's own plugin tests for conformance
 

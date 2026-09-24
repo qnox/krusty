@@ -188,7 +188,7 @@ pub(crate) fn remove(nodes: &mut Vec<(Insn, Placement)>, tables: &Tables) -> boo
 }
 
 /// The `nop`s kotlinc's cleanup keeps, by node position.
-fn required_nops(nodes: &[(Insn, Placement)], tables: &Tables) -> BTreeSet<usize> {
+pub(super) fn required_nops(nodes: &[(Insn, Placement)], tables: &Tables) -> BTreeSet<usize> {
     let first_at_or_after = |group: usize| {
         nodes
             .iter()

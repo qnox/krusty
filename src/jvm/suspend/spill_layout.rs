@@ -2,9 +2,81 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{is_rematerialized_null, is_suspension_point, object_ty, spill_kind};
+use super::{is_suspension_point, object_ty};
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
+
+/// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
+/// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces,
+/// and the live value across the suspension is the `Unit` singleton.
+pub(super) fn spill_field_ty(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        ty
+    }
+}
+
+/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
+/// every other spill in the order it was spilled; field layout instead groups by kind, in the
+/// first-spill order recorded by [`SpillLayout`].
+const REFERENCE_SPILL_KIND: char = 'L';
+
+/// The per-kind spill field letter (kotlinc: references `L$`, ints `I$`, longs `J$`, …).
+fn spill_kind(ty: &Ty) -> char {
+    if ty.is_reference() {
+        REFERENCE_SPILL_KIND
+    } else {
+        match *ty {
+            Ty::Long => 'J',
+            Ty::Float => 'F',
+            Ty::Double => 'D',
+            Ty::Boolean => 'Z',
+            Ty::Char => 'C',
+            Ty::Byte => 'B',
+            Ty::Short => 'S',
+            _ => 'I',
+        }
+    }
+}
+
+/// A local of the bottom type (`var x = null` — `Ty::Null`) has exactly one possible value, so
+/// kotlinc gives it no continuation field and rematerializes it in every resume arm. Keeping it out
+/// of the spill layout also preserves its verifier `null` type instead of widening it to `Object`.
+pub(super) fn is_rematerialized_null(ty: &Ty) -> bool {
+    matches!(ty.non_null(), Ty::Null)
+}
+
+/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
+pub(super) fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
+    list.iter()
+        .filter(|(_, ty)| is_rematerialized_null(ty))
+        .map(|&(local, _)| local)
+        .collect()
+}
+
+/// Annotate each scope-list entry with its representation kind and position within that kind.
+pub(super) fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
+    let mut counts = HashMap::<char, u32>::new();
+    list.iter()
+        .filter(|(_, ty)| !is_rematerialized_null(ty))
+        .map(|&(local, ty)| {
+            let kind = spill_kind(&ty);
+            let position = counts.entry(kind).or_insert(0);
+            let current = *position;
+            *position += 1;
+            (local, ty, kind, current)
+        })
+        .collect()
+}
+
+/// Positional entries in kotlinc's store order: references first, then primitives, preserving each
+/// partition's scope-list order. Resume loads traverse this sequence in reverse.
+pub(super) fn spill_order(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
+    let mut positions = kind_positions(list);
+    positions.sort_by_key(|&(_, _, kind, _)| kind != REFERENCE_SPILL_KIND);
+    positions
+}
 
 /// Suspension points in final-body evaluation order. Spill field groups follow the first store of
 /// each representation kind, so folding their layout through a `HashMap` would make class layout
@@ -137,6 +209,33 @@ mod tests {
         assert_eq!(
             suspension_points_in_order(&ir, body, &HashSet::new()),
             [first, second],
+        );
+    }
+
+    #[test]
+    fn references_lead_stores_without_changing_field_group_order() {
+        let values = [
+            (0, Ty::Int),
+            (1, Ty::obj("test/SpillReference")),
+            (2, Ty::Long),
+        ];
+        assert_eq!(
+            spill_order(&values)
+                .into_iter()
+                .map(|(local, _, _, _)| local)
+                .collect::<Vec<_>>(),
+            [1, 0, 2]
+        );
+
+        let mut layout = SpillLayout::default();
+        layout.add_list(&values);
+        assert_eq!(
+            layout
+                .fields()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["I$0", "L$0", "J$0"]
         );
     }
 }

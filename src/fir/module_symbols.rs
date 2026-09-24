@@ -209,8 +209,11 @@ impl<'a> StreamedModuleSymbols<'a> {
             return Some(classifier.clone());
         }
         let owner = self.index.classifier_declaration(internal)?;
-        let classifier_header = self.index.classifier_header(owner)?;
         let declaration_header = self.index.declaration_header(owner)?;
+        // A declaration identity alone is sufficient for lexical binding, but hierarchy and member
+        // projection require the complete semantic classifier header. Deferred body-local shapes
+        // stay on the checker-owned overlay until that contract is available.
+        let classifier_header = self.index.classifier_header(owner)?;
         let anchor = self.index.declaration_anchor(owner)?;
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
