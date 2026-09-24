@@ -984,6 +984,8 @@ mod lnt_parity_e2e;
 mod local_capture_coverage_e2e;
 #[path = "local_class_e2e.rs"]
 mod local_class_e2e;
+#[path = "local_class_nullability_e2e.rs"]
+mod local_class_nullability_e2e;
 #[path = "local_class_scope_e2e.rs"]
 mod local_class_scope_e2e;
 #[path = "local_class_scoping_e2e.rs"]

@@ -1439,6 +1439,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
   (krusty has no visibility model beyond `private`, and skips extension functions and constructors for
   now — minor byte-parity gaps, not correctness ones.)
+- **No nullability annotations in a local class.** kotlinc writes `@NotNull`/`@Nullable` on a
+  reference-typed method return, parameter and field so a caller outside Kotlin can read the contract,
+  and skips every declaration of a *local* class (`IrClass.isLocal`): a class declared in executable
+  code, an anonymous object, a lambda's or callable reference's class, and any class nested in one,
+  however deep. Measured against kotlinc 2.4.10: a local class, its `inner` class, an anonymous
+  object and a data class declared inside a lambda carry none, and never intern the two annotation
+  types; a named suspend function's continuation keeps them. The parameter guards are unaffected.
+  krusty decides it once per classifier (`is_local_classifier`) and hands the class writer the policy,
+  which every attaching and pool-seeding path consults. The compiler's own constructor prefix (an
+  inner class's outer instance, a local class's captured values) is never annotated in any class:
+  its fields carry no annotation, and its parameters take no slot in the constructor's parameter
+  annotation table, so an inner class's first declared parameter is slot 0, as javac writes it.
+  Test: `tests/local_class_nullability_e2e.rs`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)

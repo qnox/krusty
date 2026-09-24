@@ -664,6 +664,11 @@ impl LateField {
 /// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
 /// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
 /// exists. SOURCE-retained applications never reach the IR.
+/// kotlinc's synthesized non-null annotation type.
+const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
+/// kotlinc's synthesized nullable annotation type.
+const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
+
 pub(crate) fn split_declaration_annotations(
     annotations: &crate::ir::DeclarationAnnotations,
 ) -> (
@@ -735,6 +740,9 @@ pub struct ClassWriter {
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
     /// `-Xno-param-assertions`.
     param_assertions: bool,
+    /// Write kotlinc's synthesized `@NotNull`/`@Nullable` on this class's declarations. Cleared for a
+    /// local class (see [`Self::set_nullability_annotations`]).
+    nullability_annotations: bool,
     access: u16,
     this_class: u16,
     super_class: u16,
@@ -867,6 +875,7 @@ impl ClassWriter {
             cp,
             mentioned_names: std::cell::RefCell::new(None),
             param_assertions: true,
+            nullability_annotations: true,
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
             this_class,
             super_class,
@@ -981,6 +990,21 @@ impl ClassWriter {
     /// index away from kotlinc's.
     pub fn set_param_assertions(&mut self, enabled: bool) {
         self.param_assertions = enabled;
+    }
+
+    /// Whether this class's declarations carry the synthesized `@NotNull`/`@Nullable` annotations.
+    /// kotlinc's annotation writer skips them on every declaration of a local class (a class declared
+    /// in executable code, an anonymous object, a lambda's class, and anything nested in one): no code
+    /// outside the enclosing body can call it, so there is no caller for the contract to inform. The
+    /// class then never interns the two annotation types, so the policy is the writer's: every path
+    /// that attaches or seeds one consults it. The `checkNotNullParameter` guards are unaffected.
+    pub fn set_nullability_annotations(&mut self, enabled: bool) {
+        self.nullability_annotations = enabled;
+    }
+
+    /// `ty` unless it is a synthesized nullability annotation this class does not write.
+    fn written_annotation<'a>(&self, ty: &'a str) -> Option<&'a str> {
+        (self.nullability_annotations || (ty != NOT_NULL && ty != NULLABLE)).then_some(ty)
     }
 
     /// Whether one registered nested-class declaration belongs in this writer's final
@@ -1320,7 +1344,8 @@ impl ClassWriter {
                 .iter()
                 .map(|annotation| self.encode_annotation(annotation))
                 .collect();
-            invisible_anns.extend(lf.ann.as_ref().map(|a| {
+            let nullability = lf.ann.as_deref().and_then(|a| self.written_annotation(a));
+            invisible_anns.extend(nullability.map(|a| {
                 let ti = self.cp.utf8(a);
                 vec![(ti >> 8) as u8, ti as u8, 0, 0]
             }));
@@ -1831,7 +1856,11 @@ impl ClassWriter {
             for ty in &f.invisible_ann_types {
                 self.cp.utf8(ty);
             }
-            let kind = f.ann_kind;
+            let kind = if self.nullability_annotations {
+                f.ann_kind
+            } else {
+                0
+            };
             if kind == 1 && !seeded_notnull {
                 self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
                 seeded_notnull = true;
@@ -1996,8 +2025,8 @@ impl ClassWriter {
                 self.cp.utf8(s);
             }
             // A private `copy` carries no `@NotNull` (kotlinc drops nullability annotations on it).
-            if !info.copy_is_private {
-                self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+            if !info.copy_is_private && self.nullability_annotations {
+                self.cp.utf8(NOT_NULL);
             }
             self.cp.methodref(this_internal, "<init>", ctor_desc);
             // copy$default — its descriptor, then the Methodref back to `copy`.
@@ -2172,7 +2201,9 @@ impl ClassWriter {
         // `Intrinsics.areEqual`; the other primitives compare directly (`if_icmp*`/`lcmp`, no ref).
         self.cp.utf8("equals");
         self.cp.utf8("(Ljava/lang/Object;)Z");
-        self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+        if self.nullability_annotations {
+            self.cp.utf8(NULLABLE);
+        }
         for (_, desc) in fields {
             match desc.as_str() {
                 "D" => {
@@ -2424,7 +2455,9 @@ impl ClassWriter {
         }
         let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {
-            self.cp.utf8(a);
+            if let Some(a) = self.written_annotation(a) {
+                self.cp.utf8(a);
+            }
         }
     }
 
@@ -2566,6 +2599,9 @@ impl ClassWriter {
         ret: Option<&str>,
         params: &[Option<&str>],
     ) {
+        if !self.nullability_annotations {
+            return;
+        }
         // Resolve WITHOUT interning first, like `set_method_debug`: describing a method that was never
         // emitted (the accessors of a `private` property, which are read straight from the field) must
         // not perturb the constant pool — the name and descriptor would be orphan entries.
@@ -2643,6 +2679,9 @@ impl ClassWriter {
     /// Attach `@NotNull` / `@Nullable` (a `RuntimeInvisibleAnnotations`) to a previously-added field by
     /// name — kotlinc annotates the backing field of a non-null reference property. No-op if not found.
     pub fn set_field_nullability(&mut self, name: &str, ann_type: &str) {
+        if !self.nullability_annotations {
+            return;
+        }
         let n = self.cp.utf8(name);
         let ti = self.cp.utf8(ann_type);
         let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
