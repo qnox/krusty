@@ -72,6 +72,9 @@ pub(crate) struct Body<'a> {
     pub marks: &'a [bool],
     /// Named locals: `(start index, end index, slot)`, end exclusive.
     pub named: &'a [(usize, usize, u16)],
+    /// `true` for each `checkcast` kotlinc's redundant-cast pass removes. That pass runs before this
+    /// one, so selected instructions are gone before any rule here looks.
+    pub redundant_casts: &'a [bool],
     /// The label each branch jumps to, by original index, where the builder recorded one. Several
     /// labels can stand at one index; kotlinc's rules tell them apart.
     pub branch_labels: &'a [Option<u32>],
@@ -473,19 +476,26 @@ impl Working<'_> {
             .position(|(_, placement)| *placement == Placement::Original(original))
     }
 
-    /// Whether a label kotlinc keeps stands in front of node `at`: the first node of an original
-    /// group whose index carries an arrival or a mark.
-    fn labelled(&self, at: usize) -> bool {
+    /// Original instruction groups whose labels now stand in front of node `at`. Earlier passes can
+    /// remove a whole group, so this includes every skipped group since the preceding live node.
+    fn boundary_groups(&self, at: usize) -> std::ops::RangeInclusive<usize> {
         let group = self.nodes[at].1.group();
-        let first = at == 0 || self.nodes[at - 1].1.group() != group;
-        first && (self.body.arrivals[group] || self.body.marks[group])
+        let first = at.checked_sub(1).map_or(0, |previous| {
+            self.nodes[previous].1.group().saturating_add(1)
+        });
+        first..=group
+    }
+
+    /// Whether a label kotlinc keeps stands in front of node `at`.
+    fn labelled(&self, at: usize) -> bool {
+        self.boundary_groups(at)
+            .any(|group| self.body.arrivals[group] || self.body.marks[group])
     }
 
     /// Whether a label with non-trivial predecessors stands in front of node `at`.
     fn arrived(&self, at: usize) -> bool {
-        let group = self.nodes[at].1.group();
-        let first = at == 0 || self.nodes[at - 1].1.group() != group;
-        first && self.body.arrivals[group]
+        self.boundary_groups(at)
+            .any(|group| self.body.arrivals[group])
     }
 
     /// `nodes[at..at + ops.len()]` match `ops` with nothing kotlinc keeps between them.
@@ -816,6 +826,22 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             .collect(),
     };
     let mut eliminated = Vec::new();
+    let casts_removed = body.redundant_casts.contains(&true);
+    working.nodes.retain(|(_, placement)| {
+        !matches!(placement, Placement::Original(index)
+            if body.redundant_casts.get(*index).copied().unwrap_or(false))
+    });
+    let earlier_pass_only = {
+        let nodes = working.nodes.clone();
+        move || {
+            casts_removed.then(|| Rewrite {
+                nodes,
+                eliminated: Vec::new(),
+                stack_at_target: Vec::new(),
+                late_labels: BTreeSet::new(),
+            })
+        }
+    };
     // `xload; pop` — the value loaded only to be discarded.
     let mut trivially_removed = BTreeSet::new();
     let mut at = 0;
@@ -856,8 +882,9 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             at += 1;
             continue;
         }
-        let group = working.nodes[at].1.group();
-        let protected_start = body.handlers.iter().any(|handler| handler.start == group);
+        let protected_start = working
+            .boundary_groups(at)
+            .any(|group| body.handlers.iter().any(|handler| handler.start == group));
         let meaningful_before = at > 0 && !working.labelled(at);
         let meaningful_after = at + 1 < working.nodes.len() && !working.labelled(at + 1);
         if !protected_start && (meaningful_before || meaningful_after) {
@@ -870,13 +897,15 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
     let mut stack_at_target = Vec::new();
     let mut late_labels = BTreeSet::new();
     let mut removed = trivially_removed;
-    removed.extend(fold_null_checks(
-        &mut working,
-        &mut stack_at_target,
-        &mut late_labels,
-    )?);
-    let temporaries = temporaries(body, &removed)?;
-    let mut changed = removed_nop || !removed.is_empty();
+    let Some(folded) = fold_null_checks(&mut working, &mut stack_at_target, &mut late_labels)
+    else {
+        return earlier_pass_only();
+    };
+    removed.extend(folded);
+    let Some(temporaries) = temporaries(body, &removed) else {
+        return earlier_pass_only();
+    };
+    let mut changed = casts_removed || removed_nop || !removed.is_empty();
     for (store, loads) in temporaries {
         let Some(store_at) = working.position(store) else {
             continue;
@@ -1019,12 +1048,14 @@ mod tests {
         }
         let branch_labels = vec![None; insns.len()];
         let labels_at = vec![Vec::new(); insns.len() + 1];
+        let redundant_casts = vec![false; insns.len()];
         let body = Body {
             insns,
             handlers,
             arrivals: &arrival,
             marks: &mark,
             named,
+            redundant_casts: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| field == 1,
@@ -1068,10 +1099,127 @@ mod tests {
         rewrite_with(insns, arrivals, marks, &[], &[])
     }
 
+    fn rewrite_after_casts(
+        insns: &[Insn],
+        casts: &[usize],
+        arrivals: &[usize],
+        marks: &[usize],
+        handlers: &[Handler],
+    ) -> Option<Vec<Insn>> {
+        let mut arrival = vec![false; insns.len() + 1];
+        for &index in arrivals {
+            arrival[index] = true;
+        }
+        let mut mark = vec![false; insns.len() + 1];
+        for &index in marks {
+            mark[index] = true;
+        }
+        let mut redundant_casts = vec![false; insns.len()];
+        for &index in casts {
+            redundant_casts[index] = true;
+        }
+        let branch_labels = vec![None; insns.len()];
+        let labels_at = vec![Vec::new(); insns.len() + 1];
+        let body = Body {
+            insns,
+            handlers,
+            arrivals: &arrival,
+            marks: &mark,
+            named: &[],
+            redundant_casts: &redundant_casts,
+            branch_labels: &branch_labels,
+            labels_at: &labels_at,
+            one_word_static: &|_| false,
+            string_constant: &|_| false,
+            expression_null_check: &|_| false,
+        };
+        eliminate(&body).map(|rewrite| rewrite.nodes.into_iter().map(|(insn, _)| insn).collect())
+    }
+
     const ALOAD_0: u8 = 0x2a;
     const ALOAD_1: u8 = 0x2b;
     const ASTORE_1: u8 = 0x4c;
     const ARETURN: u8 = 0xb0;
+
+    #[test]
+    fn a_cast_removal_survives_when_the_temporary_pass_declines() {
+        let cast = with(0xc0, &[0, 1]);
+        let insns = [
+            op(0x01), // aconst_null
+            cast,
+            op(POP),
+            op(ALOAD_0),
+            branch(IFNULL, 6),
+            op(0xb1),
+            op(0xb1),
+        ];
+        assert_eq!(
+            rewrite_after_casts(&insns, &[1], &[6], &[], &[]),
+            Some(vec![
+                op(0x01),
+                op(POP),
+                op(ALOAD_0),
+                branch(IFNULL, 6),
+                op(0xb1),
+                op(0xb1),
+            ])
+        );
+    }
+
+    fn safe_call_with_cast_boundary(arrivals: &[usize], marks: &[usize]) -> Vec<Insn> {
+        let call = with(0xb6, &[0, 3]);
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            with(0xc0, &[0, 4]),
+            branch(IFNULL, 8),
+            op(ALOAD_1),
+            call.clone(),
+            branch(GOTO, 8),
+            op(0xb1),
+        ];
+        let rewritten = rewrite_after_casts(&insns, &[3], arrivals, marks, &[]).expect("cast");
+        assert_eq!(
+            rewritten,
+            vec![
+                op(ALOAD_0),
+                op(ASTORE_1),
+                op(ALOAD_1),
+                branch(IFNULL, 8),
+                op(ALOAD_1),
+                call,
+                branch(GOTO, 8),
+                op(0xb1),
+            ]
+        );
+        rewritten
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_debug_boundary_for_the_next_pass() {
+        safe_call_with_cast_boundary(&[8], &[3]);
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_branch_boundary_for_the_next_pass() {
+        safe_call_with_cast_boundary(&[3, 8], &[]);
+    }
+
+    #[test]
+    fn a_removed_cast_keeps_a_handler_boundary_for_the_next_pass() {
+        let cast = with(0xc0, &[0, 1]);
+        let insns = [op(0x01), cast, op(NOP), op(POP), op(0xb1)];
+        let handler = Handler {
+            start: 1,
+            end: 4,
+            handler: 4,
+        };
+        assert_eq!(
+            rewrite_after_casts(&insns, &[1], &[1, 4], &[], &[handler]),
+            Some(vec![op(0x01), op(NOP), op(POP), op(0xb1)])
+        );
+    }
 
     #[test]
     fn a_store_followed_by_its_only_load_leaves_the_value_on_the_stack() {
@@ -1502,12 +1650,14 @@ mod tests {
         branch_labels[6] = Some(0);
         let mut labels_at = vec![Vec::new(); insns.len() + 1];
         labels_at[7] = vec![1, 0];
+        let redundant_casts = vec![false; insns.len()];
         let body = Body {
             insns: &insns,
             handlers: &[],
             arrivals: &arrivals,
             marks: &marks,
             named: &[],
+            redundant_casts: &redundant_casts,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|_| false,
