@@ -307,13 +307,13 @@ mod tests {
         for path in rust_files_under("src/jvm") {
             let text = fs::read_to_string(&path).expect("read JVM parameter consumer");
             let mut forbidden = vec![
-                "format!(\"p{",
                 "unwrap_or_else(|| format!(\"p",
                 "parameter_names::legacy",
                 ".param_names(",
             ];
+            // The typed projection owns the JVM's positional spellings.
             if !path.ends_with("parameter_names.rs") {
-                forbidden.extend(["\"p1\"", "\"p2\""]);
+                forbidden.extend(["format!(\"p{", "\"p1\"", "\"p2\""]);
             }
             for forbidden in forbidden {
                 assert!(

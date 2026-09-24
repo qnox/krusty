@@ -447,6 +447,11 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
                     }
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. })
+                if *variable >= threshold =>
+            {
+                *variable += by;
+            }
             _ => {}
         }
         // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but

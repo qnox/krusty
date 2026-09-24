@@ -33,8 +33,17 @@ pub(super) fn local_variable(
                 Some(value_class_equals_operand(ordinal).to_string())
             }
             IrGeneratedParameterRole::AccessorValue { ordinal } => Some(format!("value{ordinal}")),
+            IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
+                Some(format!("p{ordinal}"))
+            }
         },
     }
+}
+
+/// A value parameter of the generic `invoke` bridge kotlinc writes for a callable-reference class.
+/// It numbers them from one, unlike the specialized `invoke` it bridges to.
+pub(super) fn reference_invoke_bridge_parameter(ordinal: u16) -> String {
+    format!("p{}", ordinal + 1)
 }
 
 pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
