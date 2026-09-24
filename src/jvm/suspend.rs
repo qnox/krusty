@@ -3174,7 +3174,7 @@ fn build_state_machine(
         // delivering a failed resume: a catch state executes in this invocation and must observe the
         // captured locals rather than the null/zero placeholders passed by `invokeSuspend`.
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, cont_for_f, fld);
@@ -3578,7 +3578,7 @@ fn build_lambda_state_machine(
         let mut ss = Vec::new();
         // A RESUME arm restores exactly ITS suspension's scope list (kotlinc: per-arm restores).
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let this_f = k(ir, IrExpr::GetValue(0));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, this_f, fld);
@@ -3832,7 +3832,7 @@ impl Flat<'_> {
     /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
     /// in-scope vars at per-kind positions; different states reuse the same fields).
     fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)], dead: &HashSet<u32>) {
-        for (l, ty, kind, pos) in kind_positions(list) {
+        for (l, ty, kind, pos) in spill_order(list) {
             let f = 2 + self.layout.slot(kind, pos);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
