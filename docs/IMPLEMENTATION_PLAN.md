@@ -4384,9 +4384,17 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   under the receiver and expected result (`s.let(1)` expects `(String) -> Int`).
 - ⬜ With no expected result, kotlinc also reports CANNOT_INFER for the unfixed type parameter and
   renders it `uninferred R (of fun <T, R> T.let)`; krusty renders the bound.
-- ✅ kotlinc 2.4.20 joins a rejected member with the rejected same-name extensions into one
-  NONE_APPLICABLE at the callee name, for plain and safe calls; earlier releases keep the member's
-  own error (`unselectable_but_existing_members_are_not_called_unresolved`).
+- ✅ kotlinc 2.4.20 chooses among a rejected member and the rejected same-name extensions by
+  specificity, then non-generic over generic: one survivor reports its own errors, tied survivors
+  one NONE_APPLICABLE at the callee name, for plain and safe calls; earlier releases keep the
+  member's own error (`unselectable_but_existing_members_are_not_called_unresolved`,
+  `member_extension_function_e2e`).
+- ⬜ kotlinc types a call it resolved to one rejected candidate with that candidate's return type,
+  so `fun h(): Int = K().e()` against `fun K.e(x: Int): String` also reports RETURN_TYPE_MISMATCH;
+  krusty types the call as an error and reports only the missing argument (every version).
+- ⬜ A rejected member whose argument TYPES mismatch (not its mapping) is not weighed against the
+  extensions: `catalog.loadAll(true)` against `loadAll(String)` and `Catalog.loadAll(Int)` reports
+  the extension's mismatch; kotlinc reports the member's (2.4.10) or both together (2.4.20).
 - ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
   names parameter `p0` (kotlinc: `other`), and on `Int` it sees two Java `equals` overloads and
   reports NONE_APPLICABLE where kotlinc reports NO_VALUE_FOR_PARAMETER. Pinned as a divergence

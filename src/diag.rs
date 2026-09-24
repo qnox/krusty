@@ -242,6 +242,14 @@ impl DiagSink {
     /// been merged. The stable sort preserves production order for diagnostics at the same range.
     /// Actualization diagnostics keep their production order after all others, as the reference
     /// compiler reports them from a later phase.
+    /// Order the diagnostics from `start` by source position, so one call's diagnostics read as
+    /// kotlinc lists them whichever check found them first.
+    pub(crate) fn sort_source_order_from(&mut self, start: usize) {
+        let start = start.min(self.diags.len());
+        self.diags[start..]
+            .sort_by_key(|diagnostic| (diagnostic.file, diagnostic.span.lo, diagnostic.span.hi));
+    }
+
     pub(crate) fn sort_source_order(&mut self) {
         self.diags.sort_by_key(|diagnostic| match diagnostic.kind {
             DiagnosticKind::Actualization => (1, 0, 0, 0),

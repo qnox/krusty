@@ -1,0 +1,15 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[arity_inapplicable_member_still_errors_when_source_extension_inapplicable]
+2.4.0..2.4.10:
+  Main.kt:8:60: no value passed for parameter 'type'.
+2.4.20..:
+  Main.kt:8:46: no value passed for parameter 'extra'.
+  Main.kt:8:53: no type arguments expected for 'fun Catalog.loadAll(extra: Int): List<String>'.
+
+[equally_specific_rejected_member_and_extension_are_reported_by_version]
+2.4.0..2.4.10:
+  Main.kt:6:53: no value passed for parameter 'type'.
+2.4.20..:
+  Main.kt:6:46: none of the following candidates is applicable:

@@ -20827,25 +20827,35 @@ impl<'a> Checker<'a> {
                         &receiver_callables,
                     ),
                 };
-                // A member that exists but rejected the arguments owns the failure: kotlinc reports
-                // it below, alone or joined with these extensions, never an extension's own
-                // rejection in its place.
-                let extension_ret =
-                    if extension_rung.selection.is_none() && member_mapping_failure.is_some() {
-                        None
-                    } else {
-                        self.record_extension_selection(
-                            scope,
-                            call_args,
-                            &name,
-                            CallConstraints {
-                                type_args: &call_targs,
-                                receiver: rt,
-                                expected,
-                            },
-                            extension_rung,
+                // A member that exists but rejected the arguments owns the failure, reported below
+                // alone or joined with these extensions, unless the target release hands it to a
+                // more specific extension (`rejected_call_owner`).
+                let member_owns_failure =
+                    extension_rung.selection.is_none() && member_mapping_failure.is_some() && {
+                        let candidates = self
+                            .stable_receiver_callables(rt, &name)
+                            .functions()
+                            .to_vec();
+                        !matches!(
+                            self.rejected_call_owner(call, args, &candidates),
+                            RejectedCallOwner::Extension(_)
                         )
                     };
+                let extension_ret = if member_owns_failure {
+                    None
+                } else {
+                    self.record_extension_selection(
+                        scope,
+                        call_args,
+                        &name,
+                        CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        },
+                        extension_rung,
+                    )
+                };
                 if let Some(ret) = extension_ret {
                     return ret;
                 }
@@ -20987,7 +20997,7 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let inapplicable_candidates = self
+                let mut inapplicable_candidates = self
                     .stable_receiver_callables(rt, &name)
                     .functions()
                     .to_vec();
@@ -21006,52 +21016,70 @@ impl<'a> Checker<'a> {
                 {
                     return Ty::Error;
                 }
-                if self.report_member_and_extensions_inapplicable(
+                match self.rejected_call_owner(call, args, &inapplicable_candidates) {
+                    RejectedCallOwner::Joined(contenders) => {
+                        self.report_joined_rejection(call, &name, &contenders);
+                        return Ty::Error;
+                    }
+                    // The more specific extension owns the failure; the member's is not reported.
+                    RejectedCallOwner::Extension(extension) => {
+                        inapplicable_candidates = vec![*extension];
+                        member_mapping_failure = None;
+                    }
+                    RejectedCallOwner::Member => {}
+                }
+                // A lone candidate that rejects the explicit type arguments reports that beside its
+                // argument errors, as kotlinc does for the one candidate it resolved to; the call's
+                // diagnostics then read in source order.
+                let call_diagnostics = self.diags.diags.len();
+                self.report_callable_type_argument_arity(
                     call,
                     &name,
+                    call_targs.len(),
                     &inapplicable_candidates,
-                ) {
-                    return Ty::Error;
-                }
-                if let Some(failure) = member_mapping_failure {
-                    self.report_retained_member_mapping_failure(call, &name, args, *failure);
-                    return Ty::Error;
-                }
-                crate::trace_compiler!(
-                    "unresolved_call",
-                    "name={name} receiver={rt:?} call={call:?} args={arg_tys:?} candidates={}",
-                    inapplicable_candidates.len(),
                 );
-                if self.report_single_mapped_candidate_type_errors(
-                    scope,
-                    call,
-                    args,
-                    &arg_tys,
-                    CallConstraints {
-                        type_args: &call_targs,
-                        receiver: rt,
-                        expected,
-                    },
-                    &inapplicable_candidates,
-                ) {
-                    return Ty::Error;
+                'report: {
+                    if let Some(failure) = member_mapping_failure {
+                        self.report_retained_member_mapping_failure(call, &name, args, *failure);
+                        break 'report;
+                    }
+                    crate::trace_compiler!(
+                        "unresolved_call",
+                        "name={name} receiver={rt:?} call={call:?} args={arg_tys:?} candidates={}",
+                        inapplicable_candidates.len(),
+                    );
+                    if self.report_single_mapped_candidate_type_errors(
+                        scope,
+                        call,
+                        args,
+                        &arg_tys,
+                        CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        },
+                        &inapplicable_candidates,
+                    ) || self.report_inapplicable_member_mapping_error(
+                        call,
+                        &name,
+                        args,
+                        &inapplicable_candidates,
+                    ) {
+                        break 'report;
+                    }
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        if inapplicable_candidates.is_empty() {
+                            self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt)
+                        } else {
+                            self.inapplicable_member_candidates_message(
+                                &name,
+                                &inapplicable_candidates,
+                            )
+                        },
+                    );
                 }
-                if self.report_inapplicable_member_mapping_error(
-                    call,
-                    &name,
-                    args,
-                    &inapplicable_candidates,
-                ) {
-                    return Ty::Error;
-                }
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    if inapplicable_candidates.is_empty() {
-                        self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt)
-                    } else {
-                        self.inapplicable_member_candidates_message(&name, &inapplicable_candidates)
-                    },
-                );
+                self.diags.sort_source_order_from(call_diagnostics);
                 Ty::Error
             }
             // free function call: name(args)
@@ -40942,6 +40970,45 @@ struct ExtensionRungSelection {
 /// expected to have. When no candidate is applicable, kotlinc still reports a mismatched argument
 /// against the parameter type under those constraints (`s.let(1)` expects `(String) -> Int` where
 /// `Int` is expected), so the diagnostic seeds its bindings from them.
+/// The rejected candidate that owns a receiver call's failure; see `rejected_call_owner`.
+enum RejectedCallOwner {
+    Member,
+    Extension(Box<crate::libraries::FunctionInfo>),
+    Joined(Vec<crate::libraries::FunctionInfo>),
+}
+
+/// The value-parameter types a rejected candidate's arguments map to, in argument order. A rejected
+/// call has no complete mapping, so an argument that names no parameter, or overflows a candidate
+/// without a vararg, contributes nothing, as in kotlinc's flat signature of a partial mapping.
+fn rejected_candidate_argument_shape(
+    candidate: &crate::libraries::FunctionInfo,
+    argument_count: usize,
+    argument_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+) -> Vec<Ty> {
+    let context_count = candidate
+        .context_count
+        .min(candidate.semantic_params().len());
+    let signature = candidate.call_sig.suffix(context_count);
+    let parameters = candidate.value_params();
+    (0..argument_count)
+        .filter_map(|argument| {
+            let parameter = match argument_names
+                .and_then(|names| names.get(argument))
+                .and_then(Option::as_deref)
+            {
+                Some(name) => signature.param_names.iter().position(|param| param == name),
+                None if trailing_lambda && argument + 1 == argument_count => {
+                    parameters.len().checked_sub(1)
+                }
+                None if argument < parameters.len() => Some(argument),
+                None => signature.vararg_index,
+            };
+            parameter.and_then(|parameter| parameters.get(parameter).copied())
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct CallConstraints<'a> {
     type_args: &'a [Ty],
@@ -42964,53 +43031,144 @@ impl<'a> Checker<'a> {
         message
     }
 
+    /// Report a receiver call whose member exists but rejected the arguments, after every extension
+    /// rung also failed. The member owns the failure unless the target release lets a more specific
+    /// extension take it over, or reports the tied candidates together.
+    fn report_owned_member_failure(
+        &mut self,
+        call_args: CallArgs<'_>,
+        name: &str,
+        receiver: Ty,
+        failure: MemberMappingFailure,
+    ) -> Option<Ty> {
+        let candidates = self
+            .stable_receiver_callables(receiver, name)
+            .functions()
+            .to_vec();
+        match self.rejected_call_owner(call_args.call, call_args.args, &candidates) {
+            RejectedCallOwner::Extension(_) => return None,
+            RejectedCallOwner::Member => {
+                self.report_retained_member_mapping_failure(
+                    call_args.call,
+                    name,
+                    call_args.args,
+                    failure,
+                );
+            }
+            RejectedCallOwner::Joined(contenders) => {
+                self.report_joined_rejection(call_args.call, name, &contenders);
+            }
+        }
+        Some(Ty::Error)
+    }
+
+    /// Which of a receiver call's rejected candidates own its failure.
+    ///
+    /// kotlinc 2.4.20 keeps climbing the tower past a member that rejected the call and, when every
+    /// same-name extension is rejected too, chooses among all of them as it would among applicable
+    /// overloads: the most specific by the parameters the arguments map to, then a non-generic
+    /// declaration over a generic one. A single survivor reports its own errors; tied survivors are
+    /// reported together (NONE_APPLICABLE). Earlier releases always let the member own the failure
+    /// ([`crate::diagnostic_wording::inapplicable_member_joins_extensions`]).
+    fn rejected_call_owner(
+        &self,
+        call: ExprId,
+        args: &[ExprId],
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> RejectedCallOwner {
+        let contested = crate::diagnostic_wording::inapplicable_member_joins_extensions()
+            && candidates.iter().any(|candidate| !candidate.is_extension())
+            && candidates.iter().any(|candidate| candidate.is_extension());
+        if !contested {
+            return RejectedCallOwner::Member;
+        }
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut contenders = candidates
+            .iter()
+            .map(|candidate| {
+                let shape = rejected_candidate_argument_shape(
+                    candidate,
+                    args.len(),
+                    argument_names,
+                    trailing_lambda,
+                );
+                let generic = candidate
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|signature| !signature.formals.is_empty());
+                (candidate, shape, generic)
+            })
+            .collect::<Vec<_>>();
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            &mut contenders,
+            |(candidate, shape, generic)| {
+                let receiver = candidate
+                    .is_extension()
+                    .then(|| candidate.semantic_receiver())
+                    .flatten();
+                (receiver, shape.as_slice(), *generic)
+            },
+        );
+        crate::trace_compiler!(
+            "resolve",
+            "rejected call owner call={call:?} candidates={} contenders={:?}",
+            candidates.len(),
+            contenders
+                .iter()
+                .map(|(candidate, shape, generic)| (candidate.is_extension(), shape, generic))
+                .collect::<Vec<_>>(),
+        );
+        match contenders.as_slice() {
+            [(only, _, _)] if only.is_extension() => {
+                RejectedCallOwner::Extension(Box::new((*only).clone()))
+            }
+            [_] => RejectedCallOwner::Member,
+            _ => RejectedCallOwner::Joined(
+                contenders
+                    .into_iter()
+                    .map(|(candidate, _, _)| candidate.clone())
+                    .collect(),
+            ),
+        }
+    }
+
+    /// NONE_APPLICABLE over tied rejected candidates, when [`Self::rejected_call_owner`] joins them.
+    fn report_member_and_extensions_inapplicable(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> bool {
+        match self.rejected_call_owner(call, args, candidates) {
+            RejectedCallOwner::Joined(contenders) => {
+                self.report_joined_rejection(call, name, &contenders);
+                true
+            }
+            RejectedCallOwner::Member | RejectedCallOwner::Extension(_) => false,
+        }
+    }
+
+    fn report_joined_rejection(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        contenders: &[crate::libraries::FunctionInfo],
+    ) {
+        self.diags.error(
+            self.call_callee_name_span(call),
+            self.inapplicable_member_candidates_message(name, contenders),
+        );
+    }
+
     /// Report an argument-MAPPING failure shared by every declaration named at a member call.
     ///
     /// Name lookup has already succeeded when this runs. Keeping this pass separate from overload
     /// selection prevents a wrong call shape from degrading into "unresolved reference": if every
     /// candidate rejects the same mapping, report that precise kotlinc diagnostic; otherwise the
     /// ordinary inapplicable-overload family remains the honest result.
-    /// Report a receiver call whose member exists but rejected the arguments, after every extension
-    /// rung also failed: the member owns the failure, alone or joined with the extensions.
-    fn report_owned_member_failure(
-        &mut self,
-        call: ExprId,
-        name: &str,
-        args: &[ExprId],
-        receiver: Ty,
-        failure: MemberMappingFailure,
-    ) -> Ty {
-        let candidates = self
-            .stable_receiver_callables(receiver, name)
-            .functions()
-            .to_vec();
-        if !self.report_member_and_extensions_inapplicable(call, name, &candidates) {
-            self.report_retained_member_mapping_failure(call, name, args, failure);
-        }
-        Ty::Error
-    }
-
-    /// NONE_APPLICABLE for a receiver call whose member and same-name extensions were all rejected,
-    /// when the target release reports them together
-    /// ([`crate::diagnostic_wording::inapplicable_member_joins_extensions`]).
-    fn report_member_and_extensions_inapplicable(
-        &mut self,
-        call: ExprId,
-        name: &str,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> bool {
-        let joined = crate::diagnostic_wording::inapplicable_member_joins_extensions()
-            && candidates.iter().any(|candidate| !candidate.is_extension())
-            && candidates.iter().any(|candidate| candidate.is_extension());
-        if joined {
-            self.diags.error(
-                self.call_callee_name_span(call),
-                self.inapplicable_member_candidates_message(name, candidates),
-            );
-        }
-        joined
-    }
-
     fn report_inapplicable_member_mapping_error(
         &mut self,
         call: ExprId,
@@ -68805,27 +68963,32 @@ impl<'a> Checker<'a> {
                                         &name,
                                     )
                                 })
-                                .or_else(|| match member_mapping_failure {
-                                    Some(failure) if extension.selection.is_none() => {
-                                        Some(self.report_owned_member_failure(
-                                            e, &name, a, recv, *failure,
-                                        ))
-                                    }
-                                    _ => self.record_extension_selection(
-                                        scope,
-                                        CallArgs {
-                                            call: e,
-                                            args: a,
-                                            arg_tys,
-                                        },
-                                        &name,
-                                        CallConstraints {
-                                            type_args: &type_args,
-                                            receiver: recv,
-                                            expected,
-                                        },
-                                        extension,
-                                    ),
+                                .or_else(|| {
+                                    let call_args = CallArgs {
+                                        call: e,
+                                        args: a,
+                                        arg_tys,
+                                    };
+                                    let owned = match member_mapping_failure {
+                                        Some(failure) if extension.selection.is_none() => self
+                                            .report_owned_member_failure(
+                                                call_args, &name, recv, *failure,
+                                            ),
+                                        _ => None,
+                                    };
+                                    owned.or_else(|| {
+                                        self.record_extension_selection(
+                                            scope,
+                                            call_args,
+                                            &name,
+                                            CallConstraints {
+                                                type_args: &type_args,
+                                                receiver: recv,
+                                                expected,
+                                            },
+                                            extension,
+                                        )
+                                    })
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
@@ -68880,27 +69043,32 @@ impl<'a> Checker<'a> {
                                         &name,
                                     )
                                 })
-                                .or_else(|| match member_mapping_failure {
-                                    Some(failure) if extension.selection.is_none() => {
-                                        Some(self.report_owned_member_failure(
-                                            e, &name, a, recv, *failure,
-                                        ))
-                                    }
-                                    _ => self.record_extension_selection(
-                                        scope,
-                                        CallArgs {
-                                            call: e,
-                                            args: a,
-                                            arg_tys,
-                                        },
-                                        &name,
-                                        CallConstraints {
-                                            type_args: &type_args,
-                                            receiver: recv,
-                                            expected,
-                                        },
-                                        extension,
-                                    ),
+                                .or_else(|| {
+                                    let call_args = CallArgs {
+                                        call: e,
+                                        args: a,
+                                        arg_tys,
+                                    };
+                                    let owned = match member_mapping_failure {
+                                        Some(failure) if extension.selection.is_none() => self
+                                            .report_owned_member_failure(
+                                                call_args, &name, recv, *failure,
+                                            ),
+                                        _ => None,
+                                    };
+                                    owned.or_else(|| {
+                                        self.record_extension_selection(
+                                            scope,
+                                            call_args,
+                                            &name,
+                                            CallConstraints {
+                                                type_args: &type_args,
+                                                receiver: recv,
+                                                expected,
+                                            },
+                                            extension,
+                                        )
+                                    })
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
@@ -69063,26 +69231,28 @@ impl<'a> Checker<'a> {
                 );
                 if !candidates.is_empty() {
                     let type_args = self.resolved_explicit_type_args(scope, e);
-                    reported_inapplicable =
-                        self.report_member_and_extensions_inapplicable(e, &name, &candidates)
-                            || self.report_inapplicable_member_mapping_error(
-                                e,
-                                &name,
-                                args.as_deref().unwrap_or_default(),
-                                &candidates,
-                            )
-                            || self.report_single_mapped_candidate_type_errors(
-                                scope,
-                                e,
-                                args.as_deref().unwrap_or_default(),
-                                &checked_arg_tys,
-                                CallConstraints {
-                                    type_args: &type_args,
-                                    receiver: safe_rt,
-                                    expected,
-                                },
-                                &candidates,
-                            );
+                    reported_inapplicable = self.report_member_and_extensions_inapplicable(
+                        e,
+                        &name,
+                        args.as_deref().unwrap_or_default(),
+                        &candidates,
+                    ) || self.report_inapplicable_member_mapping_error(
+                        e,
+                        &name,
+                        args.as_deref().unwrap_or_default(),
+                        &candidates,
+                    ) || self.report_single_mapped_candidate_type_errors(
+                        scope,
+                        e,
+                        args.as_deref().unwrap_or_default(),
+                        &checked_arg_tys,
+                        CallConstraints {
+                            type_args: &type_args,
+                            receiver: safe_rt,
+                            expected,
+                        },
+                        &candidates,
+                    );
                     if !reported_inapplicable {
                         self.diags.error(
                             self.call_callee_name_span(e),
