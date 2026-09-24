@@ -284,6 +284,19 @@ fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrins
         .then_some(CompilerIntrinsic::AssertFailsWith)
 }
 
+fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    (facts.package.matches("kotlin/reflect")
+        && facts.name == "typeOf"
+        && plain(facts, FnKind::TopLevel)
+        && facts.receiver.is_none()
+        && facts.params.is_empty()
+        && facts.type_parameter_count == 1
+        && facts.vararg.is_none()
+        && !facts.is_operator
+        && facts.ret == Ty::obj("kotlin/reflect/KType"))
+    .then_some(CompilerIntrinsic::TypeOf)
+}
+
 fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.context_count != 0
         || facts.vararg.is_some()
@@ -366,6 +379,8 @@ pub(crate) fn function_realization(
         coroutine(&facts)
     } else if facts.package.matches("kotlin/test") {
         kotlin_test(&facts)
+    } else if facts.package.matches("kotlin/reflect") {
+        reflection(&facts)
     } else {
         None
     }
@@ -519,6 +534,43 @@ mod tests {
             function_realization(declaration(std::slice::from_ref(&invariant_parameter))),
             None,
             "an ordinary same-named Array<T> parameter is not the builtin vararg declaration"
+        );
+    }
+
+    #[test]
+    fn type_of_requires_the_exact_reflection_declaration_shape() {
+        let declaration = |package, result| BuiltinFunctionDeclaration {
+            package,
+            name: "typeOf",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params: &[],
+            ret: result,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        };
+
+        assert_eq!(
+            function_realization(declaration(
+                type_name("kotlin/reflect"),
+                Ty::obj("kotlin/reflect/KType")
+            )),
+            Some(CompilerIntrinsic::TypeOf)
+        );
+        assert_eq!(
+            function_realization(declaration(
+                type_name("example/reflection"),
+                Ty::obj("kotlin/reflect/KType")
+            )),
+            None
+        );
+        assert_eq!(
+            function_realization(declaration(type_name("kotlin/reflect"), Ty::String)),
+            None
         );
     }
 }

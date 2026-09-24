@@ -676,6 +676,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 // backend. Keep the semantic operation explicit instead of invoking the stdlib's
                 // private throwing accessor.
                 crate::ir::IrIntrinsic::CoroutineContext => "undefined".to_string(),
+                // Runtime type descriptions are not yet part of the JS backend either; the JVM
+                // realizes this operation at its own external-call boundary.
+                crate::ir::IrIntrinsic::TypeOf { .. } => "undefined".to_string(),
                 crate::ir::IrIntrinsic::UnsignedToString { source } => {
                     let value = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     match *source {

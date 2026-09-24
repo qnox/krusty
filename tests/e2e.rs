@@ -1675,6 +1675,8 @@ mod try_catch_expr_nullable_merge_e2e;
 mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
+#[path = "type_of_e2e.rs"]
+mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]

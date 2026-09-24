@@ -103,6 +103,23 @@ impl BodyLowering<'_> {
                 FirTypeParameterRef::External { .. } => None,
             })
             .collect::<HashMap<_, _>>();
+        // Only a reified parameter's argument is known inside the expanded body at run time. A
+        // dependency's reified operation that mentions an ordinary parameter of this declaration
+        // keeps that parameter, exactly as the declaration's own emitted body would: `typeOf`
+        // describes it as a type parameter rather than as whatever this call site happened to
+        // infer for it.
+        let reified_bindings = substitutions
+            .iter()
+            .filter_map(|substitution| match substitution.parameter {
+                FirTypeParameterRef::Module(parameter) => self
+                    .index
+                    .type_parameter_header(parameter)
+                    .filter(|header| header.flags.is_reified())
+                    .and_then(|_| self.index.type_parameter_semantic_name(parameter))
+                    .map(|name| (name.to_owned(), substitution.value.get())),
+                FirTypeParameterRef::External { .. } => None,
+            })
+            .collect::<HashMap<_, _>>();
         let operand_types = function_shape
             .dispatch_receiver
             .map(Ty::obj_name)
@@ -311,6 +328,10 @@ impl BodyLowering<'_> {
             // decision must cross the enclosing inline-call boundary with the lambda.
             specialize_expression_facts(self.ir, copy, &bindings);
             specialize_types(self.ir.exprs.get_mut(copy as usize)?, &bindings);
+            specialize_dependency_substitutions(
+                self.ir.exprs.get_mut(copy as usize)?,
+                &reified_bindings,
+            );
             if let Some(previous_zero) = generated_zero {
                 let replacement = match self.ir.expr(copy) {
                     IrExpr::Variable { ty, .. } => IrConst::zero_for_value_type(*ty),
@@ -894,7 +915,8 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         }
         | IrIntrinsic::DataClassFieldEquals { ty: operand }
         | IrIntrinsic::DataClassFieldHash { ty: operand }
-        | IrIntrinsic::DataClassArrayToString { ty: operand } => specialize_ty(operand, bindings),
+        | IrIntrinsic::DataClassArrayToString { ty: operand }
+        | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
         | IrIntrinsic::ArraySet
@@ -931,17 +953,11 @@ fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
                 specialize_ty(receiver, bindings);
             }
         }
-        Callee::External {
-            params,
-            ret,
-            substitutions,
-            ..
-        } => {
+        // The dependency's own substitutions are specialized separately, by the reified
+        // arguments alone (`specialize_dependency_substitutions`).
+        Callee::External { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
         }
         Callee::Virtual {
             params: Some((params, ret)),
@@ -959,6 +975,24 @@ fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
         | Callee::Static { .. }
         | Callee::Virtual { params: None, .. }
         | Callee::Special { .. } => {}
+    }
+}
+
+/// Specialize the type arguments a dependency call selected. Only these reach a dependency's
+/// reified operations, which see the reified arguments of the expanded declaration and nothing
+/// else.
+fn specialize_dependency_substitutions(
+    expression: &mut IrExpr,
+    reified_bindings: &HashMap<String, Ty>,
+) {
+    if let IrExpr::Call {
+        callee: Callee::External { substitutions, .. },
+        ..
+    } = expression
+    {
+        for substitution in substitutions {
+            specialize_checked_substitution(substitution, reified_bindings);
+        }
     }
 }
 

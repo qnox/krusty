@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrDataClassMemberRole, IrExpr, IrField, IrFile,
-    IrFunction, IrTypeOp,
+    Callee, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile, IrFunction,
+    IrTypeOp,
 };
 use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
@@ -33,6 +33,7 @@ mod coroutine_machine;
 mod data_class_pool_seed;
 mod data_class_value_classes;
 mod debug_lines;
+mod declaration_types;
 mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -59,6 +60,12 @@ mod vararg;
 mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
+pub(crate) use declaration_types::jvm_tys;
+pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
+use declaration_types::{field_jvm_tys, jvm_declared_ty};
+use declaration_types::{
+    ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
+};
 use inline_body_emission::collect_body_var_types;
 use inline_call::{
     bind_inline_handlers, parse_descriptor_params, vtype_to_verif, InlineStaticTarget,
@@ -12796,7 +12803,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -13151,7 +13158,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack + lam_max_stack,
+                body.max_stack + lam_max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -13230,7 +13237,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack + lam_max_stack,
+            body.max_stack + lam_max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -13748,7 +13755,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
         allow_owner_bridge: bool,
-        reified: &HashMap<String, crate::jvm::inline::ReifiedArgument>,
+        reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let InlineStaticTarget {
             owner,
@@ -13902,7 +13909,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack,
+                body.max_stack + probe.stack_growth,
                 top_local,
                 arg_words,
                 ret_words,
@@ -13952,7 +13959,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack,
+            body.max_stack + bs.stack_growth,
             top_local,
             arg_words,
             ret_words,
@@ -15972,6 +15979,14 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::Assert { mode } => {
                         self.emit_assertion(*mode, args, code)
                     }
+                    crate::ir::IrIntrinsic::TypeOf { ty } => {
+                        let parameters = super::type_of::TypeParameters::new(self.ir, &self.facade);
+                        let mut instructions = Vec::new();
+                        match super::type_of::generate(*ty, &parameters, &mut instructions) {
+                            Ok(()) => super::type_of::encode(&instructions, code, self.cw),
+                            Err(error) => self.run.set_emit_error(error.to_string()),
+                        }
+                    }
                     crate::ir::IrIntrinsic::ArrayGet => {
                         self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
                     }
@@ -16269,7 +16284,8 @@ impl<'a> Emitter<'a> {
                         "resolve",
                         "emit static {owner}.{name}{descriptor} inline={inline:?}"
                     );
-                    let reified = crate::jvm::reified_operations::splice_type_map(self.ir, e);
+                    let reified =
+                        crate::jvm::reified_operations::splice_arguments(self.ir, e, &self.facade);
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
@@ -19867,108 +19883,6 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // concrete JVM type.
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
-    }
-}
-
-/// The physical JVM type of a declaration slot (parameter, field, constructor argument, or return).
-/// Semantic `Nothing` remains [`Ty::Nothing`] through expression lowering so a call with that result
-/// still terminates control flow, but a declaration descriptor names the uninhabited reference as
-/// `java/lang/Void` and therefore occupies one JVM slot.
-fn jvm_declared_ty(t: &Ty) -> Ty {
-    fn is_nothing(t: &Ty) -> bool {
-        match t {
-            Ty::Nothing => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_nothing(inner),
-            Ty::Obj(name, _) => name.matches("kotlin/Nothing"),
-            _ => false,
-        }
-    }
-
-    if is_nothing(t) {
-        return Ty::obj("java/lang/Void");
-    }
-    match ir_ty_to_jvm(t) {
-        Ty::Nothing => Ty::obj("java/lang/Void"),
-        other => other,
-    }
-}
-
-pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter()
-        .map(|ty| {
-            // `Unit` is `void` only in result position. As a parameter it is the singleton
-            // reference `kotlin.Unit`, exactly like any other semantic object value.
-            if *ty == Ty::Unit {
-                Ty::obj("kotlin/Unit")
-            } else {
-                jvm_declared_ty(ty)
-            }
-        })
-        .collect()
-}
-
-/// Realize one common-IR function's semantic parameter list for the JVM. Mutable captures remain
-/// ordinary element types in common IR; their sparse semantic marker selects the backend-owned
-/// `Ref$*Ref` holder representation here. Every descriptor consumer uses this function so a lifted
-/// lambda declaration, its method handle, and its call sites cannot disagree.
-fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Vec<Ty> {
-    let mut parameters = jvm_tys(&ir.functions[function as usize].params);
-    for (parameter, physical) in parameters.iter_mut().enumerate() {
-        let ordinal = u32::try_from(parameter).expect("too many JVM function parameters");
-        if !ir
-            .shared_capture_parameters
-            .contains_key(&(function, ordinal))
-        {
-            continue;
-        }
-        // Descriptor-sensitive backend passes may already have erased a value-class or type-
-        // parameter element in the declaration. Select the holder from that current physical
-        // element, while the sparse marker itself remains the logical common-IR fact.
-        *physical = Ty::obj(ref_class(physical).0);
-    }
-    parameters
-}
-
-/// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
-/// an `Object[]` a generic `Array<T>` erases to (recursively). A value of this type is a candidate for the
-/// narrowing `checkcast` at a consumption site; a concrete type (`String`, `Integer`, `IntArray`, a value
-/// class) is not.
-fn jvm_is_erased_top(t: Ty) -> bool {
-    match t.obj_internal() {
-        Some(n) if n.matches("java/lang/Object") || n.matches("kotlin/Any") => true,
-        _ => t.array_elem().is_some_and(jvm_is_erased_top),
-    }
-}
-
-fn ir_type_desc(t: &Ty) -> String {
-    type_descriptor(jvm_declared_ty(t))
-}
-
-fn local_variable_desc(t: Ty) -> String {
-    type_descriptor(if t == Ty::Unit {
-        Ty::obj("kotlin/Unit")
-    } else {
-        t
-    })
-}
-
-fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
-    method_descriptor(&jvm_tys(params), jvm_declared_ty(ret))
-}
-
-fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
-    fields.iter().map(|f| jvm_declared_ty(&f.ty)).collect()
-}
-
-fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
-    args.iter().map(|a| jvm_declared_ty(&a.ty)).collect()
-}
-
-pub(super) fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
-    if c.ctor_args.is_empty() {
-        field_jvm_tys(&c.fields[..c.ctor_param_count as usize])
-    } else {
-        ctor_arg_jvm_tys(&c.ctor_args)
     }
 }
 

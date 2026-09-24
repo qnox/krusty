@@ -46,7 +46,9 @@ mod bottom_values;
 mod bridges;
 mod constants;
 mod constructors;
+mod intrinsic;
 mod references;
+mod type_reflection;
 mod value_class_constructors;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
@@ -54,62 +56,10 @@ pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use intrinsic::IrIntrinsic;
 pub use references::{FuncRef, PropRef};
-
-/// A compiler-supplied operation selected from a real semantic declaration. This is an operation
-/// identity, not a library name: backends implement it without recovering signature facts from text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrIntrinsic {
-    /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
-    /// optional zero-argument message function. A backend must guard/elide the whole operation
-    /// before evaluating either child according to `mode`.
-    Assert {
-        mode: crate::types::AssertionMode,
-    },
-    ArrayGet,
-    ArraySet,
-    ArraySize,
-    StringGet,
-    StringLength,
-    StringPlus,
-    NullableAnyToString,
-    /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
-    /// reified type parameter in the emitted inline template; call-site inline specialization turns
-    /// it into the exact enum classifier without reopening resolution.
-    EnumValueOf {
-        classifier: Ty,
-    },
-    /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
-    /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
-    /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
-    /// even when its integer result is later compared with zero.
-    PrimitiveCompare {
-        operand: Ty,
-        relational_operator: bool,
-    },
-    /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
-    /// this operation with the continuation parameter's `Continuation.getContext()` call.
-    CoroutineContext,
-    UnsignedToString {
-        source: Ty,
-    },
-    PrimitiveArrayNew {
-        element: Ty,
-    },
-    /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
-    /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
-    DataClassFieldEquals {
-        ty: Ty,
-    },
-    /// Kotlin data-class hash contribution for one primary-constructor property.
-    DataClassFieldHash {
-        ty: Ty,
-    },
-    /// Kotlin's content rendering for an array stored in a data-class property.
-    DataClassArrayToString {
-        ty: Ty,
-    },
-}
+pub use type_reflection::IrGenericTopLevelProperty;
+use type_reflection::TypeReflectionFacts;
 
 /// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2486,6 +2436,7 @@ pub struct IrFile {
     /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
+    type_reflection: TypeReflectionFacts,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,

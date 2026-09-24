@@ -5770,16 +5770,15 @@ pub(crate) fn finalized_streamed_signature_index(
         .then(|| stable_function(table, headers, &classifier_types, stub.id))
         .flatten()
         .and_then(|(signature, _)| signature.generic_sig.as_ref());
-        let symbolic =
-            super::TParams::symbolic_from_decl_with(&declared_names, &declared_bounds, &|name| {
-                table.class_names.get(name)
-            })
-            .alpha_renamed_declaration(
-                &declared_names,
-                table.compilation_id,
-                stub.source.raw(),
-                declaration_start,
-            );
+        let symbolic = type_parameter_publication::symbolic(
+            &index,
+            stub.id,
+            &declared_names,
+            &declared_bounds,
+            table,
+            stub.source.raw(),
+            declaration_start,
+        );
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = type_parameter_publication::semantic_name(

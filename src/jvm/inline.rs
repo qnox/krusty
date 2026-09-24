@@ -6,7 +6,6 @@
 
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
-use std::collections::HashMap;
 
 mod relocation;
 pub use relocation::{
@@ -20,12 +19,14 @@ mod frame_layout;
 mod in_place_arguments;
 mod local_compaction;
 mod reified_operands;
+mod splice_result;
 use continuation_flow::caller_continuation_reachable;
 pub(super) use frame_layout::spliced_frame;
 pub(super) use in_place_arguments::InPlacePlan;
 use local_compaction::LocalCompaction;
-pub(super) use reified_operands::ReifiedArgument;
-use reified_operands::{reify_markers, ReifiedRepoint};
+use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
+pub(super) use reified_operands::{ReifiedArgument, ReifiedArguments};
+pub use splice_result::{BranchySplice, RelocatedLambdaSite};
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
@@ -939,67 +940,6 @@ fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType
         VType::Uninit(_) | VType::UninitThis => return None,
         other => *other,
     })
-}
-
-/// The result of splicing a **branchy** body: the spliced bytes (laid out at the `start_offset` passed
-/// to [`splice_unified`]) plus the relocated `StackMapTable` frames the caller must add (each: ABSOLUTE
-/// byte offset, the *body* locals at that point, and the operand stack). The caller prepends its own
-/// locals (slots `0..base`). The **join** is where the body's returns land (empty body locals + the
-/// return value on the stack), bound by the caller right after the spliced bytes.
-pub struct BranchySplice {
-    pub bytes: Vec<u8>,
-    /// Frames *inside* the body: (ABSOLUTE byte offset, body locals, stack). The caller prepends its own
-    /// locals and binds at the offset directly.
-    pub frames: Vec<(usize, Vec<VType>, Vec<VType>)>,
-    /// The operand stack at the **join** (where the body's returns land = the continuation right after
-    /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
-    /// post-splice position (not a precomputed end offset, which could fall at `code.len()`).
-    pub join_stack: Vec<VType>,
-    /// Whether the splice actually needs the relocated frames + a join frame bound (so it requires an
-    /// empty operand-stack baseline). `false` for a pure BRANCHLESS body — no branches, the single
-    /// trailing return dropped to fall through — which the caller can then append at ANY stack height
-    /// (mid-expression), exactly like the former `splice_branchless`.
-    pub join_required: bool,
-    /// Whether the transformed entry-to-end control-flow graph reaches the continuation after this
-    /// splice. A method body with no reachable return (for example `TODO`, whose only exit is
-    /// `athrow`) leaves the enclosing bytecode path unreachable even though its bytes were appended
-    /// in bulk.
-    pub falls_through: bool,
-    /// Every replaced lambda invocation. A single inline parameter can be invoked repeatedly; each
-    /// occurrence has its own byte position and host verifier state while referring back to the one
-    /// pre-built lambda body by `lambda_index`.
-    pub lambda_sites: Vec<RelocatedLambdaSite>,
-    /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
-    /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
-    /// catch-all/`finally`). The handler frames themselves are already in `frames` (a handler is a
-    /// StackMapTable target). Empty for a body with no handlers.
-    pub handlers: Vec<(usize, usize, usize, u16)>,
-    /// Branch operands (absolute positions in the enclosing builder) whose destinations live outside
-    /// this splice. The enclosing builder retains them until their owning loop label is bound.
-    pub external_branches: Vec<(usize, super::classfile::Label)>,
-    /// The dependency's own debug locals, relocated into the caller: `(start, length, slot, name,
-    /// descriptor)` with ABSOLUTE offsets in the spliced output and the caller's slot numbering.
-    ///
-    /// A spliced body's locals are real locals of the method that now contains them, and the
-    /// reference compiler describes every one of them. Their names come from the dependency, which
-    /// is the only place they exist; the `$iv` suffix marking a value as inlined is added here,
-    /// because it is a property of being inlined rather than of the declaration.
-    pub locals: Vec<(u16, u16, u16, String, String)>,
-    /// Line marks for the spliced code: `(absolute offset, line, from the dependency)`, ascending.
-    ///
-    /// A host instruction's line belongs to the DEPENDENCY's file and means nothing until the
-    /// caller's source map gives it an output line, which is what the flag distinguishes. A spliced
-    /// lambda's body is the caller's own source and keeps its own lines.
-    pub lines: Vec<(u16, u16, bool)>,
-}
-
-pub struct RelocatedLambdaSite {
-    pub lambda_index: usize,
-    /// Which of that lambda's `bodies` this site received.
-    pub body_index: usize,
-    pub byte_start: usize,
-    pub host_locals: Vec<VType>,
-    pub stack_prefix: Option<Vec<VType>>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` sites.
@@ -1950,7 +1890,7 @@ pub(super) fn splice_unified(
     binding: ParameterBinding<'_>,
     start_offset: usize,
     cw: &mut ClassWriter,
-    reified: &HashMap<String, ReifiedArgument>,
+    reified: &ReifiedArguments,
 ) -> Option<BranchySplice> {
     let (lambdas, in_place): (&[LambdaSplice], Option<&InPlacePlan>) = match binding {
         ParameterBinding::Stored(lambdas) => (lambdas, None),
@@ -1964,7 +1904,7 @@ pub(super) fn splice_unified(
         "splice",
         "splice_unified reified_inline={} reified_map_len={}",
         is_reified_inline(body),
-        reified.len()
+        reified.classes.len()
     );
     if is_reified_inline(body) && reified.is_empty() {
         return None;
@@ -2230,14 +2170,7 @@ pub(super) fn splice_unified(
         }
     }
     relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
-    // Repoint each reified site (post-relocation, so the fresh pool ref survives). A malformed
-    // type-bearing instruction skips the whole splice rather than emitting the erased placeholder.
-    if !reified_targets
-        .iter()
-        .all(|repoint| repoint.apply(&mut insns, cw))
-    {
-        return None;
-    }
+    let (type_of_edits, stack_growth) = apply_repoints(&reified_targets, reified, &mut insns, cw)?;
     // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
     // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
@@ -2279,6 +2212,11 @@ pub(super) fn splice_unified(
         }); // drop the trailing return → fall through
     }
     let join_required = host_has_branches || made_goto || !host_frames.is_empty();
+    edits.extend(
+        type_of_edits
+            .into_iter()
+            .map(|(at, repl)| Edit { at, len: 1, repl }),
+    );
     edits.sort_by_key(|e| e.at);
     // Reject overlapping edits (shouldn't happen for the shapes above).
     for w in edits.windows(2) {
@@ -2761,6 +2699,7 @@ pub(super) fn splice_unified(
         external_branches,
         locals: relocated_locals,
         lines: relocated_lines,
+        stack_growth,
     })
 }
 
@@ -3061,7 +3000,7 @@ mod tests {
             ParameterBinding::Stored(&[]),
             0,
             &mut cw,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("splice");
         assert!(out.join_required);
