@@ -17,6 +17,7 @@ use super::ResolvedParameterIdentity;
 mod selections;
 pub use selections::*;
 mod declaration_metadata;
+mod source_packages;
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1553,6 +1554,11 @@ pub struct ResolvedModuleIndex {
     /// Package identity for each source unit. This is declaration-header context, not a path or
     /// body coordinate; common lowering copies it only for referenced cross-file declarations.
     source_packages: HashMap<SourceFileId, TypeName>,
+    /// Every package some source unit publishes, with all of its enclosing packages: the
+    /// namespaces the source module contributes. Derived from `source_packages` as each identity
+    /// is published, so a package-child probe is one lookup instead of a walk of every source
+    /// unit's package chain (which made qualified-name resolution quadratic in the module).
+    source_package_namespaces: std::collections::HashSet<TypeName>,
     /// Stable declaration-stream ordinal computed while Pass-1 anchors are live. This is used for
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
@@ -2152,38 +2158,6 @@ impl ResolvedModuleIndex {
 
     pub fn source_package(&self, source: SourceFileId) -> Option<TypeName> {
         self.source_packages.get(&source).copied()
-    }
-
-    /// Whether the finalized source module contributes the direct package child `name` below
-    /// `parent`.
-    ///
-    /// Pass 2 uses this while resolving qualified imports. The answer is derived solely from
-    /// stable source-package identities; retaining the legacy `SymbolTable::source_packages`
-    /// prefix set would duplicate the same declaration-header fact across the pass boundary.
-    pub(crate) fn source_package_child_exists(&self, parent: TypeName, name: &str) -> bool {
-        let Some(candidate) = crate::types::existing_type_name_child(parent, name) else {
-            return false;
-        };
-        self.source_packages.values().copied().any(|package| {
-            let mut current = Some(package);
-            while let Some(namespace) = current {
-                if namespace == candidate {
-                    return true;
-                }
-                if namespace == TypeName::ROOT {
-                    break;
-                }
-                current = namespace.parent();
-            }
-            false
-        })
-    }
-
-    pub(super) fn publish_source_package(&mut self, source: SourceFileId, package: TypeName) {
-        assert!(
-            self.source_packages.insert(source, package).is_none(),
-            "a source unit may publish one package identity"
-        );
     }
 
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
@@ -3384,6 +3358,7 @@ impl ResolvedModuleIndex {
         self.declarations.storage_payload_bytes()
             + self.source_packages.len()
                 * (std::mem::size_of::<SourceFileId>() + std::mem::size_of::<TypeName>())
+            + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())
