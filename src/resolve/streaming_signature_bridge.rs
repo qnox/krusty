@@ -19,6 +19,7 @@ mod declaration_conflicts;
 mod declaration_spellings;
 mod delegates;
 mod diagnostics;
+mod file_import_scopes;
 mod header_projection;
 mod local_signatures;
 mod lookups;
@@ -89,6 +90,7 @@ struct ProductionSignatureSemantics<'a> {
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
+    file_import_scopes: file_import_scopes::FileImportScopes,
 }
 
 struct SelectedCallContract {
@@ -1105,91 +1107,6 @@ impl ProductionSignatureSemantics<'_> {
                 .libraries
                 .classifier(classifier)
                 .is_some_and(|declaration| declaration.is_enum_entry(spelling))
-    }
-
-    fn function_import_scope(
-        &self,
-        source_id: crate::fir::SourceFileId,
-    ) -> Result<crate::symbol_resolver::FunctionImportScope, crate::fir::DiagnosticId> {
-        let file = self
-            .headers
-            .scopes
-            .file(source_id)
-            .ok_or_else(Self::failure)?;
-        let path = |range| {
-            self.headers
-                .scopes
-                .path(range)
-                .iter()
-                .map(|segment| self.headers.lookup_names.get(*segment))
-                .collect::<Option<Vec<_>>>()
-                .map(|segments| segments.join("/"))
-        };
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_id.raw());
-        let symbols = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            self.table.libraries.as_ref() as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let mut explicit = std::collections::HashMap::new();
-        let mut stars = Vec::new();
-        for import in self.headers.scopes.imports(file.imports) {
-            let imported = path(import.path).ok_or_else(Self::failure)?;
-            if import.wildcard {
-                let owner = match super::qualifier_path(&imported, &symbols, None)
-                    .map_err(|_| Self::failure())?
-                {
-                    super::ResolvedQualifier::Package(package) => package,
-                    super::ResolvedQualifier::Classifier(classifier) => classifier,
-                    super::ResolvedQualifier::Value => return Err(Self::failure()),
-                };
-                stars.push(owner);
-                continue;
-            }
-            let (parent, declared_name) =
-                imported.rsplit_once('/').unwrap_or(("", imported.as_str()));
-            let owner = if parent.is_empty() {
-                crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
-            } else {
-                match super::qualifier_path(parent, &symbols, None).map_err(|_| Self::failure())? {
-                    super::ResolvedQualifier::Package(package) => {
-                        crate::symbol_source::SymbolNamespace::Package(package)
-                    }
-                    super::ResolvedQualifier::Classifier(classifier) => {
-                        crate::symbol_source::SymbolNamespace::Classifier(classifier)
-                    }
-                    super::ResolvedQualifier::Value => return Err(Self::failure()),
-                }
-            };
-            let visible_name = import
-                .alias
-                .and_then(|alias| self.headers.lookup_names.get(alias))
-                .unwrap_or(declared_name);
-            explicit.insert(
-                visible_name.to_owned(),
-                crate::symbol_resolver::CallableImport::new(owner, declared_name.to_owned()),
-            );
-        }
-        let own_package = path(file.package).ok_or_else(Self::failure)?;
-        let kotlin_defaults = super::KOTLIN_DEFAULT_IMPORT_PACKAGES
-            .iter()
-            .map(|package| crate::types::type_name(&package.replace('.', "/")))
-            .collect();
-        let platform_defaults = self
-            .table
-            .libraries
-            .platform_default_import_packages()
-            .into_iter()
-            .map(|package| crate::types::type_name(&package.replace('.', "/")))
-            .collect();
-        Ok(crate::symbol_resolver::FunctionImportScope::new(
-            explicit,
-            [
-                vec![crate::types::type_name(&own_package)],
-                stars,
-                kotlin_defaults,
-                platform_defaults,
-            ],
-        ))
     }
 
     fn explicit_imported_classifier_callable(
@@ -4598,6 +4515,7 @@ pub(crate) fn finalized_streamed_signature_index(
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
+        file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
@@ -5274,6 +5192,7 @@ pub(crate) fn finalized_streamed_signature_index(
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
+        file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };
     // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
     // so resolve it once before solving. Publication and failure accounting consume this same

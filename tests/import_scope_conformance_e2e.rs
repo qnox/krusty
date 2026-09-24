@@ -64,3 +64,47 @@ fn imported_extension_resolves_and_runs() {
     };
     assert_eq!(out, "OK", "an imported extension resolves and runs");
 }
+
+/// Each file of a package resolves signatures through its OWN imports. Two sibling files alias
+/// different classes to the same name, and every inferred signature (a function's return, a
+/// property's type, one declaration inferred from another) must bind the alias of the file that
+/// declares it, however many signatures of the other file were inferred first.
+#[test]
+fn each_file_infers_its_signatures_through_its_own_imports() {
+    let sources = [
+        (
+            "First.kt",
+            "package pick.first\nclass Item { fun tag() = \"first\" }\n",
+        ),
+        (
+            "Second.kt",
+            "package pick.second\nclass Item { fun tag() = \"second\" }\n",
+        ),
+        (
+            "UseFirst.kt",
+            "package pick.use\n\
+             import pick.first.Item as Picked\n\
+             fun first() = Picked()\n\
+             val firstAgain = first()\n\
+             fun firstTag() = firstAgain.tag()\n",
+        ),
+        (
+            "UseSecond.kt",
+            "package pick.use\n\
+             import pick.second.Item as Picked\n\
+             fun second() = Picked()\n\
+             val secondAgain = second()\n\
+             fun secondTag() = secondAgain.tag()\n",
+        ),
+        (
+            "Box.kt",
+            "package pick.use\n\
+             fun box(): String {\n\
+             val one: pick.first.Item = first()\n\
+             val two: pick.second.Item = second()\n\
+             return if (one.tag() + firstTag() + two.tag() + secondTag() == \"firstfirstsecondsecond\") \"OK\" else \"fail\"\n\
+             }\n",
+        ),
+    ];
+    common::expect_box_ok_files_with_stdlib(&sources, "per-file import aliases in signatures");
+}
