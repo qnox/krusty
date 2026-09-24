@@ -3,6 +3,7 @@
 //! This layer receives final semantic decisions. It never accepts parser arenas, resolver state,
 //! imports, or source spellings used for lookup.
 
+mod annotation_constructions;
 mod array_references;
 mod arrays;
 mod assertions;

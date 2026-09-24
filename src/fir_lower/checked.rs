@@ -800,7 +800,10 @@ impl BodyLowering<'_> {
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
         match &call.target {
-            FirConstructorTarget::Module(target) => {
+            FirConstructorTarget::Module {
+                declaration: target,
+                annotation,
+            } => {
                 let callable = self
                     .index
                     .callable(*target)
@@ -842,7 +845,6 @@ impl BodyLowering<'_> {
                 let primary_in_current_file = anchor.sibling == 0
                     && self.ir.class_id_by_name(classifier.classifier).is_some();
                 self.module_constructor_call(ModuleConstructorRequest {
-                    target: *target,
                     classifier: classifier.classifier,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
@@ -851,6 +853,7 @@ impl BodyLowering<'_> {
                     outer_receiver,
                     external_capture_arguments: external_capture_arguments.as_deref(),
                     arguments: &arguments,
+                    annotation: annotation.as_deref(),
                 })
                 .ok_or(FirLoweringFailure::UnsupportedModuleConstructor(*target))
             }
@@ -958,7 +961,10 @@ impl BodyLowering<'_> {
         FirLoweringFailure,
     > {
         match &call.target {
-            FirConstructorTarget::Module(target) => {
+            FirConstructorTarget::Module {
+                declaration: target,
+                ..
+            } => {
                 self.index
                     .callable(*target)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;

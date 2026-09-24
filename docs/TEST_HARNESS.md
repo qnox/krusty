@@ -102,27 +102,29 @@ CI builds the conformance test binary once and runs that artifact against every 
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
 uses the same configurable process-group conformance deadline as the local harness, including its
-spawned compiler and runner JVMs. A release publishes only after every leg matches its expected-failure
-list.
+spawned compiler and runner JVMs. A release publishes only after every leg matches both exact outcome
+manifests.
 
-## Box Expected-Failure Lists
+## Box Outcome Manifests
 
 `tests/box_expected_failures/<version>.txt` names, one path per line relative to
 `compiler/testData/codegen/box`, the corpus files krusty is still allowed to fail against that Kotlin
-release. The conformance test fails when a file outside the list fails (a regression) or a file in the
-list passes (a fix: delete the entry in the same change). A listed path that is absent from the corpus
-or not applicable to the JVM backend fails as a stale entry. Sharded and filtered runs judge only the
-files they ran. A version without a list must pass every applicable file.
+release. `tests/box_expected_not_applicable/<version>.txt` records the files intentionally excluded
+from the JVM backend. Pass is implicit: a path in neither file must pass. The conformance test fails
+on every transition among pass, fail, and not-applicable, so losing applicability cannot silently
+improve the score. Duplicate or corpus-absent entries also fail. Sharded and filtered runs judge only
+the files they ran while validating manifest paths against the complete discovered corpus.
 
-After a change that fixes or deliberately trades box files, rewrite the list from a full run and commit
-the diff with the change, so review sees exactly which files moved:
+After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
+with the change, so review sees exactly which files moved:
 
 ```sh
 KRUSTY_BLESS_BOX_FAILURES=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 ```
 
-Blessing is refused under CI and on a partial run. The goal is to empty every list; once they are
-empty the lists and `tests/box_ratchet.rs` are deleted.
+Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
+is replaced atomically. The goal is to empty both sets of non-passing outcomes; once they are empty,
+the manifests and `tests/box_ratchet.rs` are deleted.
 
 A pull request is judged against its own base, so two that each match the lists can still disagree
 with them once both land: one fixes a file the other's list still names, or their changes interact.
@@ -256,8 +258,8 @@ Optional profiling knobs:
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
 - `KRUSTY_FAIL_CAP=<n>` caps reported conformance failures.
-- `KRUSTY_BLESS_BOX_FAILURES=1` rewrites the Kotlin version's box expected-failure list from a full
-  conformance run instead of checking against it.
+- `KRUSTY_BLESS_BOX_FAILURES=1` atomically rewrites the Kotlin version's fail and not-applicable
+  manifests from a full local conformance run instead of checking against them.
 
 Optional compiler trace:
 
