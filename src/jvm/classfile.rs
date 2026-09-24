@@ -18,6 +18,7 @@ mod negated_jumps;
 mod null_checks;
 mod redundant_checkcasts;
 mod redundant_gotos;
+mod stack_peephole;
 mod temporaries;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
