@@ -2638,6 +2638,9 @@ impl BodyFirChecker<'_> {
                     }
                     FirExprKind::When {
                         subject,
+                        binds_subject: subject_syntax.is_some_and(|syntax| {
+                            self.file.when_subject_bindings.contains(&syntax)
+                        }),
                         branches: branches?.into_boxed_slice(),
                     }
                 }

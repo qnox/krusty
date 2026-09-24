@@ -1411,6 +1411,10 @@ pub struct File {
     /// Diagnostic names suppressed by an annotation on one executable statement. This remains
     /// transient parse state and is discarded with the active body AST after checking.
     pub statement_suppressions: std::collections::HashMap<StmtId, Vec<String>>,
+    /// The subject reference of each `when (val v = e)`. The parser desugars that binding to
+    /// `{ val v = e; when (v) { … } }`; such a `when` tests `v` itself, where `when (v)` written
+    /// over an existing value tests a copy of it.
+    pub when_subject_bindings: std::collections::HashSet<ExprId>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,

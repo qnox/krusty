@@ -1139,7 +1139,11 @@ impl BodyLowering<'_> {
                     result: expression.ty.get(),
                 })
             }
-            FirExprKind::When { subject, branches } => {
+            FirExprKind::When {
+                subject,
+                binds_subject,
+                branches,
+            } => {
                 let mut prefix = Vec::new();
                 let subject = subject
                     .map(|subject| {
@@ -1149,7 +1153,7 @@ impl BodyLowering<'_> {
                             .ok_or(FirLoweringFailure::MissingExpression(subject))?;
                         let stable_local = match &subject_expression.kind {
                             FirExprKind::ValueRead(value)
-                                if !self.local_value_is_mutable(*value) =>
+                                if *binds_subject && !self.local_value_is_mutable(*value) =>
                             {
                                 Some(*value)
                             }
@@ -1157,10 +1161,11 @@ impl BodyLowering<'_> {
                         };
                         let subject_ty = subject_expression.ty.get();
                         let value = self.expression(subject)?;
-                        // Only an immutable FIR value may replace the subject snapshot. An arbitrary
-                        // IR GetValue is not enough: a mutable `var` can change while earlier branch
-                        // conditions are evaluated, but every comparison must still see its original
-                        // subject value.
+                        // Only the immutable variable a `when (val v = e)` declares is tested as it
+                        // is. Any other subject, even a read of a stable value, is evaluated into a
+                        // temporary, as kotlinc does; its bytecode pass folds a temporary that is
+                        // loaded once. A mutable `var` can also change while earlier branch
+                        // conditions are evaluated, but every comparison must see its original value.
                         if let Some(local) = stable_local {
                             let slot = self.value_slot(local);
                             if matches!(self.ir.expr(value), IrExpr::GetValue(read) if *read == slot) {

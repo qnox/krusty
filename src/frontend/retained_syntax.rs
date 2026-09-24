@@ -943,6 +943,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))
         .collect();
+    file.when_subject_bindings = std::mem::take(&mut file.when_subject_bindings)
+        .into_iter()
+        .filter_map(|old| expressions.get(&old).copied())
+        .collect();
     file.statement_suppressions = std::mem::take(&mut file.statement_suppressions)
         .into_iter()
         .filter_map(|(old, suppressions)| {

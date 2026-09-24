@@ -1378,6 +1378,7 @@ impl Parser<'_> {
                     sp,
                 );
                 let nm = self.file.add_expr(Expr::Name(name), sp);
+                self.file.when_subject_bindings.insert(nm);
                 subject_var = Some((stmt, nm));
                 Some(nm)
             } else {

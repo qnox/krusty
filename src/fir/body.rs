@@ -1490,6 +1490,9 @@ pub enum FirExprKind {
     },
     When {
         subject: Option<FirExprId>,
+        /// The subject is the variable a `when (val v = e)` declares, tested as it is. Any other
+        /// subject is evaluated once into a temporary that the conditions test.
+        binds_subject: bool,
         branches: Box<[FirWhenBranch]>,
     },
     Block {
