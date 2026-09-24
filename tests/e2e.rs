@@ -686,6 +686,8 @@ mod feature_coverage_v_e2e;
 mod feature_coverage_w_e2e;
 #[path = "feature_coverage_x_e2e.rs"]
 mod feature_coverage_x_e2e;
+#[path = "final_dead_code_e2e.rs"]
+mod final_dead_code_e2e;
 #[path = "finally_e2e.rs"]
 mod finally_e2e;
 #[path = "float_range_nan_e2e.rs"]
