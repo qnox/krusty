@@ -4,8 +4,9 @@
 //! that syntax node with the subject's single checked value while the branches are published.
 
 use crate::ast::{ExprId, WhenArm};
+use crate::fir::{FirWhenBranch, FirWhenCondition};
 
-use super::{BodyCheckFailure, BodyFirChecker, FirExprKind, FirWhenBranch, FirWhenCondition};
+use super::{BodyCheckFailure, BodyFirChecker, FirExprKind};
 
 impl BodyFirChecker<'_> {
     pub(super) fn when_expression(
