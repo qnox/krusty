@@ -54,7 +54,7 @@ pub(crate) fn select<'a>(
         };
         let flowed = match top {
             VerificationType::Null => true,
-            VerificationType::Reference(name) => name == cast,
+            VerificationType::Reference(name) => **name == *cast,
             _ => false,
         };
         selected[at] = flowed;

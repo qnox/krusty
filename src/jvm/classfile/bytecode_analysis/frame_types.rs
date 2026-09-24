@@ -65,8 +65,9 @@ pub(crate) enum VerificationType {
     UninitializedThis,
     /// The `new` at this instruction index produced it, and no `<init>` has run on it yet.
     Uninitialized(usize),
-    /// An internal class name, or an array descriptor.
-    Reference(String),
+    /// An internal class name, or an array descriptor. Shared: every instruction the analysis
+    /// steps copies the whole frame, and a copy must not reallocate each name in it.
+    Reference(std::rc::Rc<str>),
 }
 
 impl VerificationType {
@@ -79,9 +80,9 @@ impl VerificationType {
             VerifType::Double => VerificationType::Double,
             VerifType::Null => VerificationType::Null,
             VerifType::UninitializedThis => VerificationType::UninitializedThis,
-            VerifType::ObjectName(name) => VerificationType::Reference(name.clone()),
+            VerifType::ObjectName(name) => VerificationType::Reference(name.as_str().into()),
             VerifType::Object(index) => match pool.class_name(*index) {
-                Some(name) => VerificationType::Reference(name.to_string()),
+                Some(name) => VerificationType::Reference(name.into()),
                 None => VerificationType::Top,
             },
         }
@@ -97,7 +98,7 @@ impl VerificationType {
             VerificationType::Double => VerifType::Double,
             VerificationType::Null => VerifType::Null,
             VerificationType::UninitializedThis => VerifType::UninitializedThis,
-            VerificationType::Reference(name) => VerifType::ObjectName(name.clone()),
+            VerificationType::Reference(name) => VerifType::ObjectName(name.to_string()),
         }
     }
 
@@ -113,7 +114,7 @@ impl VerificationType {
         match (self, other) {
             (a, b) if a == b => a.clone(),
             (Null, Reference(r)) | (Reference(r), Null) => Reference(r.clone()),
-            (Reference(_), Reference(_)) => Reference(OBJECT_INTERNAL_NAME.to_string()),
+            (Reference(_), Reference(_)) => Reference(OBJECT_INTERNAL_NAME.into()),
             _ => Top,
         }
     }
@@ -206,8 +207,8 @@ fn descriptor_type(descriptor: &str) -> Option<VerificationType> {
         b'J' => VerificationType::Long,
         b'F' => VerificationType::Float,
         b'D' => VerificationType::Double,
-        b'L' => VerificationType::Reference(descriptor.get(1..descriptor.len() - 1)?.to_string()),
-        b'[' => VerificationType::Reference(descriptor.to_string()),
+        b'L' => VerificationType::Reference(descriptor.get(1..descriptor.len() - 1)?.into()),
+        b'[' => VerificationType::Reference(descriptor.into()),
         _ => return None,
     })
 }
@@ -343,16 +344,24 @@ impl FrameTypes {
                     }
                 }
             };
+        // Each pass visits the instructions in reverse post-order, and one is stepped only when
+        // the state before it changed since it was last stepped. Stepping is a function of that
+        // state, and propagating a state already propagated changes nothing (the meet is
+        // idempotent and absorbing, and a recorded frame is taken once), so skipping an unchanged
+        // instruction skips only no-ops: the passes, every state they reach and the fixpoint are
+        // those of a sweep that re-steps every reachable instruction until a pass changes nothing.
+        let mut pending = vec![false; insns.len() + 1];
+        pending[0] = true;
         loop {
             let mut changed = false;
             for &index in &order {
-                if index >= insns.len() {
+                if index >= insns.len() || !std::mem::take(&mut pending[index]) {
                     continue;
                 }
-                let Some(state) = before[index].clone() else {
+                let Some(state) = before[index].as_ref() else {
                     continue;
                 };
-                let Some(after) = step(insns, index, &state, pool, None) else {
+                let Some(after) = step(insns, index, state, pool, None) else {
                     crate::trace_compiler!(
                         "bytecode",
                         "frame analysis: cannot step {:?} at {index} from {state:?}",
@@ -360,6 +369,10 @@ impl FrameTypes {
                     );
                     return None;
                 };
+                // A handler is entered with locals as they stood BEFORE this instruction, which a
+                // self-edge below may join into; keep them only when a handler covers it.
+                let entry_locals =
+                    (!graph.exceptional_successors(index).is_empty()).then(|| state.locals.clone());
                 for &to in graph.normal_successors(index) {
                     let Some(did) = propagate(&mut before, to, &after) else {
                         crate::trace_compiler!(
@@ -370,19 +383,18 @@ impl FrameTypes {
                         );
                         return None;
                     };
+                    pending[to] |= did;
                     changed |= did;
                 }
-                if graph.exceptional_successors(index).is_empty() {
+                let Some(entry_locals) = entry_locals else {
                     continue;
-                }
+                };
                 // A handler is entered with the exception alone on the stack, and locals as they
                 // stood at whichever point of the instruction threw — before its own store, or
                 // after it.
                 let mut thrown = FrameState {
-                    locals: state.locals.clone(),
-                    stack: vec![VerificationType::Reference(
-                        "java/lang/Throwable".to_string(),
-                    )],
+                    locals: entry_locals,
+                    stack: vec![VerificationType::Reference("java/lang/Throwable".into())],
                 };
                 let after_store = FrameState {
                     locals: after.locals.clone(),
@@ -398,6 +410,7 @@ impl FrameTypes {
                         );
                         return None;
                     };
+                    pending[handler] |= did;
                     changed |= did;
                 }
             }
@@ -434,7 +447,7 @@ pub(super) fn step(
         }
     };
     let class_at = |operands: &[u8]| -> Option<VerificationType> {
-        Some(Reference(pool.class_name(u2(operands)?)?.to_string()))
+        Some(Reference(pool.class_name(u2(operands)?)?.into()))
     };
     let invoke = |s: &mut FrameState, descriptor: &str, receiver: bool| -> Option<()> {
         let (params, ret) = method_types(descriptor)?;
@@ -638,7 +651,7 @@ pub(super) fn step(
                     }
                 }
             } else if receiver == UninitializedThis {
-                let constructed = Reference(this_class.unwrap_or(OBJECT_INTERNAL_NAME).to_string());
+                let constructed = Reference(this_class.unwrap_or(OBJECT_INTERNAL_NAME).into());
                 for value in s.locals.iter_mut().chain(s.stack.iter_mut()) {
                     if *value == UninitializedThis {
                         *value = constructed.clone();
@@ -674,15 +687,18 @@ pub(super) fn step(
                 11 => "[J",
                 _ => return None,
             };
-            s.push(Reference(element.to_string()));
+            s.push(Reference(element.into()));
         } // newarray
         0xbd => {
             s.pop()?;
             let class = pool.class_name(u2(operands)?)?;
-            s.push(Reference(match class.starts_with('[') {
-                true => format!("[{class}"),
-                false => format!("[L{class};"),
-            }));
+            s.push(Reference(
+                match class.starts_with('[') {
+                    true => format!("[{class}"),
+                    false => format!("[L{class};"),
+                }
+                .into(),
+            ));
         } // anewarray
         0xbe => {
             s.pop()?;
@@ -734,11 +750,15 @@ pub(super) fn step(
 }
 
 /// The class the `new` at `created` instantiates.
-fn constructed_class(insns: &[Insn], created: usize, pool: &dyn PoolView) -> Option<String> {
+fn constructed_class(
+    insns: &[Insn],
+    created: usize,
+    pool: &dyn PoolView,
+) -> Option<std::rc::Rc<str>> {
     let Insn::Plain { op: 0xbb, operands } = insns.get(created)? else {
         return None;
     };
-    Some(pool.class_name(u2(operands)?)?.to_string())
+    Some(pool.class_name(u2(operands)?)?.into())
 }
 
 /// The type a store of kind `kind` (0 `int`, 1 `long`, 2 `float`, 3 `double`, 4 reference) leaves
@@ -800,12 +820,12 @@ mod tests {
         assert_eq!(
             params,
             vec![
-                VerificationType::Reference("()".to_string()),
+                VerificationType::Reference("()".into()),
                 VerificationType::Integer,
-                VerificationType::Reference("[J".to_string()),
+                VerificationType::Reference("[J".into()),
             ]
         );
-        assert_eq!(ret, Some(VerificationType::Reference("()".to_string())));
+        assert_eq!(ret, Some(VerificationType::Reference("()".into())));
     }
 
     fn plain(op: u8) -> Insn {
@@ -834,7 +854,7 @@ mod tests {
     }
 
     fn reference(name: &str) -> VerificationType {
-        VerificationType::Reference(name.to_string())
+        VerificationType::Reference(name.into())
     }
 
     fn analyze(
@@ -845,6 +865,82 @@ mod tests {
     ) -> FrameTypes {
         let graph = ControlGraph::build(insns, &[]).expect("graph");
         FrameTypes::analyze(insns, &graph, entry, frames, pool).expect("types")
+    }
+
+    /// A pool that counts method-descriptor reads: one per `invokestatic` the analysis steps.
+    struct CountingPool {
+        inner: FakePool,
+        method_reads: std::cell::Cell<usize>,
+    }
+
+    impl PoolView for CountingPool {
+        fn class_name(&self, index: u16) -> Option<&str> {
+            self.inner.class_name(index)
+        }
+        fn field_descriptor(&self, index: u16) -> Option<&str> {
+            self.inner.field_descriptor(index)
+        }
+        fn method_descriptor(&self, index: u16) -> Option<&str> {
+            self.method_reads.set(self.method_reads.get() + 1);
+            self.inner.method_descriptor(index)
+        }
+        fn loadable_constant(&self, index: u16) -> Option<VerifType> {
+            self.inner.loadable_constant(index)
+        }
+    }
+
+    /// An instruction is stepped again only when the state before it changed. A loop whose
+    /// back edge changes nothing is walked once; one whose back edge widens its header re-steps the
+    /// loop once, and the pass that confirms the fixpoint steps nothing.
+    #[test]
+    fn an_instruction_is_stepped_again_only_when_its_incoming_state_changed() {
+        let mut inner = FakePool::default();
+        inner.methods.insert(7, "(Ljava/lang/Object;)I");
+        inner.constants.insert(3, object("java/lang/String"));
+        let pool = CountingPool {
+            inner,
+            method_reads: std::cell::Cell::new(0),
+        };
+        let run = |insns: &[Insn]| {
+            pool.method_reads.set(0);
+            let graph = ControlGraph::build(insns, &[]).expect("graph");
+            let types =
+                FrameTypes::analyze(insns, &graph, &[object("Main")], &[], &pool).expect("types");
+            (types, pool.method_reads.get())
+        };
+
+        // aload_0 ; invokestatic #7 ; ifne 0 ; return — the back edge arrives with the state
+        // the loop was entered with.
+        let steady = [
+            plain(0x2a),
+            with(0xb8, &[0, 7]),
+            branch(0x9a, 0),
+            plain(0xb1),
+        ];
+        let (_, steady_reads) = run(&steady);
+        assert_eq!(steady_reads, 1, "an unchanged loop is walked once");
+
+        // aconst_null ; astore_1 ; aload_1 ; invokestatic #7 ; ifeq 8 ; ldc #3 ; astore_1 ;
+        // goto 2 ; return — the back edge widens slot 1 from `null` to `String` at the header.
+        let widening = [
+            plain(0x01),
+            plain(0x4c),
+            plain(0x2b),
+            with(0xb8, &[0, 7]),
+            branch(0x99, 8),
+            with(0x12, &[3]),
+            plain(0x4c),
+            branch(0xa7, 2),
+            plain(0xb1),
+        ];
+        let (types, widening_reads) = run(&widening);
+        assert_eq!(widening_reads, 2, "one widening re-steps the loop once");
+        let header = types.before(2).expect("reachable");
+        assert_eq!(header.local(1), &reference("java/lang/String"));
+        assert_eq!(
+            types.before(8).expect("reachable").local(1),
+            &reference("java/lang/String")
+        );
     }
 
     /// Two frames at ONE index means the caller handed over per-label frames instead of the merged
