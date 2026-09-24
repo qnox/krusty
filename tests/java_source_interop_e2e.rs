@@ -252,16 +252,84 @@ open class A {
 fun box(): String = J().name()
 "#;
     let java = "public class J extends A { @Override public String name() { return \"OK\"; } }";
+    assert_eq!(run_kotlin_first(kotlin, &[("J", java)]), "OK");
+}
+
+/// A bounded type variable erases to its leftmost bound (JLS §4.6). The Kotlin call is emitted
+/// against the header krusty reads from the Java source, then runs against javac's class, so a
+/// header that erased `T` to `Object` fails with `NoSuchMethodError`.
+#[test]
+fn java_source_headers_erase_type_variables_to_their_bounds() {
+    let java = r#"
+import java.util.List;
+
+public final class JUtil<N extends Number> {
+    public N number;
+    public JUtil(N number) { this.number = number; }
+    public N get() { return number; }
+    public static <T extends Comparable<T>> T max(List<T> xs) {
+        T best = xs.get(0);
+        for (T x : xs) if (x.compareTo(best) > 0) best = x;
+        return best;
+    }
+    public static <T extends Comparable<? super T>> T[] same(T[] xs) { return xs; }
+    public static <A, B extends A> B pick(A a, B b) { return b; }
+    public static <E extends CharSequence & Comparable<E>> E first(E e) { return e; }
+}
+"#;
+    let kotlin = r#"
+fun box(): String {
+    val ints = JUtil<Int>(40)
+    val biggest: Int = JUtil.max(listOf(1, 2, 0))
+    val total = ints.get() + ints.number + biggest
+    val word = JUtil.max(listOf("K", "O")) + JUtil.same(arrayOf("K"))[0]
+    val picked = JUtil.pick<Any, String>(1, "!") + JUtil.first("?")
+    return if (total == 82 && word == "OK" && picked == "!?") "OK" else "FAIL: $total $word $picked"
+}
+"#;
+    assert_eq!(run_kotlin_first(kotlin, &[("JUtil", java)]), "OK");
+}
+
+/// A non-static Java member class inherits its enclosing class's type-variable scope. This runs
+/// Kotlin emitted from the source stub against javac's real nested class, so losing the enclosing
+/// bound changes `Cell.get` from `Number` to `Object` and fails at linkage.
+#[test]
+fn java_member_class_headers_inherit_enclosing_type_variable_bounds() {
+    let java = r#"
+public final class Tray<T extends Number> {
+    public final class Cell<U extends T> {
+        private final U value;
+        public Cell(U value) { this.value = value; }
+        public U get() { return value; }
+    }
+    public Cell<T> cell(T value) { return new Cell<>(value); }
+}
+"#;
+    let kotlin = r#"
+fun box(): String {
+    val value = Tray<Int>().cell(42).get()
+    return if (value == 42) "OK" else "FAIL: $value"
+}
+"#;
+    assert_eq!(run_kotlin_first(kotlin, &[("Tray", java)]), "OK");
+}
+
+/// Kotlin-first mixed compilation, as a build tool runs it: the Kotlin and Java sources enter the
+/// production frontend together, whose JVM provider publishes Java declaration headers during
+/// Pass 1; Kotlin is emitted, only then does javac compile the real Java against krusty's output,
+/// and `box()` runs with the real classes only.
+fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
     let jdk = common::jdk_modules();
     let jars = common::classpath_jars_for(kotlin);
     let mut cp_paths = jars.clone();
     cp_paths.push(jdk.clone());
     let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
-    let inputs = [
-        krusty::source::SourceInput::kotlin(kotlin).with_file_stem("Main"),
-        krusty::source::SourceInput::java(java).with_file_stem("J"),
-    ];
-    let stems = vec!["Main".to_string(), "J".to_string()];
+    let mut inputs = vec![krusty::source::SourceInput::kotlin(kotlin).with_file_stem("Main")];
+    let mut stems = vec!["Main".to_string()];
+    for (stem, source) in java {
+        inputs.push(krusty::source::SourceInput::java(source).with_file_stem(stem));
+        stems.push(stem.to_string());
+    }
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
@@ -282,7 +350,7 @@ fun box(): String = J().name()
     );
     assert!(
         !diagnostics.has_errors(),
-        "mixed-source production frontend rejected the legal cycle: {:?}",
+        "mixed-source production frontend rejected the sources: {:?}",
         diagnostics
             .diags
             .iter()
@@ -297,8 +365,7 @@ fun box(): String = J().name()
         })
         .collect::<Vec<_>>();
 
-    let root = std::env::temp_dir().join(format!("krusty_stub_e2e_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = common::scratch_dir().expect("scratch directory");
     let kotlindir = root.join("kotlin");
 
     // Real javac sees krusty's output; provider-owned Java headers never reach the runtime.
@@ -309,11 +376,13 @@ fun box(): String = J().name()
     }
     let mut javac_cp = jars.clone();
     javac_cp.push(kotlindir.clone());
-    let Some((javadir, java_classes)) =
-        common::javac_compile(&[("J.java".to_string(), java.to_string())], &javac_cp)
-    else {
+    let java_sources = java
+        .iter()
+        .map(|(stem, source)| (format!("{stem}.java"), source.to_string()))
+        .collect::<Vec<_>>();
+    let Some((javadir, java_classes)) = common::javac_compile(&java_sources, &javac_cp) else {
         let _ = std::fs::remove_dir_all(&root);
-        panic!("javac should compile J against krusty's emitted A");
+        panic!("javac should compile the Java sources against krusty's output");
     };
     cleanup(&javadir);
     let _ = std::fs::remove_dir_all(&root);
@@ -322,8 +391,7 @@ fun box(): String = J().name()
     let mut classes = kotlin_classes;
     classes.extend(java_classes);
     let box_class = common::find_box_class(&classes).expect("box() class");
-    let got = common::run_box(&classes, &box_class, &jars).expect("box run");
-    assert_eq!(got, "OK");
+    common::run_box(&classes, &box_class, &jars).expect("box run")
 }
 
 #[test]
