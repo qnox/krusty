@@ -14,10 +14,22 @@ impl CodeBuilder {
         self.dead
     }
 
+    fn record_bind(&mut self, index: usize) {
+        self.next_bind += 1;
+        self.bind_sequence[index] = self.next_bind;
+    }
+
+    /// When label `index` was bound relative to the others: later labels at one offset stand after
+    /// earlier ones. `0` for a label never bound.
+    pub(crate) fn bind_sequence(&self, index: usize) -> u32 {
+        self.bind_sequence.get(index).copied().unwrap_or(0)
+    }
+
     pub fn new_label(&mut self) -> Label {
         let id = self.labels.len() as u32;
         self.labels.push(usize::MAX);
         self.dead_bound.push(false);
+        self.bind_sequence.push(0);
         Label {
             builder: self.id,
             index: id,
@@ -29,6 +41,7 @@ impl CodeBuilder {
     pub fn bind(&mut self, l: Label) {
         let index = self.label_index(l);
         self.labels[index] = self.bytes.len();
+        self.record_bind(index);
         if self.dead {
             let branched_here = self.fixups.iter().any(|&(_, target)| target == l)
                 || self.switch_fixups.iter().any(|&(_, _, target)| target == l);
@@ -50,6 +63,7 @@ impl CodeBuilder {
     pub fn bind_target_at(&mut self, l: Label, offset: usize) {
         let index = self.label_index(l);
         self.labels[index] = offset;
+        self.record_bind(index);
         self.dead_bound[index] = false;
     }
 
@@ -63,6 +77,7 @@ impl CodeBuilder {
     pub fn bind_external_target(&mut self, l: Label) {
         let index = self.label_index(l);
         self.labels[index] = self.bytes.len();
+        self.record_bind(index);
         self.dead = false;
         self.dead_bound[index] = false;
     }
@@ -71,6 +86,7 @@ impl CodeBuilder {
     pub fn bind_handler(&mut self, l: Label, protects: &[(Label, Label)]) {
         let index = self.label_index(l);
         self.labels[index] = self.bytes.len();
+        self.record_bind(index);
         let guards_live_code = protects.iter().any(|&(s, e)| {
             let (s_index, e_index) = (self.label_index(s), self.label_index(e));
             let (s_off, e_off) = (self.labels[s_index], self.labels[e_index]);
@@ -90,6 +106,7 @@ impl CodeBuilder {
         }
         let index = self.label_index(l);
         self.labels[index] = offset;
+        self.record_bind(index);
     }
 
     pub(super) fn branch(&mut self, opcode: u8, l: Label, delta: i32) {

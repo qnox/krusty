@@ -21,7 +21,9 @@ pub(super) fn write_self_publication(
         metadata_scope: IrGeneratedFunctionMetadataScope::Additive,
         functions: vec![IrGeneratedFunctionPublication {
             function,
-            parameter_names: WRITE_SELF_PARAMETER_NAMES.map(String::from).to_vec(),
+            parameter_identities: WRITE_SELF_PARAMETER_NAMES
+                .map(crate::ir::IrParameterIdentity::producer_value)
+                .to_vec(),
             metadata: Some(IrGeneratedFunctionMetadata {
                 source_name: WRITE_SELF_KOTLIN_NAME.to_string(),
                 visibility: Visibility::Internal,
@@ -62,9 +64,9 @@ impl GeneratedSerializerMembers {
         let member =
             |function, parameter_names: &[&str], metadata, debug| IrGeneratedFunctionPublication {
                 function,
-                parameter_names: parameter_names
+                parameter_identities: parameter_names
                     .iter()
-                    .map(|name| (*name).to_string())
+                    .map(|name| crate::ir::IrParameterIdentity::producer_value(*name))
                     .collect(),
                 metadata,
                 debug,
@@ -281,7 +283,10 @@ pub(super) fn add_guarded_instance_method(
         .iter()
         .map(|parameter| parameter.name.to_string())
         .collect::<Vec<_>>();
-    let param_checks = parameter_names.iter().cloned().map(Some).collect();
+    let param_checks = parameter_names
+        .iter()
+        .map(|_| Some(crate::ir::IrParameterCheck::NonNull))
+        .collect();
     ir.add_fun(IrFunction {
         name: name.to_string(),
         params: parameter_types,
@@ -324,7 +329,11 @@ mod tests {
                         member.function,
                         metadata.source_name.clone(),
                         metadata.visibility,
-                        member.parameter_names.clone(),
+                        member
+                            .parameter_identities
+                            .iter()
+                            .map(|identity| identity.source_name.clone().expect("semantic name"))
+                            .collect(),
                     )
                 })
             })
@@ -429,7 +438,14 @@ mod tests {
         assert_eq!(publication.functions.len(), 1);
         let member = &publication.functions[0];
         assert_eq!(member.function, 7);
-        assert_eq!(member.parameter_names, ["self", "output", "serialDesc"]);
+        assert_eq!(
+            member
+                .parameter_identities
+                .iter()
+                .map(|identity| identity.source_name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("self"), Some("output"), Some("serialDesc")]
+        );
         let metadata = member.metadata.as_ref().expect("writeSelf metadata");
         assert_eq!(metadata.source_name, "write$Self");
         assert_eq!(metadata.visibility, Visibility::Internal);

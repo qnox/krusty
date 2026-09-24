@@ -127,6 +127,7 @@ fn annotation_implementation(
             .iter()
             .map(|(name, ty)| IrCtorArg {
                 name: Some(name.clone()),
+                context_kind: crate::types::ContextParameterKind::None,
                 ty: *ty,
                 declared_ty: None,
                 is_field: true,

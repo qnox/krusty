@@ -100,6 +100,24 @@ fn a_bridge_names_its_parameters_after_the_override() {
     result.expect("NoteStore byte-identical to kotlinc");
 }
 
+/// A member-extension receiver is a real physical bridge parameter, between any context prefix and
+/// the ordinary value parameters. The stable override edge must retain it explicitly; otherwise the
+/// bridge either loses `$this$foo` or pairs the value name with the receiver slot.
+#[test]
+fn a_member_extension_bridge_keeps_the_receiver_identity() {
+    let src = "interface Transformer<T> {\n\
+               \x20   fun T.transform(value: T): T\n\
+               }\n\
+               \n\
+               class StringTransformer : Transformer<String> {\n\
+               \x20   override fun String.transform(value: String): String = this + value\n\
+               }\n";
+    // The source has unrelated metadata-shape differences, so compare the complete executable and
+    // debug projection. This still covers every instruction, line, and local-table row of both the
+    // declaration and its erased bridge.
+    assert_code_and_debug_identical("MemberExtensionBridge", src, "StringTransformer");
+}
+
 /// Property bridges do not delegate through an `IrFunction`, so their setter parameter cannot get
 /// a source name from `fn_params`. It still has kotlinc's generated accessor spelling rather than a
 /// positional fallback.
@@ -115,6 +133,51 @@ fn a_property_setter_bridge_uses_its_generated_parameter_name() {
     // This source has a known unrelated metadata-flag delta, so compare the complete javap code +
     // line/local-table projection rather than weakening the bridge assertion to substrings.
     assert_code_and_debug_identical("PropertyBridge", src, "StringBox");
+}
+
+/// An explicit setter parameter is source identity, not the implicit setter's generated role.
+/// Preserve it on the declaration's guard and local table instead of rewriting every setter to
+/// `<set-?>`.
+#[test]
+fn a_custom_property_setter_keeps_its_source_parameter_name() {
+    let src = "class Holder {\n\
+               \x20   var item: String = \"\"\n\
+               \x20       set(replacement) { field = replacement }\n\
+               }\n";
+    assert_code_and_debug_identical("CustomSetterParameter", src, "Holder");
+}
+
+/// An extension accessor's physical method name is a JVM projection. Its receiver local is derived
+/// from the semantic property declaration, so getter and setter both use `$this$payload` while the
+/// explicit setter value retains its own source identity.
+#[test]
+fn extension_property_accessors_use_the_property_source_identity() {
+    let src = "var String.payload: String\n\
+               \x20   get() = this\n\
+               \x20   set(replacement) { replacement.length }\n";
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+        common::stdlib_jar(),
+        common::jdk_modules(),
+    ]));
+    let (files, diagnostics) = common::capture_common_ir(
+        src,
+        "ExtensionPropertyReceiver",
+        Box::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+    let [ir] = files.as_slice() else {
+        panic!("expected one common-IR file, got {}", files.len());
+    };
+    assert_eq!(ir.fn_source_names.len(), 2);
+    assert!(ir.fn_source_names.values().all(|name| name == "payload"));
+    assert_code_and_debug_identical(
+        "ExtensionPropertyReceiver",
+        src,
+        "ExtensionPropertyReceiverKt",
+    );
 }
 
 /// An ANNOTATED class: kotlinc roots the bridge at where the DECLARATION starts, annotations

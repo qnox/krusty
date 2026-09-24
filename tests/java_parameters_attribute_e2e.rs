@@ -35,7 +35,7 @@ fn method_parameters(bytes: &[u8], file_name: &str) -> Vec<String> {
                 (Some(name), flags, None)
                     if name
                         .chars()
-                        .all(|c| c.is_alphanumeric() || c == '$' || c == '_') =>
+                        .all(|c| c.is_alphanumeric() || matches!(c, '$' | '_' | '-' | '#')) =>
                 {
                     collected.push(format!("{name}/{}", flags.unwrap_or("-")));
                 }
@@ -259,6 +259,20 @@ fn java_parameters_names_generated_and_prefixed_parameters() {
             "demo/Face",
             "demo/Face$DefaultImpls",
         ],
+    );
+}
+
+/// New anonymous context parameters are not legacy context receivers. Reflection still sees a
+/// type-derived parameter name, and equal type stems are disambiguated in declaration order.
+#[test]
+fn java_parameters_names_anonymous_context_parameters() {
+    assert_parameter_parity(
+        "JavaParametersAnonymousContext",
+        "// LANGUAGE: +ContextParameters\n\
+         package demo\n\
+         context(_: String, _: String) fun inspect(value: String): String = value\n\
+         context(_: Int) fun count(value: Int): Int = value\n",
+        &["demo/JavaParametersAnonymousContextKt"],
     );
 }
 

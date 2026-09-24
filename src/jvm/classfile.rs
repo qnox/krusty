@@ -8,11 +8,15 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod bytecode_analysis;
+mod constant_pool_queries;
 mod control_flow;
 mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
+mod negated_jumps;
+mod redundant_checkcasts;
+mod redundant_gotos;
 mod temporaries;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
@@ -305,102 +309,6 @@ impl ConstPool {
         let n = self.dedup.get(&Const::Utf8(s.to_string())).copied()?;
         self.dedup.get(&Const::String(n)).copied()
     }
-    /// The entry at 1-based pool index `idx` (long/double occupy 2 slots, so this is not a plain
-    /// `entries[idx-1]` in general). Reverses a `CONSTANT_Class` index back to its name for frame
-    /// comparison — called per mixed `Object(idx)`/`ObjectName` local per frame, so the common
-    /// no-wide-constants pool takes the O(1) path.
-    fn entry_at(&self, idx: u16) -> Option<&Const> {
-        if self.wide_count == 0 {
-            return self.entries.get(idx as usize - 1);
-        }
-        let mut slot = 1u16;
-        for c in &self.entries {
-            if slot == idx {
-                return Some(c);
-            }
-            slot += if matches!(c, Const::Long(_) | Const::Double(_)) {
-                2
-            } else {
-                1
-            };
-        }
-        None
-    }
-    /// The internal name of the `CONSTANT_Class` at `idx` (via its `Utf8` name), if it is one.
-    fn class_name(&self, idx: u16) -> Option<&str> {
-        let Const::Class(utf8_idx) = self.entry_at(idx)? else {
-            return None;
-        };
-        match self.entry_at(*utf8_idx)? {
-            Const::Utf8(s) => Some(s),
-            _ => None,
-        }
-    }
-    /// The `Utf8` at `idx`, if it is one.
-    fn utf8_at(&self, idx: u16) -> Option<&str> {
-        match self.entry_at(idx)? {
-            Const::Utf8(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// The `(owner, name, descriptor)` a Methodref/InterfaceMethodref at `idx` names.
-    fn methodref_parts(&self, idx: u16) -> Option<(&str, &str, &str)> {
-        let (class_idx, name_and_type) = match self.entry_at(idx)? {
-            Const::Methodref(c, nt) | Const::InterfaceMethodref(c, nt) => (*c, *nt),
-            _ => return None,
-        };
-        let Const::NameAndType(name_idx, descriptor_idx) = self.entry_at(name_and_type)? else {
-            return None;
-        };
-        Some((
-            self.class_name(class_idx)?,
-            self.utf8_at(*name_idx)?,
-            self.utf8_at(*descriptor_idx)?,
-        ))
-    }
-
-    /// The descriptor a Fieldref at `idx` names.
-    fn fieldref_descriptor(&self, idx: u16) -> Option<&str> {
-        let Const::Fieldref(_, name_and_type) = self.entry_at(idx)? else {
-            return None;
-        };
-        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
-            return None;
-        };
-        self.utf8_at(*descriptor_idx)
-    }
-
-    /// The descriptor of the call site an `invokedynamic` at `idx` links.
-    fn invokedynamic_descriptor(&self, idx: u16) -> Option<&str> {
-        let Const::InvokeDynamic(_, name_and_type) = self.entry_at(idx)? else {
-            return None;
-        };
-        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
-            return None;
-        };
-        self.utf8_at(*descriptor_idx)
-    }
-
-    /// The verification type `ldc`/`ldc_w`/`ldc2_w` of the constant at `idx` pushes.
-    fn loadable_constant_type(&self, idx: u16) -> Option<VerifType> {
-        Some(match self.entry_at(idx)? {
-            Const::Integer(_) => VerifType::Integer,
-            Const::Float(_) => VerifType::Float,
-            Const::Long(_) => VerifType::Long,
-            Const::Double(_) => VerifType::Double,
-            Const::String(_) => VerifType::ObjectName("java/lang/String".to_string()),
-            Const::Class(_) => VerifType::ObjectName("java/lang/Class".to_string()),
-            Const::MethodType(_) => {
-                VerifType::ObjectName("java/lang/invoke/MethodType".to_string())
-            }
-            Const::MethodHandle(..) => {
-                VerifType::ObjectName("java/lang/invoke/MethodHandle".to_string())
-            }
-            _ => return None,
-        })
-    }
-
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -2504,7 +2412,7 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
         annotations: &crate::ir::DeclarationAnnotations,
-        parameters: &[(String, u16)],
+        parameters: &[(Option<String>, u16)],
     ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
@@ -2515,7 +2423,9 @@ impl ClassWriter {
         // `visitParameter` before `visitParameterAnnotation` and before the code, so a parameter name
         // precedes both the `@NotNull`/`@Nullable` descriptors and every constant the body introduces.
         for (parameter, _) in parameters {
-            self.cp.utf8(parameter);
+            if let Some(parameter) = parameter {
+                self.cp.utf8(parameter);
+            }
         }
         let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {
@@ -3569,6 +3479,10 @@ pub struct CodeBuilder {
     /// same-offset dedup. Their frames are dropped instead. Indexed like `labels`; `false` for a
     /// label bound normally, and for one never bound at all.
     dead_bound: Vec<bool>,
+    /// When each label was last bound, by label id (0 = never): the order labels bound at one offset
+    /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
+    bind_sequence: Vec<u32>,
+    next_bind: u32,
 }
 
 impl CodeBuilder {
@@ -3591,6 +3505,8 @@ impl CodeBuilder {
             implicit_void_return_pc: None,
             dead: false,
             dead_bound: Vec::new(),
+            bind_sequence: Vec::new(),
+            next_bind: 0,
         }
     }
 
