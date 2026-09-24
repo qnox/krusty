@@ -567,7 +567,7 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
         let mut shadowed = Vec::new();
         for (index, existing) in retained.iter().enumerate() {
             if existing.context_count != candidate.context_count
-                || existing.semantic_params() != candidate.semantic_params()
+                || !same_slot_parameters(&existing.semantic_params(), &candidate.semantic_params())
             {
                 continue;
             }
@@ -626,6 +626,17 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
         retained.push(candidate);
     }
     functions.overloads = retained;
+}
+
+/// Parameter lists occupying one override slot. A Java platform type is flexible, so an override
+/// of `J.from(String!)` declared as `from(String)` or `from(String?)` is the same slot, as in
+/// kotlinc's override checker.
+fn same_slot_parameters(left: &[Ty], right: &[Ty]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| crate::assignable::same_flexible_type(left, right))
 }
 
 /// Result of inherited nested-classifier lookup.

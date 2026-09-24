@@ -6216,6 +6216,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/ext_receiver_tparam_binding_e2e.rs`
   (`a_subtype_receiver_over_a_caller_type_variable_binds_the_declared_receiver_formal`,
   cross-checked against the reference compiler).
+- **An override of a Java member matches the platform type, and a Java class merges its members by
+  erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
+  bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
+  `J3.from(String!)`; and a Java class's own scope merges the members it inherits under Java's
+  erasure rule, so inside `java.util.AbstractList<E>` the inherited
+  `AbstractCollection.contains(Object)` implements `List<E>.contains(E)`. krusty compared the
+  substituted parameter types exactly, so every concrete class extending an abstract Java class
+  with a reference-typed parameter (Moshi's `JsonAdapter<T>`, the JDK's skeleton collections) was
+  rejected as "not abstract and does not implement all abstract members". The obligation check
+  (`src/resolve/abstract_obligations.rs`) now discharges an abstract member with a concrete one
+  whose parameters are the same modulo platform flexibility (`assignable::same_flexible_type`), or,
+  when one Java classifier of the hierarchy inherits both declaring classifiers, whose erased
+  declared parameters are equal. An erasure match that only meets in the Kotlin class
+  (`JBase.add(Object)` against `Sink<String>.add(String)`) still leaves the member unimplemented, as
+  in kotlinc. The inherited-member walk collapses the same flexible slot, so a call through the
+  subclass sees only the override's `String` parameter and `b.from(null)` is rejected as it is for a
+  Kotlin base. Remaining gap: an abstract Java map (`java.util.AbstractMap`), whose
+  `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
+  rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
+  for the plain override, JDK skeleton collections, and the shapes that stay rejected).
 
 ## 8. Success criteria for the PoC
 
