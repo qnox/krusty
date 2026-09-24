@@ -52,3 +52,25 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
         .collect();
     ir.remap_classifier_identities(&identities);
 }
+
+/// The class a source callable reference at `expression` compiles to: its lexical owner's physical
+/// name (after [`realize`]), then its source segments and ordinal. `None` for a reference the naming
+/// walk never saw, one lowering synthesized.
+pub(crate) fn callable_reference_name(
+    ir: &IrFile,
+    facade: &str,
+    expression: u32,
+) -> Option<TypeName> {
+    let provenance = ir.callable_reference_provenance.get(&expression)?;
+    let mut name = provenance
+        .lexical_owner
+        .map(|owner| ir.classes[owner as usize].fq_name)
+        .unwrap_or_else(|| type_name(facade));
+    for segment in provenance.segments.iter() {
+        name = type_name_nested_child(name, segment);
+    }
+    if let Some(ordinal) = provenance.ordinal {
+        name = type_name_nested_child(name, &ordinal.to_string());
+    }
+    Some(name)
+}

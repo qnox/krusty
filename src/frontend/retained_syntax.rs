@@ -911,6 +911,10 @@ pub(super) fn compact(file: &mut File) {
     file.anon_fun_receivers =
         remap_u32_map(std::mem::take(&mut file.anon_fun_receivers), &expressions);
     file.suspend_lambdas = remap_u32_set(std::mem::take(&mut file.suspend_lambdas), &expressions);
+    file.callable_reference_provenance = remap_u32_map(
+        std::mem::take(&mut file.callable_reference_provenance),
+        &expressions,
+    );
     file.lambda_labels = remap_u32_map(std::mem::take(&mut file.lambda_labels), &expressions);
     file.base_arg_names = remap_u32_map(std::mem::take(&mut file.base_arg_names), &expressions);
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);

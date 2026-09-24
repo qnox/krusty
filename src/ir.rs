@@ -2188,6 +2188,10 @@ pub struct IrFile {
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
     pub(crate) local_class_name_provenance:
         std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
+    /// The same naming context for each source callable-reference node, by expression id. A target
+    /// that realizes the reference as a class of its own names that class from it.
+    pub(crate) callable_reference_provenance:
+        std::collections::HashMap<u32, IrLocalClassNameProvenance>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from

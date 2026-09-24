@@ -1837,6 +1837,8 @@ mod reified_value_class_splice_e2e;
 
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
+#[path = "local_class_naming_e2e.rs"]
+mod local_class_naming_e2e;
 
 mod serializer_metadata_class_id_e2e;
 #[path = "common/kotlin_metadata.rs"]

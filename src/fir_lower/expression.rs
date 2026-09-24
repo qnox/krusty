@@ -1441,6 +1441,7 @@ impl BodyLowering<'_> {
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.record_callable_reference_provenance(expression_id, first_generated);
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
@@ -1465,6 +1466,46 @@ impl BodyLowering<'_> {
         self.record_expression_origins(first_generated, lowered, origin);
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
+    }
+
+    /// Attach the naming provenance of a source callable reference to the one reference node its
+    /// lowering produced. A reference whose owner has no common-IR class keeps no provenance.
+    fn record_callable_reference_provenance(
+        &mut self,
+        expression_id: crate::fir::FirExprId,
+        first_generated: usize,
+    ) {
+        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
+            return;
+        };
+        let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
+            matches!(
+                self.ir.exprs[raw],
+                crate::ir::IrExpr::CallableReference(_)
+                    | crate::ir::IrExpr::Checked(
+                        crate::ir::IrCheckedOperation::CallableReference { .. }
+                            | crate::ir::IrCheckedOperation::PropertyReference { .. }
+                    )
+            )
+        });
+        let (Some(reference), None) = (references.next(), references.next()) else {
+            return;
+        };
+        let lexical_owner = match provenance.lexical_owner {
+            Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
+                Some(&class) => Some(class),
+                None => return,
+            },
+            None => None,
+        };
+        self.ir.callable_reference_provenance.insert(
+            reference as u32,
+            crate::ir::IrLocalClassNameProvenance {
+                lexical_owner,
+                segments: provenance.segments.clone(),
+                ordinal: provenance.ordinal,
+            },
+        );
     }
 
     pub(super) fn expression_with_conversion(

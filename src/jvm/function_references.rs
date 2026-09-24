@@ -36,6 +36,26 @@ fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_re
         | (i32::from(unit_conversion) << 2)
 }
 
+/// The class a callable reference at `expression` compiles to: the name the source file's
+/// local-class naming walk gives it. A reference that walk never saw (one lowering synthesized, or
+/// a second copy an inline splice made) keeps an internal name.
+pub(super) fn reference_class_name(
+    ir: &IrFile,
+    current_facade: &str,
+    expression: usize,
+    kind: &str,
+) -> crate::types::TypeName {
+    u32::try_from(expression)
+        .ok()
+        .and_then(|raw| {
+            crate::jvm::local_class_names::callable_reference_name(ir, current_facade, raw)
+        })
+        // A second node carrying the same source name is a copy of the first; it cannot share
+        // the class.
+        .filter(|name| ir.classes.iter().all(|class| class.fq_name != *name))
+        .unwrap_or_else(|| type_name(&format!("{current_facade}$fir${kind}${}", ir.classes.len())))
+}
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
     current_facade: &str,
@@ -117,10 +137,7 @@ fn realize_adapter_reference(
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
     }
-    let internal = type_name(&format!(
-        "{current_facade}$fir$function${}",
-        ir.classes.len()
-    ));
+    let internal = reference_class_name(ir, current_facade, expression, "function");
     let mut class = IrClass::synthetic(internal);
     class.superclass = type_name(if adapted {
         "kotlin/jvm/internal/AdaptedFunctionReference"
@@ -472,10 +489,7 @@ pub(super) fn realize(
         }
         let arity = u8::try_from(reference.params.len())
             .map_err(|_| FunctionReferenceRealizationTarget::External(declaration))?;
-        let internal = type_name(&format!(
-            "{current_facade}$fir$function${}",
-            ir.classes.len()
-        ));
+        let internal = reference_class_name(ir, current_facade, raw, "function");
         let mut class = IrClass::synthetic(internal);
         class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
         class.func_ref = Some(FuncRef {
