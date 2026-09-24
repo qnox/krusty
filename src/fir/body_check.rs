@@ -183,19 +183,18 @@ pub struct CheckedBodyParameter<'a> {
     pub name: &'a str,
     pub ty: ResolvedTy,
     pub span: Span,
+    pub context_kind: crate::types::ContextParameterKind,
 }
 
 #[derive(Clone, Copy)]
 struct CheckedBodyReceiverShape<'a> {
     context_receivers: &'a [ResolvedTy],
-    context_value_count: u32,
     extension_receiver: Option<ResolvedTy>,
 }
 
 impl CheckedBodyReceiverShape<'_> {
     const EMPTY: Self = Self {
         context_receivers: &[],
-        context_value_count: 0,
         extension_receiver: None,
     };
 }
@@ -363,7 +362,11 @@ fn check_body_unit_with_parameters_and_defaults(
     }
     checker.configure_receivers(
         receiver_shape.context_receivers,
-        receiver_shape.context_value_count,
+        parameters
+            .iter()
+            .take(receiver_shape.context_receivers.len())
+            .map(|parameter| parameter.context_kind)
+            .collect(),
         receiver_shape.extension_receiver,
     );
     bind_parameters_and_check_defaults(&mut checker, parameters, defaults, receiver_shape)?;
@@ -413,9 +416,6 @@ fn bind_parameters_and_check_defaults(
 ) -> Result<(), BodyCheckFailure> {
     let context_parameter_count = u32::try_from(receiver_shape.context_receivers.len())
         .map_err(|_| checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
-    if receiver_shape.context_value_count > context_parameter_count {
-        return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
-    }
     let mut defaults = defaults.iter().peekable();
     for (ordinal, parameter) in parameters.iter().enumerate() {
         let ordinal = u32::try_from(ordinal).map_err(|_| {
@@ -438,7 +438,9 @@ fn bind_parameters_and_check_defaults(
                 value,
             });
         }
-        if ordinal >= receiver_shape.context_value_count && ordinal < context_parameter_count {
+        if ordinal < context_parameter_count
+            && parameter.context_kind != crate::types::ContextParameterKind::Named
+        {
             continue;
         }
         let value = if parameter.name == "_" {
@@ -1005,12 +1007,13 @@ impl BodyFirChecker<'_> {
     fn configure_receivers(
         &mut self,
         context_receivers: &[ResolvedTy],
-        context_value_count: u32,
+        context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
         extension_receiver: Option<ResolvedTy>,
     ) {
         self.body
             .set_context_receiver_types(context_receivers.to_vec());
-        self.body.set_context_value_count(context_value_count);
+        self.body
+            .set_context_parameter_kinds(context_parameter_kinds);
         if let Some(receiver) = extension_receiver {
             self.body.set_receiver_type(receiver);
         }
@@ -1020,7 +1023,7 @@ impl BodyFirChecker<'_> {
                 u32::try_from(context_receivers.len())
                     .expect("too many checked-body context parameters"),
             )
-            .and_then(|count| count.checked_sub(context_value_count))
+            .and_then(|count| count.checked_sub(self.body.context_value_count()))
             .and_then(|count| count.checked_add(u32::from(extension_receiver.is_some())))
             .expect("too many checked-body implicit receivers");
     }
@@ -1035,7 +1038,6 @@ impl BodyFirChecker<'_> {
         let extension_count = u32::from(self.body.receiver_type().is_some());
         let context_count = u32::try_from(self.body.context_receiver_types().len())
             .expect("too many checked-body context receivers");
-        let context_value_count = self.body.context_value_count().min(context_count);
         let mut semantic_depth = 0;
         let mut runtime_depth = 0;
         if extension_count != 0 {
@@ -1044,7 +1046,10 @@ impl BodyFirChecker<'_> {
             runtime_depth += 1;
         }
         for declaration_ordinal in (0..context_count).rev() {
-            if declaration_ordinal >= context_value_count {
+            if !self
+                .body
+                .is_context_value_ordinal(declaration_ordinal as usize)
+            {
                 capture_depths.insert(semantic_depth, runtime_depth);
                 semantic_depth += 1;
                 runtime_depth += 1;
@@ -1127,6 +1132,25 @@ impl BodyFirChecker<'_> {
             }
             declaration = anchor.owner?;
         }
+    }
+
+    fn current_named_context_parameter(
+        &self,
+        name: &str,
+    ) -> Option<(DeclarationId, u32, ResolvedTy)> {
+        let owner = self.current_storage_owner()?;
+        let (ordinal, parameter) = self
+            .index
+            .classifier_header(owner)?
+            .context_parameters
+            .iter()
+            .enumerate()
+            .find(|(_, parameter)| parameter.name.as_deref() == Some(name))?;
+        Some((
+            owner,
+            u32::try_from(ordinal).expect("too many classifier context parameters"),
+            parameter.ty,
+        ))
     }
 
     fn enclosing_receiver_capture(
@@ -2040,6 +2064,18 @@ impl BodyFirChecker<'_> {
                         let origin = self.expression_origin(expression)?;
                         let kind = self.class_storage_read_kind(binding, origin)?;
                         return self.checked_storage_read(expression, binding.ty, kind);
+                    } else if let Some((owner, parameter, ty)) =
+                        self.current_named_context_parameter(name)
+                    {
+                        let kind = if self.constructor_prefix_capture_access {
+                            FirExprKind::ConstructorContextRead { owner, parameter }
+                        } else {
+                            FirExprKind::ClassStorageRead {
+                                owner,
+                                field: parameter,
+                            }
+                        };
+                        return self.checked_storage_read(expression, ty, kind);
                     } else if let Some(constant) = self.info.resolved_constants.get(&expression) {
                         // A `const val` referenced by BARE NAME from inside its own classifier. The
                         // checker folds it exactly as it folds a qualified one; there is no property to

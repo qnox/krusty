@@ -501,6 +501,27 @@ impl BodyFirChecker<'_> {
             .as_ref()
             .filter(|(name, _)| name != "this")
         {
+            if let Some((owner, parameter, ty)) = self
+                .current_named_context_parameter(name)
+                .filter(|(_, _, ty)| *ty == selected_ty)
+            {
+                let value = self.body.add_expr(FirExpr {
+                    origin,
+                    ty,
+                    kind: if self.constructor_prefix_capture_access {
+                        FirExprKind::ConstructorContextRead { owner, parameter }
+                    } else {
+                        FirExprKind::ClassStorageRead {
+                            owner,
+                            field: parameter,
+                        }
+                    },
+                });
+                return Ok(Some(FirReceiver {
+                    value,
+                    conversion: None,
+                }));
+            }
             let (enclosing_depth, binding) = self
                 .binding_source_at_shadow_depth(name, *shadow_depth)
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;

@@ -451,9 +451,7 @@ fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
 /// walk serves both erased class reachability and generic argument comparison, so no caller can
 /// observe the class relationship while silently discarding the supertype template.
 pub(crate) fn applied_supertype(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> Option<Ty> {
-    let Some(target) = sup.kotlin_class_internal() else {
-        return None;
-    };
+    let target = sup.kotlin_class_internal()?;
     let mut seen = std::collections::HashSet::new();
     // A FUNCTION TYPE has no class identity of its own — `(P) -> R` names no classifier — but it
     // has supertypes: the oracle answers `kotlin.Function<R>` for it, which is Kotlin's own

@@ -1,6 +1,6 @@
 //! Cross-phase contract for metadata and debug publication of generated class members.
 
-use super::{FunId, IrFile};
+use super::{FunId, IrFile, IrParameterIdentity, IrParameterProvenance};
 use crate::types::{TypeName, Visibility};
 use std::num::NonZeroU32;
 
@@ -78,8 +78,8 @@ pub struct IrGeneratedFunctionMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrGeneratedFunctionPublication {
     pub function: FunId,
-    /// Complete source-level parameter identities, exactly parallel to `IrFunction::params`.
-    pub parameter_names: Vec<String>,
+    /// Complete semantic parameter identities, exactly parallel to `IrFunction::params`.
+    pub parameter_identities: Vec<IrParameterIdentity>,
     /// `None` means the physical function has no Kotlin `Function` record (for example a generated
     /// property's getter). Debug publication remains independent and explicit.
     pub metadata: Option<IrGeneratedFunctionMetadata>,
@@ -120,13 +120,22 @@ impl IrFile {
                 .get(member.function as usize)
                 .expect("a generated publication names an existing function");
             assert_eq!(
-                member.parameter_names.len(),
+                member.parameter_identities.len(),
                 function.params.len(),
                 "generated parameter identities exactly match semantic function arity"
             );
             assert!(
-                member.parameter_names.iter().all(|name| !name.is_empty()),
-                "generated parameter identities are never empty"
+                member
+                    .parameter_identities
+                    .iter()
+                    .all(|identity| identity.source_name.as_deref() != Some("")),
+                "generated semantic parameter identities are never empty"
+            );
+            assert!(
+                member.parameter_identities.iter().all(|identity| {
+                    identity.provenance == IrParameterProvenance::CompilerGenerated
+                }),
+                "a generated declaration publishes generated parameter provenance"
             );
             assert!(
                 member.debug.fallthrough_line().is_none() || function.ret == crate::types::Ty::Unit,

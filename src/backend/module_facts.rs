@@ -78,7 +78,7 @@ pub struct BackendMemberFact {
     pub suspend: bool,
     pub abstract_member: bool,
     pub visibility: Visibility,
-    pub param_names: Box<[Box<str>]>,
+    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,14 +109,18 @@ impl BackendClassifierFact {
                 surface.push(BackendMemberFact::from_callable_named(
                     &property.getter,
                     property.visibility,
-                    &property.context_param_names,
+                    &property.context_parameter_identities,
+                    None,
+                    property.receiver.is_some(),
                     BackendMemberName::PropertyGetter(property.name.as_str().into()),
                 ));
                 if let Some(setter) = &property.setter {
                     surface.push(BackendMemberFact::from_callable_named(
                         setter,
                         property.setter_visibility,
-                        &property.context_param_names,
+                        &property.context_parameter_identities,
+                        property.setter_parameter_name.as_deref(),
+                        property.receiver.is_some(),
                         BackendMemberName::PropertySetter(property.name.as_str().into()),
                     ));
                 }
@@ -182,13 +186,17 @@ impl BackendMemberFact {
             suspend: function.flags.suspend,
             abstract_member: function.flags.is_abstract,
             visibility: function.visibility,
-            param_names: function
+            parameter_identities: function
                 .call_sig
-                .param_names
-                .iter()
-                .map(|name| name.as_str().into())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+                .physical_parameter_identities(
+                    callable.params.len(),
+                    function.context_count,
+                    (function.is_extension()
+                        && callable.params.len()
+                            == function.call_sig.parameter_identities.len() + 1)
+                        .then_some(function.context_count),
+                )
+                .expect("a normalized function publishes every typed parameter identity"),
         }
     }
 
@@ -206,22 +214,51 @@ impl BackendMemberFact {
             suspend: member.suspend(),
             abstract_member: member.is_abstract(),
             visibility: member.visibility,
-            param_names: member
+            parameter_identities: member
                 .call_sig
-                .param_names
-                .iter()
-                .map(|name| name.as_str().into())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+                .physical_parameter_identities(
+                    member.params.len(),
+                    member.context_count,
+                    (member.is_member_extension()
+                        && member.params.len() == member.call_sig.parameter_identities.len() + 1)
+                        .then_some(member.context_count),
+                )
+                .expect("a normalized member publishes every typed parameter identity"),
         }
     }
 
     fn from_callable_named(
         callable: &LibraryCallable,
         visibility: Visibility,
-        param_names: &[String],
+        context_parameter_identities: &[crate::fir::ResolvedParameterIdentity],
+        setter_parameter_name: Option<&str>,
+        extension_receiver: bool,
         name: BackendMemberName,
     ) -> Self {
+        let setter = matches!(name, BackendMemberName::PropertySetter(_));
+        let mut logical_identities = context_parameter_identities.to_vec();
+        if setter {
+            logical_identities.push(setter_parameter_name.map_or(
+                crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
+            ));
+        }
+        // An associated/companion extension participates in source lookup through a receiver but
+        // its accessor has no physical receiver parameter. Preserve only receivers actually present
+        // in this target-facing parameter list.
+        let extension_receiver =
+            extension_receiver && callable.params.len() == logical_identities.len() + 1;
+        if extension_receiver {
+            logical_identities.insert(
+                callable.context_count,
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+            );
+        }
+        assert_eq!(
+            callable.params.len(),
+            logical_identities.len(),
+            "a normalized property accessor publishes every typed parameter identity"
+        );
         Self {
             name,
             physical_name: None,
@@ -235,11 +272,7 @@ impl BackendMemberFact {
             suspend: callable.suspend,
             abstract_member: callable.is_abstract,
             visibility,
-            param_names: param_names
-                .iter()
-                .map(|name| name.as_str().into())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            parameter_identities: logical_identities.into_boxed_slice(),
         }
     }
 
@@ -398,14 +431,11 @@ impl BackendModuleFacts {
                                 receiver.get(),
                             );
                         }
-                        let param_names = (0..index.callable_parameter_name_count(callable.id))
-                            .filter_map(|ordinal| {
-                                index
-                                    .callable_parameter_name(callable.id, ordinal as u32)
-                                    .map(Box::<str>::from)
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice();
+                        let parameter_identities = index
+                            .callable_parameter_identities(callable.id, parameters.len())
+                            .ok_or(BackendFactError::IncompleteClassifier(
+                                classifier.classifier,
+                            ))?;
                         surface.push((
                             index.source_order(child).unwrap_or(u32::MAX),
                             BackendMemberFact {
@@ -432,7 +462,7 @@ impl BackendModuleFacts {
                                     .flags
                                     .has(crate::fir::DeclarationFlags::ABSTRACT),
                                 visibility: child_header.visibility,
-                                param_names,
+                                parameter_identities,
                             },
                         ));
                     }
@@ -469,6 +499,18 @@ impl BackendModuleFacts {
                         let abstract_member = child_header
                             .flags
                             .has(crate::fir::DeclarationFlags::ABSTRACT);
+                        let mut getter_parameter_identities = index
+                            .property_context_parameter_identities(property_id)
+                            .ok_or(BackendFactError::IncompleteClassifier(
+                                classifier.classifier,
+                            ))?
+                            .into_vec();
+                        if property.extension_receiver.is_some() {
+                            getter_parameter_identities
+                                .push(crate::fir::ResolvedParameterIdentity::ExtensionReceiver);
+                        }
+                        let getter_parameter_identities =
+                            getter_parameter_identities.into_boxed_slice();
                         surface.push((
                             index.source_order(child).unwrap_or(u32::MAX),
                             BackendMemberFact {
@@ -484,11 +526,23 @@ impl BackendModuleFacts {
                                 suspend: false,
                                 abstract_member,
                                 visibility: child_header.visibility,
-                                param_names: Box::default(),
+                                parameter_identities: getter_parameter_identities.clone(),
                             },
                         ));
                         if property.mutable {
                             parameters.push(signature.result.get());
+                            let mut setter_parameter_identities =
+                                getter_parameter_identities.to_vec();
+                            setter_parameter_identities.push(
+                                index
+                                    .property_setter_parameter_identity(property_id)
+                                    .ok_or(BackendFactError::IncompleteClassifier(
+                                        classifier.classifier,
+                                    ))?
+                                    .clone(),
+                            );
+                            let setter_parameter_identities =
+                                setter_parameter_identities.into_boxed_slice();
                             let setter_visibility = index
                                 .owned_declaration(child, crate::fir::DeclarationKind::Accessor, 1)
                                 .and_then(|setter| index.declaration_header(setter))
@@ -508,7 +562,7 @@ impl BackendModuleFacts {
                                     suspend: false,
                                     abstract_member,
                                     visibility: setter_visibility,
-                                    param_names: Box::default(),
+                                    parameter_identities: setter_parameter_identities,
                                 },
                             ));
                         }
@@ -986,6 +1040,9 @@ mod tests {
                 fun echo(value: T): T = value
                 fun text(value: String): String = value
                 val answer: Int get() = 42
+                var item: String
+                    get() = ""
+                    set(replacement) {}
             }
         "#;
         let mut diagnostics = crate::diag::DiagSink::new();

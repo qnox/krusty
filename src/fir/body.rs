@@ -2,6 +2,7 @@ use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
 use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
+mod context_parameters;
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 
@@ -1885,7 +1886,7 @@ pub struct FirBody {
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<FirStatementDebugLines>,
     context_receiver_types: Vec<ResolvedTy>,
-    context_value_count: u32,
+    context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1935,7 +1936,7 @@ impl FirBody {
             expression_debug_lines: Vec::new(),
             statement_debug_lines: Vec::new(),
             context_receiver_types: Vec::new(),
-            context_value_count: 0,
+            context_parameter_kinds: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2131,22 +2132,6 @@ impl FirBody {
 
     pub fn context_receiver_types(&self) -> &[ResolvedTy] {
         &self.context_receiver_types
-    }
-
-    pub fn set_context_value_count(&mut self, count: u32) {
-        assert_eq!(
-            self.context_value_count, 0,
-            "a FIR body may publish its context value count only once"
-        );
-        assert!(
-            count as usize <= self.context_receiver_types.len(),
-            "named context values must be a prefix of context receiver types"
-        );
-        self.context_value_count = count;
-    }
-
-    pub const fn context_value_count(&self) -> u32 {
-        self.context_value_count
     }
 
     pub fn add_parameter(&mut self, parameter: FirValueParameter) {

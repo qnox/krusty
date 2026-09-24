@@ -97,28 +97,19 @@ pub(crate) fn run_backend_passes(
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
-    run_backend_passes_after_plugins(
-        ir,
-        facade,
-        classifiers,
-        classifiers.module().source_value_classes(),
-        classifiers.module().metadata_readable_value_classes(),
-        classpath,
-        Some(stems),
-        facts,
-    )
+    run_backend_passes_after_plugins(ir, facade, classifiers, classpath, Some(stems), facts)
 }
 
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
-    classifiers: &dyn crate::types::ClassifierFactSource,
-    module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
-    module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
+    classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
     stems: Option<&[String]>,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    let module_value_classes = classifiers.module().source_value_classes();
+    let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     crate::jvm::module_calls::realize_super_calls(ir).map_err(|_| SkipReason::SuperCalls)?;
@@ -1078,6 +1069,13 @@ pub fn facade_package_metadata_from_ir(
             if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
                 no_infer_params.remove(declaration.context_count);
             }
+            let context_parameter_kinds = ir
+                .function_parameter_identities(declaration.function)
+                .expect("a package function metadata declaration retains parameter identities")
+                .iter()
+                .take(declaration.context_count)
+                .map(crate::jvm::parameter_names::metadata_context_kind)
+                .collect();
             crate::metadata::builder::FnMeta {
                 name: declaration.name.clone(),
                 params: declaration.params.clone(),
@@ -1116,6 +1114,7 @@ pub fn facade_package_metadata_from_ir(
                     .map(|parameter| parameter.bounds.clone())
                     .collect(),
                 context_count: declaration.context_count,
+                context_parameter_kinds,
                 vararg_index: declaration.vararg_index,
                 visibility: declaration.visibility,
                 spellings: declaration.spellings.clone(),
@@ -1133,6 +1132,17 @@ pub fn facade_package_metadata_from_ir(
         .package_properties
         .iter()
         .map(|declaration| {
+            let setter_function = match ir.local_property_layouts.get(&declaration.property) {
+                Some(
+                    crate::ir::IrLocalPropertyLayout::TopLevelStorage { setter, .. }
+                    | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. },
+                ) => *setter,
+                Some(
+                    crate::ir::IrLocalPropertyLayout::Member { .. }
+                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                )
+                | None => None,
+            };
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1180,10 +1190,16 @@ pub fn facade_package_metadata_from_ir(
                     .context_parameter_names
                     .iter()
                     .cloned()
+                    .zip(declaration.context_parameter_kinds.iter().copied())
                     .zip(declaration.context_parameters.iter().copied())
+                    .map(|((name, kind), ty)| (name, kind, ty))
                     .collect(),
                 getter,
                 setter,
+                setter_parameter_name: crate::jvm::ir_emit::explicit_setter_parameter_name(
+                    ir,
+                    setter_function,
+                ),
                 is_const: declaration.is_const,
                 has_constant: declaration.has_constant,
                 decl_order: declaration.source_order as usize,
@@ -1343,10 +1359,35 @@ mod tests {
     }
 
     #[test]
-    fn facade_metadata_round_trips_plain_top_level_properties() {
+    fn facade_metadata_uses_the_custom_setter_parameter_identity() {
         let mut ir = crate::ir::IrFile::default();
+        let setter = ir.add_fun(crate::ir::IrFunction {
+            name: "setTopLevel".to_string(),
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            setter,
+            crate::ir::FnParamInfo::identities(vec![crate::ir::IrParameterIdentity::source(
+                "replacement",
+            )]),
+        );
+        let property_id = crate::fir::PropertyId::from_raw(0);
+        ir.local_property_layouts.insert(
+            property_id,
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                storage: 0,
+                getter: None,
+                setter: Some(setter),
+                qualifier: None,
+            },
+        );
         ir.package_properties.push(crate::ir::IrPackageProperty {
-            property: crate::fir::PropertyId::from_raw(0),
+            property: property_id,
             name: "topLevel".to_string(),
             ty: Ty::Int,
             mutable: true,
@@ -1354,6 +1395,7 @@ mod tests {
             receiver: None,
             context_parameters: Vec::new(),
             context_parameter_names: Vec::new(),
+            context_parameter_kinds: Vec::new(),
             is_const: false,
             has_constant: true,
             visibility: crate::types::Visibility::Public,
@@ -1385,6 +1427,10 @@ mod tests {
         };
         assert_eq!(property.name, "topLevel");
         assert!(property.is_var);
+        assert_eq!(
+            property.setter_parameter_name.as_deref(),
+            Some("replacement")
+        );
         assert_eq!(
             property.ret_class,
             Some(crate::types::type_name("kotlin/Int"))

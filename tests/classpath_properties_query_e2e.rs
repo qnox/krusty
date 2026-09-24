@@ -113,6 +113,43 @@ fn member_property_getter_and_setter_from_metadata() {
 }
 
 #[test]
+fn metadata_provider_preserves_only_an_explicit_setter_parameter_identity() {
+    let Some(dir) = common::compile_lib(
+        "setterparamidentity",
+        "class Holder {\n\
+         \x20   var custom: String = \"\"\n\
+         \x20       set(replacement) { field = replacement }\n\
+         \x20   var implicit: String = \"\"\n\
+         }\n",
+    ) else {
+        eprintln!("skip: kotlinc unavailable");
+        return;
+    };
+    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![dir, common::stdlib_jar()])))
+        .expect("JVM provider initialization");
+
+    let custom = declared(&lib, Ty::obj("Holder"), "custom")
+        .into_parts()
+        .1
+        .overloads
+        .into_iter()
+        .next()
+        .expect("custom property decoded from metadata");
+    let implicit = declared(&lib, Ty::obj("Holder"), "implicit")
+        .into_parts()
+        .1
+        .overloads
+        .into_iter()
+        .next()
+        .expect("implicit property decoded from metadata");
+
+    // The custom source declaration is a metadata fact. The implicit setter still has no declared
+    // identity: do not recover one from classfile debug tables or invent `value`.
+    assert_eq!(custom.setter_parameter_name.as_deref(), Some("replacement"));
+    assert_eq!(implicit.setter_parameter_name, None);
+}
+
+#[test]
 fn jvmname_extension_property_resolves_via_metadata_getter() {
     // A classpath extension property whose getter is `@JvmName`-renamed: the `getX` guess (`getTag`)
     // misses the real `grabTag`, so this was `unresolved member 'tag'` before the properties() query

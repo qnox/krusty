@@ -413,7 +413,7 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
     for property in &class.properties {
         reject_all(
             "property context parameter",
-            property.context_params.iter().map(|(_, ty)| *ty),
+            property.context_params.iter().map(|(_, _, ty)| *ty),
         )?;
         reject("property declaration", property.ty)?;
         if let Some(storage) = property.storage_ty {

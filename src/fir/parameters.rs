@@ -1,4 +1,4 @@
-use super::{CallableId, DeclarationNameId, ResolvedModuleIndex};
+use super::{CallableId, DeclarationNameId, ResolvedModuleIndex, ResolvedParameterIdentity};
 
 /// Persistent semantic facts for one callable value parameter. Source types are represented by the
 /// pending-free `ResolvedSignature`; this compact record carries declaration behavior that the
@@ -10,17 +10,20 @@ pub struct ResolvedValueParameterHeader {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResolvedValueParameterFlags(u8);
+pub struct ResolvedValueParameterFlags(u16);
 
 impl ResolvedValueParameterFlags {
-    const VARARG: u8 = 1 << 0;
-    const DEFAULT: u8 = 1 << 1;
-    const PROPERTY: u8 = 1 << 2;
-    const MUTABLE_PROPERTY: u8 = 1 << 3;
-    const IMPLICIT_INTEGER_COERCION: u8 = 1 << 4;
-    const EXACT: u8 = 1 << 5;
-    const NO_INFER: u8 = 1 << 6;
-    const MATERIALIZED_LAMBDA: u8 = 1 << 7;
+    const VARARG: u16 = 1 << 0;
+    const DEFAULT: u16 = 1 << 1;
+    const PROPERTY: u16 = 1 << 2;
+    const MUTABLE_PROPERTY: u16 = 1 << 3;
+    const IMPLICIT_INTEGER_COERCION: u16 = 1 << 4;
+    const EXACT: u16 = 1 << 5;
+    const NO_INFER: u16 = 1 << 6;
+    const MATERIALIZED_LAMBDA: u16 = 1 << 7;
+    const ANONYMOUS_CONTEXT: u16 = 1 << 8;
+    const LEGACY_CONTEXT_RECEIVER: u16 = 1 << 9;
+    const PROPERTY_SETTER_VALUE: u16 = 1 << 10;
 
     pub const fn new(vararg: bool, default: bool, property: bool, mutable_property: bool) -> Self {
         let mut bits = 0;
@@ -101,6 +104,39 @@ impl ResolvedValueParameterFlags {
     /// function-typed — so an expansion that needs the difference must read it here.
     pub const fn materializes_its_lambda(self) -> bool {
         self.0 & Self::MATERIALIZED_LAMBDA != 0
+    }
+
+    pub const fn with_context_kind(mut self, kind: crate::types::ContextParameterKind) -> Self {
+        match kind {
+            crate::types::ContextParameterKind::Anonymous => self.0 |= Self::ANONYMOUS_CONTEXT,
+            crate::types::ContextParameterKind::LegacyReceiver => {
+                self.0 |= Self::LEGACY_CONTEXT_RECEIVER
+            }
+            crate::types::ContextParameterKind::None
+            | crate::types::ContextParameterKind::Named => {}
+        }
+        self
+    }
+
+    pub const fn context_kind(self) -> crate::types::ContextParameterKind {
+        if self.0 & Self::ANONYMOUS_CONTEXT != 0 {
+            crate::types::ContextParameterKind::Anonymous
+        } else if self.0 & Self::LEGACY_CONTEXT_RECEIVER != 0 {
+            crate::types::ContextParameterKind::LegacyReceiver
+        } else {
+            crate::types::ContextParameterKind::Named
+        }
+    }
+
+    pub const fn with_property_setter_value(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= Self::PROPERTY_SETTER_VALUE;
+        }
+        self
+    }
+
+    pub const fn is_property_setter_value(self) -> bool {
+        self.0 & Self::PROPERTY_SETTER_VALUE != 0
     }
 }
 
@@ -192,6 +228,68 @@ impl ResolvedModuleIndex {
             .map_or(0, |parameters| parameters.len())
     }
 
+    /// Exact semantic identity of one logical declaration parameter. Roles come only from typed
+    /// header flags published while the provider/source header is live; spellings are payload, not
+    /// discriminators.
+    pub fn callable_parameter_identity(
+        &self,
+        callable: CallableId,
+        ordinal: u32,
+    ) -> Option<ResolvedParameterIdentity> {
+        let header = self.callable(callable)?;
+        let parameter = self.callable_parameter(callable, ordinal)?;
+        let name = self.callable_parameter_name(callable, ordinal)?;
+        if ordinal < header.shape.context_parameter_count {
+            return Some(match parameter.flags.context_kind() {
+                crate::types::ContextParameterKind::Named => {
+                    ResolvedParameterIdentity::ContextValue {
+                        ordinal,
+                        source_name: name.into(),
+                    }
+                }
+                crate::types::ContextParameterKind::Anonymous => {
+                    ResolvedParameterIdentity::AnonymousContextParameter { ordinal }
+                }
+                crate::types::ContextParameterKind::LegacyReceiver => {
+                    ResolvedParameterIdentity::LegacyContextReceiver { ordinal }
+                }
+                crate::types::ContextParameterKind::None => return None,
+            });
+        }
+        Some(if parameter.flags.is_property_setter_value() {
+            ResolvedParameterIdentity::PropertySetterValue
+        } else if name.is_empty() {
+            ResolvedParameterIdentity::Unnamed { ordinal }
+        } else {
+            ResolvedParameterIdentity::Source(name.into())
+        })
+    }
+
+    /// Complete physical identity list for a resolved callable. The extension receiver is a typed
+    /// callable-shape fact and is inserted at its semantic position; no name is inspected to find it.
+    pub fn callable_parameter_identities(
+        &self,
+        callable: CallableId,
+        physical_count: usize,
+    ) -> Option<Box<[ResolvedParameterIdentity]>> {
+        let shape = self.callable(callable)?.shape;
+        let logical_count =
+            physical_count.checked_sub(usize::from(shape.extension_receiver.is_some()))?;
+        if self.callable_parameter_name_count(callable) != logical_count {
+            return None;
+        }
+        let mut identities = (0..logical_count)
+            .map(|ordinal| self.callable_parameter_identity(callable, ordinal as u32))
+            .collect::<Option<Vec<_>>>()?;
+        if shape.extension_receiver.is_some() {
+            identities.insert(
+                shape.context_parameter_count as usize,
+                ResolvedParameterIdentity::ExtensionReceiver,
+            );
+        }
+        Some(identities.into_boxed_slice())
+    }
+
     pub fn publish_callable_parameters<'a>(
         &mut self,
         callable: CallableId,
@@ -203,9 +301,17 @@ impl ResolvedModuleIndex {
         );
         let parameters = parameters
             .into_iter()
-            .map(|(name, flags)| ResolvedValueParameterHeader {
-                name: self.intern_declaration_name(name),
-                flags,
+            .map(|(name, flags)| {
+                let name =
+                    if flags.context_kind() == crate::types::ContextParameterKind::LegacyReceiver {
+                        ""
+                    } else {
+                        name
+                    };
+                ResolvedValueParameterHeader {
+                    name: self.intern_declaration_name(name),
+                    flags,
+                }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();

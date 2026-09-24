@@ -100,6 +100,28 @@ fn local_slots(dump: &str) -> Vec<String> {
         .collect()
 }
 
+fn instructions(dump: &str) -> Vec<String> {
+    dump.lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.split_once(':')
+                .is_some_and(|(offset, _)| offset.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| {
+                    if token.starts_with('#') && token[1..].chars().all(|c| c.is_ascii_digit()) {
+                        "#"
+                    } else {
+                        token
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
 const ORDER: &str = r#"package repro
 
 class Src
@@ -148,6 +170,26 @@ fn a_context_extension_body_binds_the_receiver_after_the_contexts() {
         "receiver should occupy slot 2, after both contexts: {:?}",
         local_slots(&krusty)
     );
+}
+
+/// An anonymous context parameter is reflection-visible and assertion-visible, but it is not a
+/// lexical source local. The complete instruction stream pins the type-derived assertion string;
+/// the complete local table pins its omission there while retaining the ordinary value parameter.
+#[test]
+fn an_anonymous_context_parameter_has_surface_specific_names() {
+    const SOURCE: &str = "// LANGUAGE: +ContextParameters\n\
+        package repro\n\
+        context(_: String) fun inspect(value: String): String = value\n";
+    let Some((kotlinc, krusty)) = javap_both(
+        "AnonymousContextNames",
+        SOURCE,
+        "repro/AnonymousContextNamesKt",
+    ) else {
+        eprintln!("skip (AnonymousContextNames: reference toolchain unavailable)");
+        return;
+    };
+    assert_eq!(instructions(&krusty), instructions(&kotlinc));
+    assert_eq!(local_slots(&krusty), local_slots(&kotlinc));
 }
 
 const MEMBER: &str = r#"package repro

@@ -272,7 +272,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
 pub(super) fn emit_ctor_marker_accessor(
     owner: &str,
     real_params: &[Ty],
-    real_parameter_identities: &[String],
+    real_parameter_identities: &[Option<String>],
     cw: &mut ClassWriter,
 ) {
     assert_eq!(
@@ -316,7 +316,10 @@ pub(super) fn emit_ctor_marker_accessor(
         real_parameter_identities
             .iter()
             .zip(&param_slots)
-            .map(|(name, &(slot, ty))| (name.clone(), super::type_descriptor(ty), slot)),
+            .filter_map(|(name, &(slot, ty))| {
+                name.clone()
+                    .map(|name| (name, super::type_descriptor(ty), slot))
+            }),
     );
     locals.push((
         "$constructor_marker".to_string(),

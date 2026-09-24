@@ -1,15 +1,18 @@
 //! JVM `MethodParameters` planning from checked declarations and backend-generated provenance.
 
-use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
-use crate::types::{same, Ty, TypeName};
+use crate::ir::{
+    IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
+    IrSecondaryCtor,
+};
+use crate::types::{Ty, TypeName};
 
-pub(super) type MethodParameter = (String, u16);
+pub(super) type MethodParameter = (Option<String>, u16);
 
 const SYNTHETIC: u16 = 0x1000;
 const MANDATED: u16 = 0x8000;
 
 fn parameter(name: impl Into<String>, flags: u16) -> MethodParameter {
-    (name.into(), flags)
+    (Some(name.into()), flags)
 }
 
 /// JVM storage spelling for a lexical capture. Common IR retains the source spelling; local and
@@ -37,10 +40,13 @@ pub(super) fn prepend_value_class_receiver(ir: &mut IrFile, function: u32, name:
     let info = ir
         .fn_params
         .entry(function)
-        .or_insert_with(|| crate::ir::FnParamInfo::names(Vec::new()));
-    info.prepend_compiler_generated(name.to_string());
+        .or_insert_with(|| crate::ir::FnParamInfo::identities(Vec::new()));
+    info.prepend_generated(IrParameterIdentity::generated(
+        IrGeneratedParameterRole::ValueClassCarrier,
+        Some(name.to_string()),
+    ));
     assert_eq!(
-        info.names.len(),
+        info.identities.len(),
         expected,
         "value-class carrier provenance must match the transformed function"
     );
@@ -65,13 +71,26 @@ pub(super) fn record_function(
     let info = ir
         .fn_params
         .entry(function)
-        .or_insert_with(|| crate::ir::FnParamInfo::names(names.clone()));
+        .or_insert_with(|| crate::ir::FnParamInfo::source_names(names.clone()));
     assert_eq!(
-        info.names, names,
+        info.identities
+            .iter()
+            .map(|identity| identity.source_name.as_deref())
+            .collect::<Vec<_>>(),
+        names
+            .iter()
+            .map(String::as_str)
+            .map(Some)
+            .collect::<Vec<_>>(),
         "one function has one parameter identity list"
     );
     for &parameter in compiler_generated {
-        info.mark_compiler_generated(parameter);
+        let identity = info
+            .identities
+            .get_mut(parameter)
+            .expect("generated MethodParameters provenance needs an identity");
+        identity.role = IrParameterRole::Generated(IrGeneratedParameterRole::ValueClassCarrier);
+        identity.provenance = crate::ir::IrParameterProvenance::CompilerGenerated;
     }
 }
 
@@ -88,38 +107,33 @@ pub(super) fn function(
     if ir.synthetic_methods.contains(&function) && generated.is_none() {
         return Vec::new();
     }
-    let source_info = ir.fn_params.get(&function);
-    let Some(mut names) = ir
+    let Some(identities) = ir
         .function_parameter_identities(function)
-        .map(<[String]>::to_vec)
+        .map(<[IrParameterIdentity]>::to_vec)
     else {
         return Vec::new();
     };
-    if names.len() + 1 == physical_parameters.len()
-        && physical_parameters.last().is_some_and(|ty| {
-            ty.obj_internal()
-                .is_some_and(|name| same(name, crate::types::wk::continuation()))
-        })
-    {
-        names.push("$completion".to_string());
-    }
     assert_eq!(
-        names.len(),
+        identities.len(),
         physical_parameters.len(),
         "recorded function parameter identities must match the physical JVM parameters"
     );
-    assert!(
-        names.iter().all(|name| !name.is_empty()),
-        "a MethodParameters entry must have a non-empty name"
-    );
-    let mut parameters = names
+    let projected_names =
+        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
+            .expect("published MethodParameters identities have JVM projections");
+    let mut parameters = identities
         .into_iter()
         .enumerate()
-        .map(|(index, name)| {
-            parameter(
-                name,
-                u16::from(source_info.is_some_and(|info| info.is_compiler_generated(index)))
-                    * SYNTHETIC,
+        .map(|(index, identity)| {
+            (
+                projected_names[index].clone(),
+                u16::from(matches!(
+                    identity.role,
+                    IrParameterRole::Generated(
+                        IrGeneratedParameterRole::HolderReceiver
+                            | IrGeneratedParameterRole::ValueClassCarrier
+                    )
+                )) * SYNTHETIC,
             )
         })
         .collect::<Vec<_>>();
@@ -174,15 +188,8 @@ pub(super) fn primary_constructor(
     );
     let prefix = class.constructor_prefix_count as usize;
     let mut parameters = constructor_prefix(class, prefix);
-    parameters.extend(class.ctor_args[prefix..].iter().map(|argument| {
-        parameter(
-            argument
-                .name
-                .clone()
-                .expect("a declared constructor parameter needs its source name"),
-            0,
-        )
-    }));
+    let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
+    parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
 }
 
@@ -192,11 +199,10 @@ pub(super) fn primary_constructor(
 pub(super) fn primary_constructor_identities(
     class: &IrClass,
     physical_parameters: &[Ty],
-) -> Vec<String> {
-    primary_constructor(class, physical_parameters)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect()
+) -> Vec<Option<String>> {
+    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    assert_eq!(identities.len(), physical_parameters.len());
+    identities
 }
 
 /// Everything a class KIND prepends to EVERY constructor it declares, ahead of what the
@@ -269,7 +275,7 @@ pub(super) fn secondary_constructor_identities(
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
     physical_parameters: &[Ty],
-) -> Vec<String> {
+) -> Vec<Option<String>> {
     assert_eq!(
         owner_prefix.len() + constructor.prefix_params.len() + constructor.named_params.len(),
         physical_parameters.len(),
@@ -307,18 +313,17 @@ pub(super) fn enum_value_of() -> [MethodParameter; 1] {
 /// Compatibility-holder forwards prepend a JVM-generated receiver to the declaration's parameters.
 /// Metadata/provider boundaries must supply every source identity; inventing `pN` names would make
 /// reflection succeed with a semantically false parameter list.
-pub(super) fn holder_forward(names: &[String], physical_parameters: &[Ty]) -> Vec<MethodParameter> {
+pub(super) fn holder_forward(
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
     assert_eq!(
         names.len(),
         physical_parameters.len(),
         "compatibility-holder parameter identities must match its declaration"
     );
-    assert!(
-        names.iter().all(|name| !name.is_empty()),
-        "a MethodParameters entry must have a non-empty name"
-    );
     std::iter::once(parameter("$this", SYNTHETIC))
-        .chain(names.iter().cloned().map(|name| parameter(name, 0)))
+        .chain(names.iter().cloned().map(|name| (name, 0)))
         .collect()
 }
 

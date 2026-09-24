@@ -438,12 +438,15 @@ pub(crate) fn lower_suspend(
         f.params.push(continuation_ty());
         f.param_checks.push(None);
         f.ret = object_ty();
-        // kotlinc names the synthesized continuation parameter `$completion` in the method's
-        // LocalVariableTable. Append it to the recorded parameter names so the debug-table emitter
-        // uses it instead of the positional `p{n}` fallback. `@Metadata` describes the DECLARED
-        // function (no continuation parameter — it reads only the leading names), so this is inert there.
+        // Preserve the synthesized continuation's ROLE in the physical parameter contract. The JVM
+        // debug boundary formats it `$completion`; Kotlin metadata describes the declared function
+        // and therefore reads only the leading declaration identities.
         if let Some(info) = ir.fn_params.get_mut(&fid) {
-            info.names.push("$completion".to_string());
+            info.identities
+                .push(crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::Continuation,
+                    None,
+                ));
         }
         // kotlinc emits NO `checkNotNullParameter` on a suspend fn: the state-machine RE-ENTRY call
         // (`foo(null, continuation)`) passes null for every value parameter (the real values live in
@@ -2979,11 +2982,15 @@ fn build_state_machine(
         let ir = &*flat.ir;
         let mut slot_name: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
-        if let Some(names) = ir.param_names(fid) {
+        if let Some(identities) = ir.function_parameter_identities(fid) {
             let function = &ir.functions[fid as usize];
             let this_off = u32::from(function.dispatch_receiver.is_some() && !function.is_static);
-            for (i, nm) in names.iter().enumerate() {
-                slot_name.insert(this_off + i as u32, nm.clone());
+            for (i, identity) in identities.iter().enumerate() {
+                if let Some(name) =
+                    crate::jvm::parameter_names::debug_metadata(identity, &function.name)
+                {
+                    slot_name.insert(this_off + i as u32, name);
+                }
             }
         }
         collect_slot_names(ir, b, &mut slot_name);
@@ -5560,6 +5567,7 @@ fn build_continuation_class(
         pre_super_param_fields.push((0, receiver_field));
         ctor_args.push(IrCtorArg {
             name: None,
+            context_kind: crate::types::ContextParameterKind::None,
             ty: recv_ty,
             declared_ty: None,
             is_field: false,
@@ -5573,6 +5581,7 @@ fn build_continuation_class(
     }
     ctor_args.push(IrCtorArg {
         name: None,
+        context_kind: crate::types::ContextParameterKind::None,
         ty: continuation_ty(),
         declared_ty: None,
         is_field: false,

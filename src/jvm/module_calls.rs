@@ -116,15 +116,9 @@ fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizat
             .map_err(|()| ModuleRealizationTarget::Function(function))?;
         if let Some(physical) = physical {
             let source_name = ir
-                .package_functions
-                .iter()
-                .find(|declaration| declaration.function == function)
-                .map(|declaration| declaration.name.clone())
-                .or_else(|| {
-                    ir.functions
-                        .get(function as usize)
-                        .map(|function| function.name.clone())
-                })
+                .fn_source_names
+                .get(&function)
+                .cloned()
                 .ok_or(ModuleRealizationTarget::Function(function))?;
             names.push((function, source_name, physical.to_owned()));
         }
@@ -148,7 +142,7 @@ fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizat
         }
     }
     for (function, source_name, name) in names {
-        ir.fn_source_names.entry(function).or_insert(source_name);
+        debug_assert_eq!(ir.fn_source_names.get(&function), Some(&source_name));
         let declaration = ir
             .functions
             .get_mut(function as usize)

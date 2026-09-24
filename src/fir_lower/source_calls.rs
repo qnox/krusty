@@ -711,9 +711,9 @@ impl BodyLowering<'_> {
         });
         if let Some(name) = self
             .ir
-            .param_names(implementation)
-            .and_then(|names| names.get(formal_slots.len() - 1))
-            .cloned()
+            .function_parameter_identities(implementation)
+            .and_then(|identities| identities.get(formal_slots.len() - 1))
+            .and_then(|identity| identity.source_name.clone())
         {
             self.ir.value_names.insert(element_declaration, name);
         }

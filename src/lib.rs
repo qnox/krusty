@@ -18,6 +18,7 @@ pub mod backend;
 mod callable_access;
 pub mod compiler;
 pub mod conformance;
+mod context_parameters;
 pub mod contracts;
 mod declaration_validation;
 pub mod diag;

@@ -4,7 +4,7 @@
 //! JVM-style zero-initialized instance fields. This pass removes only the exact declaration stores
 //! whose values the JVM supplies implicitly; later assignments to the same field remain observable.
 
-use crate::ir::{ExprId, IrConst, IrExpr, IrFile, IrLocalPropertyLayout, IrTypeOp};
+use crate::ir::{ExprId, IrExpr, IrFile, IrLocalPropertyLayout};
 
 /// Select the JVM `@JvmField` storage realization for top-level declarations.
 ///
@@ -40,32 +40,6 @@ pub fn realize_top_level_jvm_fields(ir: &mut IrFile) {
     }
 }
 
-/// Whether `expression` is a constant the JVM already supplies as a field's initial value (`null`,
-/// zero of any width — signed or unsigned, whose carrier is the same primitive — `false`) — so a store of it is pure redundancy the emitter may drop.
-pub(crate) fn is_jvm_default(ir: &IrFile, expression: ExprId) -> bool {
-    match ir.expr(expression) {
-        IrExpr::Const(IrConst::Boolean(false))
-        | IrExpr::Const(IrConst::Byte(0))
-        | IrExpr::Const(IrConst::Short(0))
-        | IrExpr::Const(IrConst::Int(0))
-        | IrExpr::Const(IrConst::Long(0))
-        | IrExpr::Const(IrConst::Char(0))
-        | IrExpr::Const(IrConst::UByte(0))
-        | IrExpr::Const(IrConst::UShort(0))
-        | IrExpr::Const(IrConst::UInt(0))
-        | IrExpr::Const(IrConst::ULong(0))
-        | IrExpr::Const(IrConst::Null) => true,
-        IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
-        IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
-        IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } => is_jvm_default(ir, *arg),
-        _ => false,
-    }
-}
-
 /// Remove JVM-default declaration stores from constructor/init blocks.
 ///
 /// The exact store identities come from common lowering. Matching only `(class, field, value)` would
@@ -76,10 +50,7 @@ pub fn elide_default_property_stores(ir: &mut IrFile) {
         .property_initializer_stores
         .iter()
         .copied()
-        .filter(|&store| match ir.expr(store) {
-            IrExpr::SetField { value, .. } => is_jvm_default(ir, *value),
-            _ => false,
-        })
+        .filter(|&store| ir.is_elided_initializer_store(store))
         .collect();
 
     if elided.is_empty() {
@@ -95,6 +66,7 @@ pub fn elide_default_property_stores(ir: &mut IrFile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::IrConst;
 
     #[test]
     fn removes_only_the_recorded_declaration_store() {
@@ -138,9 +110,9 @@ mod tests {
             IrConst::ULong(0),
         ] {
             let expression = ir.add_expr(IrExpr::Const(zero));
-            assert!(is_jvm_default(&ir, expression));
+            assert!(ir.is_storage_default(expression));
         }
         let one = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
-        assert!(!is_jvm_default(&ir, one));
+        assert!(!ir.is_storage_default(one));
     }
 }

@@ -3,7 +3,7 @@
 //! Backend-specific names and descriptors are kept out of this module.
 
 mod interning;
-
+pub use crate::context_parameters::ContextParameterKind;
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 use std::collections::HashMap;

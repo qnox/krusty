@@ -2412,7 +2412,7 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
         annotations: &crate::ir::DeclarationAnnotations,
-        parameters: &[(String, u16)],
+        parameters: &[(Option<String>, u16)],
     ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
@@ -2423,7 +2423,9 @@ impl ClassWriter {
         // `visitParameter` before `visitParameterAnnotation` and before the code, so a parameter name
         // precedes both the `@NotNull`/`@Nullable` descriptors and every constant the body introduces.
         for (parameter, _) in parameters {
-            self.cp.utf8(parameter);
+            if let Some(parameter) = parameter {
+                self.cp.utf8(parameter);
+            }
         }
         let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {

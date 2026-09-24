@@ -478,31 +478,39 @@ impl<'a> CommonIrBodySink<'a> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let mut names = (0..index.callable_parameter_name_count(callable.id))
-            .filter_map(|ordinal| {
-                index
-                    .callable_parameter_name(callable.id, ordinal as u32)
-                    .map(str::to_owned)
+        let mut identities = (0..index.callable_parameter_name_count(callable.id))
+            .map(|ordinal| {
+                super::callable_parameter_identity(
+                    index,
+                    callable.id,
+                    ordinal as u32,
+                    callable.shape.context_parameter_count,
+                )
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if !companion_associated {
             if let Some(receiver) = callable.shape.extension_receiver {
                 let position = callable.shape.context_parameter_count as usize;
-                if position > params.len() || position > names.len() {
+                if position > params.len() || position > identities.len() {
                     return Err(FirFileLoweringFailure::MissingCallable(declaration));
                 }
                 params.insert(position, receiver.get());
-                names.insert(position, "$this$inline".to_string());
+                identities.insert(
+                    position,
+                    crate::ir::IrParameterIdentity::extension_receiver(),
+                );
             }
         }
         let dispatch_receiver = index
             .enclosing_classifier(declaration)
             .map(|classifier| classifier.classifier);
+        let source_name = index
+            .callable_name(callable.id)
+            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+            .to_owned();
         let function = self.ir.add_fun(IrFunction {
-            name: index
-                .callable_name(callable.id)
-                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
-                .to_owned(),
+            name: source_name.clone(),
             param_checks: vec![None; params.len()],
             params,
             ret: signature.result.get(),
@@ -510,6 +518,7 @@ impl<'a> CommonIrBodySink<'a> {
             is_static: dispatch_receiver.is_none(),
             dispatch_receiver,
         });
+        self.ir.fn_source_names.insert(function, source_name);
         self.ir.inline_fns.insert(function);
         self.ir.inline_only_fns.insert(function);
         self.ir.foreign_inline_templates.insert(function);
@@ -526,7 +535,7 @@ impl<'a> CommonIrBodySink<'a> {
         }
         self.ir
             .fn_params
-            .insert(function, FnParamInfo::names(names));
+            .insert(function, FnParamInfo::identities(identities));
         attach_callable_generic_facts(index, declaration, function, self.ir);
         self.ir
             .checked_callable_functions
@@ -915,6 +924,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // parameter. Leaving it unnamed keeps it out of constructor metadata while the
                     // JVM descriptor and field store still retain the slot.
                     name: None,
+                    context_kind: crate::types::ContextParameterKind::None,
                     ty: outer_ty,
                     declared_ty: None,
                     is_field: true,
@@ -1034,27 +1044,27 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let mut names = (0..index.callable_parameter_name_count(callable.id))
+            let mut identities = (0..index.callable_parameter_name_count(callable.id))
                 .map(|ordinal| {
-                    index
-                        .callable_parameter_name(callable.id, ordinal as u32)
-                        .expect("published parameter-name count must address every name")
-                        .to_owned()
+                    super::callable_parameter_identity(
+                        index,
+                        callable.id,
+                        ordinal as u32,
+                        callable.shape.context_parameter_count,
+                    )
+                    .expect("published parameter-name count must address every identity")
                 })
                 .collect::<Vec<_>>();
             if !companion_associated {
                 if let Some(receiver) = callable.shape.extension_receiver {
                     let position = callable.shape.context_parameter_count as usize;
-                    if position > params.len() || position > names.len() {
+                    if position > params.len() || position > identities.len() {
                         return Err(FirFileLoweringFailure::MissingCallable(declaration));
                     }
                     params.insert(position, receiver.get());
-                    names.insert(
+                    identities.insert(
                         position,
-                        format!(
-                            "$this${}",
-                            index.callable_name(callable.id).unwrap_or("extension")
-                        ),
+                        crate::ir::IrParameterIdentity::extension_receiver(),
                     );
                 }
             }
@@ -1076,11 +1086,12 @@ impl<'a> CommonIrBodySink<'a> {
                     })
                 })
                 .transpose()?;
+            let source_name = index
+                .callable_name(callable.id)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                .to_owned();
             let function = self.ir.add_fun(IrFunction {
-                name: index
-                    .callable_name(callable.id)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
-                    .to_owned(),
+                name: source_name.clone(),
                 param_checks: vec![None; params.len()],
                 params,
                 ret: if compiler_generated {
@@ -1092,6 +1103,7 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            self.ir.fn_source_names.insert(function, source_name);
             self.ir.fn_source_order.insert(
                 function,
                 index
@@ -1163,7 +1175,7 @@ impl<'a> CommonIrBodySink<'a> {
             }
             self.ir
                 .fn_params
-                .insert(function, FnParamInfo::names(names));
+                .insert(function, FnParamInfo::identities(identities));
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
                 self.ir
                     .plugin_declaration_functions
@@ -1394,15 +1406,17 @@ impl<'a> CommonIrBodySink<'a> {
             };
             *slot = Some(value);
         }
-        let names = self
+        let identities = self
             .ir
             .fn_params
             .get(&function)
-            .map(|info| info.names.clone())
+            .map(|info| info.identities.clone())
             .unwrap_or_default();
-        self.ir
-            .fn_params
-            .insert(function, FnParamInfo::defaults(names, defaults));
+        self.ir.fn_params.insert(function, {
+            let mut info = FnParamInfo::identities(identities);
+            info.defaults = Some(defaults);
+            info
+        });
         Ok(())
     }
 }

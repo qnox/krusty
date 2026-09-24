@@ -207,7 +207,7 @@ fn synthesize_components_and_copy(
         .collect();
     ir.fn_params.insert(
         copy,
-        FnParamInfo::defaults(
+        FnParamInfo::source_defaults(
             fields.iter().map(|field| field.name.clone()).collect(),
             defaults,
         ),
@@ -216,7 +216,8 @@ fn synthesize_components_and_copy(
         ir.functions[copy as usize].param_checks = fields
             .iter()
             .map(|field| {
-                (field.ty.is_reference() && !field.ty.is_nullable()).then(|| field.name.clone())
+                (field.ty.is_reference() && !field.ty.is_nullable())
+                    .then_some(crate::ir::IrParameterCheck::NonNull)
             })
             .collect();
     }

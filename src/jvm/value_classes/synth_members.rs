@@ -303,7 +303,7 @@ pub(super) fn synth_value_members(
         if let Some(def) = constructor_default {
             ir.fn_params.insert(
                 cfid,
-                crate::ir::FnParamInfo::defaults(vec![fname.clone()], vec![Some(def)]),
+                crate::ir::FnParamInfo::source_defaults(vec![fname.clone()], vec![Some(def)]),
             );
         }
     }
@@ -345,7 +345,21 @@ pub(super) fn synth_value_members(
         };
         let body = ret_block(ir, cmp);
         let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
-        crate::jvm::method_parameters::record_function(ir, function, &["p1", "p2"], &[]);
+        ir.fn_params.insert(
+            function,
+            crate::ir::FnParamInfo::identities(
+                [1, 2]
+                    .map(|ordinal| {
+                        crate::ir::IrParameterIdentity::generated(
+                            crate::ir::IrGeneratedParameterRole::ValueClassEqualsOperand {
+                                ordinal,
+                            },
+                            None,
+                        )
+                    })
+                    .to_vec(),
+            ),
+        );
         ir.jvm_value_class_representation_order.insert(function, 3);
         ir.jvm_nullability_unannotated_methods.insert(function);
     }

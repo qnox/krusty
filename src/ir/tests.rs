@@ -299,8 +299,10 @@ fn toplevel_default_stub_safe_accepts_a_simple_constant_default() {
     let mut f = IrFile::default();
     let fid = add_toplevel_fn(&mut f, "greet", Ty::Int);
     let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(def)]),
+    );
     assert!(toplevel_default_stub_safe(&f, fid));
 }
 
@@ -312,8 +314,10 @@ fn toplevel_default_stub_safe_accepts_mangled_suspend_and_rejects_missing_defaul
     let mut f = IrFile::default();
     let fid = add_toplevel_fn(&mut f, "greet-abc123", Ty::Int);
     let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(def)]),
+    );
     assert!(toplevel_default_stub_safe(&f, fid));
 
     // A mangled SUSPEND function stays accepted: the CPS-appended Continuation is just another
@@ -333,15 +337,19 @@ fn toplevel_default_stub_safe_allows_overloaded_and_rejects_unsafe_default() {
     let fid = add_toplevel_fn(&mut f, "over", Ty::Int);
     add_toplevel_fn(&mut f, "over", Ty::String);
     let def = f.add_expr(IrExpr::Const(IrConst::Int(0)));
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(def)]),
+    );
     assert!(toplevel_default_stub_safe(&f, fid));
 
     let mut g = IrFile::default();
     let gid = add_toplevel_fn(&mut g, "spill", Ty::Int);
     let bad = g.add_expr(IrExpr::GetValue(3));
-    g.fn_params
-        .insert(gid, FnParamInfo::defaults(Vec::new(), vec![Some(bad)]));
+    g.fn_params.insert(
+        gid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(bad)]),
+    );
     assert!(!toplevel_default_stub_safe(&g, gid));
 }
 
@@ -369,7 +377,7 @@ fn toplevel_default_stub_safe_accepts_a_lambda_capturing_only_parameters() {
     });
     f.fn_params.insert(
         fid,
-        FnParamInfo::defaults(Vec::new(), vec![None, Some(lam)]),
+        FnParamInfo::source_defaults(Vec::new(), vec![None, Some(lam)]),
     );
     assert!(toplevel_default_stub_safe(&f, fid));
 }
@@ -388,8 +396,10 @@ fn toplevel_default_stub_safe_rejects_a_lambda_capturing_a_spilled_temp() {
         sam: None,
         inline_body: None,
     });
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(lam)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(lam)]),
+    );
     assert!(!toplevel_default_stub_safe(&f, fid));
 }
 
@@ -409,8 +419,10 @@ fn toplevel_default_stub_safe_accepts_locals_declared_inside_the_default() {
         stmts: vec![declaration],
         value: Some(value),
     });
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(block)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(block)]),
+    );
 
     assert!(toplevel_default_stub_safe(&f, fid));
 }
@@ -434,8 +446,10 @@ fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
     f.add_class(c);
     let fid = add_toplevel_fn(&mut f, "foo", Ty::obj("X"));
     let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(def)]),
+    );
     assert!(toplevel_default_stub_safe(&f, fid));
 
     f.classes[0].fields[0].ty = Ty::nullable(Ty::String);
@@ -459,8 +473,10 @@ fn default_stub_trusts_value_construction_provenance_not_helper_spelling() {
         dispatch_receiver: None,
         args: Vec::new(),
     });
-    f.fn_params
-        .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(call)]));
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(call)]),
+    );
 
     assert!(!toplevel_default_stub_safe(&f, fid));
 
@@ -489,7 +505,7 @@ fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
     });
     f.fn_params.insert(
         fid,
-        FnParamInfo::defaults(Vec::new(), vec![Some(construction)]),
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(construction)]),
     );
 
     assert!(toplevel_default_stub_safe(&f, fid));
@@ -514,7 +530,7 @@ fn generated_publication_rejects_parameter_name_arity_drift() {
             metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
             functions: vec![IrGeneratedFunctionPublication {
                 function,
-                parameter_names: Vec::new(),
+                parameter_identities: Vec::new(),
                 metadata: Some(IrGeneratedFunctionMetadata {
                     source_name: "generated".to_string(),
                     visibility: crate::types::Visibility::Public,
@@ -523,4 +539,69 @@ fn generated_publication_rejects_parameter_name_arity_drift() {
             }],
         },
     );
+}
+
+/// A declaration's store of what fresh storage already holds is elided; the same store written as
+/// a later statement is not, and neither is a declaration's store of anything else.
+///
+/// The identity decides, not the shape: `var x = 0` followed by `init { x = 0 }` is two stores of
+/// the same field and value, and only the first is the declaration's.
+#[test]
+fn only_a_declarations_store_of_the_storage_default_is_elided() {
+    let mut ir = IrFile::default();
+    let receiver = ir.add_expr(IrExpr::GetValue(0));
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let store = |ir: &mut IrFile, value| {
+        ir.add_expr(IrExpr::SetField {
+            receiver,
+            class: 0,
+            index: 0,
+            value,
+        })
+    };
+    let declaration = store(&mut ir, zero);
+    let later = store(&mut ir, zero);
+    let declared_one = store(&mut ir, one);
+    ir.property_initializer_stores.insert(declaration);
+    ir.property_initializer_stores.insert(declared_one);
+
+    assert!(ir.is_elided_initializer_store(declaration));
+    assert!(!ir.is_elided_initializer_store(later));
+    assert!(!ir.is_elided_initializer_store(declared_one));
+}
+
+/// Fresh storage holds all-zero bits: `null`, `false`, and a zero of every width, signed or
+/// unsigned. A floating zero counts only with its sign bit clear, since `-0.0` is not those bits.
+#[test]
+fn the_storage_default_is_every_all_zero_constant() {
+    let mut ir = IrFile::default();
+    for constant in [
+        IrConst::Null,
+        IrConst::Boolean(false),
+        IrConst::Byte(0),
+        IrConst::Short(0),
+        IrConst::Int(0),
+        IrConst::Long(0),
+        IrConst::Char(0),
+        IrConst::UByte(0),
+        IrConst::UShort(0),
+        IrConst::UInt(0),
+        IrConst::ULong(0),
+        IrConst::Float(0.0),
+        IrConst::Double(0.0),
+    ] {
+        let expression = ir.add_expr(IrExpr::Const(constant.clone()));
+        assert!(ir.is_storage_default(expression), "{constant:?}");
+    }
+    for constant in [
+        IrConst::Boolean(true),
+        IrConst::Int(1),
+        IrConst::UInt(1),
+        IrConst::Float(-0.0),
+        IrConst::Double(-0.0),
+    ] {
+        let expression = ir.add_expr(IrExpr::Const(constant.clone()));
+        assert!(!ir.is_storage_default(expression), "{constant:?}");
+    }
 }

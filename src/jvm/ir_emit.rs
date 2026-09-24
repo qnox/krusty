@@ -89,6 +89,17 @@ fn is_jvm_interface(c: &IrClass) -> bool {
     c.is_interface || c.is_annotation
 }
 
+/// Kotlin metadata records a setter value parameter only when source declared its identity.
+/// The final semantic parameter is the setter value by the accessor contract; its typed IR
+/// identity distinguishes a written name from the compiler-generated implicit setter value.
+pub(super) fn explicit_setter_parameter_name(ir: &IrFile, setter: Option<u32>) -> Option<String> {
+    let identity = ir.function_parameter_identities(setter?)?.last()?;
+    (identity.role == crate::ir::IrParameterRole::Value
+        && identity.provenance == crate::ir::IrParameterProvenance::SourceDeclared)
+        .then(|| crate::jvm::parameter_names::metadata(identity).map(str::to_owned))
+        .flatten()
+}
+
 fn declared_jvm_interface(ir: &IrFile, owner: TypeName) -> bool {
     ir.classes
         .iter()
@@ -1133,13 +1144,26 @@ fn build_class_metadata(
         .iter()
         .flat_map(|property| property.getter.into_iter().chain(property.setter))
         .collect();
-    // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
-    // declared function — emit it (with derived flags) rather than declining the whole class.
+    let source_callable_fids = ir
+        .checked_callable_functions
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    // Metadata Function records come only from exact source-callable realizations. Accessors have
+    // Property records, while generated declarations use the explicit publication contract below.
     let mut declared_fids: Vec<u32> = c
         .methods
         .iter()
         .copied()
         .filter(|&fid| {
+            // A physical class method is not necessarily a Kotlin declaration. Lifted local
+            // functions and interface-delegation forwarders are implementation methods and have
+            // no Function entry in class metadata. Common lowering publishes the exact source
+            // callable -> function edge, so metadata consumes that identity instead of inferring
+            // declaration status from a name, descriptor, or parameter spelling.
+            if !source_callable_fids.contains(&fid) {
+                return false;
+            }
             if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {
                 return false;
             }
@@ -1372,6 +1396,7 @@ fn build_class_metadata(
                     type_params: Vec::new(),
                     getter,
                     setter,
+                    setter_parameter_name: explicit_setter_parameter_name(ir, property.setter),
                     field_desc: backing
                         .filter(|(_, field)| property.ty != field.ty)
                         .map(|(_, field)| desc(field.ty)),
@@ -1422,6 +1447,7 @@ fn build_class_metadata(
                 type_params: Vec::new(),
                 getter: None,
                 setter: None,
+                setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
                 annotations: property_marker_annotations(ir, c, &prop.name),
@@ -1473,6 +1499,7 @@ fn build_class_metadata(
             type_params: ext.type_params.clone(),
             getter: accessor_sig(ext.getter),
             setter: ext.setter.and_then(accessor_sig),
+            setter_parameter_name: explicit_setter_parameter_name(ir, ext.setter),
             field_desc: None,
             field_name: None,
             annotations: property_marker_annotations(ir, c, &ext.name),
@@ -1631,9 +1658,9 @@ fn build_class_metadata(
             .iter()
             .filter_map(|&fid| {
                 let f = ir.functions.get(fid as usize)?;
-                // Real parameter NAMES — metadata is reflection-visible, so a placeholder would be an
-                // observable lie. Positional fallback only when the IR has no recorded names.
-                let names = ir.param_names(fid);
+                // Real parameter identities — metadata is reflection-visible, so a placeholder
+                // would be an observable lie. A missing semantic name is rejected below.
+                let parameter_identities = ir.function_parameter_identities(fid);
                 // A function is described as SOURCE declared it: its own name, parameters and return
                 // type. Two lowerings hide that — CPS gives a `suspend fun` a trailing `Continuation`
                 // and an `Object` return, and the value-class pass mangles the name and erases the
@@ -1649,13 +1676,13 @@ fn build_class_metadata(
                             .get(&fid)
                             .map(|(p, r)| (f.name.as_str(), p.as_slice(), *r))
                     });
-                let (realized_base_name, params, ret) =
+                let (_, params, ret) =
                     declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
                 let name = ir
                     .fn_source_names
                     .get(&fid)
                     .map(String::as_str)
-                    .unwrap_or(realized_base_name);
+                    .expect("a source metadata function retains its declaration name");
                 let semantic_signature = ir.signatures.get(&fid);
                 // A member mentioning an ENCLOSING-CLASS type parameter records its semantic shape
                 // separately (`member_semantic_sigs`) — the erased params would publish `Any`.
@@ -1705,20 +1732,26 @@ fn build_class_metadata(
                             .collect()
                     })
                     .unwrap_or_default();
-                // A member EXTENSION realized its receiver as `params[0]` — restore it to
-                // `Function.receiver_type` so the record's value parameters are the LOGICAL ones.
-                // Both parameter side tables use the physical IR order. An extension receiver is the
-                // first parameter, while Kotlin metadata exposes it separately from value parameters.
-                // The receiver's physical index is the function's context count, so it is NOT
-                // separable by a leading skip: `(contexts…, receiver, values…)` means the logical
-                // value parameters lie on BOTH sides of it.
+                // Restore an extension receiver to `Function.receiver_type` so metadata keeps only
+                // the declaration's logical value parameters. A value-class member's static
+                // `-impl` has one backend-generated carrier before that complete declaration list;
+                // the exact representation marker supplies that offset. Source-owned side tables
+                // remain indexed by the declaration list and never acquire the carrier slot.
                 let member_context_count = ir.fn_context_counts.get(&fid).copied().unwrap_or(0);
                 let is_ext = ir.extension_receiver_fns.contains(&fid)
                     && member_context_count < metadata_params.len();
                 let receiver_index = is_ext.then_some(member_context_count);
-                let apply_nullable = |i_full: usize, t: crate::types::Ty| {
+                let backend_parameter_prefix =
+                    usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
+                let parameter_identities = parameter_identities
+                    .expect("a metadata function retains exact parameter identities");
+                assert!(
+                    backend_parameter_prefix + metadata_params.len() <= parameter_identities.len(),
+                    "metadata declaration parameters retain their exact physical identities"
+                );
+                let apply_nullable = |source_index: usize, t: crate::types::Ty| {
                     if declared_nullable
-                        .and_then(|v| v.get(i_full))
+                        .and_then(|v| v.get(source_index))
                         .copied()
                         .unwrap_or(false)
                     {
@@ -1734,23 +1767,37 @@ fn build_class_metadata(
                         if receiver_index == Some(index) {
                             None
                         } else {
-                            Some((index, index))
+                            Some((index, backend_parameter_prefix + index))
                         }
                     })
                     .collect::<Vec<_>>();
                 let logical_params: Vec<(String, crate::types::Ty)> = logical_param_indices
                     .iter()
                     .map(|&(metadata_index, physical_index)| {
-                        // `fn_params` records the extension receiver (`$this$<fn>`) at that same
-                        // physical index, exactly like `param_defaults`; both are read positionally.
-                        let n = names
-                            .and_then(|ns| ns.get(physical_index).cloned())
-                            .unwrap_or_else(|| format!("p{physical_index}"));
+                        let identity = parameter_identities
+                            .get(physical_index)
+                            .expect("a metadata parameter carries an exact identity");
+                        let n = if matches!(
+                            identity.role,
+                            crate::ir::IrParameterRole::ContextReceiver { .. }
+                        ) {
+                            String::new()
+                        } else {
+                            crate::jvm::parameter_names::metadata(identity)
+                                .map(str::to_owned)
+                                .expect("a metadata value parameter carries a semantic name")
+                        };
                         (
                             n,
-                            apply_nullable(physical_index, metadata_params[metadata_index]),
+                            apply_nullable(metadata_index, metadata_params[metadata_index]),
                         )
                     })
+                    .collect();
+                let context_parameter_kinds = parameter_identities
+                    .iter()
+                    .skip(backend_parameter_prefix)
+                    .take(member_context_count)
+                    .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
                 // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
                 // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
@@ -1784,6 +1831,7 @@ fn build_class_metadata(
                     param_defaults,
                     vararg_index: ir.fn_vararg_index.get(&fid).copied(),
                     context_count: member_context_count,
+                    context_parameter_kinds,
                     // The physical descriptor rides along whenever a reader could not derive it from
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
@@ -1824,10 +1872,10 @@ fn build_class_metadata(
                     // `Continuation` is already dropped), so the side table lines up with it.
                     param_annotations: logical_param_indices
                         .iter()
-                        .map(|&(_, physical_index)| {
+                        .map(|&(metadata_index, _)| {
                             ir.fn_param_annotations
                                 .get(&fid)
-                                .and_then(|table| table.get(physical_index))
+                                .and_then(|table| table.get(metadata_index))
                                 .map(|annotations| {
                                     annotations
                                         .iter()
@@ -1839,10 +1887,10 @@ fn build_class_metadata(
                         .collect(),
                     no_infer_params: logical_param_indices
                         .iter()
-                        .map(|&(_, physical_index)| {
+                        .map(|&(metadata_index, _)| {
                             ir.fn_param_no_infer
                                 .get(&fid)
-                                .and_then(|flags| flags.get(physical_index))
+                                .and_then(|flags| flags.get(metadata_index))
                                 .copied()
                                 .unwrap_or(false)
                         })
@@ -1868,6 +1916,7 @@ fn build_class_metadata(
             m.push(FnMeta {
                 jvm_sig_name: realization.jvm_name,
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name,
                 params: vec![],
@@ -1903,6 +1952,7 @@ fn build_class_metadata(
             m.push(FnMeta {
                 jvm_sig_name: realization.jvm_name,
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 params: data_component_properties
@@ -1931,6 +1981,7 @@ fn build_class_metadata(
         {
             m.push(FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -1960,6 +2011,7 @@ fn build_class_metadata(
         {
             m.push(FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
@@ -1986,6 +2038,7 @@ fn build_class_metadata(
         {
             m.push(FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],
@@ -2015,6 +2068,7 @@ fn build_class_metadata(
         let mut methods = vec![
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -2036,6 +2090,7 @@ fn build_class_metadata(
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
@@ -2057,6 +2112,7 @@ fn build_class_metadata(
             },
             FnMeta {
                 context_count: 0,
+                context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],
@@ -2880,10 +2936,14 @@ fn attach_synth_debug_tables(
             guard_slot += slot_size(argument.ty);
         }
     }
-    // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
-    for f in c.fields.iter().take(c.ctor_param_count as usize) {
-        ctor_locals.push((f.name.clone(), desc(f.ty), slot));
-        slot += slot_size(f.ty);
+    // Only physical constructor parameters are locals. Anonymous context parameters deliberately
+    // have no LVT row even though their MethodParameters/assertion surfaces have a generated label.
+    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
+    for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
+        if let Some(name) = name {
+            ctor_locals.push((name, desc(argument.ty), slot));
+        }
+        slot += slot_size(argument.ty);
     }
     let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
     // kotlinc maps the `super()` call to where the DECLARATION starts — annotations included — and
@@ -3106,8 +3166,16 @@ fn attach_synth_debug_tables(
                     "equals-impl0".into(),
                     format!("({u}{u})Z"),
                     vec![
-                        ("p1".to_string(), u.clone(), 0),
-                        ("p2".to_string(), u.clone(), w),
+                        (
+                            crate::jvm::parameter_names::value_class_equals_operand(1).to_string(),
+                            u.clone(),
+                            0,
+                        ),
+                        (
+                            crate::jvm::parameter_names::value_class_equals_operand(2).to_string(),
+                            u.clone(),
+                            w,
+                        ),
                     ],
                 ),
             ];
@@ -9009,18 +9077,46 @@ fn emit_interface_class(
                     Some((params, ret)) => (params.clone(), *ret),
                     None => (jd_declared_param_tys(ir, fid), f.ret),
                 };
+                let physical_params = jvm_function_params(ir, fid);
+                let assertion_names =
+                    crate::jvm::parameter_names::function_assertions(ir, fid, &physical_params)
+                        .expect("a compatibility declaration carries exact assertion identities");
                 let guards = if opts.param_assertions {
-                    f.param_checks.clone()
+                    f.param_checks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, check)| {
+                            check.as_ref().map(|_| {
+                                let _identity = ir
+                                    .function_parameter_identities(fid)
+                                    .and_then(|identities| identities.get(index))
+                                    .expect("a checked compatibility parameter has an identity");
+                                assertion_names[index]
+                                    .clone()
+                                    .expect("a checked compatibility parameter has a JVM label")
+                            })
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 };
+                let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
+                    .expect("a compatibility declaration carries exact parameter identities");
+                let method_parameter_names =
+                    crate::jvm::parameter_names::function_method_parameters(
+                        ir,
+                        fid,
+                        &physical_params,
+                    )
+                    .expect("a compatibility declaration carries exact reflection identities");
                 interface_compatibility::emit_holder_forward(
                     di,
                     c.fq_name,
                     &f.name,
-                    &jvm_function_params(ir, fid),
+                    &physical_params,
                     &semantic_params,
-                    ir.param_names(fid).unwrap_or(&[]),
+                    &parameter_names,
+                    &method_parameter_names,
                     &guards,
                     jvm_declared_ty(&f.ret),
                     semantic_ret,
@@ -9175,18 +9271,27 @@ fn emit_interface_class(
     // first, then the republished surface for inherited defaults this interface does not redeclare.
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
+        let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
+            .expect("an access bridge carries exact declaration parameter identities");
         emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
             &f.name,
             &jvm_function_params(ir, fid),
-            ir.param_names(fid).unwrap_or(&[]),
+            &parameter_names,
             jvm_declared_ty(&f.ret),
         );
     }
     if enable_compat {
-        emit_inherited_default_surface(ir, c, &mut cw, &mut default_impls, opts, env);
+        interface_compatibility::emit_inherited_default_surface(
+            ir,
+            c,
+            &mut cw,
+            &mut default_impls,
+            opts,
+            env,
+        );
     }
     let emitted_default_impls = default_impls.is_some();
     if let Some(mut di) = default_impls {
@@ -10196,13 +10301,18 @@ fn emit_default_impls_forwarders(
                                name: &str,
                                param_tys: &[Ty],
                                semantic_params: &[Ty],
-                               param_names: &[String],
+                               parameter_identities: &[crate::fir::ResolvedParameterIdentity],
                                ret: Ty,
                                semantic_ret: Ty,
                                target_owner: &str,
                                target_name: &str,
                                target_descriptor: &str,
                                dispatch: ForwarderDispatch| {
+        assert_eq!(
+            parameter_identities.len(),
+            param_tys.len(),
+            "an inherited forwarder needs every declaration parameter identity"
+        );
         let desc = method_descriptor(param_tys, ret);
         let mut code = CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
         code.aload(0);
@@ -10243,11 +10353,12 @@ fn emit_default_impls_forwarders(
         let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
         let mut slot = 1u16;
         for (index, parameter) in param_tys.iter().enumerate() {
-            let parameter_name = param_names
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| format!("p{index}"));
-            locals.push((parameter_name, local_variable_desc(*parameter), slot));
+            if let Some(parameter_name) = crate::jvm::parameter_names::resolved_local_variable(
+                &parameter_identities[index],
+                name,
+            ) {
+                locals.push((parameter_name, local_variable_desc(*parameter), slot));
+            }
             slot += slot_words(*parameter);
         }
         cw.set_method_debug(
@@ -10288,12 +10399,13 @@ fn emit_default_impls_forwarders(
             let mut param_tys = jvm_tys(&physical_params);
             let mut ret = jvm_declared_ty(&member.physical_ret);
             let mut semantic_params = member.params.to_vec();
-            let mut param_names = member
-                .param_names
-                .iter()
-                .map(|name| name.to_string())
-                .collect::<Vec<_>>();
+            let mut parameter_identities = member.parameter_identities.to_vec();
             let mut semantic_ret = member.ret;
+            assert_eq!(
+                parameter_identities.len(),
+                semantic_params.len(),
+                "an inherited member needs exact metadata parameter identities"
+            );
             // A `suspend` member's PHYSICAL realization is its CPS shape — a trailing
             // `Continuation` and an `Object` return. The semantic record keeps the declared
             // params/return, so adjust here or the forwarder declares a method the interface does
@@ -10303,10 +10415,7 @@ fn emit_default_impls_forwarders(
             if member.suspend() {
                 param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
                 ret = Ty::obj("java/lang/Object");
-                while param_names.len() < semantic_params.len() {
-                    param_names.push(format!("p{}", param_names.len()));
-                }
-                param_names.push("$completion".to_string());
+                parameter_identities.push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
@@ -10372,7 +10481,7 @@ fn emit_default_impls_forwarders(
                 &name,
                 &param_tys,
                 &semantic_params,
-                &param_names,
+                &parameter_identities,
                 ret,
                 semantic_ret,
                 &target_owner,
@@ -10448,9 +10557,14 @@ fn emit_jd_access_bridge(
     decl_line: u32,
     member_name: &str,
     param_tys: &[Ty],
-    param_names: &[String],
+    parameter_names: &[Option<String>],
     ret: Ty,
 ) {
+    assert_eq!(
+        parameter_names.len(),
+        param_tys.len(),
+        "an access bridge needs every declaration parameter identity"
+    );
     let fq = interface.render();
     let member_desc = method_descriptor(param_tys, ret);
     let mut with_receiver = vec![Ty::obj_name(interface)];
@@ -10475,217 +10589,16 @@ fn emit_jd_access_bridge(
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
-        let parameter_name = param_names
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("p{index}"));
-        locals.push((parameter_name, local_variable_desc(*parameter), slot));
+        if let Some(parameter_name) = &parameter_names[index] {
+            locals.push((
+                parameter_name.clone(),
+                local_variable_desc(*parameter),
+                slot,
+            ));
+        }
         slot += slot_words(*parameter);
     }
     cw.set_method_debug(&name, &bridge_desc, None, &locals);
-}
-
-/// Under `enable`, an interface REPUBLISHES the compatibility surface for every non-abstract,
-/// non-private member it inherits and does not redeclare: kotlinc gives even an empty
-/// `interface B : A` its own `access$f$jd` bridge (an `invokespecial` through B itself, which the
-/// JVM resolves to the inherited default) and a `B$DefaultImpls` holder forwarding to that bridge.
-/// A member inherited from a `disable`-compiled dependency has no default method to bridge to —
-/// its holder entry forwards straight to the dependency's own holder (behind a `checkcast`), with
-/// no `access$…$jd` bridge and no `@Deprecated`, exactly as measured on kotlinc 2.4.10.
-fn emit_inherited_default_surface(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    cw: &mut ClassWriter,
-    default_impls: &mut Option<ClassWriter>,
-    opts: &EmitOptions,
-    env: &EmitEnv,
-) {
-    let symbols = env.signature_symbols;
-    let closure = sorted_interface_closure(symbols, c.interfaces.iter_ids().collect());
-    if closure.is_empty() {
-        return;
-    }
-    let fq_name = c.fq_name();
-    let method_key = |name: &str, params: &[Ty]| {
-        (
-            name.to_string(),
-            params
-                .iter()
-                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
-                .collect::<String>(),
-        )
-    };
-    // A member this interface declares (bodied or abstract) is its own: an abstract redeclaration
-    // suppresses an ancestor's body here exactly as on an implementing class.
-    let mut selected = c
-        .methods
-        .iter()
-        .map(|fid| {
-            let function = &ir.functions[*fid as usize];
-            method_key(&function.name, &jvm_function_params(ir, *fid))
-        })
-        .chain(
-            c.bridges
-                .iter()
-                .map(|bridge| method_key(&bridge.name, &bridge.erased_params)),
-        )
-        .collect::<std::collections::HashSet<_>>();
-    for (interface, shape) in closure {
-        let mut surface = |name: &str,
-                           param_tys: &[Ty],
-                           semantic_params: &[Ty],
-                           param_names: &[String],
-                           physical_ret: Ty,
-                           semantic_ret: Ty,
-                           is_abstract: bool,
-                           visibility: crate::types::Visibility,
-                           realization: crate::libraries::MemberRealization,
-                           owner: Option<crate::types::TypeName>,
-                           descriptor: &str,
-                           cw: &mut ClassWriter,
-                           default_impls: &mut Option<ClassWriter>| {
-            let key = method_key(name, param_tys);
-            // The nearest declaration wins even when it is abstract.
-            if !selected.insert(key) {
-                return;
-            }
-            if is_abstract || visibility == crate::types::Visibility::Private {
-                return;
-            }
-            let target = match realization {
-                // The dependency's `disable` realization: its holder static is the only body.
-                crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true,
-                } => {
-                    let Some(holder) = owner else { return };
-                    JdHolderTarget::DependencyHolder {
-                        declaring: interface,
-                        holder,
-                        descriptor,
-                    }
-                }
-                // A Kotlin default method somewhere above: bridge through this interface itself.
-                crate::libraries::MemberRealization::Dispatch if shape.is_kotlin => {
-                    JdHolderTarget::AccessBridge
-                }
-                // A JAVA default method never joins the Kotlin compatibility surface.
-                _ => return,
-            };
-            if matches!(target, JdHolderTarget::AccessBridge) {
-                emit_jd_access_bridge(
-                    cw,
-                    c.fq_name,
-                    c.decl_line,
-                    name,
-                    param_tys,
-                    param_names,
-                    physical_ret,
-                );
-            }
-            let di = default_impls.get_or_insert_with(|| {
-                let mut w =
-                    new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                w
-            });
-            if let JdHolderTarget::DependencyHolder {
-                declaring, holder, ..
-            } = &target
-            {
-                // The holder references the dependency's nested holder — kotlinc records BOTH
-                // `InnerClasses` relations on it.
-                di.add_inner_class(crate::jvm::classfile::InnerClassSpec {
-                    inner: holder.render(),
-                    outer: Some(declaring.render()),
-                    name: Some("DefaultImpls".to_string()),
-                    access: 0x0019,
-                });
-            }
-            // The guard set of an inherited member follows its semantic parameter nullability —
-            // the same selection its `@NotNull` parameter annotations use.
-            let guards: Vec<Option<String>> = if opts.param_assertions {
-                semantic_params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, parameter)| {
-                        (jd_nullability_annotation(parameter)
-                            == Some("Lorg/jetbrains/annotations/NotNull;"))
-                        .then(|| {
-                            param_names
-                                .get(index)
-                                .cloned()
-                                .unwrap_or_else(|| format!("p{index}"))
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            interface_compatibility::emit_holder_forward(
-                di,
-                c.fq_name,
-                name,
-                param_tys,
-                semantic_params,
-                param_names,
-                &guards,
-                physical_ret,
-                semantic_ret,
-                // The promoted generic signature of an inherited member is not reconstructed here
-                // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
-                None,
-                c.decl_line,
-                opts.java_parameters,
-                target,
-            );
-        };
-        for member in &shape.surface {
-            let physical_params = if member.physical_params.len() == member.params.len() {
-                member.physical_params.clone()
-            } else {
-                member.params.clone()
-            };
-            let name = backend_member_jvm_name(member);
-            let mut param_tys = jvm_tys(&physical_params);
-            let mut physical_ret = jvm_declared_ty(&member.physical_ret);
-            let mut semantic_params = member.params.to_vec();
-            let mut param_names = member
-                .param_names
-                .iter()
-                .map(|name| name.to_string())
-                .collect::<Vec<_>>();
-            let mut semantic_ret = member.ret;
-            // A `suspend` member republishes in its CPS shape — trailing `Continuation`
-            // (`$completion`, `@NotNull`) and a `@Nullable Object` return — like the
-            // implementing-class forwarders.
-            if member.suspend() {
-                param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
-                physical_ret = Ty::obj("java/lang/Object");
-                while param_names.len() < semantic_params.len() {
-                    param_names.push(format!("p{}", param_names.len()));
-                }
-                param_names.push("$completion".to_string());
-                semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
-                semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
-            }
-            surface(
-                &name,
-                &param_tys,
-                &semantic_params,
-                &param_names,
-                physical_ret,
-                semantic_ret,
-                member.is_abstract(),
-                member.visibility,
-                member.realization,
-                member.owner,
-                &member.descriptor,
-                cw,
-                default_impls,
-            );
-        }
-    }
 }
 
 /// Where an `enable`-mode holder forward sends its call.
@@ -11069,12 +10982,22 @@ fn emit_method_inner_with_holder(
     // kotlinc guards each non-null reference parameter of a visible function with
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
     let param_checks = f.param_checks.clone();
+    let parameter_identities = ir.function_parameter_identities(fid);
+    let assertion_names = crate::jvm::parameter_names::function_assertions(ir, fid, &param_tys);
     for (i, check) in param_checks.iter().enumerate() {
-        if let Some(name) = check {
+        if check.is_some() {
+            let _identity = parameter_identities
+                .and_then(|identities| identities.get(i))
+                .expect("a checked parameter carries an exact identity");
+            let name = assertion_names
+                .as_ref()
+                .and_then(|names| names.get(i))
+                .and_then(Clone::clone)
+                .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
                 code.aload(slot);
-                code.push_string(name, e.cw);
+                code.push_string(&name, e.cw);
                 let m = e.cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
                     "checkNotNullParameter",
@@ -11336,13 +11259,16 @@ fn emit_method_inner_with_holder(
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
             let pname = parameter_identities
-                .and_then(|identities| identities.get(i).cloned())
-                .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
-                .unwrap_or_else(|| format!("p{i}"));
-            let pdesc = local_variable_desc(*t);
-            e.cw.seed_utf8(&pname);
-            e.cw.seed_utf8(&pdesc);
-            code.add_local_entry(0, None, slot, &pname, &pdesc);
+                .and_then(|identities| identities.get(i))
+                .and_then(|identity| {
+                    crate::jvm::parameter_names::function_local_variable(ir, fid, identity)
+                });
+            if let Some(pname) = pname {
+                let pdesc = local_variable_desc(*t);
+                e.cw.seed_utf8(&pname);
+                e.cw.seed_utf8(&pdesc);
+                code.add_local_entry(0, None, slot, &pname, &pdesc);
+            }
             slot += slot_words(*t);
         }
     }
@@ -13264,7 +13190,8 @@ impl<'a> Emitter<'a> {
                                 .ir
                                 .fn_params
                                 .get(&impl_fn)
-                                .and_then(|info| info.names.get(n_cap + j))
+                                .and_then(|info| info.identities.get(n_cap + j))
+                                .and_then(|identity| identity.source_name.as_ref())
                             {
                                 lam_locals_declared.push((
                                     u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),

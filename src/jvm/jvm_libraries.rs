@@ -870,6 +870,12 @@ impl JvmLibraries {
                 builtin.param_defaults,
                 builtin.vararg,
             );
+            for ordinal in 0..builtin.context_count {
+                function.call_sig.parameter_identities[ordinal] =
+                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                        ordinal: ordinal as u32,
+                    };
+            }
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
             function.context_count = builtin.context_count;
             function.callable.context_count = builtin.context_count;
@@ -1153,6 +1159,7 @@ impl JvmLibraries {
                 ty: property_ty,
                 context_count: 0,
                 context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 getter: accessor(
                     &getter_sig.name,
                     &getter_sig.desc,
@@ -1163,6 +1170,7 @@ impl JvmLibraries {
                 ),
                 setter,
                 setter_visibility: property.visibility,
+                setter_parameter_name: None,
                 is_const: property.is_const,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
@@ -3724,9 +3732,11 @@ impl JvmLibraries {
             ty: field.ty,
             context_count: 0,
             context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
             getter,
             setter,
             setter_visibility: field.visibility,
+            setter_parameter_name: None,
             is_const: field.constant.is_some() && field.is_final,
             implicit_integer_coercion: false,
             compile_time_constant: field.constant,
@@ -3996,9 +4006,11 @@ impl JvmLibraries {
                             .iter()
                             .map(|parameter| parameter.name.clone())
                             .collect(),
+                        context_parameter_identities: mp.context_parameter_identities(),
                         getter,
                         setter,
                         setter_visibility: mp.visibility,
+                        setter_parameter_name: mp.setter_parameter_name.clone(),
                         is_const: mp.is_const,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
@@ -4138,9 +4150,11 @@ impl JvmLibraries {
                         .iter()
                         .map(|parameter| parameter.name.clone())
                         .collect(),
+                    context_parameter_identities: mp.context_parameter_identities(),
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
+                    setter_parameter_name: mp.setter_parameter_name.clone(),
                     is_const: mp.is_const,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4235,9 +4249,11 @@ impl JvmLibraries {
                     ty: field_ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter,
                     setter_visibility: visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4289,9 +4305,11 @@ impl JvmLibraries {
                     ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter: None,
                     setter_visibility: function.visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -4365,9 +4383,11 @@ impl JvmLibraries {
                         ty,
                         context_count: 0,
                         context_param_names: Vec::new(),
+                        context_parameter_identities: Vec::new(),
                         getter,
                         setter,
                         setter_visibility,
+                        setter_parameter_name: None,
                         is_const: false,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
@@ -4862,6 +4882,7 @@ impl JvmLibraries {
                 let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
+                let context_parameter_identities = mp.context_parameter_identities();
                 let Some(getter_sig) = mp.getter else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -5009,9 +5030,11 @@ impl JvmLibraries {
                         .iter()
                         .map(|parameter| parameter.name.clone())
                         .collect(),
+                    context_parameter_identities,
                     getter,
                     setter,
                     setter_visibility: mp.visibility,
+                    setter_parameter_name: mp.setter_parameter_name.clone(),
                     is_const: mp.is_const,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -5108,6 +5131,21 @@ impl JvmLibraries {
 }
 
 impl SymbolSource for JvmLibraries {
+    /// Both answered by the classpath, which is where this provider interned them.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.cp.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.cp.external_property(identity)
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         JvmLibraries::package_exists(self, parent, name)
     }
@@ -5508,18 +5546,20 @@ impl JvmLibraries {
                         // Normalize the exact Kotlin `Any` declaration while its provider identity
                         // and source member are still together. Later JVM passes consume this role
                         // from the selected callable; they never rediscover it from call spelling.
-                        let semantic_role = (builtin_cn == crate::types::wk::any()
-                            && params.is_empty())
-                        .then(|| match m.name.as_str() {
-                            "hashCode" => {
-                                Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
-                            }
-                            "toString" => {
-                                Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
-                            }
-                            _ => None,
-                        })
-                        .flatten();
+                        let semantic_role =
+                            if builtin_cn == crate::types::wk::any() && params.is_empty() {
+                                match m.name.as_str() {
+                                    "hashCode" => {
+                                        Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
+                                    }
+                                    "toString" => {
+                                        Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
                         let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),
@@ -6109,9 +6149,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     ty,
                     context_count: 0,
                     context_param_names: Vec::new(),
+                    context_parameter_identities: Vec::new(),
                     getter,
                     setter,
                     setter_visibility,
+                    setter_parameter_name: None,
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
@@ -6766,6 +6808,49 @@ mod tests {
             .and_then(crate::symbol_resolver::Symbol::extension_call)
             .expect("UByte.downTo(UByte) must select from parsed stdlib metadata");
         assert_eq!(ubyte_down_to.ret, Ty::obj("kotlin/ranges/UIntProgression"));
+    }
+
+    /// A backend realizes a selected dependency through the PROVIDER, by the opaque identity the
+    /// provider assigned, and never by reaching into the classpath behind it. Each published
+    /// overload carries its identity, and asking the provider for it answers that very declaration.
+    #[test]
+    fn a_selected_dependency_is_realized_through_the_provider_by_its_identity() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/collections")),
+            "listOf",
+        );
+        let functions = match &symbols.callables {
+            crate::libraries::Callables::Functions(functions)
+            | crate::libraries::Callables::Both { functions, .. } => functions,
+            _ => panic!("kotlin.collections.listOf callable missing"),
+        };
+        assert!(!functions.overloads.is_empty());
+        let platform: &dyn SemanticPlatform = &libraries;
+        for function in &functions.overloads {
+            let identity = function
+                .callable
+                .external_identity
+                .expect("a published dependency function carries its provider identity");
+            let realization = platform
+                .external_callable(identity)
+                .expect("the provider realizes an identity it assigned");
+            assert_eq!(realization.callable.name, function.callable.name);
+            assert_eq!(realization.callable.owner, function.callable.owner);
+            assert_eq!(
+                realization.callable.physical_params,
+                function.callable.physical_params
+            );
+            assert_eq!(
+                realization.kind,
+                crate::libraries::ExternalCallableKind::TopLevel
+            );
+        }
     }
 
     #[test]
