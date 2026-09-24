@@ -42,7 +42,9 @@ fn an_inlined_call_pushes_its_operands_from_where_they_are_like_kotlinc() {
             !reference.is_empty() && !krusty.is_empty(),
             "{member} not found"
         );
-        // Both push the two parameters straight from their own slots, in source order.
+        // This PR owns the common-lowering operand copies: both push the two source parameters
+        // directly and in order. The remaining expansion-parameter store is JVM splice behavior
+        // owned by the stacked in-place-argument change.
         let pushes = |body: &[String]| {
             body.iter()
                 .take(2)
@@ -50,12 +52,11 @@ fn an_inlined_call_pushes_its_operands_from_where_they_are_like_kotlinc() {
                 .collect::<Vec<_>>()
         };
         assert_eq!(pushes(&krusty), pushes(&reference), "{member}: {krusty:#?}");
-        // The expansion's parameter store is the only copy left; kotlinc reads these in place.
         let stores = krusty
             .iter()
             .filter(|insn| opcode(insn).contains("store"))
             .count();
-        assert!(stores <= 1, "{member} copies an operand twice: {krusty:#?}");
+        assert_eq!(stores, 1, "{member}: exact remaining splice store");
     }
 }
 
@@ -71,4 +72,26 @@ fn an_inlined_call_without_operand_copies_still_runs() {
         ),
         "inline operand copies",
     );
+}
+
+#[test]
+fn an_external_inline_vararg_keeps_nested_element_locals_declared() {
+    const LIBRARY: &str = "@file:Suppress(\"INVISIBLE_MEMBER\", \"INVISIBLE_REFERENCE\")\n\
+        package dependency\n\
+        @kotlin.internal.InlineOnly\n\
+        inline fun first(vararg values: String): String = values[0]\n";
+    const CONSUMER: &str = "package consumer\n\
+        import dependency.first\n\
+        fun box(): String {\n\
+        \x20   val value = \"OK\"\n\
+        \x20   return first(value)\n\
+        }\n";
+
+    let Some(output) = common::expect_box_run_against_kotlinc(LIBRARY, CONSUMER) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    // `value` is nested below the Vararg node. Removing its operand temp without rewriting that
+    // nested read leaves an uninitialized local slot, which the JVM verifier rejects before box().
+    assert_eq!(output, "OK");
 }
