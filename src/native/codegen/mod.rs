@@ -85,6 +85,11 @@ impl Backend for CraneliftBackend {
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
+        // A local or anonymous classifier arrives with an opaque identity; this target names it
+        // from its provenance as Kotlin/Native does. There is no facade class here, so a
+        // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
+        // `box$1`. Everything below, the name a failed cast reports included, reads that name.
+        file.ir.realize_local_class_names_in_packages();
         // Before the generator sees the file: a reflective dependency reference is a checked node
         // the generator has no shape for, and this turns the realizable ones into the adapter form
         // it already lowers. See `native::dependency_references`.

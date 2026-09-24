@@ -257,6 +257,31 @@ fn a_failed_cast_names_both_classes_the_way_kotlin_native_does() {
 }
 
 #[test]
+fn a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does() {
+    // The frontend hands a local classifier over with an opaque identity and the naming
+    // provenance each target spells for itself. Kotlin/Native has no facade class, so a class
+    // local to `box` is `box$MyLocalObject` and the first anonymous object in it `box$1` -- the
+    // names the corpus's `casts/nativeCCEMessage` cases pin, never the JVM's `...Kt$box$1` or
+    // the frontend's placeholder.
+    expect_native_box(
+        "class MyObject\n\
+         fun box(): String {\n\
+         \x20   class MyLocalObject\n\
+         \x20   var said = \"\"\n\
+         \x20   try { MyLocalObject() as MyObject } catch (e: ClassCastException) { said += \"${e.message}|\" }\n\
+         \x20   try { MyObject() as MyLocalObject } catch (e: ClassCastException) { said += \"${e.message}|\" }\n\
+         \x20   try { object {} as MyObject } catch (e: ClassCastException) { said += \"${e.message}|\" }\n\
+         \x20   val expected = \"class box\\$MyLocalObject cannot be cast to class MyObject|\" +\n\
+         \x20       \"class MyObject cannot be cast to class box\\$MyLocalObject|\" +\n\
+         \x20       \"class box\\$1 cannot be cast to class MyObject|\"\n\
+         \x20   return if (said == expected) \"OK\" else \"fail: $said\"\n\
+         }\n",
+        "LocalCastMessage",
+        "OK",
+    );
+}
+
+#[test]
 fn a_null_cast_is_a_null_pointer_exception_naming_the_target_type() {
     // `null as T` and `x!!` are both NullPointerException and differ in their MESSAGE: the cast
     // names the type it could not reach, and `!!` says nothing at all. kotlinc 2.4.10 confirms
