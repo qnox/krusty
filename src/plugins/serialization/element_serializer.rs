@@ -1,10 +1,11 @@
 //! Select and emit one complete serializer for a property element type.
 
+use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
-    collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
-    serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
+    generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
+    type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
@@ -16,8 +17,8 @@ pub(super) enum ElementSerializerPlan {
         classifier: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
-    Collection {
-        builder: TypeName,
+    ConstructedStandard {
+        serializer: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
@@ -53,8 +54,9 @@ pub(super) struct UnderivableChildCacheElement;
 /// Select the one serializer plan a child-cache slot will emit.
 ///
 /// `Ok(None)` means the type does not use the cache. `Err` means it does require a cache (a
-/// collection or same-file enum), but its complete serializer is underivable. The cache builder
-/// publishes that invalid state as an unsupported residual rather than trying an uncached path.
+/// constructed standard type or same-file enum), but its complete serializer is underivable. The
+/// cache builder publishes that invalid state as an unsupported residual rather than trying an
+/// uncached path.
 pub(super) fn child_cache_element_plan(
     ir: &IrFile,
     ctx: &PluginContext,
@@ -70,7 +72,7 @@ pub(super) fn child_cache_element_plan(
     };
     // kotlinc caches every element whose serializer is a constructed instance rather than a
     // singleton: a collection's, an enum's and an object's `ObjectSerializer`.
-    let cacheable = collection_serializer_builder(classifier).is_some()
+    let cacheable = constructed_standard_serializer(classifier).is_some()
         || ir
             .classes
             .iter()
@@ -307,20 +309,21 @@ pub(super) fn element_serializer_plan_in(
             arguments: Vec::new(),
         });
     }
-    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes
-    // through the kotlinx collection serializer class over its element serializer(s). The element
-    // serializers are derived recursively; if any cannot be, the whole collection cannot.
-    if let Some((builder, n)) = collection_serializer_builder(fq_name) {
-        if type_args.len() >= n {
-            let mut arguments = Vec::with_capacity(n);
-            for a in type_args.iter().take(n) {
-                // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
-                // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
-                // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                arguments.push(type_argument_serializer_plan(ir, ctx, a, scope)?);
-            }
-            return Some(ElementSerializerPlan::Collection { builder, arguments });
+    // A constructed standard type (`List<T>`, `Pair<A, B>`, `Map.Entry<K, V>`, …) serializes
+    // through the runtime serializer selected for its classifier. Its operands come from every
+    // checked semantic type argument; the classifier-to-serializer ABI table owns no arity fact.
+    if let Some(serializer) = constructed_standard_serializer(fq_name) {
+        if type_args.is_empty() {
+            return None;
         }
+        let arguments = type_args
+            .iter()
+            .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(ElementSerializerPlan::ConstructedStandard {
+            serializer,
+            arguments,
+        });
     }
     // A field with OPEN-polymorphic dispatch serializes via `PolymorphicSerializer(<type>::class)`
     // (descriptor serialName `kotlinx.serialization.Polymorphic<T>`), not a generated `$serializer`. Two
@@ -515,9 +518,9 @@ fn readable_type_argument(argument: &Ty) -> Option<Ty> {
     }
 }
 
-fn emit_collection_serializer(
+fn emit_constructed_standard_serializer(
     ir: &mut IrFile,
-    builder: TypeName,
+    serializer: TypeName,
     arguments: Vec<ElementSerializerPlan>,
 ) -> ExprId {
     let arity = arguments.len();
@@ -528,11 +531,10 @@ fn emit_collection_serializer(
             narrow_to_kserializer(ir, argument)
         })
         .collect();
-    // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the same
-    // thing: `ListSerializer(x)` is an inline stdlib function over `ArrayListSerializer(x)`, and
-    // kotlinc's plugin emits the construction.
+    // Constructed directly, not obtained from the `BuiltinSerializersKt` factory that returns the
+    // same value. kotlinc's plugin emits the runtime serializer construction itself.
     ir.add_expr(IrExpr::New {
-        internal: builder,
+        internal: serializer,
         args: arguments,
         ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
         ctor_desc: Some(format!(
@@ -545,10 +547,10 @@ fn emit_collection_serializer(
     })
 }
 
-/// kotlinc passes every serializer operand of a serializer factory (a collection constructor, the
-/// `nullable` extension) as a `KSerializer`: the cast is a `checkcast` wherever the operand's static
-/// type is a concrete serializer class (`StringSerializer.INSTANCE`) and vanishes where it already
-/// is `KSerializer` (a type parameter's serializer, another factory's result).
+/// kotlinc passes every serializer operand of a serializer factory (a constructed standard
+/// serializer, the `nullable` extension) as a `KSerializer`: the cast is a `checkcast` wherever the
+/// operand's static type is a concrete serializer class (`StringSerializer.INSTANCE`) and vanishes
+/// where it already is `KSerializer` (a type parameter's serializer, another factory's result).
 fn narrow_to_kserializer(ir: &mut IrFile, serializer: ExprId) -> ExprId {
     ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::Cast,
@@ -576,9 +578,10 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 arguments,
             )
         }
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments)
-        }
+        ElementSerializerPlan::ConstructedStandard {
+            serializer,
+            arguments,
+        } => emit_constructed_standard_serializer(ir, serializer, arguments),
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
             let inner = narrow_to_kserializer(ir, inner);
