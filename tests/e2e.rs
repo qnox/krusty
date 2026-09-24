@@ -762,6 +762,8 @@ mod generic_signature_e2e;
 mod generic_static_field_e2e;
 #[path = "generic_suspend_member_return_e2e.rs"]
 mod generic_suspend_member_return_e2e;
+#[path = "generic_value_class_result_e2e.rs"]
+mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
 mod generic_vararg_inference_e2e;
 #[path = "hides_members_overload_e2e.rs"]

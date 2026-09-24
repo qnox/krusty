@@ -976,6 +976,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — whose GENERIC half is a separate,
   facade-side rule (see "A facade `@Metadata` record keeps a BOUNDED type parameter as a type
   parameter").
+- **A generic declaration whose result is a value class returns the carrier, whatever its type
+  arguments.** `fun <A> of(v: A): Tagged<A>` read as `Tagged<Int>` is realized exactly like a
+  non-generic `(): Tagged`: the declaration `areturn`s the carrier and the caller reads it directly.
+  Type arguments have no JVM representation, so a declared result whose erasure already equals the
+  call's own result erasure crosses no physical boundary, and FIR lowering records none for it. Only
+  a result that erases differently (a bare `T` instantiated with a value class, which comes back
+  through `Object` as a box) keeps the physical slot the value-class pass reads as `Boxed`. Recording
+  the erased `Tagged` as the physical slot made that pass `checkcast`+`unbox-impl` a carrier that was
+  never boxed, a VerifyError at the caller. Tests: `tests/generic_value_class_result_e2e.rs` (the
+  caller's facade byte-compared with kotlinc; `Ok`/`Err`-style factories over a two-parameter value
+  class with an `Any?` carrier).
 - **An `annotation class` that declares `@Target` carries THREE meta-annotations, and the Java one is
   a PROJECTION.** kotlinc writes, into `RuntimeVisibleAnnotations`: every annotation the source
   declares, in SOURCE order (`kotlin.annotation.Retention` and `kotlin.annotation.Target` among them);
