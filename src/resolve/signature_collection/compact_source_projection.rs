@@ -44,8 +44,9 @@ pub(in crate::resolve) fn compact_classifier_identity(
     // and chooses the physical spelling later.
     let runtime_name = if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
         // Only a member of a local classifier's own body is nested in it. A classifier declared
-        // in executable code of a member (`Owner.f { object {} }`) has that classifier as its
-        // lexical naming owner too, but it is not a nested member and must keep its own identity.
+        // in executable code of a member or class header (`Owner.f { object {} }`,
+        // `class A(x: Any = run { class B })`) has that classifier as its lexical naming owner
+        // too, but it is not a nested member and must keep its own opaque identity.
         let nested = headers
             .local_class_name_provenance
             .get(&stub.id)
@@ -57,7 +58,10 @@ pub(in crate::resolve) fn compact_classifier_identity(
                     .is_some_and(|anchor| anchor.owner == Some(*owner))
             })
             .and_then(|owner| headers.stub(owner))
-            .filter(|owner| owner.kind == crate::fir::DeclarationKind::Classifier)
+            .filter(|owner| {
+                owner.kind == crate::fir::DeclarationKind::Classifier
+                    && owner.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            })
             .and_then(|owner| compact_classifier_identity(headers, owner))
             .and_then(|(_, owner)| {
                 headers

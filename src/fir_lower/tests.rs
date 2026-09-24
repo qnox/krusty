@@ -2217,9 +2217,9 @@ fn inline_function_and_accessor_carry_nested_local_classifier_bodies() {
 
     assert!(library.foreign_inline_templates.is_empty());
     assert!(library
-        .classes
-        .iter()
-        .any(|class| class.fq_name.render().contains("Local")));
+        .local_class_name_provenance
+        .values()
+        .any(|provenance| provenance.segments.last().map(String::as_str) == Some("Local")));
     assert!(!consumer.foreign_inline_templates.is_empty());
     for class in &consumer.classes {
         assert!(

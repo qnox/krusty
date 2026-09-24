@@ -1425,7 +1425,11 @@ fun <T> test(emitter: MaybeCallbacks<T>) {
     let classifier = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
         .filter_map(|declaration| index.classifier_header(declaration))
-        .find(|classifier| classifier.classifier.contains("InnerLocal"))
+        .find(|classifier| {
+            index
+                .declaration_name(classifier.declaration)
+                .is_some_and(|name| name.rsplit('.').next() == Some("InnerLocal"))
+        })
         .expect("stable InnerLocal classifier header");
     assert!(classifier
         .interfaces
