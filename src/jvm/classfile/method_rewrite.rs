@@ -477,6 +477,38 @@ impl ClassWriter {
         });
         let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
         let rewrite_late = rewrite.late_labels.clone();
+        let no_late_branch = |_: usize| false;
+        let peephole_tables = redundant_gotos::Tables {
+            lines: &lines,
+            variable_bounds: &variable_bounds,
+            protected_starts: &protected_starts,
+            // The peephole only uses the tables for NOP retention.
+            late_branch: &no_late_branch,
+        };
+        // kotlinc's stack peephole runs after the temporaries pass and before the `goto` cleanup.
+        let handler_entries: Vec<usize> = handlers.iter().map(|handler| handler.handler).collect();
+        let peephole = stack_peephole::optimize(
+            &mut rewrite.nodes,
+            &peephole_tables,
+            &handler_entries,
+            &stack_peephole::Pool {
+                unit_instance: &|field| {
+                    matches!(
+                        self.cp.fieldref_parts(field),
+                        Some(("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;"))
+                    )
+                },
+                compare_int: &|method| {
+                    matches!(
+                        self.methodref_parts(method),
+                        Some(("kotlin/jvm/internal/Intrinsics", "compare", "(II)I"))
+                    )
+                },
+            },
+        );
+        for &(from, to) in &peephole.moved_branches {
+            branch_labels[to] = branch_labels[from].take();
+        }
         let late_branch = |index: usize| {
             branch_labels
                 .get(index)
@@ -490,21 +522,6 @@ impl ClassWriter {
             protected_starts: &protected_starts,
             late_branch: &late_branch,
         };
-        // kotlinc's stack peephole runs after the temporaries pass and before the `goto` cleanup.
-        let handler_entries: Vec<usize> = handlers.iter().map(|handler| handler.handler).collect();
-        let peephole_changed = stack_peephole::optimize(
-            &mut rewrite.nodes,
-            &tables,
-            &handler_entries,
-            &stack_peephole::Pool {
-                unit_instance: &|field| {
-                    matches!(
-                        self.cp.fieldref_parts(field),
-                        Some(("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;"))
-                    )
-                },
-            },
-        );
         let gotos_changed = redundant_gotos::remove(&mut rewrite.nodes, &tables);
         let mut labelled: Vec<bool> = lines
             .iter()
@@ -523,7 +540,7 @@ impl ClassWriter {
                 .flatten()
                 .is_some_and(|label| rewrite_late.contains(&label))
         });
-        if !folded_any && !peephole_changed && !gotos_changed && !jumps_negated {
+        if !folded_any && !peephole.changed && !gotos_changed && !jumps_negated {
             return None;
         }
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
