@@ -901,7 +901,16 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
     }
     let mut stack_at_target = Vec::new();
     let mut late_labels = BTreeSet::new();
+    // The temporary analysis runs over the original instruction indices. Feed it every load that
+    // an earlier pass has already selected for removal; otherwise a deleted `aload` that supplied a
+    // redundant null check remains a phantom use and keeps its compiler temporary alive.
     let mut removed = trivially_removed;
+    removed.extend(
+        body.redundant_null_checks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &is_removed)| is_removed.then_some(index)),
+    );
     let Some(folded) = fold_null_checks(&mut working, &mut stack_at_target, &mut late_labels)
     else {
         return earlier_passes_only();
@@ -1262,6 +1271,16 @@ mod tests {
                 branch(GOTO, 9),
                 op(0xb1),
             ])
+        );
+    }
+
+    #[test]
+    fn a_load_removed_with_a_null_check_does_not_keep_its_temporary_alive() {
+        let check = with(INVOKESTATIC, &[0, 9]);
+        let insns = [op(ALOAD_0), op(ASTORE_1), op(ALOAD_1), check, op(0xb1)];
+        assert_eq!(
+            rewrite_after_earlier_passes(&insns, &[], &[2, 3], &[], &[], &[]),
+            Some(vec![op(ALOAD_0), op(POP), op(0xb1)])
         );
     }
 
