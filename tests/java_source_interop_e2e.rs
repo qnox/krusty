@@ -290,6 +290,30 @@ fun box(): String {
     assert_eq!(run_kotlin_first(kotlin, &[("JUtil", java)]), "OK");
 }
 
+/// A non-static Java member class inherits its enclosing class's type-variable scope. This runs
+/// Kotlin emitted from the source stub against javac's real nested class, so losing the enclosing
+/// bound changes `Cell.get` from `Number` to `Object` and fails at linkage.
+#[test]
+fn java_member_class_headers_inherit_enclosing_type_variable_bounds() {
+    let java = r#"
+public final class Tray<T extends Number> {
+    public final class Cell<U extends T> {
+        private final U value;
+        public Cell(U value) { this.value = value; }
+        public U get() { return value; }
+    }
+    public Cell<T> cell(T value) { return new Cell<>(value); }
+}
+"#;
+    let kotlin = r#"
+fun box(): String {
+    val value = Tray<Int>().cell(42).get()
+    return if (value == 42) "OK" else "FAIL: $value"
+}
+"#;
+    assert_eq!(run_kotlin_first(kotlin, &[("Tray", java)]), "OK");
+}
+
 /// Kotlin-first mixed compilation, as a build tool runs it: the Kotlin and Java sources enter the
 /// production frontend together, whose JVM provider publishes Java declaration headers during
 /// Pass 1; Kotlin is emitted, only then does javac compile the real Java against krusty's output,

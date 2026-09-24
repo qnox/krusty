@@ -73,11 +73,14 @@ pub fn stub_classes(
     // This parser-owned graph is the only authority for lexical nesting and the type parameters
     // visible through it. Walking encoded names by splitting `$` would make a legal `$` inside an
     // identifier look like an enclosing declaration.
-    let declarations_by_internal = parsed
-        .iter()
-        .flat_map(|(_, declarations)| declarations)
-        .map(|declaration| (declaration.internal.as_str(), declaration))
-        .collect::<HashMap<_, _>>();
+    let mut declarations_by_internal = HashMap::new();
+    for declaration in parsed.iter().flat_map(|(_, declarations)| declarations) {
+        // Emission keeps the first declaration for a duplicate internal name. Lexical-owner and
+        // type-variable lookup must consult that same declaration rather than a later duplicate.
+        declarations_by_internal
+            .entry(declaration.internal.as_str())
+            .or_insert(declaration);
+    }
     let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
@@ -127,6 +130,16 @@ struct TypeVariables<'a> {
     levels: Vec<&'a [(String, Option<SrcType>)]>,
 }
 
+/// Stable identity of a type parameter within one lexical type-variable scope.
+///
+/// Source spelling is insufficient: an inner declaration or member may shadow an enclosing type
+/// parameter while referring to it indirectly through another parameter's bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScopedTypeVariable {
+    level: usize,
+    index: usize,
+}
+
 impl<'a> TypeVariables<'a> {
     fn for_declaration(
         declaration: &'a RawDecl,
@@ -169,17 +182,19 @@ impl<'a> TypeVariables<'a> {
             .any(|level| level.iter().any(|(declared, _)| declared == name))
     }
 
-    /// The leftmost bound of the innermost type variable `name`, with the scope it is written in.
-    fn bound(&self, name: &str) -> Option<(Option<&'a SrcType>, Self)> {
+    /// The identity and leftmost bound of the innermost type variable `name`, with the scope it is
+    /// written in.
+    fn bound(&self, name: &str) -> Option<(ScopedTypeVariable, Option<&'a SrcType>, Self)> {
         let level = self
             .levels
             .iter()
             .rposition(|level| level.iter().any(|(declared, _)| declared == name))?;
-        let bound = self.levels[level]
+        let index = self.levels[level]
             .iter()
-            .find(|(declared, _)| declared == name)
-            .and_then(|(_, bound)| bound.as_ref());
+            .position(|(declared, _)| declared == name)?;
+        let bound = self.levels[level][index].1.as_ref();
         Some((
+            ScopedTypeVariable { level, index },
             bound,
             Self {
                 levels: self.levels[..=level].to_vec(),
@@ -276,22 +291,22 @@ impl Resolver<'_> {
         &self,
         t: &'t SrcType,
         tparams: &TypeVariables<'t>,
-        erasing: &mut Vec<&'t str>,
+        erasing: &mut Vec<ScopedTypeVariable>,
     ) -> Option<String> {
         let mut s = "[".repeat(t.array as usize);
         if let Some(p) = primitive_desc(&t.name) {
             s.push_str(p);
-        } else if let Some((bound, bound_scope)) = tparams.bound(&t.name) {
+        } else if let Some((parameter, bound, bound_scope)) = tparams.bound(&t.name) {
             match bound {
                 None => s.push_str("Ljava/lang/Object;"),
-                Some(_) if erasing.contains(&t.name.as_str()) => {
+                Some(_) if erasing.contains(&parameter) => {
                     if !self.mode.is_lenient() {
                         return None;
                     }
                     s.push_str("Ljava/lang/Object;");
                 }
                 Some(bound) => {
-                    erasing.push(&t.name);
+                    erasing.push(parameter);
                     let erased = self.erased_desc(bound, &bound_scope, erasing);
                     erasing.pop();
                     s.push_str(&erased?);
@@ -1245,6 +1260,31 @@ mod tests {
     }
 
     #[test]
+    fn bounded_record_components_use_their_erased_descriptors_everywhere() {
+        let out = stubs(
+            "public record Box<T extends Number>(T value, T[] values) {}",
+            &["java/lang/Record", "java/lang/Number", "java/lang/Object"],
+        )
+        .expect("record stub");
+        let class = parse_class(&out[0].1).expect("parse");
+        let field = |name: &str| {
+            class
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.descriptor.as_str())
+        };
+
+        assert_eq!(field("value"), Some("Ljava/lang/Number;"));
+        assert_eq!(field("values"), Some("[Ljava/lang/Number;"));
+        assert!(class.method("value", "()Ljava/lang/Number;").is_some());
+        assert!(class.method("values", "()[Ljava/lang/Number;").is_some());
+        assert!(class
+            .method("<init>", "(Ljava/lang/Number;[Ljava/lang/Number;)V")
+            .is_some());
+    }
+
+    #[test]
     fn annotation_type_emits_abstract_element_methods() {
         let out = stubs(
             "package p;\npublic @interface Tag { int value() default 1; String[] names(); }",
@@ -1468,6 +1508,48 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_nested_declarations_use_the_first_lexical_owners_bound() {
+        let sources = vec![
+            (
+                "first/Outer.java".to_string(),
+                "public class Outer<T extends Number> { \
+                 public class Inner { public T value(T value) { return value; } } \
+                 }"
+                .to_string(),
+            ),
+            (
+                "second/Outer.java".to_string(),
+                "public class Outer<T extends CharSequence> { \
+                 public class Inner { public T value(T value) { return value; } } \
+                 }"
+                .to_string(),
+            ),
+        ];
+        let out = stub_classes(&sources, StubMode::Strict, &|candidate| {
+            matches!(
+                candidate,
+                "java/lang/Object" | "java/lang/Number" | "java/lang/CharSequence"
+            )
+        })
+        .expect("stubs");
+        let inner = out
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+            .expect("first nested declaration");
+
+        assert!(inner
+            .method("value", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+        assert!(inner
+            .method(
+                "value",
+                "(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"
+            )
+            .is_none());
+    }
+
+    #[test]
     fn type_use_annotations_are_skipped_in_every_type_position() {
         let out = stubs(
             "import java.util.List; import java.util.function.Supplier;\n\
@@ -1623,6 +1705,51 @@ mod tests {
             descriptors("shadow"),
             ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
         );
+    }
+
+    #[test]
+    fn shadowed_type_variable_bound_chain_uses_scoped_parameter_identity() {
+        let sources = vec![(
+            "Outer.java".to_string(),
+            "public class Outer<T extends Number> { \
+             public class Inner<U extends T> { \
+             public <T extends U> T value(T value) { return value; } \
+             } \
+             }"
+            .to_string(),
+        )];
+
+        for mode in [StubMode::Strict, StubMode::Lenient] {
+            let out = stub_classes(&sources, mode, &|candidate| {
+                matches!(candidate, "java/lang/Object" | "java/lang/Number")
+            })
+            .unwrap_or_else(|| panic!("{mode:?} stubs"));
+            let inner = out
+                .iter()
+                .find(|(name, _)| name == "Outer$Inner")
+                .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+                .expect("Inner");
+
+            assert!(
+                inner
+                    .method("value", "(Ljava/lang/Number;)Ljava/lang/Number;")
+                    .is_some(),
+                "{mode:?} must erase the complete shadowing chain to Number"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_static_type_boundaries_do_not_capture_outer_type_variables() {
+        for source in [
+            "class Outer<T extends Number> { interface Nested { T invalid(); } }",
+            "interface Outer<T extends Number> { class Nested { T invalid; } }",
+        ] {
+            assert!(
+                stubs(source, &["java/lang/Object", "java/lang/Number"]).is_none(),
+                "an implicitly static nested type must not capture outer T: {source}"
+            );
+        }
     }
 
     #[test]
