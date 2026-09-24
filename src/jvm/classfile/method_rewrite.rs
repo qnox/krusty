@@ -21,8 +21,9 @@
 use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
+use super::stack_peephole;
 use super::temporaries::{self, Body};
-use super::{negated_jumps, redundant_checkcasts, redundant_gotos, stack_peephole};
+use super::{dead_code, local_slots, negated_jumps, redundant_checkcasts, redundant_gotos};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
@@ -539,9 +540,59 @@ impl ClassWriter {
                 .flatten()
                 .is_some_and(|label| rewrite_late.contains(&label))
         });
-        if !folded_any && !peephole.changed && !gotos_changed && !jumps_negated {
+        // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
+        // above left unreachable goes, with its line numbers, empty protected ranges and emptied
+        // local variables (see `dead_code`).
+        let lines_at: Vec<(usize, u16)> = method
+            .lnt
+            .iter()
+            .map(|&(pc, line)| Some((index_of(usize::from(pc))?, line)))
+            .collect::<Option<_>>()?;
+        let local_ranges: Vec<Option<(usize, usize)>> = method
+            .lvt
+            .iter()
+            .map(|&(_, _, _, start, len)| {
+                let (start, end) = range(start, len);
+                (start < code_len)
+                    .then(|| Some((index_of(start)?, index_of(end)?)))
+                    .flatten()
+            })
+            .collect();
+        let mut fixed_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
+        for &(_, desc, slot, _, _) in &method.lvt {
+            fixed_slots.insert(slot);
+            if matches!(self.cp.utf8_at(desc), Some("J" | "D")) {
+                fixed_slots.insert(slot + 1);
+            }
+        }
+        let dead = dead_code::eliminate(
+            &mut rewrite.nodes,
+            &dead_code::Flow {
+                handlers: &handlers,
+                late_branch: &late_branch,
+                lines: &lines_at,
+                line_after_inserted: &|index| {
+                    rewrite
+                        .stack_at_target
+                        .iter()
+                        .any(|(target, _)| *target == index)
+                },
+                locals: &local_ranges,
+            },
+        );
+        let renumbered = local_slots::compact(&mut rewrite.nodes, &fixed_slots);
+        if !folded_any
+            && !peephole.changed
+            && !gotos_changed
+            && !jumps_negated
+            && dead.is_none()
+            && renumbered.is_none()
+        {
             return None;
         }
+        let removed = |table: fn(&dead_code::Elimination) -> &[bool], at: usize| {
+            dead.as_ref().is_some_and(|dead| table(dead)[at])
+        };
         // Every original index `k` now starts at the first rewritten instruction of group `k` or a
         // later one — where a label that stood at `k` lands.
         let mut new_index = vec![rewrite.nodes.len(); n + 1];
@@ -710,6 +761,37 @@ impl ClassWriter {
         if received.contains(&false) {
             return None;
         }
+        // A label dead code alone reached is gone with it, and so is its frame; a label live code
+        // only falls into needs none.
+        if let Some(dead) = &dead {
+            frames.frames.retain(|(label, _, _)| {
+                let Some(index) = source
+                    .builder
+                    .labels
+                    .get(*label as usize)
+                    .and_then(|&pc| index_of(pc))
+                else {
+                    return true;
+                };
+                dead.targeted.contains(&(index, is_late_label(*label)))
+            });
+        }
+        if let Some(renumbered) = &renumbered {
+            for (_, locals, _) in &mut frames.frames {
+                let slots = renumbered.locals(expand_slots(locals));
+                // A wide value whose second word moved away from it cannot be described.
+                let split = slots.iter().enumerate().any(|(slot, local)| {
+                    matches!(local, VerifType::Long | VerifType::Double)
+                        && slots
+                            .get(slot + 1)
+                            .is_some_and(|next| *next != VerifType::Top)
+                });
+                if split {
+                    return None;
+                }
+                *locals = compress_slots(&slots);
+            }
+        }
         frames.bytes = assemble(&new_insns);
         frames.fixups.clear();
         frames.switch_fixups.clear();
@@ -734,6 +816,9 @@ impl ClassWriter {
         let exceptions: Vec<(u16, u16, u16, u16)> = method
             .exceptions
             .iter()
+            .enumerate()
+            .filter(|&(at, _)| !removed(|dead| &dead.removed_handlers, at))
+            .map(|(_, entry)| entry)
             .map(|&(start, end, handler, catch)| (map16(start), map16(end), map16(handler), catch))
             .collect();
         if exceptions.iter().any(|&(start, end, _, _)| start >= end) {
@@ -742,11 +827,17 @@ impl ClassWriter {
         let lnt: Vec<(u16, u16)> = method
             .lnt
             .iter()
+            .enumerate()
+            .filter(|&(at, _)| !removed(|dead| &dead.removed_lines, at))
+            .map(|(_, entry)| entry)
             .map(|&(pc, line)| (map_after_inserted16(pc), line))
             .collect();
-        let lvt: Vec<LvtEntry> = method
+        let mut lvt: Vec<LvtEntry> = method
             .lvt
             .iter()
+            .enumerate()
+            .filter(|&(at, _)| !removed(|dead| &dead.removed_locals, at))
+            .map(|(_, entry)| entry)
             .map(|&(name, desc, slot, old_start, old_len)| {
                 let start = old_start.map(map_after_inserted16);
                 let len = old_len.map(|old_len| {
@@ -757,6 +848,11 @@ impl ClassWriter {
                 (name, desc, slot, start, len)
             })
             .collect();
+        if let Some(renumbered) = &renumbered {
+            for entry in &mut lvt {
+                entry.2 = renumbered.slot(entry.2)?;
+            }
+        }
         if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
             // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
             // does not own debug-local deletion, so preserve the original method instead.
