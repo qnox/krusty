@@ -61,7 +61,7 @@ use statement_normalization::{
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
-use tail_forward::{make_forward_body, tail_forward_call};
+use tail_forward::{rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
@@ -229,15 +229,14 @@ pub(crate) fn lower_suspend(
         // the RAW body, before splice/hoist/desugar reshape the tail suspension into a bound resume point.
         // The call `ExprId` is stable across the later `shift_locals`, so remember it and thread
         // `$completion` in below. When it matches, the splice/hoist/desugar normalizations are all skipped.
-        let forward = body.and_then(|b| {
-            tail_forward_call(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets)
-        });
+        let forward = body
+            .and_then(|b| tail_forward(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets));
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
         // rewrites descendants in place and installs each suspension temp in the current parent's
         // prelude, so every non-forward body that can reach a suspension must own one node per use.
         // Do this before scope/debug-line capture: cloned suspension identities then become the
         // authoritative keys used by every later coroutine phase.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             if expr_calls_suspend(ir, b, &suspend_set) {
                 let clones = crate::ir::make_expression_children_unique_tracked(ir, b);
                 for (source, target) in clones {
@@ -254,7 +253,7 @@ pub(crate) fn lower_suspend(
         // `splice_return_blocks` flattens block STATEMENTS into their parent, which would leak a
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
         // expr ids are stable through the transforms; keyed per function.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             if let std::collections::hash_map::Entry::Vacant(entry) = pre_splice_scopes.entry(fid) {
                 let is_lambda = ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid);
                 let prefix: Vec<(u32, Ty)> = if is_lambda {
@@ -304,7 +303,7 @@ pub(crate) fn lower_suspend(
                 }
             }
         }
-        let suspension_lines = if let (Some(b), None) = (body, forward) {
+        let suspension_lines = if let (Some(b), None) = (body, forward.as_ref()) {
             capture_suspension_lines(ir, b, &suspend_set, ir.fn_close_lines.get(&fid).copied())
         } else {
             std::collections::HashMap::new()
@@ -313,13 +312,13 @@ pub(crate) fn lower_suspend(
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
         // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
         // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             splice_return_blocks(ir, b);
             separate_catches_from_finally(ir, b);
         }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             let mut value_types = function_value_types(ir, fid, b);
             hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
         }
@@ -327,7 +326,7 @@ pub(crate) fn lower_suspend(
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
         let ret_ty = ir.functions[fid as usize].ret.clone();
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             // An expression-bodied suspend function can carry a suspending `when`/`try` as the block's
             // trailing VALUE rather than as an explicit `return`. Materialize that tail first so the
             // same value-control-flow desugars below handle expression and block bodies identically.
@@ -383,7 +382,7 @@ pub(crate) fn lower_suspend(
         // A function that ALSO has suspensions of its own is taken whole: one method has one
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
         // machine never saw the spliced kind, so such a function does not compile today at all.
-        let spliced_suspensions: Vec<ExprId> = match (forward, body) {
+        let spliced_suspensions: Vec<ExprId> = match (forward.as_ref(), body) {
             (None, Some(b)) if machine_eligible(ir, fid) => {
                 match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
                     true => Vec::new(),
@@ -510,20 +509,22 @@ pub(crate) fn lower_suspend(
             }
         }
 
-        if let (Some(call), Some(b)) = (forward, body) {
-            // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into the
-            // callee and return its `Object` result directly. No state machine, no continuation class —
-            // exactly kotlinc's tail-call optimization.
-            let cont = ir.add_expr(IrExpr::GetValue(p_old));
-            if !append_continuation(ir, call, cont, default_call_operands) {
-                return false;
+        if let (Some(forward), Some(b)) = (forward, body) {
+            // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into
+            // each callee and return its `Object` result directly. No state machine, no continuation
+            // class — exactly kotlinc's tail-call optimization.
+            for &call in forward.calls() {
+                let cont = ir.add_expr(IrExpr::GetValue(p_old));
+                if !append_continuation(ir, call, cont, default_call_operands) {
+                    return false;
+                }
             }
             // Checked expression bodies carry one source-oriented grouping block around the actual
             // statements. Normalize that transparent wrapper now that the forward decision has been
-            // made; the call id remains stable and `make_forward_body` can rewrite the function's
-            // physical tail in one place.
+            // made; the call ids remain stable and `rewrite_forward_body` can rewrite the function's
+            // physical tails in one place.
             splice_return_blocks(ir, b);
-            make_forward_body(ir, b, call);
+            rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
             // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail
