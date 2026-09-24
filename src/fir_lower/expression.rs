@@ -279,11 +279,13 @@ impl BodyLowering<'_> {
                     // Preserve the checked semantic conversion from the declaration's result to
                     // its call-site substitution. Whether that conversion crosses a physical ABI
                     // boundary is target-owned; the JVM records its answer after generic erasure.
-                    self.ir.add_expr(IrExpr::TypeOp {
+                    let coercion = self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: lowered,
                         type_operand: expression.ty.get(),
-                    })
+                    });
+                    self.ir.declaration_result_coercions.insert(coercion);
+                    coercion
                 } else {
                     lowered
                 }
