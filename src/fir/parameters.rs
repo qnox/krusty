@@ -158,6 +158,29 @@ impl ResolvedValueParameterHeader {
 }
 
 impl ResolvedModuleIndex {
+    pub(crate) fn publish_annotation_constructor_defaults(
+        &mut self,
+        callable: CallableId,
+        defaults: impl IntoIterator<Item = Option<crate::libraries::DefaultValue>>,
+    ) {
+        let defaults = defaults.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        assert!(
+            self.annotation_constructor_defaults
+                .insert(callable, defaults)
+                .is_none(),
+            "an annotation constructor may publish its defaults only once"
+        );
+    }
+
+    pub fn annotation_constructor_defaults(
+        &self,
+        callable: CallableId,
+    ) -> Option<&[Option<crate::libraries::DefaultValue>]> {
+        self.annotation_constructor_defaults
+            .get(&callable)
+            .map(Box::as_ref)
+    }
+
     pub fn callable_behavior(&self, callable: CallableId) -> ResolvedCallableBehavior {
         self.callable_behaviors
             .get(&callable)

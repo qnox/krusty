@@ -85,7 +85,6 @@ pub(super) struct ExternalCallRequest<'a> {
 }
 
 pub(super) struct ModuleConstructorRequest<'a> {
-    pub(super) target: CallableId,
     pub(super) classifier: crate::types::TypeName,
     pub(super) argument_parameter_types: &'a [Ty],
     pub(super) declaration_parameter_types: &'a [Ty],
@@ -94,6 +93,7 @@ pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) outer_receiver: Option<ExprId>,
     pub(super) external_capture_arguments: Option<&'a [(ExprId, Ty)]>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) annotation: Option<&'a FirAnnotationConstruction>,
 }
 
 /// Whether the checked source-order operand stream is already in selected parameter order. Missing
@@ -1173,11 +1173,11 @@ impl BodyLowering<'_> {
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.record_external_annotation_construction(construction, classifier, annotation)?;
+        self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
 
-    fn record_external_annotation_construction(
+    fn record_annotation_construction(
         &mut self,
         construction: ExprId,
         classifier: crate::types::TypeName,
@@ -1244,7 +1244,6 @@ impl BodyLowering<'_> {
         request: ModuleConstructorRequest<'_>,
     ) -> Option<ExprId> {
         let ModuleConstructorRequest {
-            target,
             classifier,
             argument_parameter_types,
             declaration_parameter_types,
@@ -1253,6 +1252,7 @@ impl BodyLowering<'_> {
             outer_receiver,
             external_capture_arguments,
             arguments,
+            annotation,
         } = request;
         let mut declaration_parameter_types = declaration_parameter_types.to_vec();
         let selected = self.selected_semantic_operands(SelectedOperandRequest {
@@ -1312,59 +1312,8 @@ impl BodyLowering<'_> {
         self.ir
             .construction_declared_params
             .insert(construction, declared_parameters);
-        self.record_module_annotation_construction(construction, target, classifier)?;
+        self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
-    }
-
-    fn record_module_annotation_construction(
-        &mut self,
-        construction: ExprId,
-        target: CallableId,
-        classifier: crate::types::TypeName,
-    ) -> Option<()> {
-        let declaration = self.index.classifier_declaration(classifier)?;
-        let header = self.index.declaration_header(declaration)?;
-        if !header
-            .flags
-            .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
-        {
-            return Some(());
-        }
-        let callable = self.index.callable(target)?;
-        let signature = self.index.signature(callable.declaration)?;
-        let members = signature
-            .parameters
-            .iter()
-            .enumerate()
-            .map(|(ordinal, parameter)| {
-                Some((
-                    self.index
-                        .callable_parameter_name(target, ordinal as u32)?
-                        .to_owned(),
-                    crate::types::stored_value_ty(parameter.get()),
-                ))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let defaults = self
-            .ir
-            .class_ctor_defaults_name(classifier)
-            .cloned()
-            .unwrap_or_else(|| vec![None; members.len()]);
-        let enclosing_class = self
-            .body
-            .lexical_class_owner()
-            .and_then(|owner| self.index.classifier_header(owner))
-            .map(|owner| owner.classifier);
-        self.ir.annotation_constructions.insert(
-            construction,
-            crate::ir::IrAnnotationConstruction {
-                interface: classifier,
-                members,
-                defaults,
-                enclosing_class,
-            },
-        );
-        Some(())
     }
 
     /// Normalize source-order checked arguments into physical parameter order. An already ordered

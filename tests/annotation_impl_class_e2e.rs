@@ -72,6 +72,29 @@ fn a_constructed_annotation_reads_back_its_argument() {
 }
 
 #[test]
+fn annotation_defaults_are_independent_of_declaration_and_construction_order() {
+    let source = r#"
+        fun before(): Marker = Marker()
+
+        annotation class Marker(val name: String = "OK")
+
+        fun after(): Marker = Marker()
+        fun box(): String = before().name + after().name
+    "#;
+
+    assert_eq!(
+        common::compile_and_run_box(
+            source,
+            "Main",
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        )
+        .as_deref(),
+        Some("OKOK")
+    );
+}
+
+#[test]
 fn annotation_tracking_ignores_an_ordinary_synthetic_construction() {
     let source = r#"
         fun box(): String {
@@ -105,7 +128,7 @@ fn an_annotation_declared_in_another_source_file_is_constructed_at_the_use_site(
             (
                 "Use",
                 r#"package sample
-                   fun box(): String = Marker("OK").name"#,
+                   fun box(): String = Marker().name"#,
             ),
         ],
         std::slice::from_ref(&stdlib),
@@ -126,7 +149,7 @@ fn an_annotation_declared_in_another_source_file_is_constructed_at_the_use_site(
     );
     assert_eq!(
         common::run_box(&classes, "sample.UseKt", std::slice::from_ref(&stdlib)).as_deref(),
-        Some("OK")
+        Some("default")
     );
 }
 

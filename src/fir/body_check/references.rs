@@ -458,7 +458,10 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| {
                         self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                     })?;
-                crate::fir::FirConstructorTarget::Module(callable.id)
+                crate::fir::FirConstructorTarget::Module {
+                    declaration: callable.id,
+                    annotation: None,
+                }
             } else if let Some(declaration) = constructor.external_identity {
                 crate::fir::FirConstructorTarget::External {
                     declaration,

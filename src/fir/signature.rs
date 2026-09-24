@@ -1652,6 +1652,11 @@ pub struct ResolvedModuleIndex {
     classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
     classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) callable_parameters: HashMap<CallableId, Box<[super::ResolvedValueParameterHeader]>>,
+    /// File-independent closed defaults for source annotation constructors. Ordinary executable
+    /// defaults stay in retained checked bodies; annotation construction needs this declaration
+    /// payload in every consuming source file.
+    pub(super) annotation_constructor_defaults:
+        HashMap<CallableId, Box<[Option<crate::libraries::DefaultValue>]>>,
     pub(super) callable_equality_bounds: HashMap<CallableId, ResolvedTy>,
     pub(super) callable_behaviors: HashMap<CallableId, super::ResolvedCallableBehavior>,
     pub(super) declaration_names: Vec<Box<str>>,
@@ -3565,6 +3570,16 @@ impl ResolvedModuleIndex {
             + self.classifier_own_type_parameter_counts.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
             + self.callable_parameter_storage_payload_bytes()
+            + self.annotation_constructor_defaults.len()
+                * (std::mem::size_of::<CallableId>()
+                    + std::mem::size_of::<Box<[Option<crate::libraries::DefaultValue>]>>())
+            + self
+                .annotation_constructor_defaults
+                .values()
+                .map(|defaults| {
+                    defaults.len() * std::mem::size_of::<Option<crate::libraries::DefaultValue>>()
+                })
+                .sum::<usize>()
             + self
                 .declaration_names
                 .iter()

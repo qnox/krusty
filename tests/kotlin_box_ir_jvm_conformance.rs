@@ -12,9 +12,9 @@
 //! Env vars:
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
-//!   KRUSTY_BLESS_BOX_FAILURES  rewrite tests/box_expected_failures/<version>.txt (full runs only)
+//!   KRUSTY_BLESS_BOX_FAILURES=1  rewrite both exact outcome manifests (full local runs only)
 //!
-//! Every run is held to that version's expected-failure list; see `box_ratchet`.
+//! Every run is held to that version's exact fail/not-applicable manifests; see `box_ratchet`.
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
 //! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
@@ -1610,8 +1610,8 @@ fn kotlin_codegen_box_conformance() {
     );
 }
 
-/// Hold the run to `tests/box_expected_failures/<version>.txt` (see `box_ratchet`), or rewrite that
-/// list under `KRUSTY_BLESS_BOX_FAILURES=1`.
+/// Hold the run to both exact outcome manifests (see `box_ratchet`), or rewrite them under
+/// `KRUSTY_BLESS_BOX_FAILURES=1`.
 fn check_expected_failures(
     box_dir: &Path,
     results: &[(PathBuf, TestResult)],
@@ -1630,7 +1630,9 @@ fn check_expected_failures(
             (box_ratchet::corpus_key(box_dir, file), outcome)
         })
         .collect();
-    if env("KRUSTY_BLESS_BOX_FAILURES").is_some() {
+    let bless = box_ratchet::bless_requested(env("KRUSTY_BLESS_BOX_FAILURES").as_deref())
+        .unwrap_or_else(|error| panic!("{error}"));
+    if bless {
         assert!(
             full_run,
             "KRUSTY_BLESS_BOX_FAILURES needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
@@ -1644,14 +1646,29 @@ fn check_expected_failures(
             .filter(|(_, outcome)| **outcome == Outcome::Fail)
             .map(|(path, _)| path.clone())
             .collect();
-        let path = box_ratchet::list_path(version);
-        fs::create_dir_all(path.parent().expect("list directory")).expect("create list directory");
-        fs::write(&path, box_ratchet::render(version, &failing))
-            .unwrap_or_else(|err| panic!("failed to write {}: {err}", path.display()));
+        let not_applicable: BTreeSet<String> = outcomes
+            .iter()
+            .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let failure_path = box_ratchet::list_path(version);
+        let not_applicable_path = box_ratchet::not_applicable_list_path(version);
+        box_ratchet::write_atomic(
+            &failure_path,
+            &box_ratchet::render_failures(version, &failing),
+        )
+        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", failure_path.display()));
+        box_ratchet::write_atomic(
+            &not_applicable_path,
+            &box_ratchet::render_not_applicable(version, &not_applicable),
+        )
+        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", not_applicable_path.display()));
         eprintln!(
-            "box ratchet: blessed {} expected failures into {}",
+            "box ratchet: blessed {} expected failures and {} expected not-applicable cases into {} and {}",
             failing.len(),
-            path.display()
+            not_applicable.len(),
+            failure_path.display(),
+            not_applicable_path.display(),
         );
         return;
     }
@@ -1659,9 +1676,11 @@ fn check_expected_failures(
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
     assert!(mismatches.is_empty(), "{}", mismatches.report(version));
     eprintln!(
-        "box ratchet: matches {} ({} expected failures)",
+        "box ratchet: matches {} and {} ({} expected failures, {} expected not-applicable)",
         box_ratchet::list_path(version).display(),
-        expected.len()
+        box_ratchet::not_applicable_list_path(version).display(),
+        expected.failures.len(),
+        expected.not_applicable.len(),
     );
 }
 

@@ -14,9 +14,10 @@ fn unsupported_constructor_reference(
     target: &crate::fir::FirConstructorTarget,
 ) -> FirLoweringFailure {
     match target {
-        crate::fir::FirConstructorTarget::Module(target) => {
-            FirLoweringFailure::UnsupportedCallableReference(*target)
-        }
+        crate::fir::FirConstructorTarget::Module {
+            declaration: target,
+            ..
+        } => FirLoweringFailure::UnsupportedCallableReference(*target),
         crate::fir::FirConstructorTarget::External { declaration, .. } => {
             FirLoweringFailure::UnsupportedExternalCallableReference(*declaration)
         }
@@ -272,7 +273,10 @@ impl BodyLowering<'_> {
         arguments: &[crate::ir::IrCheckedArgument],
     ) -> Result<ExprId, FirLoweringFailure> {
         match target {
-            crate::fir::FirConstructorTarget::Module(target) => {
+            crate::fir::FirConstructorTarget::Module {
+                declaration: target,
+                annotation,
+            } => {
                 let primary_in_current_file = self
                     .index
                     .callable(*target)
@@ -293,7 +297,6 @@ impl BodyLowering<'_> {
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
                 self.module_constructor_call(ModuleConstructorRequest {
-                    target: *target,
                     classifier,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
@@ -302,6 +305,7 @@ impl BodyLowering<'_> {
                     outer_receiver,
                     external_capture_arguments: None,
                     arguments,
+                    annotation: annotation.as_deref(),
                 })
                 .ok_or(FirLoweringFailure::UnsupportedModuleConstructor(*target))
             }

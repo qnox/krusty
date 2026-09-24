@@ -40,30 +40,6 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         }
     }
 
-    // A construction records its annotation's parameter defaults only when the annotation class was
-    // lowered before it, so one site can carry them while another does not. The implementation class
-    // serves every site, so it takes the defaults any site recorded, else the annotation's own.
-    let mut declared_defaults = HashMap::<TypeName, Vec<Option<u32>>>::new();
-    for expression in 0..ir.exprs.len() as u32 {
-        let Some(site) = sites.get(&expression) else {
-            continue;
-        };
-        if site.defaults.iter().any(Option::is_some) {
-            declared_defaults
-                .entry(site.interface)
-                .or_insert_with(|| site.defaults.clone());
-        }
-    }
-    for site in sites.values() {
-        if let Some(defaults) = ir.class_ctor_defaults_name(site.interface) {
-            if defaults.iter().any(Option::is_some) {
-                declared_defaults
-                    .entry(site.interface)
-                    .or_insert_with(|| defaults.clone());
-            }
-        }
-    }
-
     let mut implementations = HashMap::<TypeName, TypeName>::new();
     let mut generated = Vec::new();
     for expression in 0..ir.exprs.len() as u32 {
@@ -86,8 +62,8 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
                 site.interface,
                 &site.members,
             ));
-            if let Some(defaults) = declared_defaults.get(&site.interface) {
-                ir.insert_class_ctor_defaults_name(implementation, defaults.clone());
+            if site.defaults.iter().any(Option::is_some) {
+                ir.insert_class_ctor_defaults_name(implementation, site.defaults.clone());
             }
             implementation
         });
@@ -243,42 +219,5 @@ mod tests {
         assert!(ir.classes.iter().any(|class| {
             class.fq_name_id() == *internal && class.annotation_impl_of == Some(interface)
         }));
-    }
-
-    #[test]
-    fn an_implementation_takes_its_annotations_defaults_when_the_first_site_recorded_none() {
-        let interface = type_name("sample/A");
-        let mut ir = IrFile::default();
-        let default_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
-        ir.insert_class_ctor_defaults_name(interface, vec![Some(default_value)]);
-        let construction = ir.add_expr(IrExpr::New {
-            internal: interface,
-            args: vec![default_value],
-            ctor_params: Some(vec![Ty::Int]),
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
-        // Lowered before the annotation class, so the site saw no defaults.
-        ir.annotation_constructions.insert(
-            construction,
-            crate::ir::IrAnnotationConstruction {
-                interface,
-                members: vec![("x".into(), Ty::Int)],
-                defaults: vec![None],
-                enclosing_class: None,
-            },
-        );
-
-        lower_annotation_constructions(&mut ir, "sample/MainKt");
-
-        let IrExpr::New { internal, .. } = ir.expr(construction) else {
-            panic!("annotation construction remains an allocation")
-        };
-        assert_eq!(
-            ir.class_ctor_defaults_name(*internal),
-            Some(&vec![Some(default_value)])
-        );
     }
 }

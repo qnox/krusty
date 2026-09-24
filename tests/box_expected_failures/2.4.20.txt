@@ -1,7 +1,7 @@
-# Kotlin 2.4.20 codegen/box files krusty is expected to fail, relative to
-# compiler/testData/codegen/box. The conformance test fails when a file outside this list
-# fails or a file in it passes. Regenerate with KRUSTY_BLESS_BOX_FAILURES=1 on a full run.
-# The goal is an empty list.
+# Kotlin 2.4.20 codegen/box files krusty expects to fail, relative to
+# compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate
+# tests/box_expected_failures/2.4.20.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
+# The goal is to empty this list of expected failures.
 annotations/instances/AnnotationInstantiationWithArray.kt
 annotations/instances/annotationInstancesEmptyDefaultLowered.kt
 annotations/instances/arraysAndKClass.kt

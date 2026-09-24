@@ -34,6 +34,7 @@ pub enum FirFileLoweringFailure {
     UnsupportedPropertyShape(DeclarationId),
     MissingClassifier(DeclarationId),
     MissingAnnotationPolicy(DeclarationId),
+    IncompleteAnnotationConstruction(crate::types::TypeName),
     MissingModuleClassifier(crate::types::TypeName),
     UnsupportedCallableOwner(DeclarationId),
     UnsupportedInlinePayloadOwner {
@@ -191,6 +192,7 @@ impl<'a> CommonIrBodySink<'a> {
         )?;
         self.predeclare_functions(index)?;
         finalize_constructors(index, self.ir)?;
+        super::annotation_constructions::finalize_defaults(self.ir)?;
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;

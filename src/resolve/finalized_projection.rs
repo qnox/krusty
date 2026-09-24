@@ -479,6 +479,17 @@ pub(crate) fn publish_stable_declaration_metadata(
                 declaration,
                 class.applied_annotations.iter().cloned(),
             );
+            if class.is_annotation() {
+                let constructor = class
+                    .primary_constructor_declaration
+                    .and_then(|constructor| index.callable_for_declaration(constructor));
+                if let Some(constructor) = constructor {
+                    index.publish_annotation_constructor_defaults(
+                        constructor.id,
+                        class.ctor_defaults.iter().cloned(),
+                    );
+                }
+            }
         }
         let (Some(declaration), Some(companion)) =
             (class.stable_declaration, class.companion_internal)

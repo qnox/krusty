@@ -2756,7 +2756,10 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
     let delegation = body.add_statement(FirStatement {
         origin,
         kind: FirStatementKind::ConstructorDelegation(FirConstructorCall {
-            target: FirConstructorTarget::Module(constructor),
+            target: FirConstructorTarget::Module {
+                declaration: constructor,
+                annotation: None,
+            },
             context_parameter_count: 0,
             outer_parameter: None,
             outer_receiver: None,
