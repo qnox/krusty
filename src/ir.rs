@@ -37,6 +37,7 @@ mod bridges;
 mod constants;
 mod constructors;
 mod default_arguments;
+mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
 mod references;
@@ -49,6 +50,7 @@ pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use references::{FuncRef, PropRef};
@@ -649,16 +651,6 @@ pub struct IrAnnotationConstruction {
     pub defaults: Vec<Option<ExprId>>,
     /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
     pub enclosing_class: Option<TypeName>,
-}
-
-/// Which declaration a checked enum `valueOf` operation selected. Both name the same lookup by
-/// entry name; they are different declarations, and only one of them is `inline`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EnumValueOfDeclaration {
-    /// The classifier's own implicit member — `E.valueOf(name)`.
-    Member,
-    /// The standard library's top-level `enumValueOf<E>(name)`, whose body expands at the call.
-    StandardLibraryTopLevel,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -2385,11 +2377,9 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: std::collections::HashSet<ExprId>,
-    /// The `when` of every lowered `&&` and `||` (`a && b` is `when { a -> b; else -> false }`,
-    /// `a || b` is `when { a -> true; else -> b }`). A backend lays these out as short-circuit
-    /// jumps where the platform compiler does, which it does NOT do for the same `if` written by
-    /// hand, so the provenance is recorded here rather than recognized from the shape.
-    pub short_circuits: std::collections::HashSet<ExprId>,
+    /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
+    /// the same generic `when` written by hand must remain distinguishable.
+    pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
