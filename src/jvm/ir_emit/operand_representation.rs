@@ -232,4 +232,28 @@ impl Emitter<'_> {
             .copied();
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
+
+    pub(super) fn adapt_physical_constructor_operand_for(
+        &mut self,
+        construction: crate::ir::ExprId,
+        parameter_index: usize,
+        expression: crate::ir::ExprId,
+        source: Ty,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&expression)
+            .copied()
+            .unwrap_or(source);
+        let destination_semantic = self
+            .ir
+            .construction_declared_params
+            .get(&construction)
+            .and_then(|parameters| parameters.get(parameter_index))
+            .copied();
+        self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
+    }
 }

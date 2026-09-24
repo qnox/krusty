@@ -14,7 +14,9 @@
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
 
 mod bridge_returns;
+mod call_arguments;
 mod call_result_boundaries;
+mod call_results;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
@@ -3754,119 +3756,25 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // A value class flowing into a resolved classpath call (`KProperty1.get(Object)`, a stdlib
-            // method) is boxed at each REFERENCE parameter the descriptor declares. Calls OWNED by a
-            // value class (its own `-impl`/mangled members) take the underlying — never box those.
-            if let IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    }
-                    | Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    }
-                    | Callee::Special {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    },
-                args,
-                ..
-            } = &ir.exprs[id as usize]
-            {
-                // A call OWNED by a value class (its own `-impl`/mangled members) takes the underlying at
-                // most parameters — never box those. EXCEPT when a parameter's declared type is itself a
-                // BOXED value class (`ZN.constructor-impl(LZ1;)`, where `ZN`'s underlying `Z1?` boxes):
-                // there the unboxed `Z1` arg must box to `LZ1;`. So for a VC-owned call, box an arg only
-                // when its param descriptor is exactly `Lx;` for the arg's value class `x`.
-                let vc_owned = is_value_class_internal(*owner, &under);
-                // `box-impl` is the representation adapter itself: its argument is already this
-                // value class's unboxed carrier. For an `Object`-underlying class (notably
-                // `Result`) treating that descriptor as an erased generic slot recursively boxes
-                // the carrier, producing `box-impl(box-impl(carrier))`.
-                if vc_owned && name == "box-impl" {
-                    continue;
-                }
-                let refs = descriptor_parameters::references(descriptor);
-                let ptypes = descriptor_parameters::types(descriptor);
-                #[cfg(feature = "trace")]
-                if crate::trace::enabled("value_classes") {
-                    if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
-                        let nm = match callee {
-                            Callee::Static { name, .. }
-                            | Callee::Virtual { name, .. }
-                            | Callee::Special { name, .. } => name.as_str(),
-                            _ => "?",
-                        };
-                        if nm.contains("getOrThrow") || nm.contains("throwOnFailure") {
-                            let a0 = args.first().map(|&a| match repr_ctx.repr(a) {
-                                Repr::Unboxed(_) => "Unboxed",
-                                Repr::Boxed(_) => "Boxed",
-                                Repr::NotVc => "NotVc",
-                            });
-                            crate::trace_compiler!(
-                                "value_classes",
-                                "call {owner}.{nm} vc_owned={vc_owned} arg0_repr={a0:?}"
-                            );
-                        }
-                    }
-                }
-                for (k, a) in args.clone().into_iter().enumerate() {
-                    // The selected provider declaration is authoritative when it retained a source
-                    // parameter for this slot. This resolves the descriptor's irreducible `Object`
-                    // ambiguity without a value-class/name special case: a direct `Result<T>`
-                    // parameter wants the carrier, while a declaration type parameter wants a box.
-                    if let Some(parameter) = ir
-                        .call_declared_params
+            if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
+                call_arguments::record_boundaries(
+                    callee,
+                    args,
+                    ir.call_declared_params
                         .get(&id)
-                        .and_then(|parameters| parameters.get(k))
-                        .copied()
-                    {
-                        let (value, _) = repr_ctx.through_erased_generic_coercion(a);
-                        record_value_boundary(
-                            &mut ops, &ir.exprs, &repr_ctx, value, parameter, &under,
-                        );
-                        continue;
-                    }
-                    // The RECEIVER (`args[0]`) of a value-class extension facade call takes the value class's
-                    // OWN underlying (`getOrThrow-impl(Object)` for `Result`), so it passes UNBOXED — the
-                    // dedicated `ext_call_source_receiver` handling above owns it. Never box it here, even
-                    // though its `Object` param would otherwise look like a generic boxed slot.
-                    if recv_is_ref_vc && k == 0 {
-                        continue;
-                    }
-                    let (representation_value, representation) =
-                        repr_ctx.through_erased_generic_coercion(a);
-                    let Repr::Unboxed(x) = representation else {
-                        continue;
-                    };
-                    // A reference parameter boxes an unboxed value-class argument unless that parameter
-                    // is exactly the value class's own concrete carrier. This is independent of who owns
-                    // the callable: a value-class `*-impl` can still declare an ordinary interface
-                    // parameter, and that slot must receive the box implementing the interface. An erased
-                    // `Object` carrier remains ambiguous and therefore boxes; exact provider declaration
-                    // types took the authoritative path above.
-                    let under_desc = under.get(&x).map(|u| desc(&erase(u, &under)));
-                    let own_underlying = ptypes.get(k).map(String::as_str) == under_desc.as_deref()
-                        && under_desc.as_deref() != Some("Ljava/lang/Object;");
-                    let box_here = refs.get(k).copied().unwrap_or(false) && !own_underlying;
-                    if box_here {
-                        ops.push((
-                            representation_value,
-                            repr_ctx.box_op(representation_value, x),
-                        ));
-                    }
-                }
+                        .map(|parameters| parameters.as_ref()),
+                    recv_is_ref_vc,
+                    &under,
+                    &repr_ctx,
+                    &mut ops,
+                );
             }
             // Each `(value expr, target type)` boundary in this expression.
             let pairs: Vec<(ExprId, Ty)> = match &ir.exprs[id as usize] {
+                // Checked declaration parameters were already applied uniformly above. They are
+                // authoritative for every call shape, so no origin-specific fallback may reinterpret
+                // those arguments from a source function or realized descriptor.
+                IrExpr::Call { .. } if ir.call_declared_params.contains_key(&id) => Vec::new(),
                 // The boundary target types are the constructor's parameter types, read from wherever they
                 // are known — the same for any owner: the named class's own field types when it has them
                 // (an in-IR primary ctor), otherwise the node's explicit `ctor_params` (a fieldless
@@ -5410,57 +5318,11 @@ fn repr(
             Some(fq) if under.contains_key(&fq) => Repr::Boxed(fq),
             _ => Repr::NotVc,
         },
-        // A call not matched by the value-class-specific arms above — a LIBRARY call whose logical result
-        // type the lowerer recorded. Its representation depends on whether the PHYSICAL return is the value
-        // class's own UNDERLYING or a generic-erased `Object`: `runCatching{…}: Result` physically returns
-        // `Object` = `Result`'s underlying → the UNBOXED value class; a generic `decode(): TO = IC` returns
-        // `Object` ≠ `IC`'s `double` underlying → a BOXED value class (it sat in a type-parameter slot).
+        // Calls whose earlier, identity-specific arms did not classify are handled by the one
+        // backend-owned result-boundary operation. It consumes selected semantic and physical facts;
+        // it never resolves a callable or dispatches from a name.
         IrExpr::Call { callee, .. } => {
-            // A callee that returns a value class BY DECLARATION hands back its erased CARRIER: that is
-            // the whole classpath value-class RETURN ABI (`fun make(): K` → `make-<hash>()
-            // Ljava/lang/String;`), and it holds whatever the underlying erases to — so it settles the
-            // `Object`-underlying cases the descriptor comparison below cannot. Checked FIRST for
-            // exactly that reason: `A.create(): A<String>` and `List<TokenBox>.get` both spell
-            // `()Ljava/lang/Object;`, and only the declaration says the first is a carrier and the
-            // second a box. Nullable declared returns are never recorded (they really are boxed).
-            if let Some(declared) = types.declared_value_class(id, under) {
-                return Repr::Unboxed(declared);
-            }
-            let Some(t) = types.get(&id) else {
-                return Repr::NotVc;
-            };
-            let Some(x) = t
-                .non_null()
-                .obj_internal()
-                .filter(|fq| under.contains_key(fq))
-            else {
-                return Repr::NotVc;
-            };
-            let phys_ret = match callee {
-                Callee::Virtual {
-                    params: Some((_, ret)),
-                    ..
-                } => Some(desc(ret)),
-                Callee::Static { descriptor, .. }
-                | Callee::Virtual { descriptor, .. }
-                | Callee::Special { descriptor, .. } => {
-                    descriptor.rsplit(')').next().map(str::to_string)
-                }
-                _ => None,
-            };
-            // FIR lowering records an erased-top physical result for a declaration whose result is a
-            // bare type parameter (`Iterator<X>.next`, `List<X>.get`): that slot holds the BOX. The
-            // descriptor comparison below cannot tell it from a carrier when `X`'s underlying erases
-            // to `Object` too, so the recorded fact decides first.
-            if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
-                return Repr::Boxed(x);
-            }
-            let u_desc = desc(&erase(&under[&x], under));
-            if phys_ret.as_deref() == Some(u_desc.as_str()) {
-                repr_of_ty(t, under)
-            } else {
-                Repr::Boxed(x)
-            }
+            call_results::representation(id, callee, under, types, physical)
         }
         // A value-class GETTER / member read (statically `S<T>` though its erased form is `Object`) whose
         // SUBSTITUTED static type the lowerer recorded: repr it by that logical type, so a redundant `Cast`

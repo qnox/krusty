@@ -10557,12 +10557,12 @@ fn emit_method_inner_with_holder(
             None => method_sig,
         },
     };
-    let ann_of = |t: Ty| -> Option<&'static str> {
-        let d = crate::jvm::names::type_descriptor(t);
+    let ann_of = |physical: Ty, semantic: Ty| -> Option<&'static str> {
+        let d = crate::jvm::names::type_descriptor(physical);
         if !(d.starts_with('L') || d.starts_with('[')) {
             return None;
         }
-        Some(if matches!(t, Ty::Nullable(_)) {
+        Some(if matches!(semantic, Ty::Nullable(_)) {
             "Lorg/jetbrains/annotations/Nullable;"
         } else {
             "Lorg/jetbrains/annotations/NotNull;"
@@ -10574,6 +10574,7 @@ fn emit_method_inner_with_holder(
     let member_sem = ir.member_semantic_sigs.get(&fid);
     let unannotated_type_parameter =
         |ty: Ty| matches!(ty, Ty::TyParam(_, bound) if bound.is_nullable());
+    let value_class_declaration = ir.vc_declared_sigs.get(&fid);
     // A LAMBDA IMPL (`<fn>$lambda$N`) is a synthetic realization — kotlinc gives it debug tables
     // but NO nullability annotations.
     let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
@@ -10584,35 +10585,53 @@ fn emit_method_inner_with_holder(
         && !reified_body
         && gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
         && member_sem.is_none_or(|(_, r)| !unannotated_type_parameter(*r)))
-    .then(|| ann_of(f.ret))
+    .then(|| {
+        let semantic = value_class_declaration
+            .map(|(_, _, result)| *result)
+            .unwrap_or(f.ret);
+        ann_of(f.ret, semantic)
+    })
     .flatten();
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
     // mangle); consult it so a nullable reference parameter is annotated `@Nullable`, not `@NotNull`.
     let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    // A value-class member's static `-impl` has one backend-generated carrier before its source
+    // parameters. Declaration-side facts never acquire that physical prefix.
+    let value_class_receiver_prefix = usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
     let param_anns: Vec<Option<&str>> = f
         .params
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let is_unannotated_tparam = gsig
-                .and_then(|g| g.params.get(i))
-                .copied()
-                .is_some_and(unannotated_type_parameter)
-                || member_sem
-                    .and_then(|(ps, _)| ps.get(i))
+            let source_index = i.checked_sub(value_class_receiver_prefix);
+            let is_unannotated_tparam = source_index.is_some_and(|index| {
+                gsig.and_then(|g| g.params.get(index))
                     .copied()
-                    .is_some_and(unannotated_type_parameter);
+                    .is_some_and(unannotated_type_parameter)
+                    || member_sem
+                        .and_then(|(ps, _)| ps.get(index))
+                        .copied()
+                        .is_some_and(unannotated_type_parameter)
+            });
             let carrier_receiver = i == 0 && ir.jvm_value_class_receiver_impls.contains(&fid);
             if lambda_impl || reified_body || is_unannotated_tparam || carrier_receiver {
                 None
-            } else if declared_nullable
-                .and_then(|v| v.get(i))
-                .copied()
-                .unwrap_or(false)
-            {
-                ann_of(Ty::nullable(*t))
             } else {
-                ann_of(*t)
+                let semantic = source_index
+                    .and_then(|index| {
+                        value_class_declaration.and_then(|(_, parameters, _)| parameters.get(index))
+                    })
+                    .copied()
+                    .unwrap_or(*t);
+                if source_index
+                    .and_then(|index| declared_nullable.and_then(|values| values.get(index)))
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    ann_of(*t, Ty::nullable(semantic))
+                } else {
+                    ann_of(*t, semantic)
+                }
             }
         })
         .collect();
@@ -15405,7 +15424,9 @@ impl<'a> Emitter<'a> {
                                     )
                                 });
                             load(*ty, *slot, code);
-                            self.adapt_physical_operand_for(*argument, *ty, physical, code);
+                            self.adapt_physical_constructor_operand_for(
+                                e, parameter, *argument, *ty, physical, code,
+                            );
                         }
                     }
                     for &(_, _, lease) in &temps {
@@ -15459,7 +15480,9 @@ impl<'a> Emitter<'a> {
                                     )
                                 });
                             self.emit_value(argument, code);
-                            self.adapt_physical_operand_for(
+                            self.adapt_physical_constructor_operand_for(
+                                e,
+                                parameter,
                                 argument,
                                 self.value_ty(argument),
                                 physical,

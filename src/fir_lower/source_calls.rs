@@ -1299,6 +1299,7 @@ impl BodyLowering<'_> {
             declaration_parameter_types.splice(0..0, captures.iter().map(|(_, ty)| *ty));
             default_prefix_count += capture_count;
         }
+        let declared_parameters = declaration_parameter_types.clone().into_boxed_slice();
         let construction = self.ir.add_expr(IrExpr::New {
             internal: classifier,
             args,
@@ -1308,6 +1309,9 @@ impl BodyLowering<'_> {
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
+        self.ir
+            .construction_declared_params
+            .insert(construction, declared_parameters);
         self.record_module_annotation_construction(construction, target, classifier)?;
         Some(self.wrap_call_statements(statements, construction))
     }

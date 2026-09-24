@@ -2765,9 +2765,10 @@ pub struct IrFile {
     /// The distinction it carries cannot be recovered from the descriptor: a value class returned by
     /// declaration (`A.create(): A<String>`, whose mangled method hands back the erased carrier) and
     /// the same value class arriving BOXED out of a generic slot (`List<TokenBox>.get`) both
-    /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, `get`
-    /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
-    /// declared returns are recorded: a nullable value class really is boxed.
+    /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, while
+    /// `get` declares the type parameter `E`, which remains a type-parameter identity rather than
+    /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
+    /// class really is boxed.
     pub call_declared_ret: std::collections::HashMap<u32, Ty>,
     /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
     /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
@@ -2782,6 +2783,11 @@ pub struct IrFile {
     /// Dispatch receivers remain separate; static realizations that consume one prepend its selected
     /// semantic receiver before publishing this vector.
     pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
+    /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
+    /// argument order. A generic constructor can consume a value-class box through bare `T` even
+    /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
+    /// consumes this identity-backed fact instead of reinterpreting the descriptor.
+    pub(crate) construction_declared_params: std::collections::HashMap<ExprId, Box<[Ty]>>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether
