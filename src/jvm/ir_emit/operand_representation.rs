@@ -6,6 +6,16 @@
 
 use super::*;
 
+/// How a reference value reaches a consumer's reference type.
+pub(super) enum ReferenceCoercion {
+    /// The value is already acceptable; the verifier keeps its current type.
+    Unchanged,
+    /// A `checkcast` to this internal name.
+    Cast(String),
+    /// A value-class or unsigned carrier, adapted by `narrow_on_stack`.
+    Carried,
+}
+
 impl Emitter<'_> {
     /// Emit `expression` and materialize it at the consumer's declared type.
     pub(super) fn emit_value_as(
@@ -124,8 +134,21 @@ impl Emitter<'_> {
         target: Ty,
         code: &mut CodeBuilder,
     ) {
+        match self.reference_coercion(source, target) {
+            ReferenceCoercion::Unchanged => {}
+            ReferenceCoercion::Cast(internal) => {
+                let class = self.cw.class_ref(&internal);
+                code.checkcast(class);
+            }
+            ReferenceCoercion::Carried => self.narrow_on_stack(source, target, code),
+        }
+    }
+
+    /// What `coerce_reference_on_stack` does to a `source` value consumed as `target`, so a
+    /// pre-emission fact about the value's verifier type can follow the same decision.
+    pub(super) fn reference_coercion(&self, source: Ty, target: Ty) -> ReferenceCoercion {
         if matches!(source.non_null(), Ty::Null | Ty::Nothing) {
-            return;
+            return ReferenceCoercion::Unchanged;
         }
         // A value class or unsigned type is carried as its underlying value, which the erased type
         // does not name. Its representation belongs to the value-class adapter, so only a value
@@ -141,13 +164,12 @@ impl Emitter<'_> {
             }
         };
         if carried(source) || carried(target) {
-            self.narrow_on_stack(source, target, code);
-            return;
+            return ReferenceCoercion::Carried;
         }
         let (from, to) = (ir_ty_to_jvm(&source), ir_ty_to_jvm(&target));
         let (from_descriptor, to_descriptor) = (type_descriptor(from), type_descriptor(to));
         if !from.is_reference() || !to.is_reference() || from_descriptor == to_descriptor {
-            return;
+            return ReferenceCoercion::Unchanged;
         }
         // Between arrays of the same dimension count, an `Object` element needs no cast.
         let dimensions = |descriptor: &str| descriptor.bytes().take_while(|&b| b == b'[').count();
@@ -155,12 +177,13 @@ impl Emitter<'_> {
             && dimensions(&from_descriptor) == dimensions(&to_descriptor)
             && to_descriptor[dimensions(&to_descriptor)..] == *"Ljava/lang/Object;"
         {
-            return;
+            return ReferenceCoercion::Unchanged;
         }
         let internal = crate::jvm::names::instanceof_internal_name(to);
-        if internal != "java/lang/Object" {
-            let class = self.cw.class_ref(&internal);
-            code.checkcast(class);
+        if internal == "java/lang/Object" {
+            ReferenceCoercion::Unchanged
+        } else {
+            ReferenceCoercion::Cast(internal)
         }
     }
 

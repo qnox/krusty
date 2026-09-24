@@ -134,3 +134,42 @@ fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
         Some("OK")
     );
 }
+
+/// A local's StackMapTable type is the type its store leaves in the slot. An initializer is cast to
+/// the declared type when that type differs and is not `Object`, so `val g: Greeter = Ann()` records
+/// `Greeter`, as kotlinc does. An assignment, or an `Any` local, keeps the exact stored class.
+#[test]
+fn a_local_frame_type_follows_the_cast_its_initializer_takes() {
+    let source = r#"
+        package f
+        interface Greeter { fun name(): String }
+        class Ann : Greeter { override fun name(): String = "Ann" }
+        fun declared(): String {
+            val g: Greeter = Ann()
+            if (g.name() != "Ann") return "f1"
+            return "OK"
+        }
+        fun erased(): String {
+            val g: Any = Ann()
+            if (g.hashCode() == 0) return "f2"
+            return "OK"
+        }
+        fun box(): String {
+            if (declared() != "OK") return "fail"
+            return erased()
+        }
+    "#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "LocalFrame").as_deref(),
+        Some("OK")
+    );
+    match common::byte_diff_against_kotlinc_cp(
+        "LocalFrame",
+        source,
+        "f/LocalFrameKt",
+        &[common::stdlib_jar()],
+    ) {
+        Some(Ok(())) | None => {}
+        Some(Err(difference)) => panic!("local frame facade differs from kotlinc:\n{difference}"),
+    }
+}
