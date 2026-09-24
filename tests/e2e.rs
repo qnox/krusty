@@ -1496,6 +1496,8 @@ mod serializer_operand_cast_e2e;
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
 mod shadowed_method_tparam_e2e;
+#[path = "short_circuit_condition_e2e.rs"]
+mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]
 mod short_circuit_e2e;
 #[path = "sibling_generic_custom_serializer_e2e.rs"]

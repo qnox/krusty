@@ -16782,6 +16782,13 @@ impl<'a> Emitter<'a> {
                 }
                 code.invokestatic(m, 1, 1);
             }
+            // A source `&&`/`||` as a value is its condition materialized: both operands jump to one
+            // shared `iconst_0`, the way kotlinc materializes any branching Boolean.
+            IrExpr::When { .. } if self.short_circuit_operands(e).is_some() => {
+                let f = code.new_label();
+                let _ = self.emit_cond_branch(e, f, false, code);
+                self.materialize_cmp_bool(f, code);
+            }
             IrExpr::When { branches } => self.emit_when(e, branches, false, code),
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
@@ -18347,6 +18354,26 @@ impl<'a> Emitter<'a> {
             }
             return false;
         }
+        // A source `&&`/`||` never materializes its Boolean in a condition. `&&` is decided by a
+        // false left operand and `||` by a true one: that operand jumps on its own, and only the
+        // right operand is left to decide the rest (kotlinc's `jumpIfFalse`/`jumpIfTrue` over
+        // `ANDAND`/`OROR`). A hand-written `if (a) b else false` keeps the materialized form, as
+        // kotlinc's does, which is why the lowering records which `when`s these are.
+        if let Some((first, second, is_and)) = self.short_circuit_operands(cond) {
+            let decided_by = !is_and;
+            if decided_by == jump_when_true {
+                if self.emit_cond_branch(first, target, jump_when_true, code) {
+                    return true;
+                }
+                return self.emit_cond_branch(second, target, jump_when_true, code);
+            }
+            let skip = code.new_label();
+            if !self.emit_cond_branch(first, skip, decided_by, code) {
+                let _ = self.emit_cond_branch(second, target, jump_when_true, code);
+            }
+            self.bind(skip, code);
+            return false;
+        }
         // Boolean equality against a literal is only polarity. Peel it before the general
         // comparison path so `(a == b) == false` branches directly on `a != b`, and an intrinsic
         // Boolean result is consumed by one `ifeq`/`ifne` rather than materialized and compared
@@ -18480,6 +18507,32 @@ impl<'a> Emitter<'a> {
             code.ifeq(target);
         }
         false
+    }
+
+    /// The operands of a source `&&` (`is_and`) or `||`, as `(left, right, is_and)`, while its
+    /// lowered `when` still has that shape. A constant operand is left to the ordinary `when`
+    /// emission, which folds it.
+    fn short_circuit_operands(&self, cond: u32) -> Option<(u32, u32, bool)> {
+        if !self.ir.short_circuits.contains(&cond) {
+            return None;
+        }
+        let IrExpr::When { branches } = self.ir.expr(cond) else {
+            return None;
+        };
+        let constant = |e: u32| match self.ir.expr(e) {
+            IrExpr::Const(IrConst::Boolean(value)) => Some(*value),
+            _ => None,
+        };
+        let (first, second, is_and) = match branches.as_slice() {
+            [(Some(first), second), (None, other)] if constant(*other) == Some(false) => {
+                (*first, *second, true)
+            }
+            [(Some(first), other), (None, second)] if constant(*other) == Some(true) => {
+                (*first, *second, false)
+            }
+            _ => return None,
+        };
+        (constant(first).is_none() && constant(second).is_none()).then_some((first, second, is_and))
     }
 
     /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when

@@ -1575,16 +1575,20 @@ impl BodyLowering<'_> {
 
     pub(super) fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-        self.ir.add_expr(IrExpr::When {
+        let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), rhs), (None, false_value)],
-        })
+        });
+        self.ir.short_circuits.insert(when);
+        when
     }
 
     pub(super) fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        self.ir.add_expr(IrExpr::When {
+        let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), true_value), (None, rhs)],
-        })
+        });
+        self.ir.short_circuits.insert(when);
+        when
     }
 
     /// Realize a checked boundary at which semantic `Unit` becomes a first-class value. Common IR
