@@ -1507,6 +1507,8 @@ mod short_circuit_e2e;
 mod sibling_generic_custom_serializer_e2e;
 #[path = "sibling_value_class_data_class_e2e.rs"]
 mod sibling_value_class_data_class_e2e;
+#[path = "sibling_value_class_members_e2e.rs"]
+mod sibling_value_class_members_e2e;
 #[path = "sibling_value_class_serialization_e2e.rs"]
 mod sibling_value_class_serialization_e2e;
 #[path = "smart_cast_member_extension_e2e.rs"]
