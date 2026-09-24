@@ -524,7 +524,11 @@ mod tests {
         }
     }
 
-    fn run_with_handlers(insns: &[Insn], handlers: &[Handler]) -> Vec<usize> {
+    fn run_with_handlers_and_locals(
+        insns: &[Insn],
+        handlers: &[Handler],
+        max_locals: usize,
+    ) -> Vec<usize> {
         let graph = ControlGraph::build(insns, handlers).expect("graph");
         let mut arrivals = vec![false; insns.len() + 1];
         for insn in insns {
@@ -541,11 +545,15 @@ mod tests {
             arrivals[handler.end] = true;
             arrivals[handler.handler] = true;
         }
-        redundant(insns, &graph, &arrivals, 4, &TestPool)
+        redundant(insns, &graph, &arrivals, max_locals, &TestPool)
             .into_iter()
             .enumerate()
             .filter_map(|(index, removed)| removed.then_some(index))
             .collect()
+    }
+
+    fn run_with_handlers(insns: &[Insn], handlers: &[Handler]) -> Vec<usize> {
+        run_with_handlers_and_locals(insns, handlers, 4)
     }
 
     fn run(insns: &[Insn]) -> Vec<usize> {
@@ -606,6 +614,48 @@ mod tests {
             op(ARETURN),
         ];
         assert_eq!(run(&insns), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_non_null_fact_crosses_an_arbitrarily_deep_local_chain() {
+        let mut insns = vec![op(ALOAD_0), with(LDC, &[7]), with(INVOKESTATIC, &[0, 2])];
+        for slot in 1..=10u8 {
+            insns.push(with(0x19, &[slot - 1])); // aload
+            insns.push(with(0x3a, &[slot])); // astore
+        }
+        let removed_from = insns.len() + 1;
+        insns.extend([
+            with(0x19, &[10]),
+            op(DUP),
+            with(LDC, &[7]),
+            with(INVOKESTATIC, &[0, 1]),
+            op(ARETURN),
+        ]);
+        assert_eq!(
+            run_with_handlers_and_locals(&insns, &[], 11),
+            vec![removed_from, removed_from + 1, removed_from + 2]
+        );
+    }
+
+    #[test]
+    fn matching_non_null_branch_stores_keep_the_fact_at_the_merge() {
+        let insns = [
+            with(LDC, &[7]),
+            op(0x4c), // astore_1
+            op(ALOAD_0),
+            branch(IFNULL, 7),
+            with(LDC, &[7]),
+            op(0x4c),        // astore_1
+            branch(0xa7, 9), // goto merge
+            with(LDC, &[7]),
+            op(0x4c), // astore_1
+            op(0x2b), // aload_1
+            op(DUP),
+            with(LDC, &[7]),
+            with(INVOKESTATIC, &[0, 1]),
+            op(ARETURN),
+        ];
+        assert_eq!(run(&insns), vec![10, 11, 12]);
     }
 
     #[test]
