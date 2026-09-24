@@ -350,6 +350,8 @@ mod classpath_value_class_param_e2e;
 mod classpath_valueclass_param_ext_e2e;
 #[path = "classreader_e2e.rs"]
 mod classreader_e2e;
+#[path = "cli_compiler_plugin_e2e.rs"]
+mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
 #[path = "closure_in_class_e2e.rs"]
@@ -878,6 +880,8 @@ mod java_flexible_collection_e2e;
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
+#[path = "java_member_flexible_return_e2e.rs"]
+mod java_member_flexible_return_e2e;
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
@@ -1050,6 +1054,14 @@ mod mpp_requires_the_feature_e2e;
 #[path = "expect_declaration_body_e2e.rs"]
 mod expect_declaration_body_e2e;
 
+#[path = "all_tail_calls_e2e.rs"]
+mod all_tail_calls_e2e;
+#[path = "classpath_tail_forward_e2e.rs"]
+mod classpath_tail_forward_e2e;
+#[path = "inline_arguments_in_place_e2e.rs"]
+mod inline_arguments_in_place_e2e;
+#[path = "inline_operand_copies_e2e.rs"]
+mod inline_operand_copies_e2e;
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -1134,6 +1146,8 @@ mod nothing_descriptor_e2e;
 mod nothing_nullable_e2e;
 #[path = "nothing_nullable_join_e2e.rs"]
 mod nothing_nullable_join_e2e;
+#[path = "null_out_dead_spills_e2e.rs"]
+mod null_out_dead_spills_e2e;
 #[path = "nullable_cast_e2e.rs"]
 mod nullable_cast_e2e;
 #[path = "nullable_function_parameter_lambda_e2e.rs"]
@@ -1186,14 +1200,22 @@ mod omitted_default_generic_overload_e2e;
 mod one_armed_when_fallthrough_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
+#[path = "redundant_null_check_e2e.rs"]
+mod redundant_null_check_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "spill_order_e2e.rs"]
+mod spill_order_e2e;
 #[path = "spliced_expression_null_check_e2e.rs"]
 mod spliced_expression_null_check_e2e;
+#[path = "stack_peephole_e2e.rs"]
+mod stack_peephole_e2e;
 #[path = "temporary_elimination_e2e.rs"]
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
 mod try_debug_lines_e2e;
+#[path = "uncast_continuation_operand_e2e.rs"]
+mod uncast_continuation_operand_e2e;
 
 #[path = "child_serializer_accessor_body_e2e.rs"]
 mod child_serializer_accessor_body_e2e;
@@ -1423,6 +1445,8 @@ mod secondary_constructor_member_order_e2e;
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]
 mod secondary_ctor_this_sibling_e2e;
+#[path = "serialization_class_serial_name_e2e.rs"]
+mod serialization_class_serial_name_e2e;
 #[path = "serialization_companion_byte_parity_e2e.rs"]
 mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_constructor_pool_order_e2e.rs"]
@@ -1437,10 +1461,20 @@ mod serialization_default_member_e2e;
 mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
+#[path = "serialization_object_serializer_e2e.rs"]
+mod serialization_object_serializer_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
 #[path = "common/serialization.rs"]
 mod serialization_test_support;
+#[path = "serialization_transient_diagnostics_e2e.rs"]
+mod serialization_transient_diagnostics_e2e;
+#[path = "serialization_transient_e2e.rs"]
+mod serialization_transient_e2e;
+#[path = "serialization_tuple_elements_e2e.rs"]
+mod serialization_tuple_elements_e2e;
+#[path = "serialization_type_parameter_elements_e2e.rs"]
+mod serialization_type_parameter_elements_e2e;
 #[path = "serializer_operand_cast_e2e.rs"]
 mod serializer_operand_cast_e2e;
 #[path = "session_subsystems_e2e.rs"]
@@ -1655,6 +1689,8 @@ mod try_catch_expr_nullable_merge_e2e;
 mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
+#[path = "type_of_e2e.rs"]
+mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]

@@ -38,8 +38,12 @@ use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
 mod spill_layout;
-use spill_layout::{suspension_points_in_order, SpillLayout};
+use spill_layout::{
+    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
+    suspension_points_in_order, SpillLayout,
+};
 mod statement_normalization;
+mod tail_forward;
 mod value_liveness;
 
 use crate::ir::{
@@ -57,6 +61,7 @@ use statement_normalization::{
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
+use tail_forward::{rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
@@ -88,8 +93,20 @@ type Suspension = (Option<(u32, Ty)>, ExprId, SuspensionCompletion);
 struct SuspensionScope {
     values: Vec<(u32, Ty)>,
     names: std::collections::HashMap<u32, String>,
+    /// The spilled values nothing reads after this suspension: kotlinc still spills one in debug
+    /// scope, but routes a reference through `SpillingKt.nullOutSpilledVariable` first.
+    dead: HashSet<u32>,
 }
 type SuspensionScopes = std::collections::HashMap<ExprId, SuspensionScope>;
+
+/// What every state machine of one file is built against.
+struct MachineContext<'a> {
+    /// Every function's declared (pre-CPS) return type.
+    orig_rets: &'a [Ty],
+    /// Whether the stdlib declares the exact public static
+    /// `SpillingKt.nullOutSpilledVariable(Object): Object` probe.
+    null_out_dead_spills: bool,
+}
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -186,12 +203,17 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
+    null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let context = MachineContext {
+        orig_rets: &orig_rets,
+        null_out_dead_spills,
+    };
     let fids = ir.suspend_funs.clone();
     let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
         std::collections::HashMap::new();
@@ -207,15 +229,14 @@ pub(crate) fn lower_suspend(
         // the RAW body, before splice/hoist/desugar reshape the tail suspension into a bound resume point.
         // The call `ExprId` is stable across the later `shift_locals`, so remember it and thread
         // `$completion` in below. When it matches, the splice/hoist/desugar normalizations are all skipped.
-        let fn_unit_ret = orig_rets[fid as usize] == Ty::Unit;
-        let forward =
-            body.and_then(|b| tail_forward_call(ir, b, &suspend_set, fn_unit_ret, &orig_rets));
+        let forward = body
+            .and_then(|b| tail_forward(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets));
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
         // rewrites descendants in place and installs each suspension temp in the current parent's
         // prelude, so every non-forward body that can reach a suspension must own one node per use.
         // Do this before scope/debug-line capture: cloned suspension identities then become the
         // authoritative keys used by every later coroutine phase.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             if expr_calls_suspend(ir, b, &suspend_set) {
                 let clones = crate::ir::make_expression_children_unique_tracked(ir, b);
                 for (source, target) in clones {
@@ -232,7 +253,7 @@ pub(crate) fn lower_suspend(
         // `splice_return_blocks` flattens block STATEMENTS into their parent, which would leak a
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
         // expr ids are stable through the transforms; keyed per function.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             if let std::collections::hash_map::Entry::Vacant(entry) = pre_splice_scopes.entry(fid) {
                 let is_lambda = ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid);
                 let prefix: Vec<(u32, Ty)> = if is_lambda {
@@ -270,6 +291,7 @@ pub(crate) fn lower_suspend(
                         scope: Vec::new(),
                         pending: Vec::new(),
                         levels: Vec::new(),
+                        current: Vec::new(),
                         temps_only: false,
                         out: Default::default(),
                     };
@@ -281,7 +303,7 @@ pub(crate) fn lower_suspend(
                 }
             }
         }
-        let suspension_lines = if let (Some(b), None) = (body, forward) {
+        let suspension_lines = if let (Some(b), None) = (body, forward.as_ref()) {
             capture_suspension_lines(ir, b, &suspend_set, ir.fn_close_lines.get(&fid).copied())
         } else {
             std::collections::HashMap::new()
@@ -290,13 +312,13 @@ pub(crate) fn lower_suspend(
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
         // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
         // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             splice_return_blocks(ir, b);
             separate_catches_from_finally(ir, b);
         }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             let mut value_types = function_value_types(ir, fid, b);
             hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
         }
@@ -304,7 +326,7 @@ pub(crate) fn lower_suspend(
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
         let ret_ty = ir.functions[fid as usize].ret.clone();
-        if let (Some(b), None) = (body, forward) {
+        if let (Some(b), None) = (body, forward.as_ref()) {
             // An expression-bodied suspend function can carry a suspending `when`/`try` as the block's
             // trailing VALUE rather than as an explicit `return`. Materialize that tail first so the
             // same value-control-flow desugars below handle expression and block bodies identically.
@@ -360,7 +382,7 @@ pub(crate) fn lower_suspend(
         // A function that ALSO has suspensions of its own is taken whole: one method has one
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
         // machine never saw the spliced kind, so such a function does not compile today at all.
-        let spliced_suspensions: Vec<ExprId> = match (forward, body) {
+        let spliced_suspensions: Vec<ExprId> = match (forward.as_ref(), body) {
             (None, Some(b)) if machine_eligible(ir, fid) => {
                 match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
                     true => Vec::new(),
@@ -487,20 +509,21 @@ pub(crate) fn lower_suspend(
             }
         }
 
-        if let (Some(call), Some(b)) = (forward, body) {
-            // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into the
-            // callee and return its `Object` result directly. No state machine, no continuation class —
-            // exactly kotlinc's tail-call optimization.
-            let cont = ir.add_expr(IrExpr::GetValue(p_old));
-            if !append_continuation(ir, call, cont, default_call_operands) {
-                return false;
+        if let (Some(forward), Some(b)) = (forward, body) {
+            // Forward this function's `$completion` (value-index `p_old`) into every tail callee and
+            // return each `Object` directly, without a state machine, exactly as kotlinc does.
+            for &call in forward.calls() {
+                let cont = ir.add_expr(IrExpr::GetValue(p_old));
+                if !append_continuation(ir, call, cont, default_call_operands) {
+                    return false;
+                }
             }
             // Checked expression bodies carry one source-oriented grouping block around the actual
             // statements. Normalize that transparent wrapper now that the forward decision has been
-            // made; the call id remains stable and `make_forward_body` can rewrite the function's
-            // physical tail in one place.
+            // made; the call ids remain stable and `rewrite_forward_body` can rewrite the function's
+            // physical tails in one place.
             splice_return_blocks(ir, b);
-            make_forward_body(ir, b, call);
+            rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
             // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail
@@ -550,7 +573,7 @@ pub(crate) fn lower_suspend(
                 fid,
                 body.unwrap(),
                 unit_ret,
-                &orig_rets,
+                &context,
                 pre_splice_scopes.remove(&fid),
                 &suspension_lines,
                 continuation_metadata,
@@ -568,7 +591,7 @@ pub(crate) fn lower_suspend(
             fid,
             class_id,
             field_base,
-            &orig_rets,
+            &context,
             pre_splice_scopes.remove(&fid),
             default_call_operands,
         ) {
@@ -2079,149 +2102,6 @@ fn when_has_non_direct_suspending_branch(
     })
 }
 
-/// Whether EXACTLY ONE suspension point is reachable from `e`. Iterative with a visited set (the expr arena
-/// can share/deeply-nest nodes — a recursive walk overflows the stack) and early-exits once a second is
-/// seen (the caller only needs the "== 1" answer).
-fn exactly_one_suspension_point(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool {
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![e];
-    let mut count = 0usize;
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        if is_suspension_point(ir, cur, set) {
-            count += 1;
-            if count > 1 {
-                return false;
-            }
-        }
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    count == 1
-}
-
-/// If the suspend body is a pure TAIL suspension — its result is one direct point in tail position and
-/// NOTHING else in the body suspends — return that point's `ExprId`. A callable point forwards its own
-/// `$completion` to the callee; an inlined intrinsic point already uses that completion internally. Both
-/// return the resulting `Object` directly without a continuation class. Detected before
-/// `desugar_tail_suspend`, which would otherwise bind the tail into a resume point and force a machine.
-/// Conservative: only a plain `return <point>` / trailing-value shape, never `if`/`when`/multi-return.
-fn tail_forward_call(
-    ir: &IrFile,
-    b: ExprId,
-    set: &HashSet<u32>,
-    unit_ret: bool,
-    orig_rets: &[Ty],
-) -> Option<ExprId> {
-    if !exactly_one_suspension_point(ir, b, set) {
-        return None;
-    }
-    fn tail_expression(
-        ir: &IrFile,
-        expression: ExprId,
-        set: &HashSet<u32>,
-        unit_ret: bool,
-        orig_rets: &[Ty],
-    ) -> Option<ExprId> {
-        let tail = match &ir.exprs[expression as usize] {
-            IrExpr::Return(Some(e)) => *e,
-            IrExpr::Block { value: Some(v), .. }
-                if matches!(ir.exprs[*v as usize], IrExpr::Block { .. }) =>
-            {
-                return tail_expression(ir, *v, set, unit_ret, orig_rets);
-            }
-            IrExpr::Block { value: Some(v), .. } => *v,
-            IrExpr::Block {
-                value: None, stmts, ..
-            } => match stmts.last() {
-                Some(&last) => match ir.exprs[last as usize] {
-                    IrExpr::Return(Some(e)) => e,
-                    // A `Unit` fn whose LAST statement is a BARE `Unit` suspend call
-                    // (`suspend fun delete(id) { repository.delete(id) }`) — kotlinc forwards it identically
-                    // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
-                    // on the CALLEE returning `Unit` too, so the forwarded value is what the caller expects.
-                    _ if unit_ret
-                        && is_suspension_point(ir, last, set)
-                        && suspension_ret_unit(ir, last, set, orig_rets) =>
-                    {
-                        last
-                    }
-                    // FIR preserves source grouping as nested statement-only blocks. They do not alter
-                    // control flow or evaluation order, so tail position passes through them exactly as
-                    // it does through the equivalent flattened block.
-                    _ if matches!(ir.exprs[last as usize], IrExpr::Block { .. }) => {
-                        return tail_expression(ir, last, set, unit_ret, orig_rets);
-                    }
-                    _ => return None,
-                },
-                None => return None,
-            },
-            _ => return None,
-        };
-        Some(tail)
-    }
-    let tail = tail_expression(ir, b, set, unit_ret, orig_rets)?;
-    // A generic suspend call's erased result is cast to the declared type at the call site; a
-    // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
-    let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true).point;
-    is_suspension_point(ir, tail, set).then_some(tail)
-}
-
-/// Whether suspension point `e`'s LOGICAL result is `Unit` — a same-file callee via its declared return,
-/// or a recorded cross-unit/intrinsic point via its semantic side map.
-fn suspension_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[Ty]) -> bool {
-    if let Some(fid) = suspend_call_fid(ir, e, set) {
-        return orig_rets.get(fid as usize) == Some(&Ty::Unit);
-    }
-    recorded_suspension_result(ir, e).as_ref() == Some(&Ty::Unit)
-}
-
-/// Rewrite the body's tail so it `return`s the forwarded suspend call directly — the CPS `Object` result,
-/// unboxed and unwrapped (no state machine). A trailing VALUE is promoted to a `Return`; a BARE trailing
-/// call STATEMENT (the `Unit` forward) is replaced with `return <call>`; an existing return has its
-/// operand replaced too, because checked bottom completion may wrap the physical call.
-fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
-    match ir.exprs[b as usize].clone() {
-        // Before checked bottom completion was explicit, an existing tail return already held
-        // `call`. It may now hold `BottomValue(call)`: replace that semantic boundary just like a
-        // block value, because this frame forwards the physical CPS Object and its caller owns the
-        // resumed completion.
-        IrExpr::Return(Some(_)) => {
-            ir.exprs[b as usize] = IrExpr::Return(Some(call));
-        }
-        IrExpr::Block {
-            stmts,
-            value: Some(_),
-        } => {
-            // Return the PEELED `call`, not the block's value expr — the value is the callee call still
-            // wrapped in the redundant reference `Cast` that `tail_forward_call` stripped for detection.
-            // A tail-forward `areturn`s the callee's `Object` result verbatim (no `checkcast`); returning
-            // the wrapper would re-emit the cast that kotlinc omits.
-            let mut stmts = stmts;
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
-            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
-        }
-        IrExpr::Block { stmts, value: None }
-            if stmts.last().is_some_and(|last| {
-                matches!(ir.exprs[*last as usize], IrExpr::Return(Some(_)))
-            }) =>
-        {
-            let last = *stmts.last().expect("guard proved a trailing return");
-            ir.exprs[last as usize] = IrExpr::Return(Some(call));
-        }
-        IrExpr::Block {
-            mut stmts,
-            value: None,
-        } if stmts.last() == Some(&call) => {
-            stmts.pop();
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
-            ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
-        }
-        _ => {}
-    }
-}
-
 /// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and erase
 /// the return to `Object` — `()I` → `(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`. A
 /// cross-unit suspend callee is *resolved* by its logical signature (no continuation, real return), but
@@ -2510,7 +2390,7 @@ fn build_state_machine(
     fid: u32,
     b: ExprId,
     unit_ret: bool,
-    orig_rets: &[Ty],
+    context: &MachineContext<'_>,
     captured_scopes: Option<SuspensionScopes>,
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
@@ -2531,6 +2411,7 @@ fn build_state_machine(
     // statement consumers around already-checked inline bodies. Normalize once more at the actual
     // state-machine boundary, where the body has its final control-flow shape but suspend callees
     // still retain their snapshotted declared result types in `orig_rets`.
+    let orig_rets = context.orig_rets;
     let return_ty = orig_rets.get(fid as usize).copied().unwrap_or(Ty::Unit);
     desugar_value_try(ir, b, &suspend_set, &return_ty);
     desugar_value_when(ir, b, &suspend_set, &return_ty);
@@ -2868,6 +2749,7 @@ fn build_state_machine(
             scope: Vec::new(),
             pending: Vec::new(),
             levels: Vec::new(),
+            current: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -2967,6 +2849,7 @@ fn build_state_machine(
         next_local: flat_next_local,
         loop_targets: Vec::new(),
         jump_finalizers: Vec::new(),
+        null_out_dead_spills: context.null_out_dead_spills,
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -2999,13 +2882,12 @@ fn build_state_machine(
         let mut state_indices = Vec::new();
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
-            let mut positions = kind_positions(&scope.values);
+            let positions = spill_order(&scope.values);
             // `@DebugMetadata`'s `n`/`s` lists hoist the REFERENCE spills ahead of the rest and
             // otherwise keep the order the locals were spilled in. They are not grouped by kind:
             // kotlinc lists `J$0` between `I$0` and `I$1` when the `long` was declared between the
             // two `int`s. Nor do they follow the class's field layout, which groups by kind — the
             // two orders are independent and only look alike when they agree.
-            positions.sort_by_key(|&(_, _, kind, _)| u8::from(kind != REFERENCE_SPILL_KIND));
             for (slot, _ty, kind, pos) in positions {
                 let name = scope
                     .names
@@ -3150,7 +3032,7 @@ fn build_state_machine(
         // delivering a failed resume: a catch state executes in this invocation and must observe the
         // captured locals rather than the null/zero placeholders passed by `invokeSuspend`.
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, cont_for_f, fld);
@@ -3272,10 +3154,11 @@ fn build_lambda_state_machine(
     fid: u32,
     class_id: ClassId,
     field_base: u32,
-    orig_rets: &[Ty],
+    context: &MachineContext<'_>,
     captured_scopes: Option<SuspensionScopes>,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
 ) -> bool {
+    let orig_rets = context.orig_rets;
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
     };
@@ -3384,6 +3267,7 @@ fn build_lambda_state_machine(
             scope: Vec::new(),
             pending: Vec::new(),
             levels: Vec::new(),
+            current: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -3455,6 +3339,7 @@ fn build_lambda_state_machine(
         next_local: base + 3,
         loop_targets: Vec::new(),
         jump_finalizers: Vec::new(),
+        null_out_dead_spills: context.null_out_dead_spills,
         failed: false,
     };
     for (n, &s) in stmts.iter().enumerate() {
@@ -3551,7 +3436,7 @@ fn build_lambda_state_machine(
         let mut ss = Vec::new();
         // A RESUME arm restores exactly ITS suspension's scope list (kotlinc: per-arm restores).
         if let Some(Some(list)) = state_scopes.get(i) {
-            for (local, ty, kind, pos) in kind_positions(list) {
+            for (local, ty, kind, pos) in spill_order(list).into_iter().rev() {
                 let this_f = k(ir, IrExpr::GetValue(0));
                 let fld = 2 + layout.slot(kind, pos);
                 let mut init = getf(ir, this_f, fld);
@@ -3751,6 +3636,9 @@ struct Flat<'a> {
     /// is the number of loop frames active on entry to the protected region; a jump to an older frame
     /// exits that region. The saved handler is the enclosing handler under which cleanup executes.
     jump_finalizers: Vec<(usize, ExprId, Option<usize>)>,
+    /// Whether the stdlib declares the exact public static
+    /// `SpillingKt.nullOutSpilledVariable(Object): Object` probe.
+    null_out_dead_spills: bool,
     failed: bool,
 }
 
@@ -3801,16 +3689,28 @@ impl Flat<'_> {
     }
     /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
     /// in-scope vars at per-kind positions; different states reuse the same fields).
-    fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)]) {
-        for (l, ty, kind, pos) in kind_positions(list) {
+    fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)], dead: &HashSet<u32>) {
+        for (l, ty, kind, pos) in spill_order(list) {
             let f = 2 + self.layout.slot(kind, pos);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
-            let v = if ty == Ty::obj("kotlin/Unit") {
+            let mut v = if ty == Ty::obj("kotlin/Unit") {
                 self.add(IrExpr::UnitInstance)
             } else {
                 self.gv(l)
             };
+            // kotlinc spills a reference nothing reads after the suspension through the stdlib's
+            // probe, which returns `null`: the debugger still sees the variable, and the field no
+            // longer keeps the object alive. A primitive is spilled as it is.
+            if self.null_out_dead_spills && kind == 'L' && dead.contains(&l) {
+                v = add_static_call(
+                    self.ir,
+                    "kotlin/coroutines/jvm/internal/SpillingKt",
+                    "nullOutSpilledVariable",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    vec![v],
+                );
+            }
             self.setfield(out, f, v);
         }
     }
@@ -3951,20 +3851,20 @@ impl Flat<'_> {
         if completion.semantic_bottom {
             self.ir.logical_types.remove(&point);
         }
-        self.spill_scope(out, &list);
+        let dead = self
+            .scopes
+            .get(&point)
+            .map(|scope| scope.dead.clone())
+            .unwrap_or_default();
+        self.spill_scope(out, &list, &dead);
         self.resume_points.push(point);
         if let Some(sc) = self.state_scope.get_mut(resume) {
             *sc = Some(list);
         }
         self.set_label(out, resume);
-        let cont_arg = {
-            let c = self.gv(self.cont_v);
-            self.add(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: c,
-                type_operand: continuation_ty(),
-            })
-        };
+        // The machine's continuation is its own continuation class, already a `Continuation`:
+        // kotlinc passes it as it is (`aload $continuation; invoke…`), with no cast.
+        let cont_arg = self.gv(self.cont_v);
         // Callable points receive the CPS continuation argument. An intrinsic block already embeds
         // its continuation placeholder and is intentionally unchanged by `append_continuation`.
         if !append_continuation(self.ir, point, cont_arg, self.default_call_operands) {
@@ -5870,73 +5770,6 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
         }
     }
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
-}
-
-/// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
-/// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces, and
-/// the live value across the suspension is the `Unit` singleton.
-/// The per-kind spill field letter (kotlinc: references `L$`, ints `I$`, longs `J$`, …).
-fn spill_kind(ty: &Ty) -> char {
-    if ty.is_reference() {
-        'L'
-    } else {
-        match *ty {
-            Ty::Long => 'J',
-            Ty::Float => 'F',
-            Ty::Double => 'D',
-            Ty::Boolean => 'Z',
-            Ty::Char => 'C',
-            Ty::Byte => 'B',
-            Ty::Short => 'S',
-            _ => 'I',
-        }
-    }
-}
-
-/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
-/// every other spill in the order it was spilled; field layout instead groups by kind, in the
-/// first-spill order recorded by [`SpillLayout`].
-const REFERENCE_SPILL_KIND: char = 'L';
-
-/// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
-/// per-suspension positional slot).
-/// A local of the BOTTOM type (`var x = null` — `Ty::Null`) has exactly ONE possible value, so kotlinc
-/// gives it no continuation field and REMATERIALIZES it (`aconst_null; astore`) in every resume arm.
-/// Keeping it out of the spill layout is also what keeps its verification type `null` — assignable to
-/// any reference — where restoring it from an `Object`-typed field would widen the slot and break the
-/// next typed use of it (`bar(x: String?, …)` → "Bad type on operand stack").
-fn is_rematerialized_null(ty: &Ty) -> bool {
-    matches!(ty.non_null(), Ty::Null)
-}
-
-/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
-fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
-    list.iter()
-        .filter(|(_, t)| is_rematerialized_null(t))
-        .map(|&(l, _)| l)
-        .collect()
-}
-
-fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
-    let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-    list.iter()
-        .filter(|(_, ty)| !is_rematerialized_null(ty))
-        .map(|&(l, ty)| {
-            let k = spill_kind(&ty);
-            let c = counts.entry(k).or_insert(0);
-            let pos = *c;
-            *c += 1;
-            (l, ty, k, pos)
-        })
-        .collect()
-}
-
-fn spill_field_ty(ty: Ty) -> Ty {
-    if ty == Ty::Unit {
-        Ty::obj("kotlin/Unit")
-    } else {
-        ty
-    }
 }
 
 /// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind

@@ -15,8 +15,10 @@ mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
 mod negated_jumps;
+mod null_checks;
 mod redundant_checkcasts;
 mod redundant_gotos;
+mod stack_peephole;
 mod temporaries;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
@@ -299,15 +301,6 @@ impl ConstPool {
 
     fn utf8(&mut self, s: &str) -> u16 {
         self.intern(Const::Utf8(s.to_string()))
-    }
-    /// Non-interning lookup of an existing `CONSTANT_Utf8` entry.
-    fn lookup_utf8(&self, s: &str) -> Option<u16> {
-        self.dedup.get(&Const::Utf8(s.to_string())).copied()
-    }
-    /// Non-interning lookup of an existing `CONSTANT_String` entry.
-    fn lookup_string(&self, s: &str) -> Option<u16> {
-        let n = self.dedup.get(&Const::Utf8(s.to_string())).copied()?;
-        self.dedup.get(&Const::String(n)).copied()
     }
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);

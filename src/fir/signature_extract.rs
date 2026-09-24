@@ -1798,12 +1798,22 @@ impl SignatureConstraintExtractor {
                         } else {
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
+                            let lexical_classifier =
+                                self.lexical_types.iter().rev().find_map(|types| {
+                                    match types.get(spelling.as_str()) {
+                                        Some(CompactLexicalType::Classifier(declaration)) => {
+                                            Some(*declaration)
+                                        }
+                                        Some(CompactLexicalType::Alias(_)) | None => None,
+                                    }
+                                });
                             let spelling = self.graph.intern_name(spelling);
                             let target =
                                 self.graph
                                     .add_callable_selection(DeferredCallableSelection {
                                         scope,
                                         spelling,
+                                        lexical_classifier,
                                         origin: callee_origin,
                                         expected: None,
                                         type_arguments,
@@ -1889,6 +1899,7 @@ impl SignatureConstraintExtractor {
                                     .add_callable_selection(DeferredCallableSelection {
                                         scope,
                                         spelling,
+                                        lexical_classifier: None,
                                         origin: selector_origin,
                                         expected: None,
                                         type_arguments,
@@ -2428,6 +2439,7 @@ impl SignatureConstraintExtractor {
                     .add_callable_selection(DeferredCallableSelection {
                         scope,
                         spelling,
+                        lexical_classifier: None,
                         origin: target_origin,
                         expected: None,
                         type_arguments: super::OperandRange::default(),
@@ -2476,6 +2488,7 @@ impl SignatureConstraintExtractor {
                     .add_callable_selection(DeferredCallableSelection {
                         scope,
                         spelling,
+                        lexical_classifier: None,
                         origin: target_origin,
                         expected: None,
                         type_arguments: super::OperandRange::default(),

@@ -283,6 +283,16 @@ fn member_recursion_with_checked_block_arguments() {
 }
 
 #[test]
+fn inherited_member_default_is_materialized_before_override_dispatch() {
+    check(
+        "open class A { open fun value(x: String = \"OK\"): String = x }\n\
+         class B : A() { override fun value(x: String): String = x }\n\
+         fun box(): String = B().value()",
+        "OK",
+    );
+}
+
+#[test]
 fn top_level_property_and_null() {
     check(
         "val base: Int = 100\n\

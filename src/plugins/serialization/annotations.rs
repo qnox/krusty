@@ -51,6 +51,42 @@ pub(super) fn serial_name_of(
     ctx.property_annotation_const_string(ir, class_id, property, type_name(SERIAL_NAME_FQ))
 }
 
+/// The class name used in the serial form: a declared `@SerialName("…")`, or the stable qualified
+/// source name recorded by common lowering. The plugin must not reinterpret `$` in a JVM/internal
+/// name because it is also a legal source identifier.
+pub(super) fn class_serial_name(ir: &IrFile, class_id: ClassId) -> KtString {
+    class_serial_name_override(ir, class_id).unwrap_or_else(|| {
+        ir.class_source_qualified_name(class_id)
+            .expect("a serializable source classifier has a qualified declaration name")
+    })
+}
+
+/// Whether this declaration carries an annotation whose resolved classifier is marked
+/// `@SerialInfo`. The provider performs the meta-annotation lookup; this query never infers the
+/// role from an annotation's spelling.
+pub(super) fn class_has_serial_info(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> bool {
+    ir.classes[class_id as usize]
+        .applied_annotations
+        .applications()
+        .any(|application| ctx.is_serial_info_annotation(application.internal))
+}
+
+/// A class-level `@SerialName("…")`. An application whose value is not its `String` constant is a
+/// frontend defect, not a reason to fall back to the qualified name.
+fn class_serial_name_override(ir: &IrFile, class_id: ClassId) -> Option<KtString> {
+    let serial_name = type_name(SERIAL_NAME_FQ);
+    let application = ir.classes[class_id as usize]
+        .applied_annotations
+        .applications()
+        .find(|application| application.internal == serial_name)?;
+    match application.values.first() {
+        Some((_, crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value)))) => {
+            Some(value.clone())
+        }
+        other => panic!("a class-level `@SerialName` carries its String value, not {other:?}"),
+    }
+}
+
 pub(super) fn property_is_contextual(
     ctx: &PluginContext,
     ir: &IrFile,

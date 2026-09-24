@@ -2024,6 +2024,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   star bounds now come from the provider-normalized classifier (module or classpath), exactly as
   the body checker reads them. Tests: `tests/classpath_star_projection_bound_e2e.rs`, against both
   a krusty-built and a kotlinc-built dependency.
+- **A star projection contains every argument of its parameter; its readable bound never decides
+  containment or equality.** `A<B> <: A<*>` for every `B`, and two `*` in one argument slot are one
+  projection (kotlinc's `isSubtypeForSameConstructor` skips a star super-argument). `@Metadata`
+  records a star without a type, so a `Frame<*>` read out of a dependency member
+  (`holder.frames[0]` from `val frames: List<Frame<*>>` over `Frame<out T : Bound>`) carries the
+  reader's `Any?` bound while the `Frame<*>` this module writes carries `Bound`. Comparing the two
+  bounds rejected the read value as the receiver of a `Frame<*>` extension ("inferred type is
+  Frame<*> but Frame<*> was expected"), as a `Frame<*>` local's initializer, and inside an invariant
+  `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
+  against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
+  `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
@@ -3337,7 +3348,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Map<K, out V>.getValue` leaves on the stack from `getAge()I`. The coercion goes on the
     accessor body, which is the boundary the accessor owns and where the emitter reads the value's
     own physical type — so a matching type costs nothing, a reference result gets its cast, and a
-    scalar one its unbox. It is skipped where the delegated call already coerced to that same
+    scalar one its unbox. An erased generic numeric result follows kotlinc through
+    `java.lang.Number.<kind>Value`, rather than inventing a concrete wrapper from the accessor's
+    primitive carrier. It is skipped where the delegated call already coerced to that same
     type, so the non-external arms keep their single coercion node
     (`fir_lower::tests::generic_member_delegate_result_keeps_its_erased_call_boundary` asserts
     exactly one). Putting it on the delegated CALL instead (coercing the external target's
@@ -3895,6 +3908,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names are exact roots; `$` characters in them are not parsed as evidence of source nesting. Tests:
   `tests/nested_class_ctor_scope_e2e.rs` and
   `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
+- **Local-class naming provenance is recorded by one walk that numbers every local node, as
+  kotlinc's `InventNamesForLocalClasses` does.** The common contract is an exact source classifier
+  owner, source declaration segments, and an optional ordinal. It contains no facade, `$`
+  separator, or physical class spelling. A node without a name takes the next ordinal of its chain. Lambdas,
+  function expressions and callable references take a position even when they compile to
+  `invokedynamic` and write no class, so an object after one lambda in `box` is `AKt$box$2`.
+  Ordinals are counted per upper-cased chain (`foo` overloads and `Foo` share one sequence) and run
+  across a file's declaration units. What the walk sees follows kotlinc's tree at that phase:
+  - A suspend function with a body reserves the first position of its own chain for its
+    continuation, before its body.
+  - A delegated property reserves one position before its delegate expression is walked, so
+    `val p by lazy { object {} }` gives `AKt$p$2$1`. Each accessor then takes one position: a member
+    accessor through the property reference passed to `getValue`/`setValue`, a local one as an
+    unnamed accessor function.
+  - Constructors, `init` blocks, fields (including `$$delegate_N`), value parameters and enum
+    entries add no name. What they declare is numbered in the class's chain, in source order
+    (`C$1`, `C$2`, then a secondary constructor's `C$3`).
+  - An anonymous object's super-constructor arguments are numbered in the outer chain, after the
+    object. A bodied enum entry's arguments are numbered in the entry's class (`E$B$1`).
+  - Temporaries add no name: destructuring containers, `for` iterators and local delegate storage.
+
+  Local and anonymous classifiers use opaque, stable declaration-derived identities in semantic
+  phases. A target backend owns physical spelling: the JVM pass combines the provenance with its
+  facade/class owner and `$` convention; its facade follows kotlinc's `PackagePartClassUtils`
+  rule (`a.kt` gives `AKt`, `a-b.kt` gives `A_bKt`, `1.kt` gives `_1Kt`). JS/native may format the
+  same provenance differently.
+  Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
+  complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a
@@ -6171,6 +6212,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **A generic `@Serializable` class builds each element that mentions a type parameter around
+  that parameter's serializer.** A generic `$serializer` is constructed with one `typeSerialK`
+  per type parameter. kotlinc builds each element whose type mentions a type parameter
+  (`List<T>`, `Map<String, T>`, `List<T?>`, `Box<T>`, `Box<T?>`) in place, in `childSerializers` and
+  `deserialize`, around `this.typeSerialK`. Only an element that mentions no type parameter comes
+  from the class's static `$childSerializers` cache, whose slots for the others stay `null`.
+  krusty resolved a type-parameter element only when it was the bare parameter and matched it by
+  spelling, so any collection or generic class over `T` was rejected as an unsupported construct.
+  A type parameter is now resolved by its semantic identity to the field that holds its
+  serializer, wherever it occurs in the element type. It never resolves to its bound's serializer,
+  because a `T : Base` holds whatever subtype the caller serialized. Outside the `$serializer`
+  instance there is no such serializer, and the element stays underivable. Every serializer operand
+  of a factory is passed as a `KSerializer`, as kotlinc does, including a collection constructor's
+  arguments at any depth and the operand of `.nullable`. That is a `checkcast` wherever the
+  operand's static type is a concrete serializer class, and nothing where it already is
+  `KSerializer`.
+  Known gaps, all independent of which elements are derivable:
+  - kotlinc's generic `write$Self` takes the type-parameter serializers as parameters, and its
+    `$serializer` keeps a private no-argument constructor beside the public one.
+  - kotlinc declares and initializes a generic class's `$childSerializers` before its
+    `$cachedDescriptor`, while krusty does it after.
+  Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
+  plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
+  cross-checked against the reference compiler).
 - **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
   property's declaration store when its value is the one the field already holds, and that is
   observable: a base constructor that dispatches to an override runs before the subclass's
@@ -6188,6 +6253,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `try` or an inlined lambda, and only on a singly reached node.
   Tests: `tests/tailrec_e2e.rs` (`a_unit_tailrec_bare_return_loops_wherever_it_stands`,
   cross-checked against the reference compiler).
+- **A class-level `@SerialName` names the class in the serial form.** It is the `serialName` of the
+  class's generated descriptor, of an enum's serializer and of a sealed base's
+  `SealedClassSerializer`, and so the discriminator value a sealed hierarchy writes for each
+  subclass: `@SerialName("created") data class Created(…) : Event()` is written as
+  `{"type":"created",…}`. Only property and enum-entry `@SerialName`s were read, so the qualified
+  name `Event.Created` went out instead and a document kotlinc wrote could not be read back. The
+  class's own `@SerialName` now takes precedence over its qualified name wherever the plugin names
+  the class.
+  Tests: `tests/serialization_class_serial_name_e2e.rs` (the JSON and every descriptor's
+  `serialName` under both compilers, and the string constants each generated class loads).
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole
@@ -6197,6 +6272,82 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **A computed property default is an optional element's default too.** A defaulted property is
+  written only when the encoder asks for defaults or the value differs from the default:
+  `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,
+  so `val tags: List<String> = listOf("a")` or `val next: Int = x + 1` was written every time and
+  `Json.encodeToString` (whose `encodeDefaults` is `false`) produced a longer document than kotlinc's.
+  `write$Self` now evaluates the property's checked initializer again, as kotlinc does. It works on
+  a private copy of the default: each constructor parameter the copy reads becomes that property of
+  the object being written, and the copy's own locals move above the method's.
+  A property declared in the class body with an initializer (`val tags = listOf("a")`) has a
+  default too. kotlinc makes its element optional, compares it in `write$Self` in the same way, and
+  applies the initializer in the deserialization constructor when the element is absent. krusty
+  treated such an element as required, so it wrote it every time, and decoding a document that
+  left it out threw `MissingFieldException`. The descriptor, the missing-field mask, `write$Self`
+  and the deserialization constructor now take every default from one source: the constructor
+  parameter's default, or else the body property's initializer.
+  - The deserialization constructor reads an earlier property off the object it has already
+    stored, as kotlinc does, and moves the initializer's locals above its own parameters.
+  - A parameter's default sees only the parameters before it, and its locals are numbered right
+    after them. So a value past those is one of its locals, even where a later parameter has the
+    same number.
+  - An initializer that reads the receiver (another body property, a member call) has the object
+    being written stand in for it in `write$Self`.
+  - The inlined generic shape runs on the `$serializer`, which cannot reach the object's private
+    state, so a default there that reads the receiver keeps the file unsupported. So does a default
+    that reads a constructor parameter which is not a property.
+  Tests: `tests/serialization_default_element_guard_e2e.rs`
+  (`a_computed_default_is_guarded_the_way_kotlinc_guards_it` and
+  `a_body_property_initializer_is_a_default_the_way_kotlinc_treats_it`, instruction parity with
+  kotlinc, `a_computed_default_is_omitted_from_json_like_kotlinc` and
+  `a_body_property_initializer_is_omitted_and_restored_like_kotlinc`, the JSON under both
+  compilers).
+- **A `@kotlinx.serialization.Transient` property is not a serial element.** kotlinc's plugin
+  serializes every property with a backing field except a transient one: it is absent from the
+  descriptor (element count and names), `childSerializers`, `write$Self` and `deserialize`, and the
+  deserialization constructor takes no argument or seen-mask bit for it. That constructor still
+  initializes every backing field in declaration order, and gives a transient property its
+  initializer (a constructor property's default or a body property's initializer), attributed to
+  the property's line like an absent optional element's default. krusty serialized a transient
+  property as an ordinary element (`{"x":1,"cache":7}` where kotlinc writes `{"x":1}`). Element
+  `i` is no longer backing field `i` once a transient property precedes another, so the plugin
+  keeps one mapping from elements to backing fields (`serial_elements`): the wire shape is
+  addressed by element, the object's fields by field. That mapping reads each checked
+  `IrProperty`'s own backing field and resolved annotation identities, never a property or field
+  name: a `typealias` or import alias of `kotlinx.serialization.Transient` is transient, an
+  unrelated annotation class also called `Transient` is not, and the identity survives the
+  streaming frontend releasing the declaring file's syntax. A `lateinit` transient property has no
+  initializer, and the deserialization constructor leaves its field unset, as kotlinc's does.
+  Tests: `tests/serialization_transient_e2e.rs` (`transient_properties_are_neither_written_nor_read`,
+  `a_transient_constructor_property_is_left_out_of_the_document`,
+  `an_aliased_transient_is_transient_and_a_same_named_annotation_is_not` and
+  `a_lateinit_transient_property_is_left_unset_by_deserialization`, the JSON under both compilers;
+  `a_class_with_a_transient_property_is_byte_identical`,
+  `a_class_with_aliased_and_same_named_transients_is_byte_identical` and
+  `a_transient_body_property_is_initialized_by_the_deserialization_constructor`, bytes, instruction
+  and line parity with kotlinc; `a_transient_property_declared_in_another_file_stays_transient`,
+  the JSON and bytes of a class serialized from a sibling file).
+- **A `@Transient` property must have an initializer — a frontend error, like kotlinc's.** With the
+  serialization plugin enabled, kotlinc's FIR class checker reports `TRANSIENT_MISSING_INITIALIZER`
+  ("this property is marked as @Transient and therefore must have an initializing expression") for
+  a transient property that stores a value (not abstract, delegated or accessor-only) but has
+  neither an initializer (a constructor property's default, a body property's initializer) nor
+  `lateinit`. It checks the classes whose serializer the plugin builds from their properties —
+  `@Serializable` without `with =`, not an object or an enum; an abstract or sealed class is
+  checked — and reports at the start of the whole declaration: its first modifier or annotation,
+  after any KDoc. krusty ran no plugin frontend rule, so the class reached the backend, which
+  declined the file with the generic unsupported-construct error at `1:1`. Native plugins now get
+  a frontend class-check hook (`IrPlugin::check_frontend_class`), run by the checker on each class
+  with its checked annotation identities while the class's syntax is live. The wording is the one
+  every supported reference (2.4.0, 2.4.10) uses; kotlinc 2.4.20 appends a period. Without the
+  plugin the property needs no initializer under either compiler.
+  Tests: `tests/serialization_transient_diagnostics_e2e.rs`
+  (`a_transient_property_without_an_initializer_is_rejected_like_kotlinc`, the exact error list of
+  both compilers over three files: a constructor property, modifier-first and own-line annotations,
+  a `typealias`, a sealed class, and the accepted `lateinit`, initialized, object and same-named
+  shapes; `without_the_plugin_a_transient_property_needs_no_initializer`), and the unit tests in
+  `src/plugins/serialization/transient_initializer.rs`.
 - **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
   extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
   `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for
@@ -6300,6 +6451,51 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/ext_receiver_tparam_binding_e2e.rs`
   (`a_subtype_receiver_over_a_caller_type_variable_binds_the_declared_receiver_formal`,
   cross-checked against the reference compiler).
+- **A compiler plugin runs only when the command line requests it, and one krusty cannot run fails
+  the compile.** kotlinc loads the jars of `-Xplugin=<jar>,<jar>` (repeatable, split on `,` only:
+  `-Xplugin=a.jar:b.jar` names one missing jar) and configures them with
+  `-P plugin:<id>:<key>=<value>`; 2.4 also takes the experimental `-Xcompiler-plugin=<jars>[=<k>=<v>,…]`
+  and refuses a command line that mixes the two syntaxes. Without the serialization plugin it
+  synthesizes nothing for a `@Serializable` class — no `$serializer`, no `Companion.serializer()`,
+  no intrinsic `serializer<T>()` — so krusty's serialization pass, which used to run on every
+  compilation, now runs only when requested. The CLI dropped every plugin switch with "ignoring
+  unsupported option", so all-open's source was rejected, a no-arg class compiled without its no-arg
+  constructor (`NoSuchMethodException` at run time) and a `@Composable` signature went
+  untransformed. The switches are now resolved against the extension registry, which identifies a
+  jar as kotlinc's `ServiceLoader` does — by the registrar class its
+  `META-INF/services/…CompilerPluginRegistrar` (or legacy `…ComponentRegistrar`) file declares, never
+  by its file name. A jar declaring the serialization registrar prints an `info:` line and runs
+  krusty's native pass; a jar declaring any registrar no registered extension answers to is an
+  `error:` naming it and the compile exits 1, and so is an entry krusty cannot read (kotlinc fails on
+  it too). A readable jar declaring no registrar holds no plugin, and kotlinc 2.4.20 compiles as
+  without it (exit 0), so krusty does too. A `-P` id no registered extension answers to is an error
+  as well — stricter than kotlinc, which ignores options for a plugin it did not load, and kept from
+  the registry's contract because such an option says the build meant to run a plugin krusty cannot,
+  and krusty never drops a plugin request it cannot resolve. A KSP request is an error too,
+  because the command line starts no codegen host. A missing jar and a malformed
+  `-P` are kotlinc's own errors, in its words. The selection travels with the analysis
+  (`PlatformProvider::with_native_plugins`) into signature collection, body checking and the backend,
+  so the three phases cannot disagree. The language server and the in-process test helpers select
+  every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
+  `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
+  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the all-open,
+  no-arg and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
+  unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
+  missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
+  `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
+  `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
+  them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
+  as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
+  `Triple` becomes `TripleSerializer` and `Map.Entry` becomes `MapEntrySerializer`. Each is built
+  over its argument serializers and cached in `$childSerializers` like a collection's. krusty knew
+  only the collection serializers, so a property of any of these types was rejected as an
+  unsupported construct. They now share the constructed-standard serializer registry, which also
+  gives a reified `encodeToString`/`decodeFromString` over a tuple of `@Serializable` arguments the
+  planned path.
+  Tests: `tests/serialization_tuple_elements_e2e.rs` (runtime for each tuple as a property, nested,
+  nullable, over a class type parameter and through a reified call, plus the cached factories,
+  cross-checked against the reference compiler).
 - **An override of a Java member matches the platform type, and a Java class merges its members by
   erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
   bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
@@ -6335,6 +6531,88 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_caller_bounded_type_parameter_receiver_selects_the_generic_extension`,
   `a_caller_type_parameter_receiver_does_not_match_a_concrete_element_overload`, cross-checked
   against the reference compiler).
+- **A Java source header erases a type variable to its leftmost bound.** When `.java` sources are
+  compiled together with Kotlin, krusty reads their signatures into header classes
+  (`src/jvm/java_stub.rs`) and emits its Kotlin calls against those descriptors, while the classes
+  that run are javac's. javac erases a type variable to the erasure of its leftmost bound (JLS
+  §4.6): `<T extends Comparable<T>> T max(List<T>)` is `(Ljava/util/List;)Ljava/lang/Comparable;`,
+  `<N extends Number>` makes a field `N` a `Ljava/lang/Number;`, and a bound that is another type
+  variable is erased in turn (`<A, B extends A>` erases `B` to `Object`). The header erased every
+  type variable to `Object`, so the Kotlin call failed at run time with `NoSuchMethodError`. Header
+  descriptors now follow the same rule for methods, constructors, fields and record components,
+  over enclosing and immediate class and member type parameters, each bound read in the scope that
+  declares it (a member's own `<N>` shadows the class's `N`, and a static member class starts a new
+  enclosing scope). The generic `Signature` attributes are unchanged. Tests:
+  `jvm::java_stub::tests::type_variables_erase_to_their_leftmost_bound` (javac's descriptors) and
+  `tests/java_source_interop_e2e.rs::java_source_headers_erase_type_variables_to_their_bounds`
+  (Kotlin first, then javac against krusty's output, then a run).
+- **A `@Serializable object` is serialized by an `ObjectSerializer`; it has no `$serializer`.**
+  kotlinc gives the object a member `serializer()` returning
+  `ObjectSerializer(serialName, INSTANCE, annotations)`, cached in a synthetic static
+  `$cachedSerializer$delegate` (`LazyKt.lazy(PUBLICATION, ::_init_$_anonymous_)`) and read through a
+  private synthetic `get$cachedSerializer()`. Wherever the object is an element (a property of the
+  object type, including in the `$childSerializers` cache, and a sealed hierarchy's `object` case),
+  kotlinc constructs the `ObjectSerializer` in place instead of calling `serializer()`. krusty
+  treated the object like a class: it recorded a `$serializer` for it, referenced that class from
+  every element site, and never emitted it (`NoClassDefFoundError` on first use). The object path
+  now shares the enum's cached-serializer delegate. Generated members come after the declared ones,
+  the delegate is initialized after the object's own properties in `<clinit>`, its store maps to the
+  annotated declaration line, and the return maps to the closing line. A resolved `@SerialInfo`
+  application remains an explicit unsupported plugin residual until runtime annotation construction
+  is available; it is never silently replaced with an empty descriptor-annotation array.
+  Tests: `tests/serialization_object_serializer_e2e.rs` (the runtime result under both compilers,
+  whole-class parity for a bodiless object, an object with properties, a sealed `object` case and a
+  holder's `$serializer`, plus the in-place element construction in a holder's child-serializer
+  cache and in a sealed serializer), and
+  `plugins::serialization::cached_serializer::tests::serial_info_never_silently_becomes_an_empty_annotation_array`.
+- **`typeOf<T>()` is a compiler intrinsic, realized as kotlinc 2.4 realizes it.** The stdlib
+  body only throws, so a call is never emitted. The type argument becomes a `KType` built from
+  `kotlin.jvm.internal.Reflection` factory calls (`typeOf`/`nullableTypeOf` over a class instance
+  and `KTypeProjection`s, wrapped by `mutableCollectionType`, `nothingType` or `platformType` where
+  the type calls for it). No kotlin-reflect is needed: without it the stdlib's `TypeReference`
+  answers `equals`, `hashCode`, `toString`, `classifier` and `arguments`. The details that decide
+  the bytes and the runtime answers:
+  - A non-null primitive passes `Wrapper.TYPE`; a nullable one, an unsigned type or a value class
+    passes its class. Fewer than three arguments go as separate parameters, three or more as a
+    `KTypeProjection[]`. An inner class lists its own arguments before its outer's.
+  - A **reified** parameter inside an inline body is kotlinc's placeholder,
+    `reifiedOperationMarker(6, "T")` then `aconst_null` (`"T?"` for a nullable use). Expanding the
+    body replaces the placeholder with the realization of the call-site argument, whether the body
+    is inlined from IR or spliced from a class file.
+  - A **non-reified** parameter is described, not substituted, even inside an inline body (kotlinc
+    substitutes only reified parameters): `Reflection.typeParameter(container, name, variance,
+    reified)`, then its upper bounds (`Any?` when none is written), then `typeOf(KClassifier)`. The
+    container is the declaring class's `KClass`, a `FunctionReferenceImpl` for a function, or a
+    `PropertyReferenceNImpl` signed by the getter for a property. A top-level function's owner is
+    the facade of the file that declares it, which for an inline function from another file is not
+    the file being compiled. A recursive bound or a `suspend` function type is an error, as in
+    kotlinc.
+  - A type parameter's bound may name a parameter of an enclosing declaration (`inner class
+    D<Y : X>`, `val <Y> B<Y>.p where Y : X`), and keeps it as a type parameter; it used to erase to
+    `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
+  Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
+  and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  A generic top-level extension property's accessors are generic methods and carry a `Signature`
+  (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
+  Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
+  reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
+  argument inferred as an intersection type, and a use-site projection written in a typealias
+  (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
+  applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
+  or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the
+  constructor's `Map<? extends K, ? extends V>` parameter) exposes its members with the receiver
+  already applied: `get(Object): V` returns `Y!`. kotlinc types `shelf[probe]` and `out[key]` as
+  that `Y!`/`V!`. krusty recovers the owner variables a JVM member signature mentions without
+  declaring from the provider's receiver-specialized return, but that recovery stepped through
+  `Nullable` only, not the platform wrapper of a Java return, so the still-symbolic `Y` was left
+  unbound and the return specialization erased it to its `Any?` bound, typing the indexed read as
+  `Any!` ("return type mismatch: expected 'V?', actual 'Any!'"). The recovery now steps through
+  the flexible wrapper the same way. An ordinary `shelf.get(probe)` call was already right; only
+  the indexed operator reaches the member through this return binder. Tests:
+  `tests/java_member_flexible_return_e2e.rs` (`java_member_return_keeps_the_callers_type_arguments`
+  and `jdk_collection_index_keeps_the_callers_type_arguments`, both run against kotlinc, and
+  `java_member_return_callers_match_kotlinc_bytes`, byte-identical to kotlinc).
 
 ## 8. Success criteria for the PoC
 

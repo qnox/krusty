@@ -562,3 +562,19 @@ fn expected_result_can_intersect_an_independent_declared_bound() {
         )]))
     );
 }
+
+#[test]
+fn flexible_member_return_seeds_the_receivers_symbolic_argument() {
+    // `Shelf<X, Y>.get(A): B!` applied inside `fun <X, Y>`: the provider return is already `Y!`,
+    // and `Y` is not a formal of the member. The recovery must see through the platform wrapper
+    // just as it sees through `Nullable`, or `Y` stays unbound and is erased to its bound.
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let caller_value = Ty::ty_param("caller:Y", any);
+    let flexible = Ty::platform_nullable(caller_value);
+    let mut bindings = GSigBinds::new();
+
+    seed_undeclared_return_bindings(flexible, flexible, &[], &mut bindings);
+
+    assert_eq!(bindings.get("caller:Y"), Some(&caller_value));
+    assert_eq!(ty_subst(flexible, &bindings), flexible);
+}
