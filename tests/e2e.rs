@@ -880,6 +880,8 @@ mod java_flexible_collection_e2e;
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
+#[path = "java_member_flexible_return_e2e.rs"]
+mod java_member_flexible_return_e2e;
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
