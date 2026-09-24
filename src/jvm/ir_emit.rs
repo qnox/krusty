@@ -4523,7 +4523,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
             invoke.array_load(0x32, 1); // aaload
             let wanted = type_descriptor(want);
             if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
-                unbox_prim(&mut cw, &mut invoke, want);
+                unbox_prim_from(&mut cw, &mut invoke, Ty::obj("java/lang/Object"), want);
             } else if wanted != "Ljava/lang/Object;" {
                 let internal = wanted
                     .strip_prefix('L')
@@ -4548,7 +4548,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
                 let wanted = type_descriptor(want);
                 if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
                     // The erased slot carries a wrapper wherever the body wants a scalar.
-                    unbox_prim(&mut cw, &mut invoke, want);
+                    unbox_prim_from_descriptor(&mut cw, &mut invoke, physical, want);
                 } else if wanted != *physical {
                     // `Function1.invoke` declares `Object`; the body declares the real type. Under
                     // `indy` the metafactory's adapter inserted this cast — nothing else does here,
@@ -4969,7 +4969,7 @@ fn emit_backing_field_read_adaptation(
         return;
     }
     if field_jvm.is_reference() && accessor_jvm.is_jvm_scalar() {
-        unbox_prim(cw, code, accessor_jvm);
+        unbox_prim_from(cw, code, field_jvm, accessor_jvm);
     } else if accessor_jvm.is_reference() {
         if let Some(storage) = property
             .storage_ty
@@ -5016,7 +5016,7 @@ fn emit_backing_field_write_adaptation(
                 return;
             }
         }
-        unbox_prim(cw, code, field_jvm);
+        unbox_prim_from(cw, code, accessor_jvm, field_jvm);
     } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
         box_prim_free(cw, code, accessor_jvm);
     } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
@@ -7699,7 +7699,7 @@ fn emit_func_ref_class(
                 .map(jvm_declared_ty)
                 .filter(|ty| ty.is_jvm_scalar())
             {
-                unbox_prim(&mut cw, &mut inv, primitive);
+                unbox_prim_from(&mut cw, &mut inv, Ty::obj("java/lang/Object"), primitive);
             } else if let Some(internal) = target_param_tys
                 .get(field_capture_count)
                 .map(jvm_declared_ty)
@@ -8036,10 +8036,69 @@ fn native_unsigned_impl_target(semantic: Ty) -> Option<(TypeName, Ty)> {
     })
 }
 
-/// Unbox a wrapper on the stack to the primitive `t` (free-function form for the bridge emitter).
-fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
-    crate::trace_compiler!("value_classes", "emit scalar unbox adapter={t:?}");
-    let (cls, meth, desc) = match t {
+/// Unbox the reference on the stack, statically typed `from`, to the scalar `t`: kotlinc's
+/// `StackValue.coerce` from an object type to a primitive. A wrapper already on the stack unboxes
+/// through its own accessor and then converts; any other reference reaches `Boolean` and `Char`
+/// through their wrappers and every number through `java/lang/Number`, with a `checkcast` only
+/// when the static type is not already that class. Unsigned scalars are value classes and unbox
+/// through their own `unbox-impl`.
+fn unbox_prim_from(cw: &mut ClassWriter, code: &mut CodeBuilder, from: Ty, t: Ty) {
+    unbox_prim_from_descriptor(cw, code, &type_descriptor(from), t);
+}
+
+/// [`unbox_prim_from`] for a stack value known by its JVM descriptor.
+fn unbox_prim_from_descriptor(cw: &mut ClassWriter, code: &mut CodeBuilder, from: &str, t: Ty) {
+    let from_internal = match from {
+        descriptor if descriptor.starts_with('L') && descriptor.ends_with(';') => {
+            descriptor[1..descriptor.len() - 1].to_string()
+        }
+        _ => "java/lang/Object".to_string(),
+    };
+    crate::trace_compiler!(
+        "value_classes",
+        "emit scalar unbox from={from_internal} adapter={t:?}"
+    );
+    if t.is_unsigned() {
+        let (owner, method, descriptor) = scalar_unbox_accessor(t);
+        if from_internal != owner {
+            let class = cw.class_ref(owner);
+            code.checkcast(class);
+        }
+        let m = cw.methodref(owner, method, descriptor);
+        code.invokevirtual(m, 0, slot_words(t) as i32);
+        return;
+    }
+    if let Some(own) = wrapper_owner_primitive(&from_internal) {
+        let (_, method, descriptor) = scalar_unbox_accessor(own);
+        let m = cw.methodref(&from_internal, method, descriptor);
+        code.invokevirtual(m, 0, slot_words(own) as i32);
+        emit_num_conv(own, t, code);
+        return;
+    }
+    match t {
+        Ty::Boolean => unbox_prim(cw, code, t),
+        Ty::Char if from_internal == "java/lang/Number" => {
+            let m = cw.methodref("java/lang/Number", "intValue", "()I");
+            code.invokevirtual(m, 0, 1);
+            emit_num_conv(Ty::Int, Ty::Char, code);
+        }
+        Ty::Char => unbox_prim(cw, code, t),
+        Ty::Int | Ty::Long | Ty::Double | Ty::Float | Ty::Byte | Ty::Short => {
+            if from_internal != "java/lang/Number" {
+                let number = cw.class_ref("java/lang/Number");
+                code.checkcast(number);
+            }
+            let (_, method, descriptor) = scalar_unbox_accessor(t);
+            let m = cw.methodref("java/lang/Number", method, descriptor);
+            code.invokevirtual(m, 0, slot_words(t) as i32);
+        }
+        _ => {}
+    }
+}
+
+/// The wrapper class, accessor and descriptor that unbox the scalar `t`.
+fn scalar_unbox_accessor(t: Ty) -> (&'static str, &'static str, &'static str) {
+    match t {
         Ty::Int => ("java/lang/Integer", "intValue", "()I"),
         Ty::Long => ("java/lang/Long", "longValue", "()J"),
         Ty::Double => ("java/lang/Double", "doubleValue", "()D"),
@@ -8048,13 +8107,21 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
         Ty::Char => ("java/lang/Character", "charValue", "()C"),
         Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
         Ty::Short => ("java/lang/Short", "shortValue", "()S"),
-        // An unsigned wrapper unboxes via its inline-class `unbox-impl` (a row, not a special case).
         Ty::UByte => ("kotlin/UByte", "unbox-impl", "()B"),
         Ty::UShort => ("kotlin/UShort", "unbox-impl", "()S"),
         Ty::UInt => ("kotlin/UInt", "unbox-impl", "()I"),
         Ty::ULong => ("kotlin/ULong", "unbox-impl", "()J"),
-        _ => return,
-    };
+        _ => ("", "", ""),
+    }
+}
+
+/// Unbox a wrapper on the stack to the primitive `t` (free-function form for the bridge emitter).
+fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
+    crate::trace_compiler!("value_classes", "emit scalar unbox adapter={t:?}");
+    let (cls, meth, desc) = scalar_unbox_accessor(t);
+    if cls.is_empty() {
+        return;
+    }
     let ci = cw.class_ref(cls);
     code.checkcast(ci);
     let m = cw.methodref(cls, meth, desc);
@@ -12937,9 +13004,10 @@ impl<'a> Emitter<'a> {
                             // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
                             // from the lambda's semantic parameter before using the physical carrier for
                             // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
-                            unbox_prim(
+                            unbox_prim_from(
                                 self.cw,
                                 &mut scratch,
+                                Ty::obj("java/lang/Object"),
                                 semantic_scalar_adapter(lam_semantic_tys[j], jt),
                             );
                         } else if let Some(internal) = checkcast_internal(jt) {
@@ -14593,9 +14661,10 @@ impl<'a> Emitter<'a> {
                 semantic_scalar_adapter(*operation.ty, source),
             );
         } else if !source.is_jvm_scalar() && target.is_jvm_scalar() {
-            unbox_prim(
+            unbox_prim_from(
                 self.cw,
                 code,
+                source,
                 semantic_scalar_adapter(*operation.ty, target),
             );
         } else {
@@ -17345,7 +17414,12 @@ impl<'a> Emitter<'a> {
                 // supplied the `FunctionN` implementation.
                 let rt = ir_ty_to_jvm(ret);
                 if rt.is_jvm_scalar() {
-                    unbox_prim(self.cw, code, semantic_scalar_adapter(*ret, rt));
+                    unbox_prim_from(
+                        self.cw,
+                        code,
+                        Ty::obj("java/lang/Object"),
+                        semantic_scalar_adapter(*ret, rt),
+                    );
                 } else {
                     match rt {
                         Ty::Unit | Ty::Nothing => code.pop(),
@@ -17385,7 +17459,9 @@ impl<'a> Emitter<'a> {
             .then(|| reference_array_scalar_adapter(element))
             .flatten()
         {
-            unbox_prim(self.cw, code, primitive);
+            let array_descriptor = type_descriptor(self.value_ty(array));
+            let component = array_descriptor.strip_prefix('[').unwrap_or("Ljava/lang/Object;");
+            unbox_prim_from_descriptor(self.cw, code, component, primitive);
         }
     }
 
@@ -17942,7 +18018,7 @@ impl<'a> Emitter<'a> {
         let ret = ty_from_descriptor_ret(descriptor);
         self.emit_value(recv, code);
         if !recv_ty.is_jvm_scalar() {
-            unbox_prim(self.cw, code, owner_prim);
+            unbox_prim_from(self.cw, code, recv_ty, owner_prim);
         }
         match owner_prim {
             Ty::Long => {

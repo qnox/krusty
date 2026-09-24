@@ -151,7 +151,12 @@ impl Emitter<'_> {
             // `ty` is the substituted semantic result and `logical` its JVM carrier. Choosing the
             // adapter from `logical` alone turns `UInt` into `Integer`; retain the semantic type until
             // after the `Object` boundary has been bridged.
-            unbox_prim(self.cw, code, semantic_scalar_adapter(*ty, logical));
+            unbox_prim_from(
+                self.cw,
+                code,
+                physical,
+                semantic_scalar_adapter(*ty, logical),
+            );
         } else if exact_field
             && physical.is_reference()
             && logical.is_reference()

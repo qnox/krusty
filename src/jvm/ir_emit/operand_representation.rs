@@ -102,7 +102,12 @@ impl Emitter<'_> {
             };
             box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, source_jvm));
         } else if source_jvm.is_reference() && physical.is_jvm_scalar() {
-            unbox_prim(self.cw, code, semantic_scalar_adapter(semantic, physical));
+            unbox_prim_from(
+                self.cw,
+                code,
+                source_jvm,
+                semantic_scalar_adapter(semantic, physical),
+            );
         } else if source_jvm.is_jvm_scalar() && physical.is_jvm_scalar() {
             emit_num_conv(source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_reference() {
