@@ -245,12 +245,15 @@ pub(super) fn finalize_constructors(
         }
     }
 
-    let constructors = ir
+    let mut constructors = ir
         .checked_constructor_bodies
         .iter()
         .filter(|(_, body)| body.body_attached)
         .map(|(declaration, body)| (*declaration, body.clone()))
         .collect::<Vec<_>>();
+    // Source order, not map order: it is the order of the emitted constructors and of their
+    // entries in the class's Kotlin metadata.
+    constructors.sort_by_key(|(declaration, _)| (index.source_order(*declaration), *declaration));
     for (declaration, constructor) in constructors {
         let Some(delegation) = constructor.delegation else {
             let implicit_enum_secondary = constructor.ordinal != 0

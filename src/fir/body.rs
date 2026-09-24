@@ -2964,7 +2964,7 @@ impl FirBody {
 /// resolved declaration header and rejects every ordinary body.
 #[derive(Debug, Default)]
 pub struct InlineBodyStore {
-    bodies: HashMap<CallableId, FirBody>,
+    bodies: std::collections::BTreeMap<CallableId, FirBody>,
 }
 
 /// Checked signature expressions retained from Pass 1 until their owning source is lowered. Unlike
@@ -2972,7 +2972,7 @@ pub struct InlineBodyStore {
 /// need it even when the declaration body is reparsed later.
 #[derive(Debug, Default)]
 pub struct DefaultArgumentStore {
-    bodies: HashMap<CallableId, FirBody>,
+    bodies: std::collections::BTreeMap<CallableId, FirBody>,
 }
 
 /// Callable facts published by signature finalization. Construction is crate-private so syntax

@@ -616,6 +616,24 @@ fn append_property_override_edges(
     }
 }
 
+/// `names` without duplicates, in the class's lexical declaration order. A name the source did not
+/// declare (a synthesized member) follows the declared ones, in name order.
+fn declaration_ordered<'a>(
+    class: &super::ClassSig,
+    names: impl Iterator<Item = &'a String>,
+) -> Vec<&'a String> {
+    let mut names: Vec<_> = names.collect();
+    names.sort_by_key(|name| {
+        let position = class
+            .declared_callable_order
+            .iter()
+            .position(|declared| declared == *name);
+        (position.unwrap_or(usize::MAX), *name)
+    });
+    names.dedup();
+    names
+}
+
 fn property_override_plans(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
@@ -624,7 +642,10 @@ fn property_override_plans(
 ) -> Vec<ResolvedPropertyOverride> {
     let mut overrides = Vec::new();
     let mut seen = HashSet::new();
-    for (name, implementation) in &class.declared_props {
+    let declared = declaration_ordered(class, class.declared_props.keys())
+        .into_iter()
+        .map(|name| (name, &class.declared_props[name]));
+    for (name, implementation) in declared {
         let Some(declaration) = implementation.stable_declaration else {
             continue;
         };
@@ -855,13 +876,16 @@ fn function_override_plans(
             &mut overrides,
         );
     };
-    for (name, implementations) in &class.methods {
-        for implementation in implementations {
+    // Declaration order, not map order: the plans become bridge methods, and their order is
+    // part of the emitted class.
+    for name in declaration_ordered(
+        class,
+        class.methods.keys().chain(class.member_ext_funs.keys()),
+    ) {
+        for implementation in class.methods.get(name).into_iter().flatten() {
             append_implementation(name, implementation);
         }
-    }
-    for (name, implementations) in &class.member_ext_funs {
-        for implementation in implementations {
+        for implementation in class.member_ext_funs.get(name).into_iter().flatten() {
             append_implementation(name, implementation.signature());
         }
     }
@@ -1247,7 +1271,7 @@ fn publish_inherited_function_defaults(
                             .any(|default| *default)
                         {
                             InheritedDefaultState::Unique(
-                                edge.overridden_parameter_defaults.iter().copied().collect(),
+                                edge.overridden_parameter_defaults.to_vec(),
                                 edge.overridden_default_provider.expect(
                                     "an external callable with defaults must retain its provider identity",
                                 ),

@@ -195,6 +195,18 @@ kotlinc's `META-INF/*.kotlin_module` artifact is not yet compared. The first run
 kotlinc compile (~0.4 s) per file — raise `KRUSTY_SERVER_POOL` on a large-RAM host; later runs hit
 the on-disk cache. Pair with `KRUSTY_BOX_ONLY=<substring>` for a focused divergence loop.
 
+To check that a change moves no output byte (a refactor, or a determinism fix), dump every compiled
+class from two builds and compare the directories:
+
+```text
+KRUSTY_NO_RUN=1 KRUSTY_CLASS_DUMP=target/dump-before ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+KRUSTY_NO_RUN=1 KRUSTY_CLASS_DUMP=target/dump-after ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+diff -rq target/dump-before target/dump-after
+```
+
+Two dumps from the same build must also be identical: the compiler's output may not depend on hash
+map iteration order.
+
 ## Profiling
 
 For full-suite performance work, run:
