@@ -111,6 +111,23 @@ fun box(): String {\n\
     );
 }
 
+/// Two calls to the same enclosing declaration in one contextual expression own independent
+/// inference variables. The expected `Pair` slots may therefore complete them differently even
+/// though both variables originate from the same declaration-owned `Box<T>` formal.
+#[test]
+fn sibling_calls_to_the_enclosing_declaration_have_distinct_variables() {
+    common::expect_box_same_as_kotlinc(
+        "class Box<T>(val value: T? = null) {\n\
+    fun split(): Pair<Box<String>, Box<Int>> = Pair(Box(), Box())\n\
+}\n\
+fun box(): String {\n\
+    val pair = Box<Unit>().split()\n\
+    return if (pair.first.value == null && pair.second.value == null) \"OK\" else \"FAIL\"\n\
+}\n",
+        "self_call_type_variable_siblings",
+    );
+}
+
 /// The constructed class is byte-identical to kotlinc's: the call's solution `Cell<E>` is what the
 /// local's signature and the returned value carry.
 #[test]
