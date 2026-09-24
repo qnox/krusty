@@ -3942,10 +3942,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Integer.intValue` follows). Any other reference reaches `Boolean` and `Char` through their
   wrappers and every number through `java/lang/Number` (`checkcast Number; Number.intValue`), with
   the `checkcast` omitted when the static type already is `Number`; unsigned scalars unbox through
-  their `unbox-impl`. An `as` cast to a non-null type guards with `Intrinsics.checkNotNull(value,
-  "null cannot be cast to non-null type …")` only when the operand's type admits `null`, and a
-  variable operand is read again after the guard rather than duplicated
-  (`tests/unboxing_coercion_e2e.rs`).
+  their `unbox-impl` (`tests/unboxing_coercion_e2e.rs`).
+- **An `as` cast to a non-null type is guarded unless kotlinc proves its operand non-null.**
+  kotlinc's lowering guards every such cast with `Intrinsics.checkNotNull(value, "null cannot be
+  cast to non-null type …")`, because a value of a non-null type can still be `null` at run time (a
+  property read before its initializer ran). Its bytecode nullability analysis then deletes the
+  guard when the operand is provably non-null: a non-null constant, a `new`, a class literal, a
+  value that passed `!!` or another non-null cast, a parameter asserted at method entry, or a local
+  stored only from such values. A call result, a property or field read, `this`, a string template
+  and a private function's unasserted parameter keep the guard whatever their declared type. A
+  parameter or `val` is read again after the guard; any other operand is duplicated.
+  The message renders the target as kotlinc's IR renderer does (`kotlin.collections.Map<kotlin.
+  String, kotlin.Int?>`, `kotlin.Array<out kotlin.String>`, `kotlin.Comparable<*>`,
+  `kotlin.Function0<kotlin.Unit>`). Every cast then writes a `checkcast` unless the operand already
+  has exactly the target's JVM type, so `as Any` from a narrower type keeps `checkcast
+  java/lang/Object` (`tests/unboxing_coercion_e2e.rs`). Not yet matched: a type parameter is named
+  without its container (`T of p.FileKt.f`).
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
