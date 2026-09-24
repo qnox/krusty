@@ -27,6 +27,13 @@ pub enum SkipReason {
     SuperCalls,
 }
 
+/// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
+/// compilation, and the module name their output is mangled with.
+pub(crate) struct BackendPassPlugins<'a> {
+    pub(crate) native_plugins: &'a crate::plugins::registry::NativePlugins,
+    pub(crate) module_name: &'a str,
+}
+
 /// JVM-only products accumulated by the post-lowering representation pipeline and consumed by
 /// emission.
 #[derive(Default)]
@@ -90,13 +97,19 @@ pub(crate) struct BackendPassFacts {
 pub(crate) fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     facade: &str,
-    module_name: &str,
+    plugins: BackendPassPlugins<'_>,
     classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
+    crate::plugins::run_enabled(
+        ir,
+        plugins.native_plugins,
+        plugins.module_name,
+        jvm_plugin_type_descriptor,
+        classifiers,
+    );
     run_backend_passes_after_plugins(ir, facade, classifiers, classpath, Some(stems), facts)
 }
 
@@ -716,6 +729,7 @@ impl JvmBackend {
             mut ir,
             source,
             classifiers,
+            native_plugins,
             module_name,
             stems,
         } = file;
@@ -730,7 +744,10 @@ impl JvmBackend {
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
-            module_name,
+            BackendPassPlugins {
+                native_plugins,
+                module_name,
+            },
             &classifiers,
             &self.cp,
             stems,

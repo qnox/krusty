@@ -432,14 +432,19 @@ pub trait IrPlugin {
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
-/// Run native backend plugins from frontend-checked common IR. Annotation names and values have
-/// already been resolved and folded, so neither reparsed source nor spelling participates.
+/// Run this compilation's native backend plugins over frontend-checked common IR. Annotation names
+/// and values have already been resolved and folded, so neither reparsed source nor spelling
+/// participates. `plugins` is the same selection the frontend ran; with none selected this is a no-op.
 pub fn run_enabled(
     ir: &mut IrFile,
+    plugins: &registry::NativePlugins,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
     classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
+    if plugins.is_empty() {
+        return;
+    }
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     let uses_serialization = ir.exprs.iter().any(|expression| {
         matches!(
@@ -473,7 +478,7 @@ pub fn run_enabled(
         .with_external_serializers(external)
         .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
-    enabled_plugins(module_name).run(ir, &ctx);
+    plugins.host(module_name).run(ir, &ctx);
 }
 
 /// Publish the value classes this file's fields refer to without declaring into common IR's one
@@ -647,15 +652,6 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         external.push(classifier);
     }
     external.into_iter()
-}
-
-pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {
-    let mut host = PluginHost::new();
-    host.register(Box::new(serialization::SerializationPlugin::new(
-        serialization::SerializationAbi::default(),
-        module_name,
-    )));
-    host
 }
 
 /// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,

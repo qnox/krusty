@@ -28,7 +28,7 @@ pub fn compile_in_process_files(
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        super::with_native_plugins(platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
