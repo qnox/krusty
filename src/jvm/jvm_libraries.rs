@@ -2282,26 +2282,32 @@ impl JvmLibraries {
                     supertypes.push_name(k);
                 }
             }
-            // A companion object compiles to a `public static final C$Name` field on `C` (default name
-            // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
-            // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
-            let companion_object = ci
-                .fields
-                .iter()
-                .find_map(|f| {
-                    // A Kotlin companion-object instance field is always `public static final`, typed as the
-                    // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
-                    // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
-                    // (a nested-class-typed `public static final` field) vanishingly unlikely.
-                    let public_static_final =
-                        f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
-                    if !public_static_final {
-                        return None;
-                    }
-                    let nested = format!("{internal}${}", f.name);
-                    (f.descriptor == format!("L{nested};"))
-                        .then(|| (f.name.clone(), type_name(&nested)))
+            // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
+            // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
+            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+                let companion = crate::types::type_name_nested_child(internal_name, &field);
+                Some((field, companion))
+            });
+            let classfile_companion = (!ci.meta.is_present())
+                .then(|| {
+                    ci.fields.iter().find_map(|f| {
+                        // A Kotlin companion-object instance field is always `public static final`, typed as the
+                        // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
+                        // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
+                        // (a nested-class-typed `public static final` field) vanishingly unlikely.
+                        let public_static_final =
+                            f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
+                        if !public_static_final {
+                            return None;
+                        }
+                        let nested = format!("{internal}${}", f.name);
+                        (f.descriptor == format!("L{nested};"))
+                            .then(|| (f.name.clone(), type_name(&nested)))
+                    })
                 })
+                .flatten();
+            let companion_object = metadata_companion
+                .or(classfile_companion)
                 .or_else(|| self.cp.builtin_companion_object(internal_name));
             let kind = if let Some(kind) = ci.meta.class_kind {
                 kind
@@ -5049,6 +5055,22 @@ impl SymbolSource for JvmLibraries {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         super::jvm_class_map::platform_flexible_upper_bound(lower)
     }
+
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        let owner = self.cp.find_name(classifier)?;
+        let owner_name = owner.this_class();
+        let generated_serializer = type_name("kotlinx/serialization/internal/GeneratedSerializer");
+        owner
+            .inner_classes
+            .iter()
+            .filter(|nested| nested.outer.as_deref() == Some(owner_name.as_str()))
+            .filter_map(|nested| self.cp.find(&nested.inner))
+            .find(|nested| {
+                nested.meta.class_kind == Some(crate::libraries::TypeKind::Object)
+                    && nested.interfaces.contains_name(generated_serializer)
+            })
+            .map(|nested| nested.this_class)
+    }
 }
 
 impl crate::types::ClassifierFactSource for JvmLibraries {
@@ -5080,6 +5102,26 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
             qualified_name: shape.qualified_name.clone(),
             source: shape.source_file.is_some(),
         })
+    }
+
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        SymbolSource::generated_serializer_singleton(self, classifier)
+    }
+
+    fn has_serialization_serializer_accessor(
+        &self,
+        companion: TypeName,
+        type_parameters: usize,
+    ) -> bool {
+        SymbolSource::has_serialization_serializer_accessor(self, companion, type_parameters)
+    }
+
+    fn serialization_companion(&self, classifier: TypeName) -> Option<(Box<str>, TypeName)> {
+        let shape = SymbolSource::classifier(self, classifier)?;
+        shape
+            .companion_object
+            .as_ref()
+            .map(|(field, companion)| (Box::from(field.as_str()), *companion))
     }
 
     fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {

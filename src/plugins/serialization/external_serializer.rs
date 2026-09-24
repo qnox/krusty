@@ -14,15 +14,20 @@ use crate::types::{
 };
 
 use super::annotations::SERIAL_NAME_FQ;
-use super::SERIALIZER_OBJECT_NAME;
 
 /// The serializer of a `@Serializable` classifier declared outside this file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalSerializer {
-    /// A serializer class: the one `@Serializable(with = …)` names, or the generated `$serializer`.
-    Class(TypeName),
+    /// A provider-confirmed serializer object: one `@Serializable(with = …)` names, or an exact
+    /// generated serializer classifier published by the declaring compilation.
+    Singleton(TypeName),
     /// An object's `ObjectSerializer(<serial name>, INSTANCE, …)`, constructed where it is used.
-    Object { serial_name: KtString },
+    Object {
+        serial_name: KtString,
+        /// At least one retained object annotation is itself marked `@SerialInfo`. Until its typed
+        /// values can be materialized as runtime annotation instances, emission must stay residual.
+        serial_info_unsupported: bool,
+    },
     /// The companion's generated `serializer(…)`, taking one `KSerializer` per type parameter.
     Companion {
         field: Box<str>,
@@ -35,7 +40,7 @@ pub enum ExternalSerializer {
 /// `with =` serializer of its own. `None` when the facts cannot name it: the caller leaves the
 /// element underivable, which is reported, rather than guessing a class that may not exist.
 pub(crate) fn generated_external_serializer(
-    classifier: TypeName,
+    _classifier: TypeName,
     declaration: &ClassifierDeclarationFacts,
     annotations: &[ResolvedAnnotation],
 ) -> Option<ExternalSerializer> {
@@ -44,44 +49,33 @@ pub(crate) fn generated_external_serializer(
         ClassifierDeclarationKind::Object => Some(ExternalSerializer::Object {
             serial_name: class_serial_name(annotations)?
                 .or_else(|| declaration.qualified_name.as_deref().map(KtString::from))?,
+            serial_info_unsupported: false,
         }),
         ClassifierDeclarationKind::Enum | ClassifierDeclarationKind::Interface => {
-            companion_serializer(classifier, declaration)
+            companion_serializer(declaration)
         }
         ClassifierDeclarationKind::Class
             if declaration.is_abstract || declaration.own_type_parameter_count > 0 =>
         {
-            companion_serializer(classifier, declaration)
+            companion_serializer(declaration)
         }
-        ClassifierDeclarationKind::Class => Some(ExternalSerializer::Class(
-            classifier.nested_child(SERIALIZER_OBJECT_NAME),
-        )),
+        // The provider must publish the generated classifier before a caller may read its
+        // singleton. Naming the plugin ABI is not evidence that this declaration generated it.
+        ClassifierDeclarationKind::Class => None,
     }
 }
 
 /// The companion that carries the generated `serializer(…)`. A dependency's metadata records it,
-/// generated or declared. A source classifier of this module reports only a declared one; without
-/// one, this plugin generates `Companion` for it, as it does for this file's own classes.
-fn companion_serializer(
-    classifier: TypeName,
-    declaration: &ClassifierDeclarationFacts,
-) -> Option<ExternalSerializer> {
-    let (field, companion) = match &declaration.companion {
-        Some((field, companion)) => (field.clone(), *companion),
-        None if declaration.source => (
-            Box::from(GENERATED_COMPANION),
-            classifier.nested_child(GENERATED_COMPANION),
-        ),
-        None => return None,
-    };
+/// generated or declared. Absence is an unsupported external shape, never permission to invent the
+/// conventional name.
+fn companion_serializer(declaration: &ClassifierDeclarationFacts) -> Option<ExternalSerializer> {
+    let (field, companion) = declaration.companion.as_ref()?;
     Some(ExternalSerializer::Companion {
-        field,
-        companion,
+        field: field.clone(),
+        companion: *companion,
         type_parameters: declaration.own_type_parameter_count,
     })
 }
-
-const GENERATED_COMPANION: &str = "Companion";
 
 /// A class-level `@SerialName("…")` among the classifier's resolved annotations: `Some(None)` when
 /// there is none, `None` when there is one whose value the provider did not carry, which leaves the
@@ -159,7 +153,7 @@ mod tests {
                 &facts(ClassifierDeclarationKind::Class),
                 &[]
             ),
-            Some(ExternalSerializer::Class(type_name("dep/Kind$$serializer")))
+            None
         );
         assert_eq!(
             generated_external_serializer(
@@ -168,7 +162,8 @@ mod tests {
                 &[]
             ),
             Some(ExternalSerializer::Object {
-                serial_name: KtString::from("dep.Kind")
+                serial_name: KtString::from("dep.Kind"),
+                serial_info_unsupported: false,
             })
         );
     }
@@ -189,7 +184,8 @@ mod tests {
                 &[named]
             ),
             Some(ExternalSerializer::Object {
-                serial_name: KtString::from("custom")
+                serial_name: KtString::from("custom"),
+                serial_info_unsupported: false,
             })
         );
     }
@@ -211,11 +207,7 @@ mod tests {
         };
         assert_eq!(
             generated_external_serializer(type_name("dep/Kind"), &source, &[]),
-            Some(ExternalSerializer::Companion {
-                field: Box::from("Companion"),
-                companion: type_name("dep/Kind$Companion"),
-                type_parameters: 0,
-            })
+            None
         );
     }
 

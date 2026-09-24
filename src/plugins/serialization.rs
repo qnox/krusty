@@ -1270,6 +1270,26 @@ impl IrPlugin for SerializationPlugin {
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
         classifiers.extend(generated_serializer_classifier_fact(ctx));
+        if ctx
+            .annotations
+            .iter()
+            .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
+            && ctx.kind != crate::libraries::TypeKind::Object
+            && ctx.companion.is_none()
+        {
+            classifiers.push(crate::types::GeneratedClassifierFact {
+                classifier: ctx.classifier.nested_child("Companion"),
+                lexical_owner: ctx.classifier,
+                purpose: crate::types::GeneratedClassifierPurpose::SerializationCompanion,
+                source_name: "Companion".into(),
+                visibility: crate::types::Visibility::Public,
+                kind: crate::types::GeneratedClassifierKind::Class,
+                is_abstract: false,
+                is_final: true,
+                captures_outer: false,
+                compiler_generated: true,
+            });
+        }
     }
 
     fn check_frontend_class(
@@ -3006,7 +3026,7 @@ mod tests {
             types: Vec::new(),
         });
         let ctx = PluginContext::default().with_external_serializers(
-            [(classifier, ExternalSerializer::Class(serializer))]
+            [(classifier, ExternalSerializer::Singleton(serializer))]
                 .into_iter()
                 .collect(),
         );

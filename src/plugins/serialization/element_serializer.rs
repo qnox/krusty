@@ -50,6 +50,7 @@ pub(super) enum ElementSerializerPlan {
     ExternalObject {
         object: TypeName,
         serial_name: crate::kt_string::KtString,
+        serial_info_unsupported: bool,
     },
     /// A classifier declared outside this file whose serializer its companion's generated
     /// `serializer(…)` returns, called with one argument serializer per type parameter.
@@ -490,15 +491,17 @@ pub(super) fn element_serializer_plan_in(
     // serializer class needs an ordinary checked constructor call; this post-check plugin cannot
     // reconstruct overload selection from classifier arity, so that shape remains underivable.
     match ctx.external_serializer(fq_name) {
-        Some(&ExternalSerializer::Class(serializer))
-            if type_args.is_empty() && ctx.external_serializer_is_singleton(serializer) =>
-        {
+        Some(&ExternalSerializer::Singleton(serializer)) if type_args.is_empty() => {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
         }
-        Some(ExternalSerializer::Object { serial_name }) if type_args.is_empty() => {
+        Some(ExternalSerializer::Object {
+            serial_name,
+            serial_info_unsupported,
+        }) if type_args.is_empty() => {
             return Some(ElementSerializerPlan::ExternalObject {
                 object: fq_name,
                 serial_name: serial_name.clone(),
+                serial_info_unsupported: *serial_info_unsupported,
             });
         }
         Some(ExternalSerializer::Companion {
@@ -692,15 +695,25 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         ElementSerializerPlan::ExternalObject {
             object,
             serial_name,
+            serial_info_unsupported,
         } => {
+            if serial_info_unsupported {
+                return ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "external-object-serial-info-annotations",
+                    exprs: Vec::new(),
+                    data: vec![object],
+                    types: Vec::new(),
+                });
+            }
             let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
             let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
                 owner: object,
                 ty: object,
                 field: "INSTANCE".to_string(),
             });
-            // The object's `@SerialInfo` annotations; materializing retained annotation values
-            // is not supported, so the array is empty (kotlinc's is too for an object without any).
+            // The provider proved that the object has no retained `@SerialInfo` applications, so
+            // kotlinc's empty annotation array is the complete value rather than a silent drop.
             let annotations = ir.add_expr(IrExpr::Vararg {
                 array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Annotation")]),
                 spreads: Vec::new(),
@@ -784,4 +797,35 @@ pub(super) fn element_serializer_expr_in(
 ) -> Option<ExprId> {
     let plan = element_serializer_plan_in(ir, ctx, ty, scope)?;
     Some(emit_element_serializer(ir, plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_object_serial_info_remains_an_exact_residual() {
+        let object = type_name("fixtures/Singleton");
+        let mut ir = IrFile::default();
+        let expression = emit_element_serializer(
+            &mut ir,
+            ElementSerializerPlan::ExternalObject {
+                object,
+                serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
+                serial_info_unsupported: true,
+            },
+        );
+
+        assert!(matches!(
+            ir.expr(expression),
+            IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                kind: "external-object-serial-info-annotations",
+                exprs,
+                data,
+                types,
+            } if exprs.is_empty() && data.as_slice() == [object] && types.is_empty()
+        ));
+        assert_eq!(ir.exprs.len(), 1);
+    }
 }

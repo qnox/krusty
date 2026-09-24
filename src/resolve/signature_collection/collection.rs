@@ -3030,6 +3030,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
                         classifier: internal,
+                        companion: direct_companion,
                         kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
                             crate::libraries::TypeKind::Annotation
                         } else if classifier_flags.has(ClassFlags::OBJECT) {

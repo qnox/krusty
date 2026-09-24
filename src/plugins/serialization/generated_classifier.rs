@@ -40,6 +40,7 @@ pub(super) fn generated_serializer_classifier_fact(
     Some(GeneratedClassifierFact {
         classifier: ctx.classifier.nested_child(SERIALIZER_OBJECT_NAME),
         lexical_owner: ctx.classifier,
+        purpose: crate::types::GeneratedClassifierPurpose::SerializationSerializer,
         source_name: SERIALIZER_OBJECT_NAME.into(),
         visibility: Visibility::Public,
         kind: GeneratedClassifierKind::Class,
@@ -66,6 +67,7 @@ mod tests {
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
                 classifier,
+                companion: None,
                 kind: crate::libraries::TypeKind::Class,
                 is_sealed: false,
                 type_parameters: &crate::types::TypeParameters::new(
@@ -128,6 +130,7 @@ mod tests {
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
                 classifier: type_name("demo/Singleton"),
+                companion: None,
                 kind: crate::libraries::TypeKind::Object,
                 is_sealed: false,
                 type_parameters: &crate::types::TypeParameters::default(),
@@ -148,6 +151,7 @@ mod tests {
         let parameters = crate::types::TypeParameters::default();
         let context = FrontendClassContext {
             classifier,
+            companion: None,
             kind: crate::libraries::TypeKind::Class,
             is_sealed: false,
             type_parameters: &parameters,
@@ -160,6 +164,7 @@ mod tests {
             Some(GeneratedClassifierFact {
                 classifier: classifier.nested_child(SERIALIZER_OBJECT_NAME),
                 lexical_owner: classifier,
+                purpose: crate::types::GeneratedClassifierPurpose::SerializationSerializer,
                 source_name: SERIALIZER_OBJECT_NAME.into(),
                 visibility: Visibility::Public,
                 kind: GeneratedClassifierKind::Class,
@@ -183,6 +188,7 @@ mod tests {
         ] {
             let context = FrontendClassContext {
                 classifier: type_name("demo/NotGenerated"),
+                companion: None,
                 kind,
                 is_sealed,
                 type_parameters: &parameters,

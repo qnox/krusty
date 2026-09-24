@@ -65,8 +65,7 @@ pub struct BackendClassifierFact {
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
-/// in its own form (modality, companion, qualified name) or that its annotation record keeps apart
-/// from the class-valued arguments (string-valued arguments).
+/// in its own form (modality, companion, and qualified name).
 #[derive(Clone, Debug, PartialEq)]
 struct SourceDeclaration {
     is_sealed: bool,
@@ -74,8 +73,6 @@ struct SourceDeclaration {
     companion: Option<(Box<str>, TypeName)>,
     /// The Kotlin qualified name with every boundary dotted (`pkg.Outer.Nested`).
     qualified_name: Option<Box<str>>,
-    /// String-valued annotation arguments, by the annotation's ordinal among the declaration's.
-    annotation_strings: Box<[Box<[Box<str>]>]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -587,18 +584,13 @@ impl BackendModuleFacts {
                 }
             }
             surface.sort_by_key(|(order, _)| *order);
-            // The companion's static field is named after the companion itself: its declared
-            // name below the owner's, which a nested declaration's name extends with a dot.
+            // A source companion's exact classifier identity already owns its nested segment; do
+            // not recover that segment by trimming a rendered declaration name.
             let companion = index
                 .companion_declaration(declaration)
                 .and_then(|companion| {
-                    let owner = index.declaration_name(declaration)?;
-                    let field = index
-                        .declaration_name(companion)?
-                        .strip_prefix(owner)?
-                        .strip_prefix('.')?;
                     let classifier = index.classifier_header(companion)?.classifier;
-                    Some((Box::from(field), classifier))
+                    Some((Box::from(classifier.nested_segment_ref()), classifier))
                 });
             // Package and lexical-class boundaries are both dots, the spelling lowering records
             // for this file's own classes.
@@ -636,23 +628,13 @@ impl BackendModuleFacts {
                     .declaration_annotations(declaration)
                     .iter()
                     .copied()
-                    .enumerate()
-                    .map(|(ordinal, annotation)| crate::types::ResolvedAnnotation {
+                    .map(|annotation| crate::types::ResolvedAnnotation {
                         annotation,
-                        // The class-valued arguments the frontend resolved for this occurrence.
-                        // A dependency's annotations reach a backend with their arguments intact;
-                        // one declared in ANOTHER FILE OF THIS MODULE must too, or the two sides of
-                        // the same boundary answer the same question differently.
-                        arguments: index
-                            .declaration_annotation_class_arguments(declaration, ordinal as u32)
-                            .iter()
-                            .map(|&classifier| {
-                                (
-                                    String::new(),
-                                    crate::types::AnnotationValue::Class(classifier),
-                                )
-                            })
-                            .collect(),
+                        // Stable headers currently publish only the checked annotation identity.
+                        // Do not turn ordinal side tables into a counterfeit applied annotation;
+                        // consumers that require values fail closed until the checked application
+                        // itself is retained in the stable index.
+                        arguments: Vec::new(),
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -667,17 +649,6 @@ impl BackendModuleFacts {
                     is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
                     companion,
                     qualified_name,
-                    annotation_strings: (0..index.declaration_annotations(declaration).len())
-                        .map(|ordinal| {
-                            index
-                                .declaration_annotation_string_arguments(
-                                    declaration,
-                                    ordinal as u32,
-                                )
-                                .to_vec()
-                                .into_boxed_slice()
-                        })
-                        .collect(),
                 },
             );
             if let Some(underlying) = value_underlying {
@@ -809,24 +780,7 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         &self,
         classifier: TypeName,
     ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        let mut annotations = BackendClassifierSource::classifier(self, classifier)?
-            .annotations
-            .to_vec();
-        // A dependency's annotations carry every argument. A source declaration's backend record
-        // carries the class-valued ones; its string-valued ones are kept beside it, and join here
-        // so the two answer the same question the same way.
-        if let Some(source) = self.module.source_declarations.get(&classifier) {
-            for (annotation, strings) in
-                annotations.iter_mut().zip(source.annotation_strings.iter())
-            {
-                annotation.arguments.extend(
-                    strings
-                        .iter()
-                        .map(|value| (String::new(), crate::types::AnnotationValue::string(value))),
-                );
-            }
-        }
-        Some(annotations)
+        BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
     }
 
     fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
@@ -868,6 +822,74 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
             qualified_name,
             source: fact.source,
         })
+    }
+
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        if let Some(generated) = self
+            .module
+            .generated_classifiers()
+            .iter()
+            .find(|generated| {
+                generated.lexical_owner == classifier
+                    && generated.purpose
+                        == crate::types::GeneratedClassifierPurpose::SerializationSerializer
+            })
+        {
+            return (BackendClassifierSource::classifier(self, classifier)?
+                .own_type_parameter_count
+                == 0)
+                .then_some(generated.classifier);
+        }
+        self.dependencies.generated_serializer_singleton(classifier)
+    }
+
+    fn has_serialization_serializer_accessor(
+        &self,
+        companion: TypeName,
+        type_parameters: usize,
+    ) -> bool {
+        if let Some(generated) = self
+            .module
+            .generated_classifiers()
+            .iter()
+            .find(|generated| {
+                generated.classifier == companion
+                    && generated.purpose
+                        == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+            })
+        {
+            return self
+                .module
+                .classifier(generated.lexical_owner)
+                .is_some_and(|owner| owner.own_type_parameter_count == type_parameters);
+        }
+        self.dependencies
+            .has_serialization_serializer_accessor(companion, type_parameters)
+    }
+
+    fn serialization_companion(&self, classifier: TypeName) -> Option<(Box<str>, TypeName)> {
+        self.module
+            .source_declarations
+            .get(&classifier)
+            .and_then(|source| source.companion.clone())
+            .or_else(|| {
+                self.module
+                    .generated_classifiers()
+                    .iter()
+                    .find(|generated| {
+                        generated.lexical_owner == classifier
+                            && generated.purpose
+                                == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+                    })
+                    .map(|generated| (generated.source_name.clone(), generated.classifier))
+            })
+            .or_else(|| {
+                self.dependencies
+                    .classifier(classifier)?
+                    .companion_object
+                    .as_ref()
+                    .map(|(field, companion)| (Box::from(field.as_str()), *companion))
+            })
     }
 
     fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {

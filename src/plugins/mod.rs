@@ -107,6 +107,7 @@ pub enum FrontendCallableOwner {
 /// The resolved source-class information available to frontend declaration generation.
 pub struct FrontendClassContext<'a> {
     pub classifier: TypeName,
+    pub companion: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
     pub is_sealed: bool,
     pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
@@ -170,10 +171,6 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
-    /// External serializers the provider confirms are object values. A class needs ordinary
-    /// constructor selection before generated code may instantiate it; the post-check plugin must
-    /// not infer that call from type-parameter arity.
-    external_serializer_singletons: std::collections::HashSet<TypeName>,
 }
 
 impl Default for PluginContext {
@@ -184,7 +181,6 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
-            external_serializer_singletons: std::collections::HashSet::new(),
         }
     }
 }
@@ -197,7 +193,6 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
-            external_serializer_singletons: self.external_serializer_singletons.clone(),
         }
     }
 }
@@ -255,19 +250,6 @@ impl PluginContext {
         classifier: TypeName,
     ) -> Option<&serialization::ExternalSerializer> {
         self.external_serializers.get(&classifier)
-    }
-
-    /// Record which external serializers have a provider-confirmed singleton value.
-    pub fn with_external_serializer_singletons(
-        mut self,
-        serializers: std::collections::HashSet<TypeName>,
-    ) -> Self {
-        self.external_serializer_singletons = serializers;
-        self
-    }
-
-    pub fn external_serializer_is_singleton(&self, serializer: TypeName) -> bool {
-        self.external_serializer_singletons.contains(&serializer)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -529,23 +511,9 @@ pub fn run_enabled(
     }
     record_external_value_classes(ir, classifiers);
     let external = external_serializers(ir, classifiers);
-    // `Some(false)` is the only answer that rules a singleton out. A generated `Foo$$serializer`
-    // for a CLASSPATH `@Serializable` class is an object kotlinc synthesized, and the provider has
-    // no classifier view of a synthetic it never read a declaration for — it answers `None`. Taking
-    // `None` as "not a singleton" leaves that element underivable and bails the whole file, which is
-    // exactly the failure this plugin path exists to prevent.
-    let external_singletons = external
-        .values()
-        .filter_map(|serializer| match serializer {
-            serialization::ExternalSerializer::Class(serializer) => Some(*serializer),
-            _ => None,
-        })
-        .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
-        .collect();
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
-        .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
     plugins.host(module_name).run(ir, &ctx);
 }
@@ -680,36 +648,76 @@ fn external_serializers(
             let application = annotations
                 .iter()
                 .find(|annotation| annotation.annotation == serializable);
-            // `@Serializable`'s only element is `with`, so its class-valued argument IS the
-            // serializer whether or not the provider carried the element name: a dependency read
-            // from a class file names its elements, while a sibling file of this module publishes
-            // the resolved identity positionally. The same-file path reads the first value for the
-            // same reason.
+            // Annotation values cross this boundary only as checked, named semantic facts. An
+            // unnamed positional value is retained source reconstruction, not a stable contract.
             let custom = application.and_then(|annotation| {
                 annotation
                     .arguments
                     .iter()
-                    .filter(|(name, _)| name.is_empty() || name == "with")
+                    .filter(|(name, _)| name == "with")
                     .find_map(|(_, value)| match value {
                         crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
                         _ => None,
                     })
             });
-            let serializer = match (custom, application) {
-                (Some(custom), _) => serialization::ExternalSerializer::Class(custom),
+            let mut serializer = match (custom, application) {
+                (Some(custom), _) if classifiers.classifier_is_object(custom) == Some(true) => {
+                    serialization::ExternalSerializer::Singleton(custom)
+                }
+                (Some(_), _) => return None,
                 // What the declaration's compilation generated depends on its kind; a classifier
                 // whose facts cannot name it has no entry, and an element of it is underivable.
-                (None, Some(_)) => serialization::generated_external_serializer(
-                    classifier,
-                    &classifiers.classifier_declaration(classifier)?,
-                    &annotations,
-                )?,
-                (None, None) => {
-                    let generated = classifier.nested_child("$serializer");
-                    classifiers.classifier_annotations(generated)?;
-                    serialization::ExternalSerializer::Class(generated)
+                (None, Some(_)) => {
+                    let mut declaration = classifiers.classifier_declaration(classifier)?;
+                    if declaration.companion.is_none() {
+                        declaration.companion = classifiers.serialization_companion(classifier);
+                    }
+                    match serialization::generated_external_serializer(
+                        classifier,
+                        &declaration,
+                        &annotations,
+                    ) {
+                        Some(serializer) => serializer,
+                        None if declaration.kind
+                            == crate::types::ClassifierDeclarationKind::Class
+                            && !declaration.is_abstract
+                            && declaration.own_type_parameter_count == 0 =>
+                        {
+                            let generated =
+                                classifiers.generated_serializer_singleton(classifier)?;
+                            serialization::ExternalSerializer::Singleton(generated)
+                        }
+                        None => return None,
+                    }
                 }
+                (None, None) => return None,
             };
+            if let serialization::ExternalSerializer::Object {
+                serial_info_unsupported,
+                ..
+            } = &mut serializer
+            {
+                let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+                *serial_info_unsupported = annotations.iter().any(|application| {
+                    classifiers
+                        .classifier_annotations(application.annotation)
+                        .is_some_and(|meta| {
+                            meta.iter()
+                                .any(|annotation| annotation.annotation == serial_info)
+                        })
+                });
+            }
+            if let serialization::ExternalSerializer::Companion {
+                companion,
+                type_parameters,
+                ..
+            } = &serializer
+            {
+                if !classifiers.has_serialization_serializer_accessor(*companion, *type_parameters)
+                {
+                    return None;
+                }
+            }
             Some((classifier, serializer))
         })
         .collect()
@@ -864,6 +872,11 @@ mod tests {
             Vec<crate::types::ResolvedAnnotation>,
         >,
         value_underlyings: std::collections::HashMap<crate::types::TypeName, Ty>,
+        declarations: std::collections::HashMap<
+            crate::types::TypeName,
+            crate::types::ClassifierDeclarationFacts,
+        >,
+        objects: std::collections::HashSet<crate::types::TypeName>,
     }
 
     impl crate::types::ClassifierFactSource for FakeClassifierFacts {
@@ -876,6 +889,17 @@ mod tests {
 
         fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
             self.value_underlyings.get(&classifier).copied()
+        }
+
+        fn classifier_declaration(
+            &self,
+            classifier: TypeName,
+        ) -> Option<crate::types::ClassifierDeclarationFacts> {
+            self.declarations.get(&classifier).cloned()
+        }
+
+        fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
+            self.objects.contains(&classifier).then_some(true)
         }
     }
 
@@ -1104,6 +1128,7 @@ mod tests {
                     )],
                 }],
             )]),
+            objects: std::collections::HashSet::from([serializer]),
             ..FakeClassifierFacts::default()
         };
 
@@ -1113,17 +1138,77 @@ mod tests {
             resolved,
             std::collections::HashMap::from([(
                 payload,
-                serialization::ExternalSerializer::Class(serializer)
+                serialization::ExternalSerializer::Singleton(serializer)
             )])
         );
         let context = PluginContext::default().with_external_serializers(resolved);
         assert_eq!(
             context.external_serializer(payload),
-            Some(&serialization::ExternalSerializer::Class(serializer))
+            Some(&serialization::ExternalSerializer::Singleton(serializer))
         );
         assert_eq!(
             context.external_serializer(crate::types::type_name("fixtures/Envelope")),
             None
+        );
+    }
+
+    #[test]
+    fn external_object_with_serial_info_is_marked_unsupported() {
+        let object = crate::types::type_name("fixtures/Singleton");
+        let payload = crate::types::type_name("fixtures/Payload");
+        let mut ir = IrFile::default();
+        let mut holder = synthetic_class("fixtures/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "value".to_owned(),
+            Ty::obj_name(object),
+        ));
+        ir.add_class(holder);
+        let facts = FakeClassifierFacts {
+            annotations: std::collections::HashMap::from([
+                (
+                    object,
+                    vec![
+                        crate::types::ResolvedAnnotation {
+                            annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
+                            arguments: Vec::new(),
+                        },
+                        crate::types::ResolvedAnnotation {
+                            annotation: payload,
+                            arguments: vec![(
+                                "value".to_owned(),
+                                crate::types::AnnotationValue::string("kept"),
+                            )],
+                        },
+                    ],
+                ),
+                (
+                    payload,
+                    vec![crate::types::ResolvedAnnotation {
+                        annotation: crate::types::type_name("kotlinx/serialization/SerialInfo"),
+                        arguments: Vec::new(),
+                    }],
+                ),
+            ]),
+            declarations: std::collections::HashMap::from([(
+                object,
+                crate::types::ClassifierDeclarationFacts {
+                    kind: crate::types::ClassifierDeclarationKind::Object,
+                    is_abstract: false,
+                    own_type_parameter_count: 0,
+                    companion: None,
+                    qualified_name: Some(Box::from("fixtures.Singleton")),
+                    source: false,
+                },
+            )]),
+            ..FakeClassifierFacts::default()
+        };
+
+        assert_eq!(
+            external_serializers(&ir, &facts).get(&object),
+            Some(&serialization::ExternalSerializer::Object {
+                serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
+                serial_info_unsupported: true,
+            })
         );
     }
 

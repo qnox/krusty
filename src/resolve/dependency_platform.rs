@@ -324,6 +324,12 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        self.source()
+            .generated_serializer_singleton(classifier)
+            .or_else(|| self.platform.generated_serializer_singleton(classifier))
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
         if let Some(merged) = self
             .symbols_memo
