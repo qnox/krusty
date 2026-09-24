@@ -2925,8 +2925,9 @@ fn attach_synth_debug_tables(
             guard_slot += slot_size(argument.ty);
         }
     }
-    // Only physical constructor parameters are locals. The configured reference version decides
-    // whether anonymous context parameters publish their generated labels on this surface.
+    // Only physical constructor parameters are locals. Before Kotlin 2.4.20 an anonymous context
+    // parameter has no LVT row even though its MethodParameters/assertion surfaces have a generated
+    // label; since then that label names its row too.
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
@@ -8914,8 +8915,9 @@ fn emit_interface_class(
                 } else {
                     Vec::new()
                 };
-                let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
-                    .expect("a compatibility declaration carries exact parameter identities");
+                let parameter_names =
+                    crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
+                        .expect("a compatibility declaration carries exact parameter identities");
                 let method_parameter_names =
                     crate::jvm::parameter_names::function_method_parameters(
                         ir,
@@ -9085,14 +9087,16 @@ fn emit_interface_class(
     // first, then the republished surface for inherited defaults this interface does not redeclare.
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
-        let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
-            .expect("an access bridge carries exact declaration parameter identities");
+        let physical_params = jvm_function_params(ir, fid);
+        let parameter_names =
+            crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
+                .expect("an access bridge carries exact declaration parameter identities");
         emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
             &f.name,
-            &jvm_function_params(ir, fid),
+            &physical_params,
             &parameter_names,
             jvm_declared_ty(&f.ret),
         );
@@ -11077,12 +11081,13 @@ fn emit_method_inner_with_holder(
             code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
+        let local_names = parameter_identities
+            .and_then(|_| crate::jvm::parameter_names::function_locals(ir, fid, &param_tys));
         for (i, t) in param_tys.iter().enumerate() {
-            let pname = parameter_identities
-                .and_then(|identities| identities.get(i))
-                .and_then(|identity| {
-                    crate::jvm::parameter_names::function_local_variable(ir, fid, identity)
-                });
+            let pname = local_names
+                .as_ref()
+                .and_then(|names| names.get(i))
+                .and_then(Clone::clone);
             if let Some(pname) = pname {
                 let pdesc = local_variable_desc(*t);
                 e.cw.seed_utf8(&pname);

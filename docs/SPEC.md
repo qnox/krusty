@@ -199,7 +199,10 @@ lists several kotlinc releases, and they do not all agree: kotlinc 2.4.20 reword
 diagnostics (`expected declaration` becomes `'expect' declaration`, an unresolved member names its
 receiver's type), reports NO_VALUE_FOR_PARAMETER at the callee's name instead of the argument list,
 lists every rung's candidates in a failed `getValue`, drops `@NotNull`/`@Nullable` from annotation
-implementation classes, and packs a synthetic class's visibility into bits 8–10 of `@Metadata.xi`.
+implementation classes, packs a synthetic class's visibility into bits 8–10 of `@Metadata.xi`, and
+names an anonymous context parameter by its label in the IR: it gains a `LocalVariableTable` row,
+and repeated labels are numbered `$context-String$1` where earlier releases wrote
+`$context-String#1`.
 krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
 it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
 part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The

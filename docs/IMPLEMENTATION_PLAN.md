@@ -4366,7 +4366,9 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
 - ✅ Test expectations recorded per version range from kotlinc (`tests/recorded/`,
   `tests/common/recorded.rs`): a missing version records locally and fails under CI.
 - ✅ 2.4.20 backend deltas gated on the target: `@Metadata.xi` visibility bits for synthetic
-  classes, no nullability annotations on annotation implementation classes.
+  classes, no nullability annotations on annotation implementation classes, anonymous context
+  parameters named in the `LocalVariableTable` and numbered `$1` rather than `#1`
+  (`src/jvm/parameter_names.rs`).
 - ⬜ CI runs the full suite on the newest version only; older versions run box conformance in CI
   and the full suite locally through `just test-all`.
 - ⬜ A deferred builder-inference member error names no receiver; kotlinc 2.4.20 renders the
