@@ -380,6 +380,14 @@ impl ClassWriter {
         };
         let redundant_casts =
             redundant_checkcasts::select(self, method, &insns, &offsets, &original_types);
+        // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
+        // nullability analysis proves non-null goes (see `null_checks`).
+        let redundant_null_checks = self.redundant_null_checks(
+            &insns,
+            &original_graph,
+            &arrivals,
+            usize::from(method.max_locals),
+        );
         // Which label each branch jumps to, and the labels bound at each index in the order they
         // stand: kotlinc's rules see labels, and several can share one offset.
         let mut branch_labels: Vec<Option<u32>> = vec![None; n];
@@ -415,6 +423,7 @@ impl ClassWriter {
             marks: &marks,
             named: &named,
             redundant_casts: &redundant_casts,
+            redundant_null_checks: &redundant_null_checks,
             branch_labels: &branch_labels,
             labels_at: &labels_at,
             one_word_static: &|field| {
