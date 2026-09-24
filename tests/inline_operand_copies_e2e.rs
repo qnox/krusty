@@ -42,9 +42,8 @@ fn an_inlined_call_pushes_its_operands_from_where_they_are_like_kotlinc() {
             !reference.is_empty() && !krusty.is_empty(),
             "{member} not found"
         );
-        // This PR owns the common-lowering operand copies: both push the two source parameters
-        // directly and in order. The remaining expansion-parameter store is JVM splice behavior
-        // owned by the stacked in-place-argument change.
+        // The common-lowering copies and the expansion's own parameter store are both gone: the
+        // complete instruction stream now matches kotlinc's in-place `@InlineOnly` expansion.
         let pushes = |body: &[String]| {
             body.iter()
                 .take(2)
@@ -52,11 +51,12 @@ fn an_inlined_call_pushes_its_operands_from_where_they_are_like_kotlinc() {
                 .collect::<Vec<_>>()
         };
         assert_eq!(pushes(&krusty), pushes(&reference), "{member}: {krusty:#?}");
+        assert_eq!(krusty, reference, "{member}: complete instructions");
         let stores = krusty
             .iter()
             .filter(|insn| opcode(insn).contains("store"))
             .count();
-        assert_eq!(stores, 1, "{member}: exact remaining splice store");
+        assert_eq!(stores, 0, "{member}: no operand store remains");
     }
 }
 

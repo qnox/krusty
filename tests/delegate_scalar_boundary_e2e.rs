@@ -199,7 +199,8 @@ fn body(dump: &str, needle: &str) -> Vec<String> {
 /// result, the write boxes the value into its erased parameter. Both compilers' ledgers are spelled
 /// out — they differ only in how the `KProperty` is reached (kotlinc interns one
 /// `$$delegatedProperties` array, krusty a field per property), which is a separate representation
-/// difference and is visible here rather than normalised away.
+/// difference and is visible here rather than normalised away. The erased numeric result itself
+/// follows kotlinc through `Number`, not through a wrapper guessed from the accessor's carrier.
 #[test]
 fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
     let source = "class PVar<T> {\n\
@@ -236,11 +237,11 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
             "aload_0".to_string(),
             "getstatic Field x$kprop:Lkotlin/reflect/KProperty;".to_string(),
             "invokevirtual Method PVar.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
-            "checkcast class java/lang/Long".to_string(),
-            "invokevirtual Method java/lang/Long.longValue:()J".to_string(),
+            "checkcast class java/lang/Number".to_string(),
+            "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
             "lreturn".to_string(),
         ],
-        "krusty's getX ledger: the unbox is there; the KProperty carrier and its wrapper owner differ"
+        "krusty's getX ledger: only the independently owned KProperty carrier differs"
     );
     assert_eq!(
         body(&ours, "void setX(long)"),
@@ -454,8 +455,8 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
             "iload_1".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
             "invokevirtual Method Cell.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
-            "checkcast class java/lang/Long".to_string(),
-            "invokevirtual Method java/lang/Long.longValue:()J".to_string(),
+            "checkcast class java/lang/Number".to_string(),
+            "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
             "lreturn".to_string(),
         ],
         "the scalar extension receiver is boxed into the operator's thisRef slot"
@@ -474,21 +475,10 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
         ],
         "both the extension receiver and the written value are boxed"
     );
-    // kotlinc's own ledgers, with the one wrapper-owner difference already recorded in SPEC.md
-    // (`checkcast Number` where krusty casts to the exact wrapper) normalised away.
-    let exact_wrapper = |rows: Vec<String>| {
-        rows.into_iter()
-            .map(|row| row.replace("class java/lang/Number", "class java/lang/Long"))
-            .map(|row| row.replace("java/lang/Number.longValue", "java/lang/Long.longValue"))
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
-        exact_wrapper(without_kproperty_carrier(body(
-            &reference,
-            "long getExt(int)"
-        ))),
+        without_kproperty_carrier(body(&reference, "long getExt(int)")),
         without_kproperty_carrier(body(&ours, "long getExt(int)")),
-        "getExt agrees with kotlinc"
+        "getExt uses the same erased numeric adapter as kotlinc"
     );
     assert_eq!(
         without_kproperty_carrier(body(&reference, "void setExt(int, long)")),

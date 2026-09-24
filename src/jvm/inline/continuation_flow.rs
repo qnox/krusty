@@ -85,8 +85,16 @@ mod tests {
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let bs = super::super::splice_unified(&body, "(I)I", 3, &[], 0, &mut cw, &HashMap::new())
-            .expect("branchless splice");
+        let bs = super::super::splice_unified(
+            &body,
+            "(I)I",
+            3,
+            super::super::ParameterBinding::Stored(&[]),
+            0,
+            &mut cw,
+            &HashMap::new(),
+        )
+        .expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
@@ -117,7 +125,7 @@ mod tests {
             &body,
             "()Ljava/lang/Void;",
             0,
-            &[],
+            super::super::ParameterBinding::Stored(&[]),
             0,
             &mut cw,
             &HashMap::new(),

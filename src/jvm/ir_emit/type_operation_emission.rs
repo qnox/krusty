@@ -4,13 +4,41 @@
 //! erasure, null-check call shape, reload-versus-dup selection, casts, and numeric representation.
 
 use crate::ir::{ExprId, IrBindingStability, IrExpr, IrTypeOp};
-use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::classfile::{ClassWriter, CodeBuilder};
 use crate::types::{stored_value_ty, Ty};
 
 use super::{
-    box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm,
-    semantic_scalar_adapter, type_descriptor, unbox_prim, Emitter,
+    box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm, jvm_is_erased_top,
+    semantic_scalar_adapter, slot_words, type_descriptor, unbox_prim, Emitter,
 };
+
+/// Unbox an implicit scalar coercion whose source is an erased numeric reference. Kotlin's erased
+/// callable/type-parameter boundary carries numeric values as `Number`, not as the target's exact
+/// wrapper; concrete boxed scalars retain the ordinary wrapper-specific adapter.
+fn unbox_implicit_reference(cw: &mut ClassWriter, code: &mut CodeBuilder, source: Ty, target: Ty) {
+    let source = ir_ty_to_jvm(&source);
+    let numeric = match target {
+        Ty::Byte => Some(("byteValue", "()B")),
+        Ty::Short => Some(("shortValue", "()S")),
+        Ty::Int => Some(("intValue", "()I")),
+        Ty::Long => Some(("longValue", "()J")),
+        Ty::Float => Some(("floatValue", "()F")),
+        Ty::Double => Some(("doubleValue", "()D")),
+        _ => None,
+    };
+    let erased_numeric = jvm_is_erased_top(source)
+        || crate::jvm::names::instanceof_internal_name(source) == "java/lang/Number";
+    let Some((method, descriptor)) = numeric.filter(|_| erased_numeric) else {
+        unbox_prim(cw, code, target);
+        return;
+    };
+    if crate::jvm::names::instanceof_internal_name(source) != "java/lang/Number" {
+        let class = cw.class_ref("java/lang/Number");
+        code.checkcast(class);
+    }
+    let method = cw.methodref("java/lang/Number", method, descriptor);
+    code.invokevirtual(method, 0, slot_words(target) as i32);
+}
 
 impl Emitter<'_> {
     pub(super) fn emit_type_operation(
@@ -210,7 +238,12 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(semantic, physical_arg),
             );
         } else if physical_arg.is_reference() && target.is_jvm_scalar() {
-            unbox_prim(self.cw, code, semantic_scalar_adapter(type_operand, target));
+            unbox_implicit_reference(
+                self.cw,
+                code,
+                physical_arg,
+                semantic_scalar_adapter(type_operand, target),
+            );
         } else if physical_arg.is_jvm_scalar() && target.is_jvm_scalar() && physical_arg != target {
             emit_num_conv(physical_arg, target, code);
         } else {

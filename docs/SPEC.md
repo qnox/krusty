@@ -3329,7 +3329,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Map<K, out V>.getValue` leaves on the stack from `getAge()I`. The coercion goes on the
     accessor body, which is the boundary the accessor owns and where the emitter reads the value's
     own physical type — so a matching type costs nothing, a reference result gets its cast, and a
-    scalar one its unbox. It is skipped where the delegated call already coerced to that same
+    scalar one its unbox. An erased generic numeric result follows kotlinc through
+    `java.lang.Number.<kind>Value`, rather than inventing a concrete wrapper from the accessor's
+    primitive carrier. It is skipped where the delegated call already coerced to that same
     type, so the non-external arms keep their single coercion node
     (`fir_lower::tests::generic_member_delegate_result_keeps_its_erased_call_boundary` asserts
     exactly one). Putting it on the delegated CALL instead (coercing the external target's

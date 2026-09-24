@@ -1,0 +1,100 @@
+//! JVM-local compaction for parameters removed by an inline splice.
+//!
+//! A removed `long` or `double` closes two physical slots even though it contributes one
+//! StackMapTable entry. Keeping those two views in one layout object prevents instruction locals,
+//! frames, debug locals, and the caller's `top_local` from disagreeing.
+
+use super::{param_store_ops, VType};
+
+#[derive(Clone, Debug)]
+pub(super) struct LocalCompaction {
+    removed: Vec<RemovedParameter>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RemovedParameter {
+    start: u16,
+    width: u16,
+}
+
+impl LocalCompaction {
+    pub(super) fn parameters(descriptor: &str, indices: &[usize]) -> Option<Self> {
+        let parameters = parameter_slots(descriptor)?;
+        let removed = indices
+            .iter()
+            .map(|&index| parameters.get(index).copied())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { removed })
+    }
+
+    pub(super) fn all_parameters(descriptor: &str) -> Option<Self> {
+        Some(Self {
+            removed: parameter_slots(descriptor)?,
+        })
+    }
+
+    pub(super) fn is_removed(&self, slot: u16) -> bool {
+        self.removed
+            .iter()
+            .any(|parameter| (parameter.start..parameter.start + parameter.width).contains(&slot))
+    }
+
+    /// Relocate a retained local. Callers may also use this while rewriting instructions that are
+    /// scheduled for deletion; a removed parameter then maps to the start of its closed gap.
+    pub(super) fn compact(&self, slot: u16, base: u16) -> u16 {
+        let closed = self
+            .removed
+            .iter()
+            .filter(|parameter| parameter.start < slot)
+            .map(|parameter| parameter.width.min(slot - parameter.start))
+            .sum::<u16>();
+        base + slot - closed
+    }
+
+    /// Drop removed locals from a collapsed StackMapTable locals vector. Width is tracked by JVM
+    /// slot, not vector position: `long` and `double` occupy one entry but two physical slots.
+    pub(super) fn drop_entries(&self, collapsed: &[VType]) -> Vec<VType> {
+        let mut kept = Vec::with_capacity(collapsed.len());
+        let mut slot = 0u16;
+        for value in collapsed {
+            let width = if matches!(value, VType::Long | VType::Double) {
+                2
+            } else {
+                1
+            };
+            if !self.is_removed(slot) {
+                kept.push(*value);
+            }
+            slot += width;
+        }
+        kept
+    }
+}
+
+fn parameter_slots(descriptor: &str) -> Option<Vec<RemovedParameter>> {
+    param_store_ops(descriptor, 0).map(|stores| {
+        stores
+            .into_iter()
+            .map(|(start, op)| RemovedParameter {
+                start,
+                width: if matches!(op, 0x37 | 0x39) { 2 } else { 1 },
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_removed_parameters_close_two_instruction_and_frame_slots() {
+        let compact = LocalCompaction::all_parameters("(JI)V").expect("descriptor");
+        assert_eq!(compact.compact(3, 7), 7);
+        assert_eq!(compact.compact(4, 7), 8);
+        assert_eq!(
+            compact.drop_entries(&[VType::Long, VType::Int, VType::Float]),
+            vec![VType::Float]
+        );
+    }
+}
