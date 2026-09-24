@@ -406,7 +406,7 @@ conformance-bin:
     printf '%s\n' "$bin"
 
 # Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". The suite's native
-# exit status enforces the 55% backend-applicable floor; the report exposes the exact score.
+# exit status holds every file to tests/box_expected_failures/<version>.txt; the report exposes the score.
 conformance VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -414,7 +414,7 @@ conformance VERSION=`just max-version`:
 
 # Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
 # "<pct> <passed> <scanned>". The test writes the report before its assertions, so callers receive
-# the metric without suppressing a below-threshold failure.
+# the metric even when a file disagrees with the expected-failure list.
 conformance-run BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
