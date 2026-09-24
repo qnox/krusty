@@ -33,6 +33,7 @@ mod coroutine_machine;
 mod data_class_pool_seed;
 mod data_class_value_classes;
 mod debug_lines;
+mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
@@ -14551,43 +14552,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_discarding(&mut self, e: u32, code: &mut CodeBuilder) {
-        let node = self.ir.expr(e).clone();
-        self.emit_discarding_node(e, &node, code);
-    }
-
-    fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
-        if self.emit_discarded_safe_call(e, node, code) {
-            return;
-        }
-        if let IrExpr::BottomValue {
-            producer,
-            completion,
-        } = node
-        {
-            let baseline = code.stack_height();
-            self.emit_value(*producer, code);
-            bottom_values::finish(
-                self.cw,
-                code,
-                baseline,
-                completion.diverges_when_discarded(),
-            );
-            return;
-        }
-        let suspension = self.machine_before(e, code);
-        self.emit_value_node(e, node, code);
-        self.machine_after(suspension, code);
-        // A successfully spliced bottom-typed expression has already transferred control (for
-        // example, an inline lambda's non-local `return`). It leaves no value to discard. The
-        // semantic type is retained on the IR expression even when the selected callable's physical
-        // descriptor returns `Object`.
-        if self.diverges(e) {
-            return;
-        }
-        discard(self.value_ty(e), code);
-    }
-
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::mark_expression_start(self.ir, e, code);
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
@@ -17125,7 +17089,7 @@ impl<'a> Emitter<'a> {
                 }
                 code.invokestatic(m, 1, 1);
             }
-            IrExpr::When { branches } => self.emit_when(e, branches, code),
+            IrExpr::When { branches } => self.emit_when(e, branches, false, code),
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
             IrExpr::Block { stmts, value } => {
@@ -19228,6 +19192,7 @@ impl<'a> Emitter<'a> {
         &mut self,
         expression: u32,
         branches: &[(Option<u32>, u32)],
+        discarded: bool,
         code: &mut CodeBuilder,
     ) {
         let end = code.new_label();
@@ -19241,7 +19206,8 @@ impl<'a> Emitter<'a> {
         let result_ty = exhaustive_result
             .map(|result| ir_ty_to_jvm(&result))
             .unwrap_or_else(|| self.value_ty_of_when(branches));
-        let is_stmt = (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit;
+        let is_stmt =
+            (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit || discarded;
         let enclosing_terminal_target = self.terminal_statement_target.take();
         let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         let result_stack = if is_stmt {
