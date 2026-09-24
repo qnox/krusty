@@ -38,7 +38,10 @@ use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
 mod spill_layout;
-use spill_layout::{suspension_points_in_order, SpillLayout};
+use spill_layout::{
+    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty,
+    suspension_points_in_order, SpillLayout, REFERENCE_SPILL_KIND,
+};
 mod statement_normalization;
 mod value_liveness;
 
@@ -88,8 +91,20 @@ type Suspension = (Option<(u32, Ty)>, ExprId, SuspensionCompletion);
 struct SuspensionScope {
     values: Vec<(u32, Ty)>,
     names: std::collections::HashMap<u32, String>,
+    /// The spilled values nothing reads after this suspension: kotlinc still spills one in debug
+    /// scope, but routes a reference through `SpillingKt.nullOutSpilledVariable` first.
+    dead: HashSet<u32>,
 }
 type SuspensionScopes = std::collections::HashMap<ExprId, SuspensionScope>;
+
+/// What every state machine of one file is built against.
+struct MachineContext<'a> {
+    /// Every function's declared (pre-CPS) return type.
+    orig_rets: &'a [Ty],
+    /// Whether the stdlib declares the exact public static
+    /// `SpillingKt.nullOutSpilledVariable(Object): Object` probe.
+    null_out_dead_spills: bool,
+}
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -186,12 +201,17 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
+    null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let context = MachineContext {
+        orig_rets: &orig_rets,
+        null_out_dead_spills,
+    };
     let fids = ir.suspend_funs.clone();
     let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
         std::collections::HashMap::new();
@@ -270,6 +290,7 @@ pub(crate) fn lower_suspend(
                         scope: Vec::new(),
                         pending: Vec::new(),
                         levels: Vec::new(),
+                        current: Vec::new(),
                         temps_only: false,
                         out: Default::default(),
                     };
@@ -550,7 +571,7 @@ pub(crate) fn lower_suspend(
                 fid,
                 body.unwrap(),
                 unit_ret,
-                &orig_rets,
+                &context,
                 pre_splice_scopes.remove(&fid),
                 &suspension_lines,
                 continuation_metadata,
@@ -568,7 +589,7 @@ pub(crate) fn lower_suspend(
             fid,
             class_id,
             field_base,
-            &orig_rets,
+            &context,
             pre_splice_scopes.remove(&fid),
             default_call_operands,
         ) {
@@ -2510,7 +2531,7 @@ fn build_state_machine(
     fid: u32,
     b: ExprId,
     unit_ret: bool,
-    orig_rets: &[Ty],
+    context: &MachineContext<'_>,
     captured_scopes: Option<SuspensionScopes>,
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
@@ -2531,6 +2552,7 @@ fn build_state_machine(
     // statement consumers around already-checked inline bodies. Normalize once more at the actual
     // state-machine boundary, where the body has its final control-flow shape but suspend callees
     // still retain their snapshotted declared result types in `orig_rets`.
+    let orig_rets = context.orig_rets;
     let return_ty = orig_rets.get(fid as usize).copied().unwrap_or(Ty::Unit);
     desugar_value_try(ir, b, &suspend_set, &return_ty);
     desugar_value_when(ir, b, &suspend_set, &return_ty);
@@ -2868,6 +2890,7 @@ fn build_state_machine(
             scope: Vec::new(),
             pending: Vec::new(),
             levels: Vec::new(),
+            current: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -2967,6 +2990,7 @@ fn build_state_machine(
         next_local: flat_next_local,
         loop_targets: Vec::new(),
         jump_finalizers: Vec::new(),
+        null_out_dead_spills: context.null_out_dead_spills,
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -3272,10 +3296,11 @@ fn build_lambda_state_machine(
     fid: u32,
     class_id: ClassId,
     field_base: u32,
-    orig_rets: &[Ty],
+    context: &MachineContext<'_>,
     captured_scopes: Option<SuspensionScopes>,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
 ) -> bool {
+    let orig_rets = context.orig_rets;
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
     };
@@ -3384,6 +3409,7 @@ fn build_lambda_state_machine(
             scope: Vec::new(),
             pending: Vec::new(),
             levels: Vec::new(),
+            current: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -3455,6 +3481,7 @@ fn build_lambda_state_machine(
         next_local: base + 3,
         loop_targets: Vec::new(),
         jump_finalizers: Vec::new(),
+        null_out_dead_spills: context.null_out_dead_spills,
         failed: false,
     };
     for (n, &s) in stmts.iter().enumerate() {
@@ -3751,6 +3778,9 @@ struct Flat<'a> {
     /// is the number of loop frames active on entry to the protected region; a jump to an older frame
     /// exits that region. The saved handler is the enclosing handler under which cleanup executes.
     jump_finalizers: Vec<(usize, ExprId, Option<usize>)>,
+    /// Whether the stdlib declares the exact public static
+    /// `SpillingKt.nullOutSpilledVariable(Object): Object` probe.
+    null_out_dead_spills: bool,
     failed: bool,
 }
 
@@ -3801,16 +3831,28 @@ impl Flat<'_> {
     }
     /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
     /// in-scope vars at per-kind positions; different states reuse the same fields).
-    fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)]) {
+    fn spill_scope(&mut self, out: &mut Vec<ExprId>, list: &[(u32, Ty)], dead: &HashSet<u32>) {
         for (l, ty, kind, pos) in kind_positions(list) {
             let f = 2 + self.layout.slot(kind, pos);
             // A `Unit`-typed local has no on-stack value (`gv` would underflow) — its live value across
             // the suspension is always the `Unit` singleton, so store that directly.
-            let v = if ty == Ty::obj("kotlin/Unit") {
+            let mut v = if ty == Ty::obj("kotlin/Unit") {
                 self.add(IrExpr::UnitInstance)
             } else {
                 self.gv(l)
             };
+            // kotlinc spills a reference nothing reads after the suspension through the stdlib's
+            // probe, which returns `null`: the debugger still sees the variable, and the field no
+            // longer keeps the object alive. A primitive is spilled as it is.
+            if self.null_out_dead_spills && kind == 'L' && dead.contains(&l) {
+                v = add_static_call(
+                    self.ir,
+                    "kotlin/coroutines/jvm/internal/SpillingKt",
+                    "nullOutSpilledVariable",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    vec![v],
+                );
+            }
             self.setfield(out, f, v);
         }
     }
@@ -3951,7 +3993,12 @@ impl Flat<'_> {
         if completion.semantic_bottom {
             self.ir.logical_types.remove(&point);
         }
-        self.spill_scope(out, &list);
+        let dead = self
+            .scopes
+            .get(&point)
+            .map(|scope| scope.dead.clone())
+            .unwrap_or_default();
+        self.spill_scope(out, &list, &dead);
         self.resume_points.push(point);
         if let Some(sc) = self.state_scope.get_mut(resume) {
             *sc = Some(list);
@@ -5870,73 +5917,6 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
         }
     }
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
-}
-
-/// The continuation-field type for a spilled local. A `Unit`-typed local spills as the `kotlin/Unit`
-/// object reference — a JVM field cannot carry the `void` ("V") descriptor that `Ty::Unit` produces, and
-/// the live value across the suspension is the `Unit` singleton.
-/// The per-kind spill field letter (kotlinc: references `L$`, ints `I$`, longs `J$`, …).
-fn spill_kind(ty: &Ty) -> char {
-    if ty.is_reference() {
-        'L'
-    } else {
-        match *ty {
-            Ty::Long => 'J',
-            Ty::Float => 'F',
-            Ty::Double => 'D',
-            Ty::Boolean => 'Z',
-            Ty::Char => 'C',
-            Ty::Byte => 'B',
-            Ty::Short => 'S',
-            _ => 'I',
-        }
-    }
-}
-
-/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
-/// every other spill in the order it was spilled; field layout instead groups by kind, in the
-/// first-spill order recorded by [`SpillLayout`].
-const REFERENCE_SPILL_KIND: char = 'L';
-
-/// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
-/// per-suspension positional slot).
-/// A local of the BOTTOM type (`var x = null` — `Ty::Null`) has exactly ONE possible value, so kotlinc
-/// gives it no continuation field and REMATERIALIZES it (`aconst_null; astore`) in every resume arm.
-/// Keeping it out of the spill layout is also what keeps its verification type `null` — assignable to
-/// any reference — where restoring it from an `Object`-typed field would widen the slot and break the
-/// next typed use of it (`bar(x: String?, …)` → "Bad type on operand stack").
-fn is_rematerialized_null(ty: &Ty) -> bool {
-    matches!(ty.non_null(), Ty::Null)
-}
-
-/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
-fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
-    list.iter()
-        .filter(|(_, t)| is_rematerialized_null(t))
-        .map(|&(l, _)| l)
-        .collect()
-}
-
-fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
-    let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-    list.iter()
-        .filter(|(_, ty)| !is_rematerialized_null(ty))
-        .map(|&(l, ty)| {
-            let k = spill_kind(&ty);
-            let c = counts.entry(k).or_insert(0);
-            let pos = *c;
-            *c += 1;
-            (l, ty, k, pos)
-        })
-        .collect()
-}
-
-fn spill_field_ty(ty: Ty) -> Ty {
-    if ty == Ty::Unit {
-        Ty::obj("kotlin/Unit")
-    } else {
-        ty
-    }
 }
 
 /// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind

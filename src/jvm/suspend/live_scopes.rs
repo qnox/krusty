@@ -31,6 +31,9 @@ pub(super) struct ScopeWalk<'a> {
     /// the complementary pass run over the FINAL body (see [`live_temp_scopes`]). The default (false)
     /// snapshots the parameter prefix plus the NAMED locals in scope.
     pub(super) temps_only: bool,
+    /// The statements (and trailing block values) enclosing the current walk point, outermost first:
+    /// what still runs after a suspension inside them is part of them, not of `pending`.
+    pub(super) current: Vec<ExprId>,
     pub(super) out: SuspensionScopes,
 }
 
@@ -52,15 +55,17 @@ pub(super) fn live_temp_scopes(
         pending: Vec::new(),
         levels: Vec::new(),
         temps_only: true,
+        current: Vec::new(),
         out: Default::default(),
     };
     w.walk(body);
     w.out
 }
 
-/// Append each suspension's live temps to its captured scope list. Only suspensions the capture
-/// already knows are extended: a list's PARAMETER prefix comes from the capture, and a state whose
-/// restores would silently lose it must keep behaving as before.
+/// Append each suspension's live temps to its captured scope list, and take the final body's
+/// dead set. Only suspensions the capture already knows are extended: a list's PARAMETER prefix
+/// comes from the capture, and a state whose restores would silently lose it must keep behaving as
+/// before.
 pub(super) fn merge_live_temps(scopes: &mut SuspensionScopes, temps: SuspensionScopes) {
     for (call, temp_scope) in temps {
         let Some(scope) = scopes.get_mut(&call) else {
@@ -71,6 +76,7 @@ pub(super) fn merge_live_temps(scopes: &mut SuspensionScopes, temps: SuspensionS
                 scope.values.push(entry);
             }
         }
+        scope.dead = temp_scope.dead;
     }
 }
 
@@ -143,6 +149,7 @@ impl ScopeWalk<'_> {
                 self.params.to_vec()
             },
             names: std::collections::HashMap::new(),
+            dead: HashSet::new(),
         };
         // NAMED vars spill by SCOPE (kotlinc's rule) — every splice-materialization local kotlinc
         // names is emitted `named` at its lowering site, so scope and liveness agree for them.
@@ -171,6 +178,17 @@ impl ScopeWalk<'_> {
             })
             .map(|e| (e.slot, e.ty, e.name.clone()))
             .collect();
+        // Deadness is read off the FINAL body, where every suspension is its own statement and what
+        // follows it is exactly `pending`; the pre-splice body still nests the rest of a function
+        // inside the statement that holds the suspension.
+        if self.temps_only {
+            snapshot.dead = self
+                .scope
+                .iter()
+                .map(|entry| entry.slot)
+                .filter(|&slot| self.untouched_after(slot, call))
+                .collect();
+        }
         for (slot, ty, name) in live {
             snapshot.values.push((slot, ty));
             if let Some(name) = name {
@@ -185,13 +203,30 @@ impl ScopeWalk<'_> {
     fn pending_reads(&self, slot: u32) -> bool {
         pending_reads_after(self.ir, &self.pending, &self.levels, slot, self.suspend_set)
     }
+    /// Whether nothing that may still execute reads or writes `slot`. A write counts: assigning a
+    /// captured `var` goes through the reference cell the local holds, so the cell stays live. The
+    /// statements enclosing the suspension `call` count too, all but the call itself, whose receiver
+    /// and arguments are evaluated before it suspends.
+    fn untouched_after(&self, slot: u32, call: ExprId) -> bool {
+        !self.pending_reads(slot)
+            && !self
+                .pending
+                .iter()
+                .any(|&expression| touches_outside(self.ir, expression, None, slot))
+            && !self
+                .current
+                .iter()
+                .any(|&statement| touches_outside(self.ir, statement, Some(call), slot))
+    }
     pub(super) fn walk_stmts(&mut self, stmts: &[ExprId]) {
         let base = self.scope.len();
         for (i, &st) in stmts.iter().enumerate() {
             let pbase = self.pending.len();
             self.pending.extend_from_slice(&stmts[i + 1..]);
             self.levels.push(pbase);
+            self.current.push(st);
             self.walk(st);
+            self.current.pop();
             self.levels.pop();
             self.pending.truncate(pbase);
             self.push_decl(st);
@@ -220,7 +255,9 @@ impl ScopeWalk<'_> {
                     for &st in &stmts {
                         self.push_decl(st);
                     }
+                    self.current.push(v);
                     self.walk(v);
+                    self.current.pop();
                 } else {
                     self.walk_stmts(&stmts);
                 }
@@ -305,4 +342,24 @@ impl ScopeWalk<'_> {
             }
         }
     }
+}
+
+/// Whether `expression` reads or writes `slot` anywhere outside the subtree rooted at `skip`.
+fn touches_outside(ir: &IrFile, expression: ExprId, skip: Option<ExprId>, slot: u32) -> bool {
+    if Some(expression) == skip {
+        return false;
+    }
+    match ir.exprs[expression as usize] {
+        IrExpr::GetValue(read) if read == slot => return true,
+        IrExpr::Variable { index, .. } if index == slot => return true,
+        IrExpr::SetValue { var, .. } if var == slot => return true,
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, expression, &mut |child| {
+        if !found && touches_outside(ir, child, skip, slot) {
+            found = true;
+        }
+    });
+    found
 }

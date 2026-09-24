@@ -164,12 +164,15 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    let null_out_dead_spills =
+        crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(
         ir,
         facade,
         &mut facts.continuation_metadata,
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
+        null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
     }
