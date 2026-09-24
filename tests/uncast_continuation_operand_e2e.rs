@@ -88,11 +88,17 @@ fn a_jvm_static_suspend_call_keeps_its_recorded_continuation_uncast() {
     const LIBRARY: &str = "package boundary\n\
         object StaticSuspendBoundary {\n\
         \x20   @JvmStatic suspend fun step(value: Int): Int = value\n\
-        }\n";
+        }\n\
+        suspend fun String.extensionStep(value: Int): Int = value + length\n";
     const CALLER: &str = "import boundary.StaticSuspendBoundary\n\
+        import boundary.extensionStep\n\
         suspend fun twiceStatic(): Int {\n\
         \x20   val first = StaticSuspendBoundary.step(3)\n\
         \x20   return first + StaticSuspendBoundary.step(4)\n\
+        }\n\
+        suspend fun String.twiceExtension(): Int {\n\
+        \x20   val first = extensionStep(3)\n\
+        \x20   return first + extensionStep(4)\n\
         }\n";
     let Some(library) = common::compile_lib("uncast-jvm-static-boundary", LIBRARY) else {
         return;
@@ -119,4 +125,27 @@ fn a_jvm_static_suspend_call_keeps_its_recorded_continuation_uncast() {
     );
     assert_eq!(continuation_casts(&built.reference, member), 0, "kotlinc");
     assert_eq!(continuation_casts(&built.krusty, member), 0, "krusty");
+
+    // A classpath extension is selected with its receiver separate from checked arguments, but its
+    // static descriptor physically prepends that receiver. The recorded continuation index must be
+    // interpreted after that one non-argument operand.
+    let extension_member = "java.lang.Object twiceExtension(";
+    assert!(
+        !method_instructions(&built.reference, extension_member).is_empty(),
+        "kotlinc: {extension_member} not found"
+    );
+    assert!(
+        !method_instructions(&built.krusty, extension_member).is_empty(),
+        "krusty: {extension_member} not found"
+    );
+    assert_eq!(
+        continuation_casts(&built.reference, extension_member),
+        0,
+        "kotlinc"
+    );
+    assert_eq!(
+        continuation_casts(&built.krusty, extension_member),
+        0,
+        "krusty"
+    );
 }
