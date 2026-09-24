@@ -3954,10 +3954,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter or `val` is read again after the guard; any other operand is duplicated.
   The message renders the target as kotlinc's IR renderer does (`kotlin.collections.Map<kotlin.
   String, kotlin.Int?>`, `kotlin.Array<out kotlin.String>`, `kotlin.Comparable<*>`,
-  `kotlin.Function0<kotlin.Unit>`). Every cast then writes a `checkcast` unless the operand already
-  has exactly the target's JVM type, so `as Any` from a narrower type keeps `checkcast
-  java/lang/Object` (`tests/unboxing_coercion_e2e.rs`). Not yet matched: a type parameter is named
-  without its container (`T of p.FileKt.f`).
+  `kotlin.Function0<kotlin.Unit>`, `T of p.FileKt.f`). Every cast then writes a `checkcast` unless
+  the operand already has exactly the target's JVM type, so `as Any` from a narrower type keeps
+  `checkcast java/lang/Object` (`tests/unboxing_coercion_e2e.rs`).
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a

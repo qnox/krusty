@@ -21,17 +21,19 @@ use super::common;
 fn unboxing_and_casts_match_kotlinc_byte_for_byte() {
     let source = r#"
         package u
-        fun first(l: List<Int>): Int = l[0]
+        interface Payload<T> { fun value(): T }
+        class Stored<T>(private val item: T) : Payload<T> { override fun value(): T = item }
+        fun first(v: Payload<Int>): Int = v.value()
         fun cast(a: Any): Int = a as Int
         fun str(a: Any?): String = a as String
-        fun flag(m: Map<String, Boolean>): Boolean = m.getValue("k")
-        fun ch(l: List<Char>): Char = l[0]
-        fun wide(l: List<Long>): Long = l[0]
+        fun flag(v: Payload<Boolean>): Boolean = v.value()
+        fun ch(v: Payload<Char>): Char = v.value()
+        fun wide(v: Payload<Long>): Long = v.value()
         fun arr(a: Array<Int>): Int = a[0]
         fun call(f: (Int) -> Double): Double = f(1)
         fun box(): String {
-            val ok = first(listOf(1)) == 1 && cast(2) == 2 && str("s") == "s" &&
-                flag(mapOf("k" to true)) && ch(listOf('c')) == 'c' && wide(listOf(3L)) == 3L &&
+            val ok = first(Stored(1)) == 1 && cast(2) == 2 && str("s") == "s" &&
+                flag(Stored(true)) && ch(Stored('c')) == 'c' && wide(Stored(3L)) == 3L &&
                 arr(arrayOf(4)) == 4 && call { it.toDouble() } == 1.0
             return if (ok) "OK" else "fail"
         }
@@ -40,12 +42,13 @@ fn unboxing_and_casts_match_kotlinc_byte_for_byte() {
     assert_eq!(result.as_deref(), Some("OK"));
     let checked = r#"
         package u
-        fun first(l: List<Int>): Int = l[0]
+        interface Payload<T> { fun value(): T }
+        fun first(v: Payload<Int>): Int = v.value()
         fun cast(a: Any): Int = a as Int
         fun str(a: Any?): String = a as String
-        fun flag(m: Map<String, Boolean>): Boolean = m.getValue("k")
-        fun ch(l: List<Char>): Char = l[0]
-        fun wide(l: List<Long>): Long = l[0]
+        fun flag(v: Payload<Boolean>): Boolean = v.value()
+        fun ch(v: Payload<Char>): Char = v.value()
+        fun wide(v: Payload<Long>): Long = v.value()
         fun arr(a: Array<Int>): Int = a[0]
         fun call(f: (Int) -> Double): Double = f(1)
         abstract class A { abstract val x: Any }
@@ -57,8 +60,20 @@ fn unboxing_and_casts_match_kotlinc_byte_for_byte() {
         fun fresh(): Any { val v = P(); return v as Any }
         fun asserted(a: A?) = a!! as Any
         fun twice(a: A) = (a.x as CharSequence) as String
-        fun generic(a: Any?) = a as Map<String, List<Int?>>
-        fun projected(a: Any?) = a as Array<out Comparable<*>>
+        class Envelope<A, B>
+        fun generic(a: Any?) = a as Envelope<String, Envelope<Int?, *>>
+        fun projected(a: Any?) = a as Envelope<out String, *>
+        fun <T : Any> parameterized(a: Any?) = a as T
+        fun deep(a: Any): String {
+            val a1 = a; val a2 = a1; val a3 = a2; val a4 = a3; val a5 = a4
+            val a6 = a5; val a7 = a6; val a8 = a7; val a9 = a8
+            return a9 as String
+        }
+        fun merged(flag: Boolean): String {
+            var value: Any = "initial"
+            if (flag) value = "left" else value = "right"
+            return value as String
+        }
         fun useUnasserted() = unasserted("")
     "#;
     match common::byte_diff_against_kotlinc_cp(
@@ -95,14 +110,23 @@ fn a_cast_of_a_non_null_property_read_before_initialization_throws() {
 }
 
 #[test]
-fn a_failed_cast_of_a_null_variable_names_the_target_type() {
+fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
     let source = r#"
-        fun str(a: Any?): String = a as String
+        fun int(a: Any?): Int = a as Int
+        fun <T : Any> generic(a: Any?): T = a as T
         fun box(): String = try {
-            str(null)
-            "fail: no exception"
+            int(null)
+            "fail: primitive cast did not throw"
         } catch (e: NullPointerException) {
-            if (e.message == "null cannot be cast to non-null type kotlin.String") "OK" else e.message!!
+            if (e.message != "null cannot be cast to non-null type kotlin.Int") e.message!! else
+                try {
+                    generic<String>(null)
+                    "fail: type-parameter cast did not throw"
+                } catch (nested: NullPointerException) {
+                    if (nested.message == "null cannot be cast to non-null type T of NullCastKt.generic")
+                        "OK"
+                    else nested.message!!
+                }
         }
     "#;
     assert_eq!(
