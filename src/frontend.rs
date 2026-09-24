@@ -8,9 +8,11 @@ use crate::features::LangFeatures;
 pub use crate::fir::DeclarationId as FrontendDeclarationId;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
+use crate::plugins::registry::NativePlugins;
 
 mod header_validation;
 mod inline_preparation;
+mod local_class_names;
 mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
@@ -82,7 +84,6 @@ pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
     text: Box<str>,
-    file_stem: Option<Box<str>>,
     features: LangFeatures,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
@@ -112,13 +113,10 @@ impl ReparseSource {
             &self.features,
             |mut file, diags| {
                 file.is_common = self.is_common;
-                if let Some(stem) = self.file_stem.as_deref() {
-                    name_anonymous_classes_with_counters(
-                        &mut file,
-                        &format!("{stem}Kt"),
-                        &mut anonymous_counters,
-                    );
-                }
+                record_local_class_name_provenance_with_counters(
+                    &mut file,
+                    &mut anonymous_counters,
+                );
                 visit(file, diags);
             },
         );
@@ -448,84 +446,87 @@ fn inherit_override_default_work(
         .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
         .map(|stub| stub.id)
         .collect::<Vec<_>>();
+    let overrides = classifiers
+        .iter()
+        .flat_map(|classifier| index.function_overrides(*classifier))
+        .cloned()
+        .collect::<Vec<_>>();
     loop {
         let providers = work
             .iter()
             .map(|item| (item.target, item.provider))
             .collect::<std::collections::HashMap<_, _>>();
         let mut additions = Vec::new();
-        for classifier in &classifiers {
-            for edge in index.function_overrides(*classifier) {
-                let (
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(overridden),
-                ) = (edge.implementation, edge.overridden)
-                else {
-                    continue;
-                };
-                let Some(target) = index
-                    .callable(implementation)
-                    .map(|callable| callable.declaration)
-                else {
-                    continue;
-                };
-                if providers.contains_key(&target)
-                    || additions
-                        .iter()
-                        .any(|item: &crate::fir::DefaultArgumentProvider| item.target == target)
-                {
-                    continue;
-                }
-                let Some(overridden) = index
-                    .callable(overridden)
-                    .map(|callable| callable.declaration)
-                else {
-                    continue;
-                };
-                let Some(provider) = providers.get(&overridden).copied() else {
-                    continue;
-                };
-                let defaults = match headers
-                    .syntax
-                    .declaration(provider)
-                    .map(|declaration| declaration.kind)
-                {
-                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                        headers
-                            .syntax
-                            .parameters(parameters)
-                            .iter()
-                            .map(|parameter| parameter.flags.has_default())
-                            .collect::<Vec<_>>()
-                    }
-                    _ => continue,
-                };
-                let target_parameters = match headers
-                    .syntax
-                    .declaration(target)
-                    .map(|declaration| declaration.kind)
-                {
-                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                        parameters
-                    }
-                    _ => continue,
-                };
-                if defaults.len() != headers.syntax.parameters(target_parameters).len()
-                    || !defaults.iter().any(|default| *default)
-                {
-                    continue;
-                }
-                headers
-                    .syntax
-                    .set_parameter_defaults(target_parameters, &defaults);
-                additions.push(crate::fir::DefaultArgumentProvider {
-                    target,
-                    provider,
-                    relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
-                });
+        for edge in &overrides {
+            let (
+                crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(overridden),
+            ) = (edge.implementation, edge.overridden)
+            else {
+                continue;
+            };
+            let Some(target) = index
+                .callable(implementation)
+                .map(|callable| callable.declaration)
+            else {
+                continue;
+            };
+            if providers.contains_key(&target)
+                || additions
+                    .iter()
+                    .any(|item: &crate::fir::DefaultArgumentProvider| item.target == target)
+            {
+                continue;
             }
+            let Some(overridden) = index
+                .callable(overridden)
+                .map(|callable| callable.declaration)
+            else {
+                continue;
+            };
+            let Some(provider) = providers.get(&overridden).copied() else {
+                continue;
+            };
+            let defaults = match headers
+                .syntax
+                .declaration(provider)
+                .map(|declaration| declaration.kind)
+            {
+                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                    headers
+                        .syntax
+                        .parameters(parameters)
+                        .iter()
+                        .map(|parameter| parameter.flags.has_default())
+                        .collect::<Vec<_>>()
+                }
+                _ => continue,
+            };
+            let target_parameters = match headers
+                .syntax
+                .declaration(target)
+                .map(|declaration| declaration.kind)
+            {
+                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                    parameters
+                }
+                _ => continue,
+            };
+            if defaults.len() != headers.syntax.parameters(target_parameters).len()
+                || !defaults.iter().any(|default| *default)
+            {
+                continue;
+            }
+            headers
+                .syntax
+                .set_parameter_defaults(target_parameters, &defaults);
+            additions.push(crate::fir::DefaultArgumentProvider {
+                target,
+                provider,
+                relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
+            });
         }
         if additions.is_empty() {
             break;
@@ -605,7 +606,9 @@ pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<FrontendNameToken
 /// Lex and parse one source string after reading language-feature directives from the source.
 pub fn parse_source_with_detected_features(src: &str, diags: &mut DiagSink) -> File {
     let features = LangFeatures::from_source(src);
-    parse_source(src, &features, diags)
+    let mut file = parse_source(src, &features, diags);
+    record_local_class_name_provenance(&mut file);
+    file
 }
 
 /// Analyze a source set with project-wide and per-source language features.
@@ -629,16 +632,37 @@ pub fn analyze_source_set_with_features(
     )
 }
 
-/// A platform provider is either fully constructed or a terminal initialization diagnostic. The
-/// failed state does not implement symbol lookup and therefore cannot leak dependency corruption as
+/// What a source set is analyzed against: the semantic platform and the native compiler plugins the
+/// compilation runs.
+///
+/// The platform is either fully constructed or a terminal initialization diagnostic. The failed
+/// state does not implement symbol lookup and therefore cannot leak dependency corruption as
 /// ordinary absence before the frontend reports it.
-pub struct PlatformProvider(
-    Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
-);
+///
+/// No native plugin runs unless the driver selects one with [`PlatformProvider::with_native_plugins`]
+/// (the CLI from kotlinc's `-Xplugin`/`-P` switches): kotlinc synthesizes nothing for a plugin it was
+/// not given, so a `@Serializable` class gets no serializer without the serialization plugin.
+pub struct PlatformProvider {
+    platform: Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
+    native_plugins: NativePlugins,
+}
+
+impl PlatformProvider {
+    /// Run `native_plugins` in this analysis and in the emission that consumes it.
+    pub fn with_native_plugins(self, native_plugins: NativePlugins) -> Self {
+        Self {
+            native_plugins,
+            ..self
+        }
+    }
+}
 
 impl From<Box<dyn SemanticPlatform>> for PlatformProvider {
     fn from(platform: Box<dyn SemanticPlatform>) -> Self {
-        Self(Ok(platform))
+        Self {
+            platform: Ok(platform),
+            native_plugins: NativePlugins::none(),
+        }
     }
 }
 
@@ -647,7 +671,7 @@ where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Box<T>) -> Self {
-        Self(Ok(platform))
+        Self::from(platform as Box<dyn SemanticPlatform>)
     }
 }
 
@@ -656,7 +680,10 @@ where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Result<T, crate::libraries::PlatformInitializationError>) -> Self {
-        Self(platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>))
+        Self {
+            platform: platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>),
+            native_plugins: NativePlugins::none(),
+        }
     }
 }
 
@@ -852,7 +879,6 @@ where
             kind: source.kind,
             is_common: source.is_common,
             text: source.text.into(),
-            file_stem: source.file_stem.map(Into::into),
             features: features.clone(),
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
@@ -862,10 +888,10 @@ where
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
         file.is_common = source.is_common;
+        if source.kind != SourceKind::Java {
+            record_local_class_name_provenance(&mut file);
+        }
         if source.kind == SourceKind::Kotlin {
-            if let Some(stem) = source.file_stem {
-                name_anonymous_classes(&mut file, &format!("{stem}Kt"));
-            }
             header_validation::validate(&file, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
@@ -904,7 +930,7 @@ where
             (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
                 .then_some(&file),
         );
-        if let Some((source, stubs)) = extracted {
+        if let Some((source, stubs, stable_by_transient)) = extracted {
             source_contracts.extend(crate::resolve::extract_source_contract_candidates(
                 &file, source, &stubs,
             ));
@@ -922,7 +948,11 @@ where
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(
+                &file,
+                &stubs,
+                &stable_by_transient,
+            ));
             if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
@@ -938,7 +968,11 @@ where
                 }
             }
         } else {
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &[]));
+            // A declaration-only support source intentionally contributes no compact header
+            // inventory. Its transient local classifiers are body-owned and likewise publish no
+            // Pass-1 context; later phases must not fabricate stable identities for declarations
+            // excluded at this boundary.
+            local_class_contexts.push(crate::resolve::PassOneLocalClassContext::default());
         }
         files.push(file);
     }
@@ -973,12 +1007,16 @@ where
         .map(
             |(source, input)| crate::libraries::PlatformSourceHeaderInput {
                 source,
-                file_stem: input.file_stem,
                 text: input.text,
+                file_stem: input.file_stem,
             },
         )
         .collect::<Vec<_>>();
-    let platform = match platform.0 {
+    let PlatformProvider {
+        platform,
+        native_plugins,
+    } = platform;
+    let platform = match platform {
         Ok(platform) => platform,
         Err(error) => {
             diags.set_file(0);
@@ -1092,8 +1130,12 @@ where
     };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
-        let mut dependency_symbols =
-            collect_signatures_with_cp(&files[inferred_count..], platform, &mut dependency_diags);
+        let mut dependency_symbols = crate::resolve::collect_signatures_with_cp_and_plugins(
+            &files[inferred_count..],
+            platform,
+            native_plugins.clone(),
+            &mut dependency_diags,
+        );
         dependency_symbols.offset_source_files(inferred_count as u32);
         let platform = std::mem::replace(
             &mut dependency_symbols.libraries,
@@ -1117,6 +1159,7 @@ where
         &pass1_headers,
         &local_class_contexts[..inferred_end],
         platform,
+        native_plugins,
         diags,
     );
     if multiplatform {
@@ -1235,6 +1278,7 @@ where
             &mut index,
             std::mem::take(&mut signature_default_work_items),
             &files[..inferred_end],
+            &local_class_contexts[..inferred_end],
             &parse_errors,
             checked_count,
             &mut symbols,
@@ -1328,6 +1372,7 @@ where
                 bodies,
                 default_arguments,
                 &mut files,
+                &local_class_contexts,
                 &parse_errors,
                 checked_count,
                 &mut symbols,
@@ -1446,276 +1491,22 @@ pub fn analyze_source_standalone(
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
-/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to
-/// kotlinc's enclosing-scoped spelling (`P2$Companion$build$1`): the innermost enclosing FUNCTION
-/// body (a member's or a top-level one) names the scope, with a per-scope 1-based ordinal in
-/// source order. Must run BEFORE checking — the checker records these internals in every type it
-/// hands the backend. A construction outside a function uses its innermost enclosing classifier, or
-/// the file facade at top level. No parse-time placeholder may survive as semantic identity: offsets
-/// repeat across files and would make unrelated anonymous classifiers overwrite one another.
-pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
+/// Record local-class source ownership and ordering without choosing a target spelling.
+pub fn record_local_class_name_provenance(file: &mut crate::ast::File) {
     let mut counters = std::collections::HashMap::new();
-    name_anonymous_classes_with_counters(file, facade_simple, &mut counters);
+    record_local_class_name_provenance_with_counters(file, &mut counters);
 }
 
-/// The sequence a function's generated classes are numbered in: `<owner>$<function>`.
-///
-/// One site formats it. Both the anonymous-object naming below and the continuation reservations
-/// beside it must agree on the sequence, and they can only agree by construction.
-fn function_scope(owner: &str, function: &str) -> String {
-    format!("{owner}${function}")
-}
-
-/// A classifier's nesting chain as one scope segment (`Outer.Inner` is one owner, not two).
-fn classifier_scope_chain(name: &str) -> String {
-    name.replace('.', "$")
-}
-
-fn name_anonymous_classes_with_counters(
+fn record_local_class_name_provenance_with_counters(
     file: &mut crate::ast::File,
-    facade_simple: &str,
-    counters: &mut std::collections::HashMap<String, u32>,
+    counters: &mut std::collections::HashMap<Vec<String>, u32>,
 ) {
-    use crate::ast::{Decl, Expr};
-    let mut reserved = suspend_continuation_reservations(file, facade_simple);
-    let mut continuation_ordinals = std::collections::HashMap::new();
-    let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
-        .anonymous_object_classes
-        .iter()
-        .map(|(&construction, &decl)| (construction, decl))
-        .collect();
-    anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
-    for (construction, decl) in anons {
-        let span = file.expr_spans[construction.0 as usize];
-        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
-        for &candidate in &file.decls {
-            match file.decl(candidate) {
-                Decl::Fun(function) => {
-                    if function.span.lo <= span.lo && span.hi <= function.span.hi {
-                        let size = function.span.hi - function.span.lo;
-                        if best
-                            .as_ref()
-                            .is_none_or(|(smallest, _, _)| size < *smallest)
-                        {
-                            best = Some((
-                                size,
-                                function_scope(facade_simple, &function.name),
-                                crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
-                            ));
-                        }
-                    }
-                }
-                Decl::Class(class) => {
-                    if candidate == decl {
-                        continue;
-                    }
-                    let chain = classifier_scope_chain(&class.name);
-                    for (method_index, method) in class.methods.iter().enumerate() {
-                        if method.span.lo <= span.lo && span.hi <= method.span.hi {
-                            let size = method.span.hi - method.span.lo;
-                            if best
-                                .as_ref()
-                                .is_none_or(|(smallest, _, _)| size < *smallest)
-                            {
-                                best = Some((
-                                    size,
-                                    function_scope(&chain, &method.name),
-                                    crate::ast::AnonymousEnclosingFunction::Member {
-                                        class: candidate,
-                                        method: method_index as u32,
-                                    },
-                                ));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let (scope, enclosing) = match best {
-            Some((_, scope, enclosing)) => (scope, Some(enclosing)),
-            None => {
-                let classifier_scope = file
-                    .decls
-                    .iter()
-                    .filter_map(|&candidate| match file.decl(candidate) {
-                        Decl::Class(class)
-                            if candidate != decl
-                                && class.span.lo <= span.lo
-                                && span.hi <= class.span.hi =>
-                        {
-                            Some((
-                                class.span.hi - class.span.lo,
-                                classifier_scope_chain(&class.name),
-                            ))
-                        }
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    })
-                    .min_by_key(|(size, _)| *size)
-                    .map(|(_, scope)| scope)
-                    .unwrap_or_else(|| facade_simple.to_string());
-                (classifier_scope, None)
-            }
-        };
-        if let Some(enclosing) = enclosing {
-            file.anonymous_object_enclosing_functions
-                .insert(decl, enclosing);
-        }
-        take_continuation_reservations(
-            &mut reserved,
-            counters,
-            &mut continuation_ordinals,
-            &scope,
-            span.lo,
-        );
-        let ordinal = counters.entry(scope.clone()).or_insert(0);
-        *ordinal += 1;
-        let fresh = format!("{scope}${ordinal}");
-        let Expr::Call { callee, .. } = file.expr(construction) else {
-            continue;
-        };
-        let callee = *callee;
-        let old = match file.decl(decl) {
-            Decl::Class(class) => class.name.clone(),
-            Decl::Fun(_) | Decl::Property(_) => continue,
-        };
-        let declarations = file.decls.clone();
-        let class_ownership = declarations
-            .iter()
-            .filter_map(|declaration| match file.decl(*declaration) {
-                Decl::Class(class) => Some((class.name.clone(), class.inner_of.clone())),
-                Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let mut renamed = std::collections::HashMap::from([(old.clone(), fresh.clone())]);
-        for _ in 0..class_ownership.len() {
-            let mut changed = false;
-            for (name, owner) in &class_ownership {
-                if renamed.contains_key(name) {
-                    continue;
-                }
-                let Some(owner) = owner else { continue };
-                let Some(new_owner) = renamed.get(owner) else {
-                    continue;
-                };
-                let simple = name.rsplit('.').next().unwrap_or(name);
-                renamed.insert(name.clone(), format!("{new_owner}.{simple}"));
-                changed = true;
-            }
-            if !changed {
-                break;
-            }
-        }
-        for declaration in declarations {
-            let Decl::Class(class) = file.decl_mut(declaration) else {
-                continue;
-            };
-            if let Some(name) = renamed.get(&class.name) {
-                class.name = name.clone();
-            }
-            if let Some(owner) = class.inner_of.as_mut() {
-                if let Some(name) = renamed.get(owner) {
-                    *owner = name.clone();
-                }
-            }
-        }
-        if let Expr::Name(name) = &mut file.expr_arena[callee.0 as usize] {
-            *name = fresh;
-        }
-    }
-    // A suspend function declared after the last anonymous object of its scope still holds its
-    // ordinal: a later declaration unit carrying a same-named overload must not reuse it.
-    for (scope, held) in reserved {
-        let counter = counters.entry(scope).or_insert(0);
-        for (_, function) in held {
-            *counter += 1;
-            continuation_ordinals.insert(function, *counter);
-        }
-    }
+    let invented = local_class_names::invent(file, counters);
+    file.local_class_name_provenance.extend(invented.classes);
+    file.anonymous_object_enclosing_functions
+        .extend(invented.anonymous_enclosing_functions);
     file.suspend_continuation_ordinals
-        .extend(continuation_ordinals);
-}
-
-/// Each scope's suspend functions, in declaration order, with the exact declaration that holds
-/// each reservation.
-///
-/// The reference compiler gives a suspend function's continuation class the next ordinal in its
-/// scope's `$N` sequence, ahead of every anonymous object the body declares. The reservation is
-/// made for the `suspend` modifier alone: a function that never reaches a suspension point emits
-/// no continuation class and still holds the ordinal.
-///
-/// The declaration travels with the offset so the ordinal this pass spends can be published as a
-/// fact about that declaration. Nothing downstream re-derives it.
-fn suspend_continuation_reservations(
-    file: &crate::ast::File,
-    facade_simple: &str,
-) -> std::collections::HashMap<String, Vec<(u32, crate::ast::AnonymousEnclosingFunction)>> {
-    use crate::ast::{AnonymousEnclosingFunction, Decl};
-    let mut reservations: std::collections::HashMap<
-        String,
-        Vec<(u32, AnonymousEnclosingFunction)>,
-    > = std::collections::HashMap::new();
-    for &candidate in &file.decls {
-        match file.decl(candidate) {
-            Decl::Fun(function) if function.is_suspend() => reservations
-                .entry(function_scope(facade_simple, &function.name))
-                .or_default()
-                .push((
-                    function.span.lo,
-                    AnonymousEnclosingFunction::TopLevel(candidate),
-                )),
-            Decl::Class(class) => {
-                let chain = classifier_scope_chain(&class.name);
-                for (index, method) in class.methods.iter().enumerate() {
-                    if !method.is_suspend() {
-                        continue;
-                    }
-                    reservations
-                        .entry(function_scope(&chain, &method.name))
-                        .or_default()
-                        .push((
-                            method.span.lo,
-                            AnonymousEnclosingFunction::Member {
-                                class: candidate,
-                                method: index as u32,
-                            },
-                        ));
-                }
-            }
-            Decl::Fun(_) | Decl::Property(_) => {}
-        }
-    }
-    for held in reservations.values_mut() {
-        held.sort_unstable_by_key(|(start, _)| *start);
-    }
-    reservations
-}
-
-/// Spend the ordinals held by the suspend functions of `scope` that open at or before `offset` —
-/// every one whose continuation the reference compiler names before an object declared there —
-/// recording which ordinal each one took.
-fn take_continuation_reservations(
-    reserved: &mut std::collections::HashMap<
-        String,
-        Vec<(u32, crate::ast::AnonymousEnclosingFunction)>,
-    >,
-    counters: &mut std::collections::HashMap<String, u32>,
-    ordinals: &mut std::collections::HashMap<crate::ast::AnonymousEnclosingFunction, u32>,
-    scope: &str,
-    offset: u32,
-) {
-    let Some(held) = reserved.get_mut(scope) else {
-        return;
-    };
-    let spent = held.partition_point(|(start, _)| *start <= offset);
-    if spent == 0 {
-        return;
-    }
-    let counter = counters.entry(scope.to_string()).or_insert(0);
-    for (_, function) in held.drain(..spent) {
-        *counter += 1;
-        ordinals.insert(function, *counter);
-    }
+        .extend(invented.continuations);
 }
 
 #[cfg(test)]

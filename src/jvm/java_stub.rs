@@ -70,18 +70,17 @@ pub fn stub_classes(
         })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
-    // This parser-owned graph is the only authority for lexical nesting. Walking encoded names by
-    // splitting `$` would make a legal `$` inside an identifier look like an enclosing declaration.
-    let declaration_outers = parsed
-        .iter()
-        .flat_map(|(_, declarations)| declarations)
-        .map(|declaration| {
-            (
-                declaration.internal.as_str(),
-                declaration.outer_internal.as_deref(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    // This parser-owned graph is the only authority for lexical nesting and the type parameters
+    // visible through it. Walking encoded names by splitting `$` would make a legal `$` inside an
+    // identifier look like an enclosing declaration.
+    let mut declarations_by_internal = HashMap::new();
+    for declaration in parsed.iter().flat_map(|(_, declarations)| declarations) {
+        // Emission keeps the first declaration for a duplicate internal name. Lexical-owner and
+        // type-variable lookup must consult that same declaration rather than a later duplicate.
+        declarations_by_internal
+            .entry(declaration.internal.as_str())
+            .or_insert(declaration);
+    }
     let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
@@ -98,9 +97,10 @@ pub fn stub_classes(
                 resolve: &resolve_all,
                 mode,
                 owner: Some(raw.internal.as_str()),
-                declaration_outers: &declaration_outers,
+                declarations_by_internal: &declarations_by_internal,
             };
-            match r.emit(raw) {
+            let type_variables = TypeVariables::for_declaration(raw, &declarations_by_internal);
+            match r.emit(raw, &type_variables) {
                 Some(bytes) => out.push((raw.internal.clone(), bytes)),
                 None if mode.is_lenient() => continue,
                 None => return None,
@@ -117,9 +117,90 @@ struct Resolver<'a> {
     /// Internal name of the declaration being emitted — member types of the enclosing chain
     /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
     owner: Option<&'a str>,
-    /// Parsed internal name → syntactic enclosing declaration. This is intentionally distinct from
-    /// the encoded `$` spelling, which is ambiguous for legal Java identifiers containing `$`.
-    declaration_outers: &'a HashMap<&'a str, Option<&'a str>>,
+    /// Parsed internal name → declaration. This supplies both the syntactic enclosing edge and the
+    /// enclosing type-parameter scope without interpreting the encoded JVM spelling.
+    declarations_by_internal: &'a HashMap<&'a str, &'a RawDecl>,
+}
+
+/// Type variables in scope at one source position: the class's, then a member's own. Each level is
+/// a declaration's type-parameter list with its leftmost bounds, so a bound is read in the scope
+/// that declares it (a method `<T>` does not capture the `T` in a class parameter's bound).
+#[derive(Clone)]
+struct TypeVariables<'a> {
+    levels: Vec<&'a [(String, Option<SrcType>)]>,
+}
+
+/// Stable identity of a type parameter within one lexical type-variable scope.
+///
+/// Source spelling is insufficient: an inner declaration or member may shadow an enclosing type
+/// parameter while referring to it indirectly through another parameter's bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScopedTypeVariable {
+    level: usize,
+    index: usize,
+}
+
+impl<'a> TypeVariables<'a> {
+    fn for_declaration(
+        declaration: &'a RawDecl,
+        declarations: &HashMap<&str, &'a RawDecl>,
+    ) -> Self {
+        let mut levels = Vec::new();
+        let mut current = declaration;
+        loop {
+            levels.push(current.tparams.as_slice());
+            if current.outer_internal.is_none()
+                || semantic_declaration_access(current) & ACC_STATIC != 0
+            {
+                break;
+            }
+            let Some(outer) = current
+                .outer_internal
+                .as_deref()
+                .and_then(|internal| declarations.get(internal).copied())
+            else {
+                break;
+            };
+            current = outer;
+        }
+        levels.reverse();
+        Self { levels }
+    }
+
+    fn with<'b>(&self, declared: &'b [(String, Option<SrcType>)]) -> TypeVariables<'b>
+    where
+        'a: 'b,
+    {
+        let mut levels: Vec<&'b [(String, Option<SrcType>)]> = self.levels.clone();
+        levels.push(declared);
+        TypeVariables { levels }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.levels
+            .iter()
+            .any(|level| level.iter().any(|(declared, _)| declared == name))
+    }
+
+    /// The identity and leftmost bound of the innermost type variable `name`, with the scope it is
+    /// written in.
+    fn bound(&self, name: &str) -> Option<(ScopedTypeVariable, Option<&'a SrcType>, Self)> {
+        let level = self
+            .levels
+            .iter()
+            .rposition(|level| level.iter().any(|(declared, _)| declared == name))?;
+        let index = self.levels[level]
+            .iter()
+            .position(|(declared, _)| declared == name)?;
+        let bound = self.levels[level][index].1.as_ref();
+        Some((
+            ScopedTypeVariable { level, index },
+            bound,
+            Self {
+                levels: self.levels[..=level].to_vec(),
+            },
+        ))
+    }
 }
 
 /// The declaration flags Java assigns after applying kind-specific implicit modifiers. This is the
@@ -187,19 +268,50 @@ impl Resolver<'_> {
                 if (self.resolve)(&candidate) {
                     return Some(candidate);
                 }
-                scope = self.declaration_outers.get(current).copied().flatten();
+                scope = self
+                    .declarations_by_internal
+                    .get(current)
+                    .copied()
+                    .and_then(|declaration| declaration.outer_internal.as_deref());
             }
         }
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
-    /// Erased JVM descriptor of a source type. `None` if a reference type doesn't resolve.
-    fn desc(&self, t: &SrcType, tparams: &[&str]) -> Option<String> {
+    /// Erased JVM descriptor of a source type (JLS §4.6). `None` if a reference type doesn't
+    /// resolve.
+    fn desc(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<String> {
+        self.erased_desc(t, tparams, &mut Vec::new())
+    }
+
+    /// A type variable erases to the erasure of its leftmost bound, `Object` when it has none; a
+    /// bound that is itself a type variable is erased in turn (`<A, B extends A>` erases `B` to
+    /// `Object`). `erasing` holds the variables being expanded: javac rejects a cyclic bound.
+    fn erased_desc<'t>(
+        &self,
+        t: &'t SrcType,
+        tparams: &TypeVariables<'t>,
+        erasing: &mut Vec<ScopedTypeVariable>,
+    ) -> Option<String> {
         let mut s = "[".repeat(t.array as usize);
         if let Some(p) = primitive_desc(&t.name) {
             s.push_str(p);
-        } else if tparams.contains(&t.name.as_str()) {
-            s.push_str("Ljava/lang/Object;");
+        } else if let Some((parameter, bound, bound_scope)) = tparams.bound(&t.name) {
+            match bound {
+                None => s.push_str("Ljava/lang/Object;"),
+                Some(_) if erasing.contains(&parameter) => {
+                    if !self.mode.is_lenient() {
+                        return None;
+                    }
+                    s.push_str("Ljava/lang/Object;");
+                }
+                Some(bound) => {
+                    erasing.push(parameter);
+                    let erased = self.erased_desc(bound, &bound_scope, erasing);
+                    erasing.pop();
+                    s.push_str(&erased?);
+                }
+            }
         } else {
             match self.internal_of(&t.name) {
                 Some(i) => {
@@ -210,18 +322,33 @@ impl Resolver<'_> {
                 None if self.mode.is_lenient() => s.push_str("Ljava/lang/Object;"),
                 None => return None,
             }
-        }
-        for a in t.arguments() {
-            self.desc(a, tparams)?;
+            for a in t.arguments() {
+                self.resolves(a, tparams)?;
+            }
         }
         Some(s)
+    }
+
+    /// Whether every classifier a type argument names resolves. Erasure drops the arguments, but a
+    /// strict stub must still reject an unknown type rather than guess it.
+    fn resolves(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<()> {
+        if primitive_desc(&t.name).is_some() || tparams.contains(&t.name) {
+            return Some(());
+        }
+        if self.internal_of(&t.name).is_none() && !self.mode.is_lenient() {
+            return None;
+        }
+        for a in t.arguments() {
+            self.resolves(a, tparams)?;
+        }
+        Some(())
     }
 
     fn append_type_arguments(
         &self,
         output: &mut String,
         arguments: &[SrcType],
-        tparams: &[&str],
+        tparams: &TypeVariables<'_>,
     ) -> Option<()> {
         if arguments.is_empty() {
             return Some(());
@@ -235,13 +362,13 @@ impl Resolver<'_> {
     }
 
     /// JVM generic-`Signature` form of a source type (`LA<TE;>;`, `TE;`, `I`).
-    fn sig(&self, t: &SrcType, tparams: &[&str]) -> Option<String> {
+    fn sig(&self, t: &SrcType, tparams: &TypeVariables<'_>) -> Option<String> {
         let mut s = "[".repeat(t.array as usize);
         if let Some(p) = primitive_desc(&t.name) {
             s.push_str(p);
             return Some(s);
         }
-        if tparams.contains(&t.name.as_str()) {
+        if tparams.contains(&t.name) {
             s.push('T');
             s.push_str(&t.name);
             s.push(';');
@@ -295,7 +422,7 @@ impl Resolver<'_> {
     fn tparam_block(
         &self,
         tparams: &[(String, Option<SrcType>)],
-        scope: &[&str],
+        scope: &TypeVariables<'_>,
     ) -> Option<String> {
         if tparams.is_empty() {
             return Some(String::new());
@@ -313,7 +440,12 @@ impl Resolver<'_> {
         Some(s)
     }
 
-    fn build_class_sig(&self, d: &RawDecl, tp: &[&str], default_super: &str) -> Option<String> {
+    fn build_class_sig(
+        &self,
+        d: &RawDecl,
+        tp: &TypeVariables<'_>,
+        default_super: &str,
+    ) -> Option<String> {
         let mut sig = self.tparam_block(&d.tparams, tp)?;
         match &d.superclass {
             Some(t) => sig.push_str(&self.sig(t, tp)?),
@@ -329,8 +461,7 @@ impl Resolver<'_> {
         Some(sig)
     }
 
-    fn emit(&self, d: &RawDecl) -> Option<Vec<u8>> {
-        let tp: Vec<&str> = d.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    fn emit(&self, d: &RawDecl, tp: &TypeVariables<'_>) -> Option<Vec<u8>> {
         let is_enum = d.kind == DeclKind::Enum;
         let is_record = d.kind == DeclKind::Record;
         let super_internal = if is_enum {
@@ -372,7 +503,7 @@ impl Resolver<'_> {
             let mut signature = format!("Ljava/lang/Enum<L{};>;", d.internal);
             let mut complete = true;
             for interface in &d.interfaces {
-                match self.sig(interface, &tp) {
+                match self.sig(interface, tp) {
                     Some(interface) => signature.push_str(&interface),
                     None if self.mode.is_lenient() => {
                         complete = false;
@@ -391,14 +522,14 @@ impl Resolver<'_> {
                 || d.superclass
                     .iter()
                     .chain(d.interfaces.iter())
-                    .any(|t| t.has_type_arguments() || tp.contains(&t.name.as_str()));
+                    .any(|t| t.has_type_arguments() || tp.contains(&t.name));
             if generic {
                 let default_super = if is_record {
                     "java/lang/Record"
                 } else {
                     "java/lang/Object"
                 };
-                match self.build_class_sig(d, &tp, default_super) {
+                match self.build_class_sig(d, tp, default_super) {
                     Some(sig) => w.set_signature(&sig),
                     None if self.mode.is_lenient() => {}
                     None => return None,
@@ -416,9 +547,9 @@ impl Resolver<'_> {
         }
 
         for (name, ty, acc, constant) in &d.fields {
-            let desc = self.desc(ty, &tp)?;
-            let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
-                match self.sig(ty, &tp) {
+            let desc = self.desc(ty, tp)?;
+            let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
+                match self.sig(ty, tp) {
                     Some(s) => Some(s),
                     None if self.mode.is_lenient() => None,
                     None => return None,
@@ -436,7 +567,7 @@ impl Resolver<'_> {
                     0
                 };
             let constant = (acc & (ACC_STATIC | ACC_FINAL) == (ACC_STATIC | ACC_FINAL))
-                .then(|| constant.as_ref())
+                .then_some(constant.as_ref())
                 .flatten()
                 .map(|constant| match constant {
                     JavaConstant::String(value) => {
@@ -448,9 +579,9 @@ impl Resolver<'_> {
 
         if is_record {
             for (name, ty) in &d.record_components {
-                let desc = self.desc(ty, &tp)?;
-                let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
-                    match self.sig(ty, &tp) {
+                let desc = self.desc(ty, tp)?;
+                let fsig = if ty.has_type_arguments() || tp.contains(&ty.name) {
+                    match self.sig(ty, tp) {
                         Some(s) => Some(s),
                         None if self.mode.is_lenient() => None,
                         None => return None,
@@ -495,12 +626,11 @@ impl Resolver<'_> {
             has_annotation_default: false,
         };
         let ctors: Vec<&Member> = if is_record {
-            let canonical_descriptor =
-                self.erased_parameters(&record_canonical_ctor.params, &tp)?;
+            let canonical_descriptor = self.erased_parameters(&record_canonical_ctor.params, tp)?;
             let has_explicit_canonical = d
                 .ctors
                 .iter()
-                .filter_map(|member| self.erased_parameters(&member.params, &tp))
+                .filter_map(|member| self.erased_parameters(&member.params, tp))
                 .any(|descriptor| descriptor == canonical_descriptor);
             let mut v: Vec<&Member> = Vec::new();
             if !has_explicit_canonical {
@@ -544,7 +674,7 @@ impl Resolver<'_> {
             .chain(record_accessors.iter())
             .chain(d.methods.iter())
         {
-            self.emit_member(&mut w, d, m, &tp)?;
+            self.emit_member(&mut w, d, m, tp)?;
         }
         if is_enum {
             let arr = format!("()[L{};", d.internal);
@@ -555,7 +685,7 @@ impl Resolver<'_> {
         Some(w.finish())
     }
 
-    fn build_member_sig(&self, m: &Member, scope: &[&str]) -> Option<String> {
+    fn build_member_sig(&self, m: &Member, scope: &TypeVariables<'_>) -> Option<String> {
         let mut s = self.tparam_block(&m.tparams, scope)?;
         s.push('(');
         for p in &m.params {
@@ -574,10 +704,9 @@ impl Resolver<'_> {
         w: &mut ClassWriter,
         d: &RawDecl,
         m: &Member,
-        class_tp: &[&str],
+        class_tp: &TypeVariables<'_>,
     ) -> Option<()> {
-        let mut scope = class_tp.to_vec();
-        scope.extend(m.tparams.iter().map(|(n, _)| n.as_str()));
+        let scope = class_tp.with(&m.tparams);
         let enum_constructor = d.kind == DeclKind::Enum && m.name == "<init>";
         let mut desc = if enum_constructor {
             "(Ljava/lang/String;I".to_string()
@@ -594,7 +723,7 @@ impl Resolver<'_> {
             || m.params
                 .iter()
                 .chain(m.ret.iter())
-                .any(|t| t.has_type_arguments() || scope.contains(&t.name.as_str()));
+                .any(|t| t.has_type_arguments() || scope.contains(&t.name));
         let sig = if generic {
             match self.build_member_sig(m, &scope) {
                 Some(s) => Some(s),
@@ -631,7 +760,7 @@ impl Resolver<'_> {
         Some(())
     }
 
-    fn erased_parameters(&self, params: &[SrcType], scope: &[&str]) -> Option<String> {
+    fn erased_parameters(&self, params: &[SrcType], scope: &TypeVariables<'_>) -> Option<String> {
         let mut descriptor = String::new();
         for parameter in params {
             descriptor.push_str(&self.desc(parameter, scope)?);
@@ -1131,6 +1260,31 @@ mod tests {
     }
 
     #[test]
+    fn bounded_record_components_use_their_erased_descriptors_everywhere() {
+        let out = stubs(
+            "public record Box<T extends Number>(T value, T[] values) {}",
+            &["java/lang/Record", "java/lang/Number", "java/lang/Object"],
+        )
+        .expect("record stub");
+        let class = parse_class(&out[0].1).expect("parse");
+        let field = |name: &str| {
+            class
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.descriptor.as_str())
+        };
+
+        assert_eq!(field("value"), Some("Ljava/lang/Number;"));
+        assert_eq!(field("values"), Some("[Ljava/lang/Number;"));
+        assert!(class.method("value", "()Ljava/lang/Number;").is_some());
+        assert!(class.method("values", "()[Ljava/lang/Number;").is_some());
+        assert!(class
+            .method("<init>", "(Ljava/lang/Number;[Ljava/lang/Number;)V")
+            .is_some());
+    }
+
+    #[test]
     fn annotation_type_emits_abstract_element_methods() {
         let out = stubs(
             "package p;\npublic @interface Tag { int value() default 1; String[] names(); }",
@@ -1354,6 +1508,48 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_nested_declarations_use_the_first_lexical_owners_bound() {
+        let sources = vec![
+            (
+                "first/Outer.java".to_string(),
+                "public class Outer<T extends Number> { \
+                 public class Inner { public T value(T value) { return value; } } \
+                 }"
+                .to_string(),
+            ),
+            (
+                "second/Outer.java".to_string(),
+                "public class Outer<T extends CharSequence> { \
+                 public class Inner { public T value(T value) { return value; } } \
+                 }"
+                .to_string(),
+            ),
+        ];
+        let out = stub_classes(&sources, StubMode::Strict, &|candidate| {
+            matches!(
+                candidate,
+                "java/lang/Object" | "java/lang/Number" | "java/lang/CharSequence"
+            )
+        })
+        .expect("stubs");
+        let inner = out
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+            .expect("first nested declaration");
+
+        assert!(inner
+            .method("value", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+        assert!(inner
+            .method(
+                "value",
+                "(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"
+            )
+            .is_none());
+    }
+
+    #[test]
     fn type_use_annotations_are_skipped_in_every_type_position() {
         let out = stubs(
             "import java.util.List; import java.util.function.Supplier;\n\
@@ -1433,5 +1629,201 @@ mod tests {
             .map(|reference| reference.path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(referenced, ["Actual"]);
+    }
+
+    /// JLS §4.6: a type variable erases to its leftmost bound, recursively, wherever it is declared.
+    /// Each expected descriptor is javac's for this source.
+    #[test]
+    fn type_variables_erase_to_their_leftmost_bound() {
+        let out = stubs(
+            "import java.util.List;\n\
+             public class Erasure<N extends Number, S extends N> {\n\
+                 public N number;\n\
+                 public S[] numbers;\n\
+                 public Erasure(N n) { number = n; }\n\
+                 public N get() { return number; }\n\
+                 public S narrow() { return null; }\n\
+                 public static <T extends Comparable<T>> T max(List<T> xs) { return null; }\n\
+                 public static <T extends Comparable<? super T>> T[] sorted(T[] xs) { return xs; }\n\
+                 public static <A, B extends A> B pick(A a, B b) { return b; }\n\
+                 public static <E extends CharSequence & Comparable<E>> E first(E e) { return e; }\n\
+                 public <N extends CharSequence> N shadow(N n) { return n; }\n\
+                 public <T> Erasure(T t, N n) { number = n; }\n\
+             }",
+            &[
+                "java/lang/Object",
+                "java/lang/Number",
+                "java/lang/Comparable",
+                "java/lang/CharSequence",
+                "java/util/List",
+            ],
+        )
+        .expect("stub");
+        let class = parse_class(&out[0].1).expect("parse stub");
+        let field = |name: &str| {
+            class
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.descriptor.as_str())
+        };
+        assert_eq!(field("number"), Some("Ljava/lang/Number;"));
+        assert_eq!(field("numbers"), Some("[Ljava/lang/Number;"));
+        let descriptors = |name: &str| {
+            class
+                .methods_named(name)
+                .into_iter()
+                .map(|method| method.descriptor.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            descriptors("<init>"),
+            [
+                "(Ljava/lang/Number;)V",
+                "(Ljava/lang/Object;Ljava/lang/Number;)V"
+            ]
+        );
+        assert_eq!(descriptors("get"), ["()Ljava/lang/Number;"]);
+        assert_eq!(descriptors("narrow"), ["()Ljava/lang/Number;"]);
+        assert_eq!(
+            descriptors("max"),
+            ["(Ljava/util/List;)Ljava/lang/Comparable;"]
+        );
+        assert_eq!(
+            descriptors("sorted"),
+            ["([Ljava/lang/Comparable;)[Ljava/lang/Comparable;"]
+        );
+        assert_eq!(
+            descriptors("pick"),
+            ["(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"]
+        );
+        assert_eq!(
+            descriptors("first"),
+            ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
+        );
+        assert_eq!(
+            descriptors("shadow"),
+            ["(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;"]
+        );
+    }
+
+    #[test]
+    fn shadowed_type_variable_bound_chain_uses_scoped_parameter_identity() {
+        let sources = vec![(
+            "Outer.java".to_string(),
+            "public class Outer<T extends Number> { \
+             public class Inner<U extends T> { \
+             public <T extends U> T value(T value) { return value; } \
+             } \
+             }"
+            .to_string(),
+        )];
+
+        for mode in [StubMode::Strict, StubMode::Lenient] {
+            let out = stub_classes(&sources, mode, &|candidate| {
+                matches!(candidate, "java/lang/Object" | "java/lang/Number")
+            })
+            .unwrap_or_else(|| panic!("{mode:?} stubs"));
+            let inner = out
+                .iter()
+                .find(|(name, _)| name == "Outer$Inner")
+                .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+                .expect("Inner");
+
+            assert!(
+                inner
+                    .method("value", "(Ljava/lang/Number;)Ljava/lang/Number;")
+                    .is_some(),
+                "{mode:?} must erase the complete shadowing chain to Number"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_static_type_boundaries_do_not_capture_outer_type_variables() {
+        for source in [
+            "class Outer<T extends Number> { interface Nested { T invalid(); } }",
+            "interface Outer<T extends Number> { class Nested { T invalid; } }",
+        ] {
+            assert!(
+                stubs(source, &["java/lang/Object", "java/lang/Number"]).is_none(),
+                "an implicitly static nested type must not capture outer T: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_static_member_class_inherits_its_enclosing_type_variable_scope() {
+        let out = stubs(
+            "public class Outer<T extends Number> {\n\
+                 public class Inner<U extends T> {\n\
+                     public T outer;\n\
+                     public U inner;\n\
+                     public T echo(T value) { return value; }\n\
+                     public <V extends U> V narrow(V value) { return value; }\n\
+                 }\n\
+                 public static class StaticMiddle<S extends CharSequence> {\n\
+                     public class Deep { public S value; }\n\
+                 }\n\
+             }",
+            &[
+                "java/lang/Object",
+                "java/lang/Number",
+                "java/lang/CharSequence",
+            ],
+        )
+        .expect("stub");
+        let class = |internal: &str| {
+            let bytes = &out
+                .iter()
+                .find(|(name, _)| name == internal)
+                .unwrap_or_else(|| panic!("missing {internal}"))
+                .1;
+            parse_class(bytes).unwrap_or_else(|error| panic!("parse {internal}: {error:?}"))
+        };
+
+        let inner = class("Outer$Inner");
+        assert_eq!(
+            inner
+                .fields
+                .iter()
+                .find(|field| field.name == "outer")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/Number;")
+        );
+        assert_eq!(
+            inner
+                .fields
+                .iter()
+                .find(|field| field.name == "inner")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/Number;")
+        );
+        assert!(inner
+            .method("echo", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+        assert!(inner
+            .method("narrow", "(Ljava/lang/Number;)Ljava/lang/Number;")
+            .is_some());
+
+        let deep = class("Outer$StaticMiddle$Deep");
+        assert_eq!(
+            deep.fields
+                .iter()
+                .find(|field| field.name == "value")
+                .map(|field| field.descriptor.as_str()),
+            Some("Ljava/lang/CharSequence;")
+        );
+    }
+
+    #[test]
+    fn a_static_member_class_does_not_capture_an_enclosing_type_variable() {
+        assert!(stubs(
+            "public class Outer<T extends Number> {\n\
+                 public static class Nested { public T invalid; }\n\
+             }",
+            &["java/lang/Object", "java/lang/Number"],
+        )
+        .is_none());
     }
 }

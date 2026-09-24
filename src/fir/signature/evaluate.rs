@@ -505,6 +505,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 let expectations = semantics.call_argument_expectations(
                     scope,
                     spelling,
+                    selection.lexical_classifier,
                     selection.origin,
                     &probes,
                     &resolved_type_arguments,
@@ -556,6 +557,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let expectations = semantics.call_argument_expectations(
                 scope,
                 spelling,
+                selection.lexical_classifier,
                 selection.origin,
                 &probes,
                 &resolved_type_arguments,
@@ -581,6 +583,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics.select_call(
                 scope,
                 spelling,
+                selection.lexical_classifier,
                 selection.origin,
                 &resolved_arguments,
                 &resolved_type_arguments,

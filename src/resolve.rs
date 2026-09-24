@@ -66,7 +66,9 @@ mod member_extension_selection;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
+mod plugin_class_checks;
 mod plugin_expression_annotations;
+mod plugin_expression_planning;
 mod postponed_applicability;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
@@ -80,13 +82,15 @@ mod scope;
 mod signature_collection;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
-pub(crate) use signature_collection::collect_signatures_with_cp_headers_and_local_contexts;
 use signature_collection::{
     base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
     resolve_source_alias_expansion, spelling_scope, supertype_components, supertype_graph,
 };
 pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
+pub(crate) use signature_collection::{
+    collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
+};
 mod singleton_receivers;
 mod source_constructors;
 mod stable_path;
@@ -127,9 +131,8 @@ pub(crate) use inspection_analysis::{
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
 pub use lambda_returns::ReturnTarget;
 use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
-use local_class_scope::{
-    local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
-};
+use local_class_scope::EnclosingTypeParameterDeclaration;
+pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
 pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
@@ -3854,6 +3857,11 @@ pub struct SymbolTable {
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
     source_class_headers: HashMap<TypeName, SourceClassHeader>,
+    /// Parser classifier coordinates retained only while Pass 1 inspection/capture analysis is
+    /// active, bound once to the compact header's stable semantic identity. This prevents that
+    /// legacy retained-AST lane from rebuilding an anonymous/local classifier from its parser
+    /// placeholder spelling after compact signature collection has assigned the real identity.
+    stable_parser_classifier_identities: HashMap<(u32, DeclId), TypeName>,
     /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
@@ -3926,6 +3934,8 @@ pub struct SymbolTable {
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
+    /// The native compiler plugins this compilation runs (none unless the driver selects them).
+    native_plugins: crate::plugins::registry::NativePlugins,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -3993,11 +4003,16 @@ pub struct SymbolTable {
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: Box<dyn SemanticPlatform>,
+    native_plugins: crate::plugins::registry::NativePlugins,
 }
 
 impl PassTwoSymbols {
     pub(crate) fn semantic_platform(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 }
 
@@ -4006,6 +4021,7 @@ impl SymbolTable {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: self.libraries,
+            native_plugins: self.native_plugins,
         }
     }
 }
@@ -4027,6 +4043,7 @@ impl Default for SymbolTable {
             classes: HashMap::new(),
             source_packages: std::collections::HashSet::new(),
             source_class_headers: HashMap::new(),
+            stable_parser_classifier_identities: HashMap::new(),
             source_class_aliases: HashMap::new(),
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
@@ -4044,6 +4061,7 @@ impl Default for SymbolTable {
             toplevel_jvm_names: HashMap::new(),
             enums: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
+            native_plugins: Default::default(),
             ext_funs: HashMap::new(),
             source_ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
@@ -14704,14 +14722,26 @@ impl<'a> Checker<'a> {
     }
 
     fn active_classifier_internal(&self, parser: DeclId, class: &ClassDecl) -> Option<TypeName> {
-        self.active_declarations
-            .zip(self.resolved_index)
-            .and_then(|(active, index)| {
-                active
-                    .canonical_classifier_declaration(parser, index)
-                    .and_then(|declaration| index.classifier_identity(declaration))
-            })
-            .or_else(|| self.same_package_classifier_name(&class.name))
+        if let Some((active, index)) = self.active_declarations.zip(self.resolved_index) {
+            // Pass 2 has one authoritative parser -> stable declaration binding. A miss is a miss:
+            // do not reinterpret it through Pass-1 coordinates or source spelling.
+            return active
+                .canonical_classifier_declaration(parser, index)
+                .and_then(|declaration| index.classifier_identity(declaration));
+        }
+        if let Some(symbols) = self.module.legacy_symbols() {
+            if !symbols.stable_parser_classifier_identities.is_empty() {
+                // Compact Pass 1 published the exact parser coordinate while this AST was live.
+                // Once that direct inventory exists, source spelling is not an alternative identity.
+                return symbols
+                    .stable_parser_classifier_identities
+                    .get(&(self.file_index, parser))
+                    .copied();
+            }
+        }
+        (!self.file.local_class_name_provenance.contains_key(&parser))
+            .then(|| self.same_package_classifier_name(&class.name))
+            .flatten()
     }
 
     fn direct_superclass_name(&self, owner: TypeName) -> Option<TypeName> {
@@ -24997,13 +25027,14 @@ impl<'a> Checker<'a> {
                 // under, in the scope holding this statement — so it stays visible to the rest of
                 // the block AND to the class's own body (a member may name its own class).
                 if let Stmt::LocalClass(source) = self.file.stmt(s) {
-                    if let Some(internal) = self.active_classifier_internal(d, &cl) {
-                        scope.rebind(
-                            &source.name,
-                            Ns::Classifier,
-                            ScopeBinding::LocalClass(internal),
-                        );
-                    }
+                    let internal = self.active_classifier_internal(d, &cl).expect(
+                        "a hoisted local classifier must bind its stable semantic identity",
+                    );
+                    scope.rebind(
+                        &source.name,
+                        Ns::Classifier,
+                        ScopeBinding::LocalClass(internal),
+                    );
                 }
                 // A local class captures its enclosing instance, so its rung carries the outer
                 // `this` — and with it the enclosing class's type parameters (kotlinc 2.4.10
@@ -37675,6 +37706,7 @@ fn make_checker<'a>(
 
 trait CheckerSymbolEnvironment {
     fn libraries(&self) -> &dyn SemanticPlatform;
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins;
     fn compilation_id(&self) -> u64;
     fn pass_one_symbols(&self) -> Option<&SymbolTable>;
     fn pass_one_symbols_mut(&mut self) -> Option<&mut SymbolTable>;
@@ -37683,6 +37715,10 @@ trait CheckerSymbolEnvironment {
 impl CheckerSymbolEnvironment for SymbolTable {
     fn libraries(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 
     fn compilation_id(&self) -> u64 {
@@ -37701,6 +37737,10 @@ impl CheckerSymbolEnvironment for SymbolTable {
 impl CheckerSymbolEnvironment for PassTwoSymbols {
     fn libraries(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
+        &self.native_plugins
     }
 
     fn compilation_id(&self) -> u64 {
@@ -37749,6 +37789,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     let mut checker = Checker {
         file,
         libraries: syms.libraries(),
+        native_plugins: syms.native_plugins(),
         compilation_id: syms.compilation_id(),
         demand_name: None,
         demand_call: None,
@@ -37834,6 +37875,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_member_ext_fun_rets: HashMap::new(),
         checked_local_properties: HashMap::new(),
         checked_local_methods: HashMap::new(),
+        body_local_default_providers: HashMap::new(),
         checked_local_constructors: HashMap::new(),
         local_method_dependencies: HashMap::new(),
         checking_local_method_dependencies: std::collections::HashSet::new(),
@@ -38799,100 +38841,6 @@ struct AnonymousLexicalClassScope {
     declarations: std::collections::HashSet<DeclId>,
 }
 
-/// Bounded lexical classifier facts extracted from one active Pass-1 source. These are the parts
-/// of local/anonymous signature publication that genuinely depend on body containment; copying them
-/// here lets the ordinary parser arenas die before whole-module signature collection begins.
-#[derive(Default, Clone)]
-pub(crate) struct PassOneLocalClassContext {
-    enclosing_type_parameters:
-        HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
-    sibling_classifiers: HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>>,
-    anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
-    anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
-}
-
-pub(crate) fn pass_one_local_class_context(
-    file: &File,
-    stubs: &[crate::fir::DeclarationStub],
-) -> PassOneLocalClassContext {
-    let stable_by_transient = file
-        .decl_arena
-        .iter()
-        .enumerate()
-        .filter_map(|(raw, declaration)| {
-            let Decl::Class(class) = declaration else {
-                return None;
-            };
-            stubs
-                .iter()
-                .find(|stub| {
-                    stub.kind == crate::fir::DeclarationKind::Classifier && stub.range == class.span
-                })
-                .map(|stub| (DeclId(raw as u32), stub.id))
-        })
-        .collect::<HashMap<_, _>>();
-    let transient_tparams = local_class_enclosing_tparams(file);
-    let transient_siblings = local_class_sibling_names(file);
-    let transient_anonymous = anonymous_lexical_class_scope(file);
-    crate::trace_compiler!(
-        "fir",
-        "Pass 1 local classifier context stable={} type-parameter-scopes={:?}",
-        stable_by_transient.len(),
-        transient_tparams
-            .iter()
-            .map(|(declaration, parameters)| {
-                let name = match file.decl(*declaration) {
-                    Decl::Class(class) => class.name.as_str(),
-                    Decl::Fun(_) | Decl::Property(_) => "<non-classifier>",
-                };
-                (
-                    name,
-                    stable_by_transient.get(declaration),
-                    parameters
-                        .iter()
-                        .flat_map(|parameter| parameter.names.iter())
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
-    PassOneLocalClassContext {
-        enclosing_type_parameters: transient_tparams
-            .into_iter()
-            .filter_map(|(declaration, parameters)| {
-                stable_by_transient
-                    .get(&declaration)
-                    .copied()
-                    .map(|stable| (stable, parameters))
-            })
-            .collect(),
-        sibling_classifiers: transient_siblings
-            .into_iter()
-            .filter_map(|(declaration, siblings)| {
-                stable_by_transient
-                    .get(&declaration)
-                    .copied()
-                    .map(|stable| (stable, siblings))
-            })
-            .collect(),
-        anonymous_owners: transient_anonymous
-            .owners
-            .into_iter()
-            .filter_map(|(declaration, owner)| {
-                Some((
-                    *stable_by_transient.get(&declaration)?,
-                    *stable_by_transient.get(&owner)?,
-                ))
-            })
-            .collect(),
-        anonymous_declarations: transient_anonymous
-            .declarations
-            .into_iter()
-            .filter_map(|declaration| stable_by_transient.get(&declaration).copied())
-            .collect(),
-    }
-}
-
 impl AnonymousLexicalClassScope {
     /// The declaration followed by its structurally recorded anonymous-object owners, nearest first.
     /// This is the single graph walk used by signature collection, pre-inference, and the main checker;
@@ -39679,6 +39627,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_member_ext_fun_rets,
         checked_local_properties: _,
         checked_local_methods: _,
+        body_local_default_providers: _,
         resolved_body_local_supertypes,
         checked_local_supertypes,
         stmt_lowers,
@@ -40065,103 +40014,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         context_args,
     };
     if !capture_discovery {
-        let calls = info
-            .resolved_calls
-            .iter()
-            .filter_map(|(&expression, call)| {
-                let (owner, name, params, ret, generic_sig, inline, implementation) = match call {
-                    ResolvedCall::TopLevel(target) => (
-                        target.callable.owner,
-                        target.callable.name.clone(),
-                        target.callable.params.clone(),
-                        target.callable.ret,
-                        target.callable.generic_sig.as_deref().cloned(),
-                        target.callable.inline,
-                        target.callable.plugin_expression,
-                    ),
-                    ResolvedCall::Member(target) => (
-                        target
-                            .member
-                            .owner
-                            .or_else(|| target.receiver.kotlin_class_internal())?,
-                        target.member.name.clone(),
-                        target.member.params.clone(),
-                        target.ret,
-                        target.member.generic_sig.clone(),
-                        target.member.inline,
-                        target.member.plugin_expression,
-                    ),
-                    ResolvedCall::Extension(target) => (
-                        target.callable.owner,
-                        target.callable.name.clone(),
-                        target.params.clone(),
-                        target.callable.ret,
-                        target.callable.generic_sig.as_deref().cloned(),
-                        target.callable.inline,
-                        target.callable.plugin_expression,
-                    ),
-                    ResolvedCall::Companion(target) => (
-                        target.owner?,
-                        target.name.clone(),
-                        target.params.clone(),
-                        target.ret,
-                        target.generic_sig.clone(),
-                        target.inline,
-                        target.plugin_expression,
-                    ),
-                    _ => return None,
-                };
-                let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
-                    .map(|receiver| (receiver, info.ty(receiver)));
-                let implicit_receiver = info
-                    .implicit_receiver_selections
-                    .get(&expression)
-                    .map(|selected| selected.ty);
-                Some(crate::plugins::FrontendSelectedCall {
-                    expression,
-                    explicit_receiver,
-                    implicit_receiver,
-                    owner,
-                    name,
-                    params,
-                    ret,
-                    generic_sig,
-                    inline,
-                    implementation,
-                    type_arguments: info
-                        .resolved_call_type_args
-                        .get(&expression)
-                        .cloned()
-                        .unwrap_or_default(),
-                    argument_slots: info
-                        .resolved_call_arg_slots
-                        .get(&expression)
-                        .cloned()
-                        .unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let classifier_annotations =
-            plugin_expression_annotations::classifier_annotations_for_calls(
-                plugin_expression_annotations::ClassifierAnnotationInputs {
-                    resolved_index,
-                    pass_one_symbols: syms.pass_one_symbols(),
-                    libraries: syms.libraries(),
-                },
-                &calls,
-            );
-        let context = crate::plugins::FrontendExpressionContext {
-            calls,
-            classifier_annotations,
-        };
-        for (expression, plan) in
-            crate::plugins::enabled_plugins("main").plan_frontend_expressions(&context)
-        {
-            let previous = info
-                .expr_lowers
-                .insert(expression, ExprLowering::PluginExpression(Box::new(plan)));
-            debug_assert!(previous.is_none(), "plugin expression plan collision");
-        }
+        plugin_expression_planning::plan_plugin_expressions(
+            file,
+            &mut info,
+            syms.native_plugins(),
+            plugin_expression_annotations::ClassifierAnnotationInputs {
+                resolved_index,
+                pass_one_symbols: syms.pass_one_symbols(),
+                libraries: syms.libraries(),
+            },
+        );
     }
     info
 }
@@ -40745,6 +40607,9 @@ struct Checker<'a> {
     /// External declarations and platform semantics. This provider is independent of the
     /// temporary current-module signature graph and remains valid after that graph is destroyed.
     libraries: &'a dyn SemanticPlatform,
+    /// The compilation's native plugins, whose frontend checkers see each source class
+    /// (`plugin_class_checks`).
+    native_plugins: &'a crate::plugins::registry::NativePlugins,
     /// Compilation-scoped identity used only to intern declaration-owned generic variables.
     compilation_id: u64,
     /// This compilation's declarations as a [`SymbolSource`], federated OVER the classpath by the resolver
@@ -40935,6 +40800,9 @@ struct Checker<'a> {
     /// ordinary overload selection can choose it and the local dependency scheduler can check its
     /// body on demand. It is discarded with the checker and never reaches FIR.
     checked_local_methods: HashMap<TypeName, HashMap<String, Vec<crate::libraries::FunctionInfo>>>,
+    /// Effective provider for defaults inherited by one checked body-local method.
+    body_local_default_providers:
+        HashMap<crate::fir::DeclarationId, crate::fir::ResolvedFunctionOverrideTarget>,
     /// Constructor headers of classifiers declared in the active bounded Pass-2 body. Their
     /// parameter types may depend on statement-local aliases and therefore cannot be required from
     /// the finalized Pass-1 module provider. They participate in the same provider-neutral
@@ -58634,6 +58502,8 @@ impl<'a> Checker<'a> {
                 &cl.primary_ctor_annotation_args,
             );
         }
+        // Compiler plugins' own class rules read the applications checked just above.
+        self.check_plugin_class_rules(scope, cl);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.

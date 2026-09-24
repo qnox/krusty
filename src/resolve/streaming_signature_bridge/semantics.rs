@@ -1676,9 +1676,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let label = spelling.rsplit_once('@').map(|(_, label)| label);
             let current = match label {
                 Some(label) => receivers.into_iter().find(|receiver| {
-                    receiver
-                        .obj_internal()
-                        .is_some_and(|classifier| classifier.nested_segment_ref() == label)
+                    receiver.obj_internal().is_some_and(|classifier| {
+                        self.classifier_source_spelling(classifier) == label
+                    })
                 }),
                 None => receivers.into_iter().next(),
             }
@@ -1738,9 +1738,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .implicit_receivers(scope)
                 .into_iter()
                 .find(|receiver| {
-                    receiver
-                        .obj_internal()
-                        .is_some_and(|classifier| classifier.nested_segment_ref() == label)
+                    receiver.obj_internal().is_some_and(|classifier| {
+                        self.classifier_source_spelling(classifier) == label
+                    })
                 })
                 .and_then(|receiver| crate::fir::ResolvedTy::new(receiver).ok())
                 .ok_or_else(Self::failure);
@@ -2002,6 +2002,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
+        classifier: Option<crate::fir::DeclarationId>,
         origin: crate::fir::OriginId,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
@@ -2514,7 +2515,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // The enclosing classifier itself is in lexical type scope. Inside its companion,
             // `Owner(args)` is therefore the owner's ordinary constructor call; treating `Owner`
             // only as a companion value would incorrectly search `Owner.Companion.invoke`.
-            if classifier.nested_segment_ref() == spelling {
+            if self.classifier_source_spelling(classifier) == spelling {
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
                         let (arguments, types) = Self::mapped_constructor_arguments(
@@ -2575,7 +2576,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let source_alias =
             self.applied_source_alias_expansion(scope, spelling, &resolved_type_arguments);
-        let nested_classifier = self.lexically_nested_classifier(scope, spelling);
+        let nested_classifier = self.bound_or_nested_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
             let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
             let candidates = if include_invisible {
@@ -3000,6 +3001,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
+        classifier: Option<crate::fir::DeclarationId>,
         origin: crate::fir::OriginId,
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
@@ -3061,9 +3063,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 &module as &dyn crate::symbol_source::SymbolSource,
                 &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
             ]);
-            let lexical_classifier = self
-                .qualified_classifier(scope, spelling)
-                .or_else(|| self.lexically_nested_classifier(scope, spelling));
+            let lexical_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
             let sam_interface = self
                 .with_resolver(scope, |resolver| {
                     lexical_classifier.or_else(|| match resolver.classifier_in_scope(spelling) {

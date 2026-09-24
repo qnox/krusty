@@ -1,5 +1,7 @@
 use super::*;
 
+mod local_class_provenance;
+
 fn finish_pass_one(analysis: SourceSetAnalysis) -> StreamingSourceSetAnalysis {
     let analysis = StreamingSourceSetAnalysis::from(analysis);
     assert!(
@@ -9,6 +11,19 @@ fn finish_pass_one(analysis: SourceSetAnalysis) -> StreamingSourceSetAnalysis {
         "a finalized module must own compact, coordinate-free Pass-2 state"
     );
     analysis
+}
+
+/// The semantic identity of the only classifier declared in executable code. Local classifiers
+/// carry an opaque identity, so tests find them by their naming provenance, not by a spelling.
+fn sole_local_classifier(index: &crate::fir::ResolvedModuleIndex) -> crate::types::TypeName {
+    let mut local = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| index.local_class_name_provenance(*declaration).is_some())
+        .filter_map(|declaration| index.classifier_header(declaration))
+        .map(|classifier| classifier.classifier);
+    let classifier = local.next().expect("one local classifier");
+    assert!(local.next().is_none(), "exactly one local classifier");
+    classifier
 }
 
 fn stable_declaration_at(
@@ -40,97 +55,6 @@ fn stable_declaration_at(
         })
         .max_by_key(|declaration| index.declaration_header(*declaration).is_some())
         .expect("stable declaration at active span")
-}
-
-#[test]
-fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
-    let source = "fun build(): Any = object {}";
-    let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
-    let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features(
-        &inputs,
-        Box::new(EmptySymbolSource),
-        &LangFeatures::new(),
-        &mut diagnostics,
-    );
-
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let declaration = *analysis.files[0]
-        .anonymous_object_classes
-        .values()
-        .next()
-        .expect("anonymous declaration");
-    let crate::ast::Decl::Class(class) = analysis.files[0].decl(declaration) else {
-        panic!("anonymous declaration was not a class");
-    };
-    assert_eq!(class.name, "WidgetKt$build$1");
-    let enclosing = analysis.files[0]
-        .anonymous_object_enclosing_functions
-        .get(&declaration)
-        .copied()
-        .expect("anonymous enclosure identity");
-    let crate::ast::AnonymousEnclosingFunction::TopLevel(function) = enclosing else {
-        panic!("top-level build owner was not recorded exactly");
-    };
-    assert!(matches!(
-        analysis.files[0].decl(function),
-        crate::ast::Decl::Fun(function) if function.name == "build"
-    ));
-}
-
-#[test]
-fn anonymous_renaming_keeps_nested_classifier_ownership_coherent() {
-    let source = "fun build(): Any = object { inner class Nested }";
-    let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
-    let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features(
-        &inputs,
-        Box::new(EmptySymbolSource),
-        &LangFeatures::new(),
-        &mut diagnostics,
-    );
-
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let classes = analysis.files[0]
-        .decls
-        .iter()
-        .filter_map(|declaration| match analysis.files[0].decl(*declaration) {
-            crate::ast::Decl::Class(class) => Some(class),
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let nested = classes
-        .iter()
-        .copied()
-        .find(|class| class.name.ends_with(".Nested"))
-        .unwrap_or_else(|| {
-            panic!(
-                "nested anonymous member classifier: {:?}",
-                classes
-                    .iter()
-                    .map(|class| (&class.name, &class.inner_of))
-                    .collect::<Vec<_>>()
-            )
-        });
-    assert_eq!(nested.name, "WidgetKt$build$1.Nested");
-    assert_eq!(nested.inner_of.as_deref(), Some("WidgetKt$build$1"));
-    let index = analysis
-        .streamed
-        .as_ref()
-        .expect("explicit public signature must finalize")
-        .module
-        .index();
-    let declaration = stable_declaration_at(
-        &analysis,
-        0,
-        nested.span,
-        crate::fir::DeclarationKind::Classifier,
-    );
-    assert!(index
-        .declaration_header(declaration)
-        .expect("nested classifier header")
-        .flags
-        .has(crate::fir::DeclarationFlags::LOCAL_CLASS));
 }
 
 #[test]
@@ -1533,7 +1457,7 @@ fn reparsed_anonymous_object_retains_its_own_property_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let internal = crate::types::type_name("AnonymousPropertyKt$box$1");
+    let internal = sole_local_classifier(index);
     let legacy = analysis
         .symbols
         .class_by_type_name(internal)
@@ -1607,7 +1531,7 @@ fn non_local_property_signature_publishes_demanded_anonymous_member_surface() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let anonymous = crate::types::type_name("A$1");
+    let anonymous = sole_local_classifier(index);
     let provider = crate::fir::StreamedModuleSymbols::for_file(index, 0);
     let classifier = provider
         .classifier(anonymous)
