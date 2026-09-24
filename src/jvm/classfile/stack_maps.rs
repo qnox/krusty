@@ -123,9 +123,9 @@ impl ClassWriter {
 
     /// The local slots `body` uses as ASM's `COMPUTE_MAXS` counts them: its arguments, every slot a
     /// load, store or `iinc` names, and every local-variable entry.
-    fn max_locals(&self, body: &Body<'_>, computed: &Computed, lvt: &[LvtEntry]) -> Option<usize> {
-        let entry =
-            entry_frame(body.access, body.name, body.descriptor, &self.internal_name).ok()?;
+    fn max_locals(&self, body: &Body<'_>, computed: &Computed, lvt: &[LvtEntry]) -> usize {
+        let entry = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
+            .expect("a successfully computed method must have a valid entry frame");
         let mut max = entry.iter().map(words).sum::<usize>();
         for insn in &computed.insns {
             if let Some((slot, width)) = var_slot(insn) {
@@ -133,13 +133,17 @@ impl ClassWriter {
             }
         }
         for &(_, descriptor, slot, _, _) in lvt {
-            let width = match self.cp.utf8_at(descriptor)? {
+            let width = match self
+                .cp
+                .utf8_at(descriptor)
+                .expect("a local-variable entry must retain its descriptor")
+            {
                 "J" | "D" => 2,
                 _ => 1,
             };
             max = max.max(usize::from(slot) + width);
         }
-        Some(max)
+        max
     }
 
     /// Encode `computed` as a `StackMapTable` body, interning the classes the written entries name
@@ -248,12 +252,10 @@ impl ClassWriter {
             let max_locals = self.max_locals(&body, &computed, &self.methods[index].lvt);
             let method = &mut self.methods[index];
             // kotlinc's writer computes both maxima from the final body (`COMPUTE_MAXS`).
-            if let Ok(max_stack) = u16::try_from(computed.frames.max_stack) {
-                method.max_stack = max_stack;
-            }
-            if let Some(max_locals) = max_locals.and_then(|max| u16::try_from(max).ok()) {
-                method.max_locals = max_locals;
-            }
+            method.max_stack = u16::try_from(computed.frames.max_stack)
+                .expect("a JVM method's computed stack depth must fit u16");
+            method.max_locals = u16::try_from(max_locals)
+                .expect("a JVM method's computed local count must fit u16");
             if !dead.is_empty() {
                 method.code = Some(code);
                 method.exceptions = exceptions;

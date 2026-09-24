@@ -2496,15 +2496,9 @@ impl ClassWriter {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));
-        // The method-entry frame (StackMapTable frames are deltas from it): `this` (unless static;
-        // `<init>` is UninitializedThis until super() runs) followed by each parameter's type. Only
-        // computed when the method actually has frames — `append_param_verif_types` interns the
-        // parameters' class types, which would otherwise perturb the pool of a branch-free method.
-        let mut stackmap_baseline = None;
         // The table the instructions imply: its classes intern now, where kotlinc's writer interns
         // them, and `finish` writes it computed over the final body. A non-empty emitted body must
-        // be understood by the one authoritative frame computation; recorded emitter frames are
-        // retained temporarily only for the rewrite migration below, never as output fallback.
+        // be understood by the one authoritative frame computation.
         let body = stack_maps::Body {
             access,
             name,
@@ -2522,19 +2516,6 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
-        if code.has_frames() {
-            const ACC_STATIC: u16 = 0x0008;
-            let mut initial_locals: Vec<VerifType> = Vec::new();
-            if access & ACC_STATIC == 0 {
-                initial_locals.push(if name == "<init>" {
-                    VerifType::UninitializedThis
-                } else {
-                    VerifType::ObjectName(self.internal_name.clone())
-                });
-            }
-            stackmap_baseline =
-                Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
-        }
         self.methods.push(MethodInfo {
             access,
             name: n,

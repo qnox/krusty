@@ -17,9 +17,9 @@
 use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
-use super::{stack_maps, stack_peephole};
 use super::temporaries::{self, Body};
 use super::{dead_code, local_slots, negated_jumps, redundant_checkcasts, redundant_gotos};
+use super::{stack_maps, stack_peephole};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
 
