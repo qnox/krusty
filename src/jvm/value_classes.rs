@@ -18,6 +18,7 @@ mod call_result_boundaries;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
+mod member_names;
 mod operation_relocation;
 mod property_references;
 mod synth_members;
@@ -26,6 +27,7 @@ use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
+use member_names::{vc_mangle, vc_mangle_once, vc_member_impl_name};
 use operation_relocation::clone_below_representation_wrapper;
 use std::collections::{HashMap, HashSet};
 
@@ -364,9 +366,8 @@ pub(crate) fn lower_value_classes(
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();
 
-    // Exact identities of instance entries synthesized while creating carrier implementations. They
-    // already have their final instance ABI and must not be lowered again as user value-class members.
-    let mut synthesized_value_class_instance_entries = HashSet::new();
+    // Exact identities of members whose JVM realization synthesis already finalized.
+    let mut realized_members = synth_members::SynthesizedValueMembers::default();
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
     // concern — common lowering only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
@@ -410,9 +411,10 @@ pub(crate) fn lower_value_classes(
             ir,
             cid,
             &under,
+            &callable_under,
             has_init,
             constructor_default,
-            &mut synthesized_value_class_instance_entries,
+            &mut realized_members,
         ) {
             crate::trace_compiler!(
                 "value_classes",
@@ -955,7 +957,7 @@ pub(crate) fn lower_value_classes(
                 | "toString"
                 | "<init>"
         ) || is_divergent_override_getter
-            || synthesized_value_class_instance_entries.contains(&(fid as u32));
+            || realized_members.instance_entries.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's
@@ -981,22 +983,32 @@ pub(crate) fn lower_value_classes(
                     orig_rets[fid],
                 ));
             }
-            let mut mangled = vc_mangle(
-                &source_name,
-                &orig_params[fid],
-                &orig_rets[fid],
-                &callable_under,
-                is_file_class,
-                suspend_fids.contains(&(fid as u32)),
-            );
             // Every ordinary value-class member is physically a static implementation over the
-            // carrier. A signature that independently requires Kotlin's value-class hash keeps that
-            // hash (`same-iUtXLc0`); otherwise kotlinc uses the structural `-impl` suffix. The source
-            // name and source value parameters stay in `vc_declared_sigs` for metadata.
+            // carrier. The source name and source value parameters stay in `vc_declared_sigs` for
+            // metadata.
             let lower_value_member = vc_member && !f.is_static;
-            if lower_value_member && mangled == source_name {
-                mangled.push_str("-impl");
-            }
+            let is_suspend = suspend_fids.contains(&(fid as u32));
+            let mangled = if realized_members.accessors.contains(&(fid as u32)) {
+                // Already named from its declared accessor signature, before it gained the carrier.
+                source_name.clone()
+            } else if lower_value_member {
+                vc_member_impl_name(
+                    &source_name,
+                    &orig_params[fid],
+                    &orig_rets[fid],
+                    &callable_under,
+                    is_suspend,
+                )
+            } else {
+                vc_mangle(
+                    &source_name,
+                    &orig_params[fid],
+                    &orig_rets[fid],
+                    &callable_under,
+                    is_file_class,
+                    is_suspend,
+                )
+            };
             if mangled != source_name {
                 if let Some(owner) = f.dispatch_receiver {
                     mangle_map.insert(
@@ -1360,19 +1372,42 @@ pub(crate) fn lower_value_classes(
             )
         })
         .collect();
+    // A member of a sibling file's value class is realized by that file's pass as a static
+    // implementation over the carrier: derive the same name from the declared signature the call
+    // retains (and its checked suspend fact); step 4 moves the receiver to parameter zero. The
+    // declared parameters become the selected declaration's, since an erased `Object` slot is
+    // otherwise ambiguous between the carrier itself and a generic box.
+    let mut sibling_member_impls: HashMap<ExprId, String> = HashMap::new();
     // Rewrite cross-file calls with value-class signatures to their JVM names and types.
     if !callable_under.is_empty() {
-        for e in &mut ir.exprs {
+        for (id, e) in ir.exprs.iter_mut().enumerate() {
             if let IrExpr::Call {
                 callee:
                     Callee::Virtual {
+                        owner,
                         name,
                         params: Some((params, ret)),
                         ..
                     },
+                dispatch_receiver,
                 ..
             } = e
             {
+                let id = id as ExprId;
+                // The underlying property's getter is no static implementation: it is the carrier.
+                if dispatch_receiver.is_some()
+                    && module_value_classes.contains_key(owner)
+                    && !cls_by_name.contains_key(owner)
+                    && vc_getters.get(owner) != Some(name)
+                {
+                    let is_suspend = ir.suspend_calls.contains_key(&id);
+                    let impl_name =
+                        vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
+                    sibling_member_impls.insert(id, impl_name);
+                    ir.call_declared_params
+                        .entry(id)
+                        .or_insert_with(|| params.clone().into_boxed_slice());
+                }
                 let mangled = vc_mangle_once(name, params, ret, &callable_under, false, false);
                 if &mangled != name {
                     *name = mangled;
@@ -1436,14 +1471,30 @@ pub(crate) fn lower_value_classes(
                 } else {
                     name.as_str()
                 };
-                let mangled = vc_mangle_once(
-                    base,
-                    &callable.parameters,
-                    &callable.result,
-                    &callable_under,
-                    callable.owner.is_none(),
-                    callable.flags.has(crate::fir::DeclarationFlags::SUSPEND),
-                );
+                let is_suspend = callable.flags.has(crate::fir::DeclarationFlags::SUSPEND);
+                // A member of a module value class is realized as a static implementation over
+                // its carrier, so its `$default` companion extends that implementation's name.
+                let mangled = if callable
+                    .owner
+                    .is_some_and(|owner| module_value_classes.contains_key(&owner))
+                {
+                    vc_member_impl_name(
+                        base,
+                        &callable.parameters,
+                        &callable.result,
+                        &callable_under,
+                        is_suspend,
+                    )
+                } else {
+                    vc_mangle_once(
+                        base,
+                        &callable.parameters,
+                        &callable.result,
+                        &callable_under,
+                        callable.owner.is_none(),
+                        is_suspend,
+                    )
+                };
                 *name = if module_default_call && !semantic_default {
                     format!("{mangled}$default")
                 } else {
@@ -2295,7 +2346,7 @@ pub(crate) fn lower_value_classes(
                 | "toString"
                 | "<init>"
         ) || vc_sole_getter_fids.contains(&(fid as u32))
-            || synthesized_value_class_instance_entries.contains(&(fid as u32));
+            || realized_members.instance_entries.contains(&(fid as u32));
         let user_vc_member = is_vc && !synthesized_member;
         if is_vc && !user_vc_member && f.name != "<init>" && f.name != "constructor-impl" {
             continue;
@@ -2737,30 +2788,59 @@ pub(crate) fn lower_value_classes(
             // Once a computed value-class accessor becomes static `getX-impl(U)`, preserve that
             // selected declaration while adapting its dispatch receiver to parameter zero.
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee:
+                    Callee::Virtual {
+                        owner,
+                        name,
+                        params,
+                        ..
+                    },
                 dispatch_receiver: Some(receiver),
                 args,
-            } if under.contains_key(owner) => cls_by_name.get(owner).and_then(|class| {
-                let expected = format!("{name}-impl");
-                ir.classes[*class].methods.iter().copied().find_map(|fid| {
-                    let function = ir.functions.get(fid as usize)?;
-                    (function.is_static && (function.name == *name || function.name == expected))
-                        .then(|| Rw::ImplCall {
-                            receiver: *receiver,
-                            owner: *owner,
-                            name: function.name.clone(),
-                            parameters: function.params.clone(),
-                            result: function.ret,
-                            args: args.iter().copied().map(Some).collect(),
-                            extension_receiver: ir.extension_receiver_fns.contains(&fid),
-                            default_boxed_parameters: ir
-                                .default_stub_boxed_params
-                                .get(&fid)
-                                .cloned()
-                                .unwrap_or_default(),
-                        })
-                })
-            }),
+            } if under.contains_key(owner) => match cls_by_name.get(owner) {
+                Some(class) => {
+                    let expected = format!("{name}-impl");
+                    ir.classes[*class].methods.iter().copied().find_map(|fid| {
+                        let function = ir.functions.get(fid as usize)?;
+                        (function.is_static
+                            && (function.name == *name || function.name == expected))
+                            .then(|| Rw::ImplCall {
+                                receiver: *receiver,
+                                owner: *owner,
+                                name: function.name.clone(),
+                                parameters: function.params.clone(),
+                                result: function.ret,
+                                args: args.iter().copied().map(Some).collect(),
+                                extension_receiver: ir.extension_receiver_fns.contains(&fid),
+                                default_boxed_parameters: ir
+                                    .default_stub_boxed_params
+                                    .get(&fid)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            })
+                    })
+                }
+                // A member of a sibling file's value class: its static implementation takes the
+                // erased carrier at parameter zero, followed by the member's (already erased)
+                // declared parameters. Every argument is supplied — a call omitting a defaulted
+                // argument is a `ModuleWithDefaults` call, never this virtual form.
+                None => sibling_member_impls.get(&id).map(|impl_name| {
+                    let (declared, result) = params
+                        .clone()
+                        .expect("a sibling value-class member call retains its declared signature");
+                    let carrier = erase(&under[owner], &under);
+                    Rw::ImplCall {
+                        receiver: *receiver,
+                        owner: *owner,
+                        name: impl_name.clone(),
+                        parameters: std::iter::once(carrier).chain(declared).collect(),
+                        result,
+                        args: args.iter().copied().map(Some).collect(),
+                        extension_receiver: false,
+                        default_boxed_parameters: Vec::new(),
+                    }
+                }),
+            },
             // A zero-arg `Any`-override dispatched VIRTUALLY on the value class itself (`id.hashCode()`
             // / `id.toString()` — e.g. a data class hashing its value-class field on the field's own
             // class, kotlinc's per-field shape) → the static `-impl` over the unboxed underlying
@@ -3164,20 +3244,18 @@ pub(crate) fn lower_value_classes(
     // plus every class `init { … }` block (slots = `this` + the ctor params), so a value-class member
     // call / boundary INSIDE an init block (`class B(val a: A) { init { a.f() } }`) is boxed too.
     let mut bodies: Vec<(ExprId, HashMap<u32, Ty>)> = Vec::new();
-    // `fid` indexes two parallel vecs (`ir.functions` and `slot_types`), so the range loop is wanted.
-    #[allow(clippy::needless_range_loop)]
-    for fid in 0..ir.functions.len() {
+    for (fid, function) in ir.functions.iter().enumerate() {
         crate::trace_compiler!(
             "value_classes",
             "boundary body fid={fid} name={} value_member={} body={:?}",
-            ir.functions[fid].name,
+            function.name,
             vc_methods.contains(&(fid as u32)),
-            ir.functions[fid].body
+            function.body
         );
         if vc_methods.contains(&(fid as u32)) && !lowered_value_members.contains(&(fid as u32)) {
             continue;
         }
-        if let Some(root) = ir.functions[fid].body {
+        if let Some(root) = function.body {
             bodies.push((root, slot_types[fid].clone()));
         }
         if let Some(defaults) = ir.param_defaults(fid as u32) {
@@ -6412,86 +6490,6 @@ fn shift_slots(ir: &mut IrFile, root: ExprId) {
             _ => {}
         }
     }
-}
-
-/// kotlinc's inline-class mangling info for an IR type, against the value classes in `under`.
-fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMangling {
-    let (fq_name, is_value, is_nullable) = match t.non_null().obj_internal() {
-        Some(fq_name) => (
-            fq_name.render(),
-            under.contains_key(&fq_name),
-            t.is_nullable(),
-        ),
-        None => (String::new(), false, false),
-    };
-    crate::jvm::inline_class::InfoForMangling {
-        is_value,
-        // kotlinc hashes the declared Kotlin FqName (`pkg.Outer.Inner` — dots throughout), never the
-        // JVM internal spelling, so a NESTED value class converts its `$` separator too: `I$V` must
-        // hash as `I.V` or every member mentioning it gets a different `-<hash>` than kotlinc's.
-        fq_name: fq_name.replace(['/', '$'], "."),
-        is_nullable,
-    }
-}
-
-/// kotlinc's name for a function whose JVM signature mentions a value class: `base-<hash>` (a value-class
-/// parameter, or a value-class return, triggers it). Plain `base` otherwise.
-/// [`vc_mangle`] that leaves an ALREADY-mangled name alone: if `base` is exactly what this signature
-/// would produce from its own stem, it is returned unchanged. A JVM method name a Kotlin declaration
-/// produces never contains `-` unless kotlinc's value-class mangle put it there, so splitting at the
-/// last `-` and re-mangling the stem is an exact test for "this name is already the answer".
-fn vc_mangle_once(
-    base: &str,
-    params: &[Ty],
-    ret: &Ty,
-    under: &Under,
-    is_file_class: bool,
-    is_suspend: bool,
-) -> String {
-    if let Some((stem, _)) = base.rsplit_once('-') {
-        if vc_mangle(stem, params, ret, under, is_file_class, is_suspend) == base {
-            return base.to_string();
-        }
-    }
-    vc_mangle(base, params, ret, under, is_file_class, is_suspend)
-}
-
-fn vc_mangle(
-    base: &str,
-    params: &[Ty],
-    ret: &Ty,
-    under: &Under,
-    is_file_class: bool,
-    is_suspend: bool,
-) -> String {
-    // PARAM mangling (kotlinc `IrType.getRequiresMangling`) EXEMPTS `kotlin.Result`
-    // (`!isClassWithFqName(RESULT_FQ_NAME)`), so a `Result` parameter never triggers a mangle.
-    let mut pinfo: Vec<_> = params
-        .iter()
-        .map(|t| {
-            let mut info = mangling_info(t, under);
-            if info.fq_name == "kotlin.Result" {
-                info.is_value = false;
-            }
-            info
-        })
-        .collect();
-    // kotlinc mangles the ORIGINAL (pre-CPS) signature, which for a suspend fun includes the trailing
-    // `Continuation` value parameter — a non-inline type, so it contributes the `_` placeholder. Without
-    // it a suspend `f(Id): Int` would hash identically to the non-suspend overload. (A lone non-value
-    // `_` never triggers mangling on its own — `requires_param_mangling` checks `is_value`.)
-    if is_suspend {
-        pinfo.push(crate::jvm::inline_class::InfoForMangling {
-            fq_name: String::new(),
-            is_value: false,
-            is_nullable: false,
-        });
-    }
-    // RETURN mangling (kotlinc `hasMangledReturnType`) does NOT exempt `Result`, but applies only when the
-    // function is NOT in a file class (a top-level fn returning a value class keeps its plain name).
-    let rinfo = mangling_info(ret, under);
-    let ret_opt = (rinfo.is_value && !is_file_class).then_some(&rinfo);
-    crate::jvm::inline_class::mangled_name(base, &pinfo, ret_opt)
 }
 
 /// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
