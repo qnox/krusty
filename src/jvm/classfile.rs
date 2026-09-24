@@ -2551,7 +2551,6 @@ impl ClassWriter {
                     name: name.to_string(),
                     desc: desc.to_string(),
                     builder: code.clone(),
-                    baseline: stackmap_baseline,
                 })
             }),
             exceptions: code.resolved_exceptions(),

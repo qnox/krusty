@@ -4397,14 +4397,20 @@ shadow with no output change.
   match; krusty's differ in 4,592 methods — locals dropped to top while still live, unreachable code
   kept and framed, locals typed differently, frames with no jump, and a few dozen methods that do not
   verify. These are historical counts, not a tracked figure.
-- ✅ 2a. Classes carry the computed frames (`jvm::classfile::stack_maps`): encoded when a method is
-  added, so their classes intern where kotlinc's writer interns them, and recomputed over the final
+- ✅ 2a. Classes carry the computed frames (`jvm::classfile::stack_maps`): their classes intern when
+  a method is added, where kotlinc's writer interns them (from the body kotlinc's bytecode rewrites
+  leave, so a folded temporary's class is not interned), and the table is computed over the final
   body when the class is written. Unreachable blocks become `nop`…`athrow` and leave the exception
   table, as ASM does. A non-empty emitted body the analysis declines is an internal backend error;
   recorded frames are not an output fallback. The joins the recorded frames had typed narrower than
   `Object` now get kotlinc's coercion casts (a reassigned local, a box widened to `Number`).
-- ☐ 2b. Compute `max_stack`, and delete the frame-recording sites and the passes that exist only to
-  keep recorded frames consistent.
+- ✅ 2b. `max_stack` and `max_locals` come from the final body as ASM's `COMPUTE_MAXS` counts them
+  (stack words across the dataflow, at least 1 when a block is dead; argument words, every slot a
+  load, store or `iinc` names, and every local-variable entry). kotlinc's bytecode rewrites
+  (`method_rewrite`) start from and validate against computed frames, so the recorded-frame editing
+  they carried (reference widenings, dropped temporaries, frame unification) is gone.
+- ☐ 2c. Delete the emitter's frame-recording sites (`add_frame_if_new`, the coroutine state
+  machine's merged frames, and inline-splice frame relocation), which are now unused by output.
 - ☐ 3–6. Symbolic method body and assembler, `FrameMap`-style slot allocator, kotlinc's
   transformer order, and label-based line/local tables.
 

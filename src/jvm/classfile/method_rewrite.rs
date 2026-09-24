@@ -9,19 +9,15 @@
 //! ranges), line numbers, local ranges, the implicit return — moves with the instruction it
 //! described.
 //!
-//! A rewrite adds no instruction operand. It clears frame slots to `top`, and pushes onto a jump
-//! target's frame the type a null check left on the stack; rebuilding the stack map interns that
-//! type's class if no frame named it before, after every constant emission interned — where
-//! kotlinc's writer also adds the classes its computed frames name.
-//!
-//! The rewritten body is only kept if the forward frame analysis still accepts it and every edge
-//! into a recorded frame agrees with that frame; otherwise the method is written exactly as
-//! emitted.
+//! A rewrite adds no instruction operand, and edits no frame: the class carries the frames the
+//! rewritten body implies, computed when the class is written (see [`super::stack_maps`]). The
+//! rewritten body is only kept if those frames can be computed; otherwise the method is written
+//! exactly as emitted.
 
 use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
-use super::stack_peephole;
+use super::{stack_maps, stack_peephole};
 use super::temporaries::{self, Body};
 use super::{dead_code, local_slots, negated_jumps, redundant_checkcasts, redundant_gotos};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
@@ -36,28 +32,24 @@ fn is_expression_null_check(owner: &str, name: &str, descriptor: &str) -> bool {
         )
 }
 
-/// What a method keeps so it can be rewritten when its class is written: its builder (for the
-/// frames and the labels they are bound to) and the entry frame its stack map compresses against.
+/// What a method keeps so it can be rewritten when its class is written: its builder, for the
+/// labels its branches name.
 #[derive(Clone)]
 pub(super) struct RewriteSource {
     pub access: u16,
     pub name: String,
     pub desc: String,
     pub builder: CodeBuilder,
-    pub baseline: Option<Vec<VerifType>>,
 }
 
-/// A rewritten method's `Code` and every table that moved with it.
+/// A rewritten method's `Code` and every table that moved with it. Its frames and maxima are
+/// computed from it when the class is written.
 pub(super) struct Rewritten {
     pub(super) code: Vec<u8>,
-    max_stack: u16,
-    max_locals: u16,
     pub(super) exceptions: Vec<(u16, u16, u16, u16)>,
     pub(super) lnt: Vec<(u16, u16)>,
     pub(super) lvt: Vec<LvtEntry>,
     implicit_void_return_pc: Option<u16>,
-    /// The builder with its labels moved and its frames edited, to rebuild the stack map from.
-    frames: CodeBuilder,
 }
 
 /// `locals` as one entry per slot: a `long`/`double` followed by the `top` of its second word.
@@ -72,31 +64,8 @@ fn expand_slots(locals: &[VerifType]) -> Vec<VerifType> {
     slots
 }
 
-/// The inverse of [`expand_slots`], with the trailing `top`s a frame omits dropped.
-fn compress_slots(slots: &[VerifType]) -> Vec<VerifType> {
-    let mut locals = Vec::with_capacity(slots.len());
-    let mut slot = 0;
-    while slot < slots.len() {
-        let local = slots[slot].clone();
-        let wide = matches!(local, VerifType::Long | VerifType::Double);
-        locals.push(local);
-        slot += if wide { 2 } else { 1 };
-    }
-    while locals.last() == Some(&VerifType::Top) {
-        locals.pop();
-    }
-    locals
-}
-
-fn words(value: &VerificationType) -> usize {
-    match value {
-        VerificationType::Long | VerificationType::Double => 2,
-        _ => 1,
-    }
-}
-
 /// Slots a load, store or `iinc` touches, with their width.
-fn var_slot(insn: &Insn) -> Option<(u16, u16)> {
+pub(super) fn var_slot(insn: &Insn) -> Option<(u16, u16)> {
     let Insn::Plain { op, operands } = insn else {
         return None;
     };
@@ -121,65 +90,6 @@ fn var_slot(insn: &Insn) -> Option<(u16, u16)> {
     })
 }
 
-fn is_store(insn: &Insn) -> bool {
-    match insn {
-        Insn::Plain {
-            op: 0x36..=0x4e, ..
-        } => true,
-        Insn::Plain { op: 0xc4, operands } => {
-            matches!(operands.first(), Some(0x36..=0x3a))
-        }
-        _ => false,
-    }
-}
-
-/// The original instruction indices store `store` (to `slot`) reaches: every instruction a path
-/// from it arrives at before another store to `slot`. A recorded frame there typed the slot with
-/// this store's value, which a rewrite that eliminated the store no longer provides.
-fn reached_by(insns: &[Insn], graph: &ControlGraph, store: usize, slot: u16) -> Vec<bool> {
-    let mut reached = vec![false; insns.len() + 1];
-    let mut pending: Vec<usize> = graph
-        .normal_successors(store)
-        .iter()
-        .chain(graph.exceptional_successors(store))
-        .copied()
-        .collect();
-    while let Some(index) = pending.pop() {
-        if index > insns.len() || reached[index] {
-            continue;
-        }
-        reached[index] = true;
-        if index == insns.len() {
-            continue;
-        }
-        let kills =
-            is_store(&insns[index]) && var_slot(&insns[index]).map(|(s, _)| s) == Some(slot);
-        // An exception raised before the killing store still carries the value into a handler.
-        pending.extend(graph.exceptional_successors(index));
-        if !kills {
-            pending.extend(graph.normal_successors(index));
-        }
-    }
-    reached
-}
-
-/// Two stack entries at one rewritten offset that are provably the same verifier value. `null`
-/// may meet a reference at that reference. Distinct non-null references are deliberately refused:
-/// without the class hierarchy, widening them to `Object` could make a later narrow receiver or
-/// argument fail verification.
-fn join_stack_entry(a: &VerifType, b: &VerifType, cp: &super::ConstPool) -> Option<VerifType> {
-    let reference = |v: &VerifType| matches!(v, VerifType::Object(_) | VerifType::ObjectName(_));
-    if super::verif_eq(a, b, cp) {
-        Some(a.clone())
-    } else if *a == VerifType::Null && reference(b) {
-        Some(b.clone())
-    } else if *b == VerifType::Null && reference(a) {
-        Some(a.clone())
-    } else {
-        None
-    }
-}
-
 /// Whether every short branch still reaches its target after a rewrite. [`assemble`] encodes these
 /// operands as signed 16-bit deltas, so accepting a larger delta would wrap and corrupt the method.
 fn short_branches_fit(insns: &[Insn], offsets: &[usize]) -> bool {
@@ -196,45 +106,6 @@ fn short_branches_fit(insns: &[Insn], offsets: &[usize]) -> bool {
 }
 
 impl ClassWriter {
-    /// Give every frame bound at one offset the same stack, joined entry by entry; `None` when
-    /// their heights differ or an entry has no join.
-    fn unify_stacks_at_shared_offsets(&self, frames: &mut CodeBuilder) -> Option<()> {
-        let pcs: Vec<Option<usize>> = frames
-            .frames
-            .iter()
-            .map(|(label, _, _)| {
-                frames
-                    .labels
-                    .get(*label as usize)
-                    .copied()
-                    .filter(|&pc| pc != usize::MAX)
-            })
-            .collect();
-        for (first, pc) in pcs.iter().enumerate() {
-            let Some(pc) = *pc else {
-                continue;
-            };
-            let sharing: Vec<usize> = (first..pcs.len()).filter(|&n| pcs[n] == Some(pc)).collect();
-            if sharing.len() < 2 || pcs[..first].contains(&Some(pc)) {
-                continue;
-            }
-            let mut stack = frames.frames[first].2.clone();
-            for &n in &sharing[1..] {
-                let other = &frames.frames[n].2;
-                if other.len() != stack.len() {
-                    return None;
-                }
-                for (entry, theirs) in stack.iter_mut().zip(other) {
-                    *entry = join_stack_entry(entry, theirs, &self.cp)?;
-                }
-            }
-            for &n in &sharing {
-                frames.frames[n].2.clone_from(&stack);
-            }
-        }
-        Some(())
-    }
-
     /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
     pub(super) fn rewrite_methods(&mut self) {
         for index in 0..self.methods.len() {
@@ -244,22 +115,12 @@ impl ClassWriter {
             let Some(rewritten) = self.rewritten(&self.methods[index], &source) else {
                 continue;
             };
-            let stackmap = if rewritten.frames.has_frames() {
-                rewritten
-                    .frames
-                    .build_stackmap(source.baseline.as_deref(), &mut self.cp)
-            } else {
-                None
-            };
             let method = &mut self.methods[index];
             method.code = Some(rewritten.code);
-            method.max_stack = rewritten.max_stack;
-            method.max_locals = rewritten.max_locals;
             method.exceptions = rewritten.exceptions;
             method.lnt = rewritten.lnt;
             method.lvt = rewritten.lvt;
             method.implicit_void_return_pc = rewritten.implicit_void_return_pc;
-            method.stackmap = stackmap;
             crate::trace_compiler!("bytecode", "rewrote {}{}", source.name, source.desc);
         }
     }
@@ -385,12 +246,28 @@ impl ClassWriter {
             original_analysis_cell
                 .get_or_init(|| {
                     let original_frames = self
-                        .merged_frames(&source.builder)
-                        .into_iter()
-                        .map(|(at, locals, stack)| {
-                            Some((index_of(at)?, expand_slots(&locals), stack))
+                        .compute_frames(&stack_maps::Body {
+                            access: source.access,
+                            name: &source.name,
+                            descriptor: &source.desc,
+                            code: bytes,
+                            exceptions: &method.exceptions,
+                            labels: stack_maps::table_labels(&method.lnt, &method.lvt, code_len),
                         })
-                        .collect::<Option<Vec<_>>>()?;
+                        .ok()?
+                        .frames()
+                        .iter()
+                        .map(|frame| {
+                            let locals: Vec<VerifType> = frame
+                                .locals
+                                .iter()
+                                .map(VerificationType::to_verif)
+                                .collect();
+                            let stack =
+                                frame.stack.iter().map(VerificationType::to_verif).collect();
+                            (frame.index, expand_slots(&locals), stack)
+                        })
+                        .collect::<Vec<_>>();
                     let types = FrameTypes::analyze(
                         &insns,
                         &original_graph,
@@ -486,7 +363,6 @@ impl ClassWriter {
                 .enumerate()
                 .map(|(index, insn)| (insn.clone(), temporaries::Placement::Original(index)))
                 .collect(),
-            eliminated: Vec::new(),
             stack_at_target: Vec::new(),
             late_labels: std::collections::BTreeSet::new(),
         });
@@ -714,123 +590,6 @@ impl ClassWriter {
         };
         let map_after_inserted16 = |pc: u16| map_after_inserted(usize::from(pc)) as u16;
 
-        // A null check that now keeps its value on the stack leaves it there at the jump target:
-        // that target's frame gains it, typed as the checked local was at each check.
-        let mut pushed: Vec<(usize, VerifType)> = Vec::new();
-        if !rewrite.stack_at_target.is_empty() {
-            let types = flow_types()?;
-            for (target, loads) in &rewrite.stack_at_target {
-                let mut value: Option<VerificationType> = None;
-                for &load in loads {
-                    let (slot, _) = var_slot(&insns[load])?;
-                    let local = types.before(load)?.local(slot).clone();
-                    value = Some(match value {
-                        Some(value) => value.join(&local),
-                        None => local,
-                    });
-                }
-                let value = value?;
-                if !matches!(
-                    value,
-                    VerificationType::Reference(_) | VerificationType::Null
-                ) {
-                    return None;
-                }
-                pushed.push((offsets[*target], value.to_verif()));
-            }
-        }
-
-        // An eliminated store's slot is `top` in every recorded frame its value reached: those frames
-        // typed the slot with a value the rewritten body no longer stores.
-        let reach: Vec<(u16, Vec<bool>)> = rewrite
-            .eliminated
-            .iter()
-            .map(|&(store, slot)| (slot, reached_by(&insns, &original_graph, store, slot)))
-            .collect();
-        let mut frames = source.builder.clone();
-        let mut received = vec![false; pushed.len()];
-        for (label, locals, stack) in &mut frames.frames {
-            let Some(&pc) = source.builder.labels.get(*label as usize) else {
-                continue;
-            };
-            for (n, (at, value)) in pushed.iter().enumerate() {
-                if *at == pc && !is_late_label(*label) {
-                    stack.push(value.clone());
-                    received[n] = true;
-                }
-            }
-            let Some(index) = index_of(pc) else {
-                continue;
-            };
-            let mut slots = expand_slots(locals);
-            let mut edited = false;
-            for (slot, reached) in &reach {
-                let slot = usize::from(*slot);
-                if reached[index] && slot < slots.len() && slots[slot] != VerifType::Top {
-                    slots[slot] = VerifType::Top;
-                    edited = true;
-                }
-            }
-            if edited {
-                *locals = compress_slots(&slots);
-            }
-        }
-        // A target with no recorded frame has nothing to carry the value: keep the method as it was.
-        if received.contains(&false) {
-            return None;
-        }
-        // A label dead code alone reached is gone with it, and so is its frame; a label live code
-        // only falls into needs none.
-        if let Some(dead) = &dead {
-            frames.frames.retain(|(label, _, _)| {
-                let Some(index) = source
-                    .builder
-                    .labels
-                    .get(*label as usize)
-                    .and_then(|&pc| index_of(pc))
-                else {
-                    return true;
-                };
-                dead.targeted.contains(&(index, is_late_label(*label)))
-            });
-        }
-        if let Some(renumbered) = &renumbered {
-            for (_, locals, _) in &mut frames.frames {
-                let slots = renumbered.locals(expand_slots(locals));
-                // A wide value whose second word moved away from it cannot be described.
-                let split = slots.iter().enumerate().any(|(slot, local)| {
-                    matches!(local, VerifType::Long | VerifType::Double)
-                        && slots
-                            .get(slot + 1)
-                            .is_some_and(|next| *next != VerifType::Top)
-                });
-                if split {
-                    return None;
-                }
-                *locals = compress_slots(&slots);
-            }
-        }
-        frames.bytes = assemble(&new_insns);
-        frames.fixups.clear();
-        frames.switch_fixups.clear();
-        for (label, pc) in frames.labels.iter_mut().enumerate() {
-            if *pc == usize::MAX {
-                continue;
-            }
-            *pc = if is_late_label(label as u32) {
-                let k = offsets.partition_point(|&at| at < *pc).min(n);
-                new_offsets[late_index[k]]
-            } else {
-                map(*pc)
-            };
-        }
-        // A removed reload can leave its jump target and the join after it at one offset, each with
-        // its own frame: the target's carries the checked value's type, the join's whatever every
-        // path into it agreed on. Both describe the one point now, so each stack entry is what they
-        // all accept.
-        if !pushed.is_empty() {
-            self.unify_stacks_at_shared_offsets(&mut frames)?;
-        }
         let exceptions: Vec<(u16, u16, u16, u16)> = method
             .exceptions
             .iter()
@@ -877,129 +636,31 @@ impl ClassWriter {
             return None;
         }
 
-        let new_handlers: Vec<Handler> = exceptions
-            .iter()
-            .map(|&(start, end, handler, _)| {
-                let at = |pc: u16| new_offsets.binary_search(&usize::from(pc)).ok();
-                Some(Handler {
-                    start: at(start)?,
-                    end: at(end)?,
-                    handler: at(handler)?,
-                })
-            })
-            .collect::<Option<_>>()?;
-        let new_graph = ControlGraph::build(&new_insns, &new_handlers)?;
-        // kotlinc's writer puts a frame only where a jump, a switch or a handler arrives. A label a
-        // rewrite left reached only by falling through (its `goto` removed, its jumps threaded on)
-        // loses its frame; one left in dead code keeps it, since the verifier still checks it.
-        let mut targeted = vec![false; new_insns.len() + 1];
-        for insn in &new_insns {
-            match insn {
-                Insn::Branch {
-                    target: BranchTarget::Internal(to),
-                    ..
-                }
-                | Insn::BranchW {
-                    target: BranchTarget::Internal(to),
-                    ..
-                } => targeted[*to] = true,
-                Insn::TableSwitch {
-                    default, targets, ..
-                } => {
-                    for &to in std::iter::once(default).chain(targets) {
-                        targeted[to] = true;
-                    }
-                }
-                Insn::LookupSwitch { default, pairs } => {
-                    for &to in std::iter::once(default).chain(pairs.iter().map(|(_, to)| to)) {
-                        targeted[to] = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        for handler in &new_handlers {
-            targeted[handler.handler] = true;
-        }
-        let ends_flow = |insn: &Insn| match insn {
-            Insn::Branch { op, .. } | Insn::BranchW { op, .. } => matches!(*op, 0xa7 | 0xc8),
-            Insn::Plain { op, .. } => matches!(*op, 0xac..=0xb1 | 0xbf),
-            Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => true,
-        };
-        let labels = frames.labels.clone();
-        frames.frames.retain(|(label, _, _)| {
-            let Some(&pc) = labels.get(*label as usize) else {
-                return true;
-            };
-            match new_offsets.binary_search(&pc) {
-                Ok(at) if at < new_insns.len() => {
-                    targeted[at] || (at > 0 && ends_flow(&new_insns[at - 1]))
-                }
-                _ => true,
-            }
-        });
-        let merged = self
-            .merged_frames(&frames)
-            .into_iter()
-            .filter(|(at, _, _)| *at < new_len)
-            .map(|(at, locals, stack)| {
-                Some((
-                    new_offsets.binary_search(&at).ok()?,
-                    expand_slots(&locals),
-                    stack,
-                ))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let types = FrameTypes::analyze(&new_insns, &new_graph, &entry, &merged, self)?;
-        // The reference widenings the method as emitted already makes at its frames are ones the
-        // verifier accepts; the rewritten method may make them again.
-        let known_widenings = original_analysis()
-            .and_then(|(original, frames)| {
-                original.reference_widenings(&insns, &original_graph, frames, self)
-            })
-            .unwrap_or_default();
-        if !types.frames_hold(&new_insns, &new_graph, &merged, self, &known_widenings) {
-            return None;
-        }
-        let mut max_stack = 0usize;
-        for index in 0..=new_insns.len() {
-            if let Some(state) = types.before(index) {
-                max_stack = max_stack.max(state.stack.iter().map(words).sum());
-            }
-        }
-        let mut max_locals = entry.len();
-        for insn in &new_insns {
-            if let Some((slot, width)) = var_slot(insn) {
-                max_locals = max_locals.max(usize::from(slot) + usize::from(width));
-            }
-        }
-        for &(_, desc, slot, _, _) in &lvt {
-            let width = match self.cp.utf8_at(desc) {
-                Some("J" | "D") => 2,
-                _ => 1,
-            };
-            max_locals = max_locals.max(usize::from(slot) + width);
-        }
-        for (_, locals, _) in &frames.frames {
-            max_locals = max_locals.max(expand_slots(locals).len());
-        }
+        // The class carries the frames the rewritten body implies. A body they cannot be computed
+        // for is written as emitted.
+        let code = assemble(&new_insns);
+        self.compute_frames(&stack_maps::Body {
+            access: source.access,
+            name: &source.name,
+            descriptor: &source.desc,
+            code: &code,
+            exceptions: &exceptions,
+            labels: stack_maps::table_labels(&lnt, &lvt, code.len()),
+        })
+        .ok()?;
         Some(Rewritten {
-            code: frames.bytes.clone(),
-            max_stack: u16::try_from(max_stack).ok()?,
-            max_locals: u16::try_from(max_locals).ok()?,
+            code,
             exceptions,
             lnt,
             lvt,
             implicit_void_return_pc: method.implicit_void_return_pc.map(map_after_inserted16),
-            frames,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_expression_null_check, join_stack_entry, short_branches_fit};
-    use crate::jvm::classfile::{ConstPool, VerifType};
+    use super::{is_expression_null_check, short_branches_fit};
     use crate::jvm::inline::{insn_offsets_at, BranchTarget, Insn};
 
     #[test]
@@ -1047,24 +708,5 @@ mod tests {
         ));
         let too_far = body(32_765);
         assert!(!short_branches_fit(&too_far, &insn_offsets_at(&too_far, 0)));
-    }
-
-    #[test]
-    fn shared_offsets_do_not_widen_distinct_references_without_a_hierarchy() {
-        let pool = ConstPool::default();
-        assert!(join_stack_entry(
-            &VerifType::ObjectName("java/lang/String".to_owned()),
-            &VerifType::ObjectName("java/lang/CharSequence".to_owned()),
-            &pool,
-        )
-        .is_none());
-        assert!(matches!(
-            join_stack_entry(
-                &VerifType::Null,
-                &VerifType::ObjectName("java/lang/CharSequence".to_owned()),
-                &pool,
-            ),
-            Some(VerifType::ObjectName(name)) if name == "java/lang/CharSequence"
-        ));
     }
 }
