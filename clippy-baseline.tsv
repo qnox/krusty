@@ -59,7 +59,6 @@
 1	src/jvm/ir_emit.rs	this method chain can be written more clearly with `if .. else ..`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*result`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[*index as usize].ty`
-1	src/jvm/java_stub.rs	unnecessary closure used with `bool::then`
 1	src/jvm/jvm_libraries.rs	unnecessarily eager cloning of iterator items
 1	src/jvm/metadata.rs	this function has too many arguments (8/7)
 1	src/jvm/ranges.rs	this function has too many arguments (8/7)

@@ -6284,6 +6284,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_caller_bounded_type_parameter_receiver_selects_the_generic_extension`,
   `a_caller_type_parameter_receiver_does_not_match_a_concrete_element_overload`, cross-checked
   against the reference compiler).
+- **A Java source header erases a type variable to its leftmost bound.** When `.java` sources are
+  compiled together with Kotlin, krusty reads their signatures into header classes
+  (`src/jvm/java_stub.rs`) and emits its Kotlin calls against those descriptors, while the classes
+  that run are javac's. javac erases a type variable to the erasure of its leftmost bound (JLS
+  §4.6): `<T extends Comparable<T>> T max(List<T>)` is `(Ljava/util/List;)Ljava/lang/Comparable;`,
+  `<N extends Number>` makes a field `N` a `Ljava/lang/Number;`, and a bound that is another type
+  variable is erased in turn (`<A, B extends A>` erases `B` to `Object`). The header erased every
+  type variable to `Object`, so the Kotlin call failed at run time with `NoSuchMethodError`. Header
+  descriptors now follow the same rule for methods, constructors, fields and record components,
+  over enclosing and immediate class and member type parameters, each bound read in the scope that
+  declares it (a member's own `<N>` shadows the class's `N`, and a static member class starts a new
+  enclosing scope). The generic `Signature` attributes are unchanged. Tests:
+  `jvm::java_stub::tests::type_variables_erase_to_their_leftmost_bound` (javac's descriptors) and
+  `tests/java_source_interop_e2e.rs::java_source_headers_erase_type_variables_to_their_bounds`
+  (Kotlin first, then javac against krusty's output, then a run).
 
 ## 8. Success criteria for the PoC
 

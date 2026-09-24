@@ -16193,6 +16193,14 @@ impl<'a> Emitter<'a> {
                         self.mark_inline_call_site_line(e, code);
                         match classifier.non_null() {
                             Ty::TyParam(identity, _) => {
+                                // `enumValueOf` is not `@InlineOnly`, so kotlinc's inliner stores
+                                // its argument once, into the parameter's slot, before the body
+                                // runs; the body then reads that slot.
+                                self.emit_value(args[0], code);
+                                let name = self.next_slot;
+                                self.next_slot += 1;
+                                store(Ty::String, name, code);
+                                let lease = self.lease_temporary(name, Ty::String);
                                 // Kotlin's public inline template keeps the reified classifier as
                                 // the standard mode-5 marker plus a null Class placeholder. A
                                 // consuming compiler replaces that placeholder at the call site.
@@ -16208,7 +16216,8 @@ impl<'a> Emitter<'a> {
                                 );
                                 code.invokestatic(marker, 2, 0);
                                 code.aconst_null();
-                                self.emit_value(args[0], code);
+                                load(Ty::String, name, code);
+                                self.release_temporary(lease);
                                 let method = self.cw.methodref(
                                     "java/lang/Enum",
                                     "valueOf",

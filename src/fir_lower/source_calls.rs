@@ -962,20 +962,12 @@ impl BodyLowering<'_> {
         } else {
             slots.into_iter().collect::<Option<Vec<_>>>()?
         };
-        // Only where an inline lambda LITERAL is among the operands: that is the expansion whose
-        // splice stores each remaining operand into the callee's own parameter slot, so a local of
-        // its own is a second copy. An expansion with no such lambda keeps its operand local —
-        // the reference compiler emits one there, and removing it changes which slot the body reads.
-        let substitutes_a_lambda = args.iter().any(|&argument| {
-            matches!(
-                self.ir.expr(argument),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            )
-        });
-        let (statements, receiver, args) = if preserve_inline_lambdas && substitutes_a_lambda {
+        // A retained-body expansion stores each operand into the callee's own parameter slot
+        // itself, so a caller local that only copies an operand into it is a second copy. kotlinc
+        // writes no such copy, with or without an inline lambda among the operands: its inliner
+        // stores the argument once, into the parameter's slot, or not at all for an `@InlineOnly`
+        // callee that reads it in place.
+        let (statements, receiver, args) = if preserve_inline_lambdas {
             self.fold_back_unneeded_operand_locals(statements, receiver, args)
         } else {
             (statements, receiver, args)
@@ -983,8 +975,9 @@ impl BodyLowering<'_> {
         Some((statements, receiver, args, normalized.defaults))
     }
 
-    /// Call `visit` for every local this expression reads, including inside a preserved inline
-    /// lambda's captures and body — both run in the caller's frame once the call is spliced.
+    /// Call `visit` for every local this expression reads, including nested operands and a
+    /// preserved inline lambda's captures and body — all run in the caller's frame once the call
+    /// is spliced.
     fn for_each_value_read(&self, expression: ExprId, visit: &mut impl FnMut(u32)) {
         if let IrExpr::GetValue(slot) = self.ir.expr(expression) {
             visit(*slot);
@@ -1020,11 +1013,12 @@ impl BodyLowering<'_> {
     /// Drop an operand local the splice contract does not need.
     ///
     /// A dependency inline call keeps its non-lambda operands in source-order locals so that a
-    /// captured lambda operand can reference them. An operand that is already a plain value — a
-    /// local read or a constant — and is used exactly once by this very call needs no local of its
-    /// own: re-reading it where the call consumes it is the same value in the same order. Keeping
-    /// one costs a slot and a copy the reference compiler does not emit, and shifts every local the
-    /// spliced body goes on to use.
+    /// captured lambda operand can reference them. A root operand that is already a plain value —
+    /// a local read or a constant — and is used exactly once by this very call needs no local of
+    /// its own: re-reading it where the call consumes it is the same value in the same order.
+    /// Nested uses, including vararg elements, retain their locals because this fold only replaces
+    /// root operands. Keeping a foldable root local costs a slot and a copy the reference compiler
+    /// does not emit, and shifts every local the spliced body goes on to use.
     ///
     /// Only a value whose source is not written by any surviving statement qualifies, so folding it
     /// back cannot move a read across a write.
@@ -1065,9 +1059,17 @@ impl BodyLowering<'_> {
                     continue;
                 }
             };
-            // The local must be read exactly once, by this call, and nothing left behind may write
-            // the value it was copied from.
-            let uses: usize = args
+            // Replacement is deliberately limited to a root call operand. Require exactly one
+            // such read, and fail closed if the slot is also read by a nested operand or surviving
+            // statement; otherwise removing the declaration would leave that nested read dangling.
+            let root_uses = args
+                .iter()
+                .chain(receiver.iter())
+                .filter(|&&operand| {
+                    matches!(self.ir.expr(operand), IrExpr::GetValue(read) if *read == slot)
+                })
+                .count();
+            let all_uses: usize = args
                 .iter()
                 .chain(receiver.iter())
                 .map(|&operand| reads_of(self, slot, operand))
@@ -1083,7 +1085,7 @@ impl BodyLowering<'_> {
                     other != index && self.writes_value(statement, source)
                 })
             });
-            if uses != 1 || rewritten {
+            if root_uses != 1 || all_uses != root_uses || rewritten {
                 index += 1;
                 continue;
             }
