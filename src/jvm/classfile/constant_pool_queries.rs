@@ -125,8 +125,6 @@ impl ConstPool {
 pub(super) struct PoolLookup<'a> {
     pool: &'a ConstPool,
     bootstrap_methods: &'a [(u16, Vec<u16>)],
-    /// The entry at each slot, when a `long` or `double` makes slots and entries diverge.
-    slots: Option<Vec<Option<usize>>>,
     missing: bool,
 }
 
@@ -135,20 +133,9 @@ impl<'a> PoolLookup<'a> {
         pool: &'a ConstPool,
         bootstrap_methods: &'a [(u16, Vec<u16>)],
     ) -> PoolLookup<'a> {
-        let slots = (pool.wide_count > 0).then(|| {
-            let mut slots = vec![None];
-            for (at, constant) in pool.entries.iter().enumerate() {
-                slots.push(Some(at));
-                if matches!(constant, Const::Long(_) | Const::Double(_)) {
-                    slots.push(None);
-                }
-            }
-            slots
-        });
         PoolLookup {
             pool,
             bootstrap_methods,
-            slots,
             missing: false,
         }
     }
@@ -188,11 +175,7 @@ impl<'a> PoolLookup<'a> {
 
 impl ConstantPoolView for PoolLookup<'_> {
     fn entry(&self, index: u16) -> Option<PoolEntry<'_>> {
-        let at = match &self.slots {
-            Some(slots) => (*slots.get(usize::from(index))?)?,
-            None => usize::from(index).checked_sub(1)?,
-        };
-        Some(match self.pool.entries.get(at)? {
+        Some(match self.pool.entry_at(index)? {
             Const::Utf8(text) => PoolEntry::Utf8(text),
             Const::Utf8Units(units) => PoolEntry::Utf8Units(units),
             Const::Integer(value) => PoolEntry::Integer(*value),
@@ -286,5 +269,28 @@ impl ConstantSink for PoolLookup<'_> {
         };
         let signature = self.name_and_type(name, desc);
         self.find(Const::InvokeDynamic(entry as u16, signature))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_pool_view_uses_the_authoritative_slot_index() {
+        let mut pool = ConstPool::default();
+        let wide = pool.intern(Const::Long(5));
+        let following = pool.utf8("following");
+        let view = PoolLookup::new(&pool, &[]);
+
+        assert!(matches!(view.entry(wide), Some(PoolEntry::Long(5))));
+        assert!(
+            view.entry(wide + 1).is_none(),
+            "wide second slot is unusable"
+        );
+        assert!(matches!(
+            view.entry(following),
+            Some(PoolEntry::Utf8("following"))
+        ));
     }
 }

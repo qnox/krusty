@@ -8,6 +8,72 @@
 
 use super::*;
 
+struct BootstrapSymbolSource<'a> {
+    declarations: &'a std::collections::HashSet<TypeName>,
+    aliases: &'a std::collections::HashSet<TypeName>,
+    enclosing_names: &'a std::collections::HashSet<TypeName>,
+    libraries: &'a dyn SymbolSource,
+}
+
+/// Every name enclosing a source declaration or alias, indexed once for package probes while the
+/// source type universe is built.
+fn bootstrap_enclosing_names(
+    declarations: &std::collections::HashSet<TypeName>,
+    aliases: &std::collections::HashSet<TypeName>,
+) -> std::collections::HashSet<TypeName> {
+    let mut enclosing = std::collections::HashSet::new();
+    for declaration in declarations.iter().chain(aliases) {
+        let mut owner = declaration.parent();
+        // A name already present brought its own ancestors with it.
+        while let Some(current) = owner.filter(|current| enclosing.insert(*current)) {
+            owner = current.parent();
+        }
+    }
+    enclosing
+}
+
+impl SymbolSource for BootstrapSymbolSource<'_> {
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.libraries.platform_flexible_upper_bound(lower)
+    }
+
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let library = self.libraries.symbols(namespace, name);
+        let declaration = match namespace {
+            crate::symbol_source::SymbolNamespace::Package(package) => {
+                crate::types::existing_type_name_child(package, name)
+            }
+            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
+                crate::types::existing_type_name_nested_child(owner, name)
+            }
+        };
+        if declaration.is_some_and(|declaration| {
+            self.declarations.contains(&declaration) || self.aliases.contains(&declaration)
+        }) {
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                classifier_name: declaration,
+                classifier: Some(std::sync::Arc::new(
+                    crate::libraries::LibraryType::declaration_header(),
+                )),
+                callables: library.callables.clone(),
+                importable_declaration: library.importable_declaration,
+            })
+        } else {
+            library
+        }
+    }
+
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        crate::types::existing_type_name_child(parent, name)
+            .is_some_and(|package| self.enclosing_names.contains(&package))
+            || self.libraries.package_exists(parent, name)
+    }
+}
+
 /// Everything the declaration walk needs in order to bind a written name, decided once for the
 /// whole source set.
 pub(in crate::resolve) struct SourceTypeUniverse {
@@ -203,6 +269,7 @@ pub(in crate::resolve) fn source_type_universe(
             HashMap::new();
         let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
         let mut imports_by_file = Vec::with_capacity(source_count);
+        let enclosing_names = bootstrap_enclosing_names(&user_defined, &user_aliases);
         for file_index in 0..source_count {
             let imap = source_imports[file_index]
                 .iter()
@@ -212,6 +279,7 @@ pub(in crate::resolve) fn source_type_universe(
             let source = BootstrapSymbolSource {
                 declarations: &user_defined,
                 aliases: &user_aliases,
+                enclosing_names: &enclosing_names,
                 libraries,
             };
             let own = type_name(&source_packages[file_index].replace('.', "/"));
@@ -476,5 +544,38 @@ pub(in crate::resolve) fn source_type_universe(
         file_class_names,
         user_defined,
         user_base_classes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bootstrap_enclosing_names, BootstrapSymbolSource};
+    use crate::symbol_source::SymbolSource;
+    use crate::types::{type_name, TypeName};
+
+    #[test]
+    fn a_bootstrap_package_exists_exactly_when_it_encloses_a_source_declaration_or_alias() {
+        let declarations = [
+            type_name("app/model/Order"),
+            type_name("app/model/Order$Line"),
+        ]
+        .into_iter()
+        .collect();
+        let aliases = [type_name("app/alias/Id")].into_iter().collect();
+        let enclosing_names = bootstrap_enclosing_names(&declarations, &aliases);
+        let source = BootstrapSymbolSource {
+            declarations: &declarations,
+            aliases: &aliases,
+            enclosing_names: &enclosing_names,
+            libraries: &crate::libraries::EmptySymbolSource,
+        };
+        let app = type_name("app");
+        assert!(source.package_exists(TypeName::ROOT, "app"));
+        assert!(source.package_exists(app, "model"));
+        assert!(source.package_exists(app, "alias"));
+        // A declaration is not a package of itself, and an unrelated name is none.
+        assert!(!source.package_exists(type_name("app/alias"), "Id"));
+        assert!(!source.package_exists(app, "service"));
+        assert!(!source.package_exists(TypeName::ROOT, "missing"));
     }
 }
