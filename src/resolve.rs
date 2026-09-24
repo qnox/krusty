@@ -49401,6 +49401,9 @@ impl<'a> Checker<'a> {
                 .unwrap_or_else(|| self.call_argument_list_span(call, args));
             self.call_recovery_span(call, args, fallback)
         });
+        // kotlinc lists one call's mapping errors in source order; where they share a position,
+        // in the order mapping found them.
+        let reported_from = self.diags.diags.len();
         for error in failure.errors {
             let message = error.to_string();
             let compiler_span = match &error {
@@ -49430,6 +49433,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(compiler_span, message);
             }
         }
+        self.diags.sort_source_order_from(reported_from);
     }
 
     fn report_callable_arg_mapping_error(

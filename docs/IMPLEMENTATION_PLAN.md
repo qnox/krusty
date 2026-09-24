@@ -4398,8 +4398,8 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   extensions: `catalog.loadAll(true)` against `loadAll(String)` and `Catalog.loadAll(Int)` reports
   the extension's mismatch; kotlinc reports the member's (2.4.10) or both together (2.4.20).
 - ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
-  names parameter `p0` (kotlinc: `other`), and on `Int` it sees two Java `equals` overloads and
-  reports NONE_APPLICABLE where kotlinc reports NO_VALUE_FOR_PARAMETER. Pinned as a divergence
-  (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
+  names parameter `p0` where kotlinc names `other`, and 2.4.20 `s?.equals()` on a `String?` joins
+  the member with `String?.equals` but kotlinc also reports the member's missing `other`. Pinned as
+  a divergence (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
 - ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
   its reasons, anchored at the callee name) differs from krusty's.

@@ -178,13 +178,13 @@ fn unselectable_but_existing_members_are_not_called_unresolved() {
     // (`Any?.hashCode()`); earlier versions report the member's own arity error.
     assert_inapplicable("hash-code-arity", "fun f(i: Int?): Any? = i?.hashCode(1)\n");
     // Both compilers reject `equals()`, but kotlinc reports it against the mapped Kotlin member
-    // `equals(other: Any?)` while krusty still sees the Java `Object.equals` overloads
+    // `equals(other: Any?)` while krusty still names the Java `Object.equals` parameter
     // (docs/IMPLEMENTATION_PLAN.md). krusty's exact output is pinned beside kotlinc's recorded one,
     // so neither can drift unnoticed.
     assert_rejected_divergently(
         "equals-arity",
         "fun f(i: Int?): Any? = i?.equals()\n",
-        &["none of the following candidates is applicable:"],
+        &["no value passed for parameter 'p0'."],
     );
 }
 
