@@ -12,9 +12,11 @@ use super::serialization_companion_byte_parity_e2e::{
 };
 use super::serialization_test_support::both_compilers_box;
 
-const SOURCE: &str = "import kotlinx.serialization.Serializable\n\
+const SOURCE: &str = "import kotlinx.serialization.SerialName\n\
+import kotlinx.serialization.Serializable\n\
 \n\
 @Serializable\n\
+@SerialName(\"marker-object\")\n\
 object Marker\n\
 \n\
 @Serializable\n\
@@ -26,7 +28,7 @@ object Settings {\n\
 @Serializable\n\
 sealed class Signal {\n\
 \x20   @Serializable data class Tick(val n: Int) : Signal()\n\
-\x20   @Serializable object Idle : Signal()\n\
+\x20   @Serializable @SerialName(\"idle-object\") object Idle : Signal()\n\
 }\n\
 \n\
 @Serializable\n\
@@ -55,6 +57,7 @@ fn an_object_serializes_under_both_compilers() {
          \x20       holder,\n\
          \x20       back.marker === Marker && back.maybe === Marker,\n\
          \x20       Marker.serializer() === Marker.serializer(),\n\
+         \x20       Marker.serializer().descriptor.serialName,\n\
          \x20       Settings.serializer().descriptor.serialName,\n\
          \x20       Settings.serializer().descriptor.kind,\n\
          \x20   ).joinToString(\" | \")\n\
@@ -63,9 +66,9 @@ fn an_object_serializes_under_both_compilers() {
     let outcome = both_compilers_box(&src, "object_serializer");
     assert_eq!(
         outcome,
-        "[{\"type\":\"Signal.Tick\",\"n\":1},{\"type\":\"Signal.Idle\"}] | true | {} | true | \
-         {\"marker\":{},\"signals\":[{\"type\":\"Signal.Tick\",\"n\":1},{\"type\":\"Signal.Idle\"}],\
-         \"maybe\":{}} | true | true | Settings | OBJECT"
+        "[{\"type\":\"Signal.Tick\",\"n\":1},{\"type\":\"idle-object\"}] | true | {} | true | \
+         {\"marker\":{},\"signals\":[{\"type\":\"Signal.Tick\",\"n\":1},{\"type\":\"idle-object\"}],\
+         \"maybe\":{}} | true | true | marker-object | Settings | OBJECT"
     );
 }
 

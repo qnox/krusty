@@ -5,7 +5,7 @@
 //! `_init_$_anonymous_()`. An enum's body is its `EnumSerializer` factory; an object's is an
 //! `ObjectSerializer` over its own `INSTANCE`. Neither has a generated `$serializer` class.
 
-use super::{class_ty, kserializer_of, serial_name};
+use super::{class_ty, kserializer_of};
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
@@ -18,7 +18,7 @@ const CACHED_SERIALIZER_DELEGATE: &str = "$cachedSerializer$delegate";
 pub(super) fn add_cached_serializer_delegate(
     ir: &mut IrFile,
     class_id: ClassId,
-    class_fq: &str,
+    class_name: TypeName,
     serializer: ExprId,
 ) {
     // The ANNOTATED start line (the `@Serializable` line), not the declaration keyword's — kotlinc
@@ -99,7 +99,7 @@ pub(super) fn add_cached_serializer_delegate(
         init: lazy,
         is_var: false,
         is_const: false,
-        owner: Some(type_name(class_fq)),
+        owner: Some(class_name),
         visibility: crate::types::Visibility::Private,
         setter_jvm_name: None,
         erased_declared_ty: None,
@@ -151,12 +151,15 @@ pub(super) fn local_serializable_object(
 
 /// A `@Serializable object`: `serializer()` is a member of the object returning the cached
 /// `ObjectSerializer`, through a private `get$cachedSerializer()` that reads the delegate.
-pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, class_fq: &str) {
-    let object = type_name(class_fq);
+pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, object: TypeName) {
     let owner_line = ir.classes[class_id as usize].decl_start_line;
 
     // `get$cachedSerializer()`: `(KSerializer) $cachedSerializer$delegate.getValue()`.
-    let read = ir.external_static_field(class_fq, CACHED_SERIALIZER_DELEGATE, "Lkotlin/Lazy;");
+    let read = ir.add_expr(IrExpr::ExternalStaticField {
+        owner: object,
+        name: CACHED_SERIALIZER_DELEGATE.to_string(),
+        descriptor: "Lkotlin/Lazy;".to_string(),
+    });
     let get_value = ir.add_expr(IrExpr::Call {
         callee: Callee::Virtual {
             owner: type_name("kotlin/Lazy"),
@@ -205,22 +208,8 @@ pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, class_fq
         stmts: Vec::new(),
         value: None,
     });
-    let accessor = match super::complete_frontend_serializer_accessor(ir, object, placeholder) {
-        Some(accessor) => accessor,
-        None => {
-            let accessor = ir.add_fun(IrFunction {
-                name: "serializer".to_string(),
-                params: vec![],
-                ret: kserializer_of(class_ty(class_fq)),
-                body: Some(placeholder),
-                is_static: false,
-                dispatch_receiver: Some(object),
-                param_checks: Vec::new(),
-            });
-            ir.classes[class_id as usize].methods.push(accessor);
-            accessor
-        }
-    };
+    let accessor = super::complete_frontend_serializer_accessor(ir, object, placeholder)
+        .expect("a serializable object has its checked frontend serializer declaration");
     // Generated past the frontend's declaration-line transfer: kotlinc maps the accessor to the
     // annotated declaration's first line, like every other member it generates for the object.
     if owner_line != 0 {
@@ -246,7 +235,9 @@ pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, class_fq
     });
     ir.functions[accessor as usize].body = Some(body);
 
-    let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
+    let name = ir.add_expr(IrExpr::Const(IrConst::String(
+        super::annotations::class_serial_name(ir, class_id),
+    )));
     let serializer = object_serializer(ir, object, name);
     // kotlinc narrows the initializer's value to the `KSerializer` it returns.
     let serializer = ir.add_expr(IrExpr::TypeOp {
@@ -254,9 +245,10 @@ pub(super) fn add_object_serializer(ir: &mut IrFile, class_id: ClassId, class_fq
         arg: serializer,
         type_operand: class_ty(super::KSERIALIZER_FQ),
     });
-    add_cached_serializer_delegate(ir, class_id, class_fq, serializer);
+    add_cached_serializer_delegate(ir, class_id, object, serializer);
     // An object's delegate is generated storage with no declaration of its own; kotlinc emits it
     // `ACC_SYNTHETIC` (an enum's is an ordinary private field).
     let delegate = u32::try_from(ir.statics.len() - 1).expect("static index fits u32");
-    ir.mark_synthetic_static(delegate);
+    ir.mark_compiler_generated_static(delegate);
+    ir.place_static_initializer_after_source(delegate);
 }

@@ -254,7 +254,7 @@ pub(super) fn element_serializer_plan(
     if let Some(object) = super::cached_serializer::local_serializable_object(ir, ctx, fq_name) {
         return Some(ElementSerializerPlan::Object {
             object: fq_name,
-            serial_name: super::serial_name(ir, object),
+            serial_name: super::annotations::class_serial_name(ir, object),
         });
     }
     // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds

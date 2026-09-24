@@ -1020,7 +1020,8 @@ impl SerializationPlugin {
             type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
         });
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
-        cached_serializer::add_cached_serializer_delegate(ir, class_id, class_fq, enum_ser);
+        let class_name = ir.classes[class_id as usize].fq_name_id();
+        cached_serializer::add_cached_serializer_delegate(ir, class_id, class_name, enum_ser);
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
         let read =
             ir.external_static_field(class_fq, "$cachedSerializer$delegate", "Lkotlin/Lazy;");
@@ -1192,17 +1193,17 @@ impl SerializationPlugin {
         let sub_serializers: Vec<ExprId> = subs
             .iter()
             .map(|&cid| {
-                let s = ir.classes[cid as usize].fq_name();
+                let subtype = ir.classes[cid as usize].fq_name_id();
                 // An `object` case is serialized by an `ObjectSerializer` kotlinc constructs in
                 // place, as it does for any element of an object type.
-                if let Some(object) =
-                    cached_serializer::local_serializable_object(ir, ctx, type_name(&s))
+                if let Some(object) = cached_serializer::local_serializable_object(ir, ctx, subtype)
                 {
-                    let name = ir.add_expr(IrExpr::Const(IrConst::String(self::serial_name(
-                        ir, object,
-                    ))));
-                    return cached_serializer::object_serializer(ir, type_name(&s), name);
+                    let name = ir.add_expr(IrExpr::Const(IrConst::String(
+                        annotations::class_serial_name(ir, object),
+                    )));
+                    return cached_serializer::object_serializer(ir, subtype, name);
                 }
+                let s = subtype.render();
                 serializer_of(ir, &s, vec![], kserializer_of(class_ty(&s)), vec![])
             })
             .collect();
@@ -1469,7 +1470,8 @@ impl IrPlugin for SerializationPlugin {
             .clear();
         let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
-            let class_fq = ir.classes[class_id as usize].fq_name();
+            let class_name = ir.classes[class_id as usize].fq_name_id();
+            let class_fq = class_name.render();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
             // instance of the explicit serializer `X` (`new X(C::class)`), the way kotlinc compiles it.
             if let Some(custom) = custom_serializer_of(ctx, ir, class_id) {
@@ -1485,7 +1487,7 @@ impl IrPlugin for SerializationPlugin {
             // A `@Serializable object`: no generated `$serializer` — `serializer()` is a member of
             // the object returning a cached `ObjectSerializer` over its `INSTANCE`.
             if ir.classes[class_id as usize].is_object {
-                cached_serializer::add_object_serializer(ir, class_id, &class_fq);
+                cached_serializer::add_object_serializer(ir, class_id, class_name);
                 continue;
             }
             // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —
