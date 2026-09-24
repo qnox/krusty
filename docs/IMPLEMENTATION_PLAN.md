@@ -4400,9 +4400,9 @@ shadow with no output change.
 - ✅ 2a. Classes carry the computed frames (`jvm::classfile::stack_maps`): encoded when a method is
   added, so their classes intern where kotlinc's writer interns them, and recomputed over the final
   body when the class is written. Unreachable blocks become `nop`…`athrow` and leave the exception
-  table, as ASM does. A body the analysis declines keeps its recorded frames. The joins the recorded
-  frames had typed narrower than `Object` now get kotlinc's coercion casts (a reassigned local, a
-  box widened to `Number`).
+  table, as ASM does. A non-empty emitted body the analysis declines is an internal backend error;
+  recorded frames are not an output fallback. The joins the recorded frames had typed narrower than
+  `Object` now get kotlinc's coercion casts (a reassigned local, a box widened to `Number`).
 - ☐ 2b. Compute `max_stack`, and delete the frame-recording sites and the passes that exist only to
   keep recorded frames consistent.
 - ☐ 3–6. Symbolic method body and assembler, `FrameMap`-style slot allocator, kotlinc's
