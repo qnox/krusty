@@ -1437,6 +1437,8 @@ mod serialization_companion_byte_parity_e2e;
 mod serialization_constructor_pool_order_e2e;
 #[path = "serialization_coverage_e2e.rs"]
 mod serialization_coverage_e2e;
+#[path = "serialization_class_serial_name_e2e.rs"]
+mod serialization_class_serial_name_e2e;
 #[path = "serialization_default_element_guard_e2e.rs"]
 mod serialization_default_element_guard_e2e;
 #[path = "serialization_default_member_e2e.rs"]

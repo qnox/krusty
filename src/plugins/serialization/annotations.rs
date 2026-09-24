@@ -51,6 +51,24 @@ pub(super) fn serial_name_of(
     ctx.property_annotation_const_string(ir, class_id, property, type_name(SERIAL_NAME_FQ))
 }
 
+/// A class-level `@SerialName("…")`: the name the format uses for the class itself (a sealed
+/// subclass's discriminator value, a descriptor's `serialName`). `None` when the class declares
+/// none; an application whose value is not its `String` constant is a frontend defect, not a
+/// reason to fall back to the qualified name.
+pub(super) fn class_serial_name_of(ir: &IrFile, class_id: ClassId) -> Option<KtString> {
+    let serial_name = type_name(SERIAL_NAME_FQ);
+    let application = ir.classes[class_id as usize]
+        .applied_annotations
+        .applications()
+        .find(|application| application.internal == serial_name)?;
+    match application.values.first() {
+        Some((_, crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value)))) => {
+            Some(value.clone())
+        }
+        other => panic!("a class-level `@SerialName` carries its String value, not {other:?}"),
+    }
+}
+
 pub(super) fn property_is_contextual(
     ctx: &PluginContext,
     ir: &IrFile,

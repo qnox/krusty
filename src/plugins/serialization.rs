@@ -247,12 +247,15 @@ fn complete_frontend_serializer_accessor(
     Some(function)
 }
 
-/// The `@Serializable` serial name is the declaration's qualified Kotlin source name. Common
-/// lowering records it from stable declaration ownership while that information is available; the
-/// plugin must not reinterpret `$` in a JVM/internal name because it is also a legal identifier.
+/// The `@Serializable` serial name: the class's own `@SerialName` when it declares one, else the
+/// declaration's qualified Kotlin source name. Common lowering records the latter from stable
+/// declaration ownership while that information is available; the plugin must not reinterpret `$`
+/// in a JVM/internal name because it is also a legal identifier.
 fn serial_name(ir: &IrFile, class: ClassId) -> KtString {
-    ir.class_source_qualified_name(class)
-        .expect("a serializable source classifier has a qualified declaration name")
+    annotations::class_serial_name_of(ir, class).unwrap_or_else(|| {
+        ir.class_source_qualified_name(class)
+            .expect("a serializable source classifier has a qualified declaration name")
+    })
 }
 
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
