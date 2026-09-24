@@ -4412,8 +4412,15 @@ shadow with no output change.
   frame binding are gone. The coroutine machine reads the spill types from frames computed over the
   body (`ClassWriter::builder_frames`). A non-empty emitted body the computation declines remains an
   explicit backend invariant failure; removing recorded frames does not introduce a second path.
-- ☐ 3–6. Symbolic method body and assembler, `FrameMap`-style slot allocator, kotlinc's
-  transformer order, and label-based line/local tables.
+- ✅ 3a. kotlinc's bytecode rewrites carry the method as a `jvm::method_node::MethodNode`. A
+  finished method is read against the writer's own pool (`ConstantPoolView`), its passes still run
+  on the index-addressed instruction list through the `method_rewrite::node_bridge` adapter, and
+  the result is relabelled and laid out again without adding a pool entry. The exception, line and
+  local tables and the implicit return move with their labels; the per-offset remapping is gone.
+  A spliced `ldc_w` whose host index fits one byte is now written `ldc`, as ASM writes it (121
+  classes of the 2.4.20 box corpus); no other class changes.
+- ☐ 3b–6. The rewrite passes ported onto `MethodNode` (retiring the bridge), a `FrameMap`-style
+  slot allocator, and kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
