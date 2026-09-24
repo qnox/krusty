@@ -709,21 +709,8 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
 /// An argument serializer of a companion's `serializer(…)`: kotlinc narrows each operand to the
 /// `KSerializer` the callee takes, including the one a `.nullable` wraps and a collection's own.
 fn emit_narrowed_argument(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
-    let serializer = match plan {
-        ElementSerializerPlan::Nullable(inner) => {
-            let inner = emit_narrowed_argument(ir, *inner);
-            wrap_nullable_serializer(ir, inner)
-        }
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments, true)
-        }
-        plan => emit_element_serializer(ir, plan),
-    };
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(KSERIALIZER_FQ),
-    })
+    let serializer = emit_element_serializer(ir, plan);
+    narrow_to_kserializer(ir, serializer)
 }
 
 /// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
