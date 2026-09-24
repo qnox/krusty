@@ -43,6 +43,7 @@ mod property_references;
 pub mod property_storage;
 mod ranges;
 mod reified_operations;
+mod runtime_capabilities;
 mod shared_captures;
 pub mod source_map;
 pub mod suspend;
