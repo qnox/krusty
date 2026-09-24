@@ -718,30 +718,19 @@ fn source_companion(
     Some((Box::from(index.declaration_name(declaration)?), classifier))
 }
 
-/// The dotted Kotlin declaration name of a source classifier. Each lexical segment comes from its
-/// own stable declaration; an internal/JVM name cannot distinguish nesting from a legal `$`.
+/// The dotted Kotlin declaration name of a source classifier. The stable declaration name already
+/// contains its lexical classifier path, so no JVM/internal name needs to be reinterpreted.
 fn source_qualified_name(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
 ) -> Option<Box<str>> {
     let source = index.declaration_anchor(declaration)?.source;
-    let mut segments = Vec::new();
-    let mut current = Some(declaration);
-    while let Some(candidate) = current {
-        let anchor = index.declaration_anchor(candidate)?;
-        if anchor.kind != crate::fir::DeclarationKind::Classifier {
-            return None;
-        }
-        segments.push(index.declaration_name(candidate)?);
-        current = anchor.owner;
-    }
-    segments.reverse();
+    let declaration = index.declaration_name(declaration)?;
     let package = index.source_package(source)?.render().replace('/', ".");
-    let declarations = segments.join(".");
     Some(if package.is_empty() {
-        declarations.into_boxed_str()
+        Box::from(declaration)
     } else {
-        format!("{package}.{declarations}").into_boxed_str()
+        format!("{package}.{declaration}").into_boxed_str()
     })
 }
 

@@ -5,7 +5,7 @@ use super::*;
 /// Fold classifier annotations while their declaration scopes and expression arenas are live, then
 /// retain only named typed values under stable declaration identities. Bodies are deliberately not
 /// selected; this is declaration metadata needed across source files before backend facts freeze.
-pub(super) fn publish_checked_classifier_annotations(
+pub(crate) fn publish_checked_classifier_annotations(
     files: &[File],
     table: &mut SymbolTable,
     diags: &mut DiagSink,
