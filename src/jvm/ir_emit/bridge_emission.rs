@@ -110,7 +110,6 @@ pub(super) fn emit_bridges(
             emit_bridge_barrier_outcome(barrier.outcome, cw, &mut code);
             let mut locals = vec![VerifType::ObjectName(c.fq_name())];
             locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
-            code.add_frame_if_new(dispatch, locals, vec![]);
             code.bind(dispatch);
         }
         if let Some(parameters) = &target_parameters {
@@ -253,14 +252,8 @@ pub(super) fn emit_bridges(
                 code.dup();
                 // At the branch target the DUPLICATE is still on the stack — the boxed value class,
                 // not the carrier it would have unboxed to.
-                code.add_frame_if_new(
-                    null_case,
-                    locals.clone(),
-                    vec![VerifType::ObjectName(owner.clone())],
-                );
                 code.ifnull(null_case);
                 code.invokevirtual(unbox, 0, slot_words(er) as i32);
-                code.add_frame_if_new(done, locals, vec![verif_for_jvm_free(cw, er)]);
                 code.goto(done);
                 code.bind(null_case);
                 code.pop();

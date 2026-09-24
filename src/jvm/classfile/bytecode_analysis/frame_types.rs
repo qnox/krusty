@@ -70,7 +70,7 @@ pub(crate) enum VerificationType {
 }
 
 impl VerificationType {
-    pub(super) fn from_verif(v: &VerifType, pool: &dyn PoolView) -> VerificationType {
+    pub(crate) fn from_verif(v: &VerifType, pool: &dyn PoolView) -> VerificationType {
         match v {
             VerifType::Top => VerificationType::Top,
             VerifType::Integer => VerificationType::Integer,
@@ -101,7 +101,7 @@ impl VerificationType {
         }
     }
 
-    pub(super) fn is_wide(&self) -> bool {
+    pub(crate) fn is_wide(&self) -> bool {
         matches!(self, VerificationType::Long | VerificationType::Double)
     }
 

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeSet;
 
-use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
+use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler};
 use super::stack_maps;
 use super::temporaries::{self, Body};
 use super::{negated_jumps, redundant_checkcasts, redundant_gotos, stack_peephole};
@@ -242,20 +242,8 @@ impl ClassWriter {
                             exceptions: &method.exceptions,
                             labels: stack_maps::table_labels(&method.lnt, &method.lvt, code_len),
                         })
-                        .ok()?
-                        .frames()
-                        .iter()
-                        .map(|frame| {
-                            let locals: Vec<VerifType> = frame
-                                .locals
-                                .iter()
-                                .map(VerificationType::to_verif)
-                                .collect();
-                            let stack =
-                                frame.stack.iter().map(VerificationType::to_verif).collect();
-                            (frame.index, expand_slots(&locals), stack)
-                        })
-                        .collect::<Vec<_>>();
+                        .ok()
+                        .map(|computed| stack_maps::verif_frames(computed.frames()))?;
                     let types = FrameTypes::analyze(
                         &insns,
                         &original_graph,

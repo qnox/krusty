@@ -30,7 +30,7 @@ use super::bytecode_analysis::{
     TypedHandler, VerificationType,
 };
 use super::method_rewrite::var_slot;
-use super::{u2, ClassWriter, ConstPool, LvtEntry};
+use super::{u2, ClassWriter, CodeBuilder, ConstPool, LvtEntry, VerifType};
 use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
 
 const NOP: u8 = 0x00;
@@ -74,6 +74,16 @@ impl Computed {
 impl ClassWriter {
     /// The frames `body` implies, or why none can be computed.
     pub(super) fn compute_frames(&self, body: &Body<'_>) -> Result<Computed, Decline> {
+        self.compute_frames_from(body, None)
+    }
+
+    /// [`Self::compute_frames`], entered with `entry` (one local per slot) instead of the method's
+    /// arguments when it is given.
+    fn compute_frames_from(
+        &self,
+        body: &Body<'_>,
+        entry: Option<Vec<VerificationType>>,
+    ) -> Result<Computed, Decline> {
         let insns = disassemble(body.code).ok_or(Decline::UnsupportedControlFlow)?;
         let offsets = insn_offsets_at(&insns, 0);
         if offsets.last() != Some(&body.code.len()) {
@@ -104,19 +114,46 @@ impl ClassWriter {
                 labels[at] = true;
             }
         }
-        let frames = FrameComputation {
+        let computation = FrameComputation {
             insns: &insns,
             handlers: &handlers,
             labels: &labels,
             this_class: &self.internal_name,
             pool: self,
-        }
-        .compute(body.access, body.name, body.descriptor)?;
+        };
+        let frames = match entry {
+            Some(entry) => computation.compute_from(entry)?,
+            None => computation.compute(body.access, body.name, body.descriptor)?,
+        };
         Ok(Computed {
             frames,
             insns,
             offsets,
         })
+    }
+
+    /// The frames of a body still being emitted, entered with `entry` (one local per slot), by
+    /// instruction index with their locals one per slot. `None` when they cannot be computed.
+    pub(crate) fn builder_frames(
+        &self,
+        bytes: &[u8],
+        code: &CodeBuilder,
+        entry: &[VerifType],
+    ) -> Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>> {
+        let body = Body {
+            access: 0,
+            name: "",
+            descriptor: "",
+            code: bytes,
+            exceptions: &code.resolved_exceptions(),
+            labels: builder_labels(code.line_marks(), code.local_entries(), bytes.len()),
+        };
+        let entry = entry
+            .iter()
+            .map(|value| VerificationType::from_verif(value, self))
+            .collect();
+        let computed = self.compute_frames_from(&body, Some(entry)).ok()?;
+        Some(verif_frames(computed.frames()))
     }
 
     /// The local slots `body` uses as ASM's `COMPUTE_MAXS` counts them: its arguments, every slot a
@@ -223,6 +260,7 @@ impl ClassWriter {
                         "bytecode",
                         "recorded frames kept for {name}{descriptor}: {decline:?}"
                     );
+                    self.methods[index].stackmap = None;
                     continue;
                 }
             };
@@ -274,6 +312,26 @@ pub(super) fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize
 
 /// The labels of an emitted body that the class file will record: its line marks and the bounds of
 /// its local ranges.
+/// `frames` by instruction index in the emitter's form, their locals one per slot.
+pub(super) fn verif_frames(
+    frames: &[ComputedFrame],
+) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+    frames
+        .iter()
+        .map(|frame| {
+            let mut locals = Vec::with_capacity(frame.locals.len());
+            for local in &frame.locals {
+                locals.push(local.to_verif());
+                if local.is_wide() {
+                    locals.push(VerifType::Top);
+                }
+            }
+            let stack = frame.stack.iter().map(VerificationType::to_verif).collect();
+            (frame.index, locals, stack)
+        })
+        .collect()
+}
+
 pub(super) fn builder_labels(
     lines: &[(u16, u16)],
     locals: &[(u16, Option<u16>, u16, String, String)],
