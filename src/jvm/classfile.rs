@@ -3429,14 +3429,14 @@ fn u4(out: &mut Vec<u8>, v: u32) {
 }
 
 /// The pc just past the FIRST store instruction that writes local `slot` — i.e. where a variable stored
-/// there becomes live. Walks the bytecode opcode-by-opcode via [`super::inline::instruction_len`] (so
+/// there becomes live. Walks the bytecode opcode-by-opcode via [`super::bytecode::instruction_len`] (so
 /// an operand byte that happens to equal a store opcode is skipped). `None` if no such store exists.
 /// Covers both the compact (`istore_1`) and indexed (`istore <slot>`, `wide istore <slot>`) store forms.
 fn first_store_end(code: &[u8], slot: u16) -> Option<usize> {
     let mut pc = 0usize;
     while pc < code.len() {
         let op = code[pc];
-        let len = super::inline::instruction_len(code, pc)?;
+        let len = super::bytecode::instruction_len(code, pc)?;
         let stored = match op {
             // Indexed stores: `istore/lstore/fstore/dstore/astore <u1 index>`.
             0x36..=0x3a => u16::from(code[pc + 1]) == slot,

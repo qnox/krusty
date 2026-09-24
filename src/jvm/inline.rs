@@ -4,6 +4,7 @@
 //! Built on the lazily-read [`MethodCode`](super::classreader::MethodCode); the instruction walk,
 //! local remapping, and `reifiedOperationMarker` handling layer on top in later phases.
 
+use super::bytecode::instruction_len;
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
 
@@ -55,73 +56,6 @@ fn name_and_type(cp: &[C], i: u16) -> Option<(&str, &str)> {
     match cp.get(i as usize)? {
         C::NameAndType(n, d) => Some((utf8(cp, *n)?, utf8(cp, *d)?)),
         _ => None,
-    }
-}
-
-/// The length in bytes of the instruction at `pc` (opcode + operands), including the variable-length
-/// `tableswitch`/`lookupswitch`/`wide` forms. `None` if `pc` is out of range or the opcode is
-/// malformed/truncated. Lets the relocation walk step instruction-by-instruction without a disassembler.
-pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
-    let op = *code.get(pc)?;
-    let len = match op {
-        // wide: a 2-byte-index load/store, or `wide iinc` (2-byte index + 2-byte const).
-        0xc4 => match code.get(pc + 1)? {
-            0x84 => 6, // wide iinc
-            _ => 4,    // wide iload/istore/…/ret
-        },
-        // tableswitch: 0-3 bytes pad to a 4-byte boundary, then default/low/high + (high-low+1) offsets.
-        0xaa => {
-            let base = pc + 1;
-            let pad = (4 - (base % 4)) % 4;
-            let p = base + pad;
-            let low = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?);
-            let high = i32::from_be_bytes(code.get(p + 8..p + 12)?.try_into().ok()?);
-            let n = (high - low + 1).max(0) as usize;
-            (p + 12 + n * 4) - pc
-        }
-        // lookupswitch: pad, then default + npairs + npairs*(match,offset).
-        0xab => {
-            let base = pc + 1;
-            let pad = (4 - (base % 4)) % 4;
-            let p = base + pad;
-            let npairs =
-                i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
-            (p + 8 + npairs * 8) - pc
-        }
-        // 1 operand byte.
-        0x10 | 0x12 | 0x15..=0x19 | 0x36..=0x3a | 0xa9 | 0xbc => 2,
-        // 2 operand bytes.
-        0x11
-        | 0x13
-        | 0x14
-        | 0x84
-        | 0x99..=0xa8
-        | 0xb2..=0xb8
-        | 0xbb
-        | 0xbd
-        | 0xc0
-        | 0xc1
-        | 0xc6
-        | 0xc7 => 3,
-        // multianewarray: 2-byte index + 1 dim byte.
-        0xc5 => 4,
-        // krusty's coroutine-site marker (JVMS reserves `impdep1` for an implementation's own use):
-        // a 1-byte kind and a 2-byte ordinal. It marks a position that must survive relocation into
-        // a spliced inline body, where no offset recorded before the splice would still be valid.
-        // The emitter overwrites every one of them with `nop`s once it has bound its labels, so none
-        // can reach a class file. See `docs/JVM_INLINE_BEFORE_CPS.md`.
-        0xfe => 4,
-        // invokeinterface / invokedynamic: 2-byte index + 2 trailing bytes.
-        0xb9 | 0xba => 5,
-        // goto_w / jsr_w.
-        0xc8 | 0xc9 => 5,
-        // everything else is a single byte (no operands).
-        _ => 1,
-    };
-    if pc + len <= code.len() {
-        Some(len)
-    } else {
-        None
     }
 }
 
@@ -3212,15 +3146,5 @@ mod tests {
         let expected = cw.methodref("Foo", "bar", "()V");
         assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected);
         assert_eq!(out.len(), code.len());
-    }
-
-    #[test]
-    fn instruction_len_covers_switches_and_wide() {
-        // bipush(2), invokestatic(3), wide-iinc(6), goto_w(5), single-byte iadd(1).
-        assert_eq!(instruction_len(&[0x10, 0x05], 0), Some(2));
-        assert_eq!(instruction_len(&[0xb8, 0, 6, 0xb1], 0), Some(3));
-        assert_eq!(instruction_len(&[0xc4, 0x84, 0, 1, 0, 1], 0), Some(6));
-        assert_eq!(instruction_len(&[0xc8, 0, 0, 0, 4], 0), Some(5));
-        assert_eq!(instruction_len(&[0x60], 0), Some(1));
     }
 }
