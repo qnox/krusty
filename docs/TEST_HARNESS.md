@@ -124,6 +124,12 @@ KRUSTY_BLESS_BOX_FAILURES=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test co
 Blessing is refused under CI and on a partial run. The goal is to empty every list; once they are
 empty the lists and `tests/box_ratchet.rs` are deleted.
 
+A pull request is judged against its own base, so two that each match the lists can still disagree
+with them once both land: one fixes a file the other's list still names, or their changes interact.
+The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "require branches to
+be up to date") on and the `conformance` checks required, every merge is checked on the combined
+commit before master moves. A branch that falls behind merges master in and re-blesses.
+
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
