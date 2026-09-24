@@ -169,13 +169,11 @@ pub(super) fn emit_inherited_default_surface(
             let mut param_tys = jvm_tys(&physical_params);
             let mut physical_ret = jvm_declared_ty(&member.physical_ret);
             let mut semantic_params = member.params.to_vec();
-            let mut local_variable_names = member
-                .parameter_identities
-                .iter()
-                .map(|identity| {
-                    crate::jvm::parameter_names::resolved_local_variable(identity, &name)
-                })
-                .collect::<Vec<_>>();
+            let mut local_variable_names = crate::jvm::parameter_names::resolved_local_variables(
+                &member.parameter_identities,
+                &semantic_params,
+                &name,
+            );
             let mut method_parameter_names =
                 crate::jvm::parameter_names::resolved_method_parameters(
                     &member.parameter_identities,

@@ -8,7 +8,7 @@ effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
 > reverse-engineered; the encoding is version-stable so it still holds. The reference toolchain krusty
-> is **validated** against today is pinned by the `kotlin-versions` manifest (currently **2.4.0**) and
+> is **validated** against today is pinned by the `kotlin-versions` manifest (currently **2.4.20**) and
 > self-provisioned by `just kotlinc` — see `harness/run-diff.sh` / `just conformance`.
 
 Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`.

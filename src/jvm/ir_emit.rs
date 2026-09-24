@@ -28,6 +28,7 @@ mod block_scope;
 mod bottom_values;
 mod bridge_emission;
 mod call_operands;
+mod checked_facts;
 mod constructor_defaults;
 mod coroutine_machine;
 mod data_class_pool_seed;
@@ -46,6 +47,7 @@ mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
 mod member_schedule;
+mod metadata_policy;
 mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
@@ -62,6 +64,7 @@ mod vararg;
 mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
+pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(crate) use declaration_types::jvm_tys;
 pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
 use declaration_types::{field_jvm_tys, jvm_declared_ty};
@@ -74,6 +77,11 @@ use inline_call::{
 };
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
+};
+pub use metadata_policy::KotlinMetadata;
+use metadata_policy::{
+    annotation_impl_carries_nullability, is_continuation_class, is_coroutine_state_machine,
+    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
@@ -331,6 +339,7 @@ pub(super) struct EmitEnv<'a> {
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
+    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
@@ -355,30 +364,6 @@ pub(super) struct EmitEnv<'a> {
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
-}
-
-/// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
-/// encoded protobuf, one byte per `char`) / `d2` (string table) arrays. Attached to the facade class so
-/// another Kotlin/krusty compilation can resolve its top-level declarations — in particular reading the
-/// `IS_SUSPEND` flag + logical signature of a `suspend fun`.
-#[derive(Clone)]
-pub struct KotlinMetadata {
-    pub k: i32,
-    pub mv: Vec<i32>,
-    pub xi: i32,
-    pub d1: Vec<String>,
-    pub d2: Vec<String>,
-}
-
-fn is_continuation_class(class: &crate::ir::IrClass) -> bool {
-    class.superclass_matches("kotlin/coroutines/jvm/internal/ContinuationImpl")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
-}
-
-fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
-    is_continuation_class(class)
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
 }
 
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
@@ -1039,7 +1024,11 @@ fn build_class_metadata(
         return Some(KotlinMetadata {
             k: 3,
             mv: vec![2, 4, 0],
-            xi: 48,
+            xi: synthetic_class_xi(if is_continuation_class(c) {
+                SYNTHETIC_PROTECTED
+            } else {
+                SYNTHETIC_LOCAL
+            }),
             d1: vec![],
             d2: vec![],
         });
@@ -2940,8 +2929,8 @@ fn attach_synth_debug_tables(
             guard_slot += slot_size(argument.ty);
         }
     }
-    // Only physical constructor parameters are locals. Anonymous context parameters deliberately
-    // have no LVT row even though their MethodParameters/assertion surfaces have a generated label.
+    // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
+    // reflection/assertion label names the physical constructor local too.
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
@@ -3912,26 +3901,6 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     }
 }
 
-/// Semantic metadata emitted beside one file's JVM classes.
-pub(crate) struct EmitMetadata<'a> {
-    pub facade: Option<&'a KotlinMetadata>,
-    pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
-    /// Suspend functions whose state machine this emission owns, because their only suspension is
-    /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
-    pub emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
-    pub bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
-}
-
-/// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
-pub(crate) struct CheckedEmitFacts<'a> {
-    pub(crate) metadata: EmitMetadata<'a>,
-    pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
-    pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
-    pub(crate) property_reference_realizations:
-        &'a crate::jvm::property_references::PropertyReferenceRealizations,
-    pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
-}
-
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     facade: &str,
@@ -3945,6 +3914,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         run,
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
+        unit_result_tail_forwards: facts.metadata.unit_result_tail_forwards,
         bridge_return_adaptations: facts.metadata.bridge_returns,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
@@ -8335,13 +8305,16 @@ fn emit_annotation_impl_class(
         cw.set_method_debug("<init>", &desc, None, &locals);
         // A reference member is non-null (the JVM annotation format has no null), so kotlinc stamps
         // the synthesized `@NotNull` on each such parameter — the same annotation any non-null
-        // parameter gets, and what a Java caller reads to know the contract.
-        let notnull = "Lorg/jetbrains/annotations/NotNull;";
-        let param_nullability: Vec<Option<&str>> = members
-            .iter()
-            .map(|(_, jt)| jt.is_reference().then_some(notnull))
-            .collect();
-        cw.set_method_nullability("<init>", &desc, None, &param_nullability);
+        // parameter gets, and what a Java caller reads to know the contract. Kotlin 2.4.20 stamps
+        // none anywhere in this synthetic class.
+        if annotation_impl_carries_nullability() {
+            let notnull = "Lorg/jetbrains/annotations/NotNull;";
+            let param_nullability: Vec<Option<&str>> = members
+                .iter()
+                .map(|(_, jt)| jt.is_reference().then_some(notnull))
+                .collect();
+            cw.set_method_nullability("<init>", &desc, None, &param_nullability);
+        }
         // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
@@ -8509,12 +8482,14 @@ fn emit_annotation_equals(
     cw.set_method_debug("equals", "(Ljava/lang/Object;)Z", None, &locals);
     // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
     // stamps it, and a Java caller reads the contract from it.
-    cw.set_method_nullability(
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        None,
-        &[Some("Lorg/jetbrains/annotations/Nullable;")],
-    );
+    if annotation_impl_carries_nullability() {
+        cw.set_method_nullability(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[Some("Lorg/jetbrains/annotations/Nullable;")],
+        );
+    }
 }
 
 /// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
@@ -8787,12 +8762,14 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
     );
     // `toString()` returns a non-null String, and kotlinc stamps the synthesized `@NotNull` on it.
     // The member ACCESSORS carry none, even the reference-typed ones — measured, not assumed.
-    cw.set_method_nullability(
-        "toString",
-        "()Ljava/lang/String;",
-        Some("Lorg/jetbrains/annotations/NotNull;"),
-        &[],
-    );
+    if annotation_impl_carries_nullability() {
+        cw.set_method_nullability(
+            "toString",
+            "()Ljava/lang/String;",
+            Some("Lorg/jetbrains/annotations/NotNull;"),
+            &[],
+        );
+    }
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -8920,8 +8897,9 @@ fn emit_interface_class(
                 } else {
                     Vec::new()
                 };
-                let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
-                    .expect("a compatibility declaration carries exact parameter identities");
+                let parameter_names =
+                    crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
+                        .expect("a compatibility declaration carries exact parameter identities");
                 let method_parameter_names =
                     crate::jvm::parameter_names::function_method_parameters(
                         ir,
@@ -9091,14 +9069,16 @@ fn emit_interface_class(
     // first, then the republished surface for inherited defaults this interface does not redeclare.
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
-        let parameter_names = crate::jvm::parameter_names::function_locals(ir, fid)
-            .expect("an access bridge carries exact declaration parameter identities");
+        let physical_params = jvm_function_params(ir, fid);
+        let parameter_names =
+            crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
+                .expect("an access bridge carries exact declaration parameter identities");
         emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
             &f.name,
-            &jvm_function_params(ir, fid),
+            &physical_params,
             &parameter_names,
             jvm_declared_ty(&f.ret),
         );
@@ -9124,7 +9104,8 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        di.set_kotlin_metadata(3, &[2, 4, 0], 48, &[], &[]);
+        let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
+        di.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
         extra.push((holder, di.finish()));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
@@ -10035,6 +10016,7 @@ fn emit_default_impls_forwarders(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
+    use crate::jvm::parameter_names;
     if c.is_interface {
         return;
     }
@@ -10172,11 +10154,10 @@ fn emit_default_impls_forwarders(
         finish_code::<0x0041>(cw, name, &desc, &mut code, argument_words);
         let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
         let mut slot = 1u16;
-        for (index, parameter) in param_tys.iter().enumerate() {
-            if let Some(parameter_name) = crate::jvm::parameter_names::resolved_local_variable(
-                &parameter_identities[index],
-                name,
-            ) {
+        let parameter_names =
+            parameter_names::resolved_local_variables(parameter_identities, semantic_params, name);
+        for (parameter, parameter_name) in param_tys.iter().zip(parameter_names) {
+            if let Some(parameter_name) = parameter_name {
                 locals.push((parameter_name, local_variable_desc(*parameter), slot));
             }
             slot += slot_words(*parameter);
@@ -11077,12 +11058,13 @@ fn emit_method_inner_with_holder(
             code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
+        let local_names = parameter_identities
+            .and_then(|_| crate::jvm::parameter_names::function_locals(ir, fid, &param_tys));
         for (i, t) in param_tys.iter().enumerate() {
-            let pname = parameter_identities
-                .and_then(|identities| identities.get(i))
-                .and_then(|identity| {
-                    crate::jvm::parameter_names::function_local_variable(ir, fid, identity)
-                });
+            let pname = local_names
+                .as_ref()
+                .and_then(|names| names.get(i))
+                .and_then(Clone::clone);
             if let Some(pname) = pname {
                 let pdesc = local_variable_desc(*t);
                 e.cw.seed_utf8(&pname);
@@ -12601,6 +12583,7 @@ struct Emitter<'a> {
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -12719,6 +12702,7 @@ impl<'a> Emitter<'a> {
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
+            unit_result_tail_forwards: env.unit_result_tail_forwards,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -19960,6 +19944,7 @@ mod fail_soft_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -19970,6 +19955,7 @@ mod fail_soft_tests {
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
                     emit_time_machines,
+                    unit_result_tail_forwards: &unit_result_tail_forwards,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,

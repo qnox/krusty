@@ -1,0 +1,14 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_transient_property_without_an_initializer_is_rejected_like_kotlinc]
+2.4.0..2.4.10:
+  Model.kt:7:32: this property is marked as @Transient and therefore must have an initializing expression
+  Model.kt:12:5: this property is marked as @Transient and therefore must have an initializing expression
+  Model.kt:13:5: this property is marked as @Transient and therefore must have an initializing expression
+  Model.kt:25:5: this property is marked as @Transient and therefore must have an initializing expression
+2.4.20:
+  Model.kt:7:32: this property is marked as @Transient and therefore must have an initializing expression.
+  Model.kt:12:5: this property is marked as @Transient and therefore must have an initializing expression.
+  Model.kt:13:5: this property is marked as @Transient and therefore must have an initializing expression.
+  Model.kt:25:5: this property is marked as @Transient and therefore must have an initializing expression.

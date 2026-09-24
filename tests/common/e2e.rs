@@ -218,6 +218,89 @@ fn compiler_diagnostics_with_args(
     result
 }
 
+/// Every error kotlinc reports for named sources, as `file:line:column: message` in emission
+/// order: the shape recorded per Kotlin version by [`common::recorded`].
+pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let _ = std::fs::remove_dir_all(work);
+    render_errors(&stderr)
+}
+
+/// [`reference_error_ledger`] for krusty's CLI.
+pub fn krusty_error_ledger(sources: &[(&str, &str)]) -> Vec<String> {
+    let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let output = Command::new(common::krusty_binary())
+        .arg("-d")
+        .arg(work.join("krusty-out"))
+        .arg("-no-reflect")
+        .args(&source_paths)
+        .output()
+        .expect("run krusty diagnostic fixture");
+    let _ = std::fs::remove_dir_all(work);
+    render_errors(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// Assert krusty's CLI reports exactly kotlinc's error ledger for `sources`, as recorded for the
+/// running test under the reference version. `reference_args` go to kotlinc only (krusty reads the
+/// equivalent `// LANGUAGE:` directives from the sources).
+pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
+    let expected =
+        super::recorded_support::recorded(|| reference_error_ledger(sources, reference_args));
+    assert!(!expected.is_empty(), "kotlinc reported no error");
+    assert_eq!(
+        krusty_error_ledger(sources),
+        expected,
+        "krusty's ledger against kotlinc {}",
+        krusty::kotlin_version::target()
+    );
+}
+
+/// Assert the frontend reports exactly the messages kotlinc reports for `source` compiled against
+/// the stdlib, as recorded for the running test under the reference version.
+pub fn assert_messages_match_kotlinc(source: &str) {
+    let expected = super::recorded_support::recorded(|| reference_error_messages("Main", source));
+    assert!(!expected.is_empty(), "kotlinc reported no error");
+    assert_eq!(
+        front_end_diagnostics_with_stdlib(source),
+        expected,
+        "krusty's messages against kotlinc {}",
+        krusty::kotlin_version::target()
+    );
+}
+
+/// The messages alone of every error kotlinc reports for one source compiled against the stdlib:
+/// the shape [`front_end_diagnostics_with_stdlib`] returns for krusty.
+pub fn reference_error_messages(tag: &str, source: &str) -> Vec<String> {
+    reference_error_messages_files(&[(&format!("{tag}.kt"), source)])
+}
+
+/// [`reference_error_messages`] for several named sources compiled together.
+pub fn reference_error_messages_files(sources: &[(&str, &str)]) -> Vec<String> {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), &[]);
+    let _ = std::fs::remove_dir_all(work);
+    compiler_errors(&stderr)
+        .into_iter()
+        .map(|error| error.message)
+        .collect()
+}
+
+fn render_errors(stderr: &str) -> Vec<String> {
+    compiler_errors(stderr)
+        .into_iter()
+        .map(|error| {
+            format!(
+                "{}:{}:{}: {}",
+                error.file, error.line, error.column, error.message
+            )
+        })
+        .collect()
+}
+
 /// Run the shared frontend against the provisioned Kotlin stdlib and JDK.
 pub fn front_end_diagnostics_with_stdlib(source: &str) -> Vec<String> {
     let stdlib = common::stdlib_jar();

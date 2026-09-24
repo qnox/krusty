@@ -211,26 +211,39 @@ fn duplicate_named_argument() {
     );
 }
 
+/// Every kind of source callable reports a named argument followed by a positional one alike, in
+/// kotlinc's order for the reference version: the missing parameter moved to the callee name in
+/// 2.4.20, so it is listed before the argument error there.
 #[test]
 fn mixed_argument_diagnostics_are_shared_across_source_callables() {
     let cases = [
-        "fun combine(first: Int, second: Int): Int = first + second\n\
-         fun use(): Int = combine(second = 2, 1)",
-        "class Calculator { fun combine(first: Int, second: Int): Int = first + second }\n\
-         fun use(value: Calculator): Int = value.combine(second = 2, 1)",
-        "fun use(): Int {\n\
-             fun combine(first: Int, second: Int): Int = first + second\n\
-             return combine(second = 2, 1)\n\
-         }",
-        "class Coordinate(val first: Int, val second: Int)\n\
-         fun use(): Coordinate = Coordinate(second = 2, 1)",
+        (
+            "top-level",
+            "fun combine(first: Int, second: Int): Int = first + second\n\
+             fun use(): Int = combine(second = 2, 1)",
+        ),
+        (
+            "member",
+            "class Calculator { fun combine(first: Int, second: Int): Int = first + second }\n\
+             fun use(value: Calculator): Int = value.combine(second = 2, 1)",
+        ),
+        (
+            "local",
+            "fun use(): Int {\n\
+                 fun combine(first: Int, second: Int): Int = first + second\n\
+                 return combine(second = 2, 1)\n\
+             }",
+        ),
+        (
+            "constructor",
+            "class Coordinate(val first: Int, val second: Int)\n\
+             fun use(): Coordinate = Coordinate(second = 2, 1)",
+        ),
     ];
-    let expected = vec![
-        "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.".to_string(),
-        "no value passed for parameter 'first'.".to_string(),
-    ];
-
-    for source in cases {
+    for (label, source) in cases {
+        let expected =
+            common::recorded_named(label, || common::reference_error_messages("Main", source));
+        assert!(!expected.is_empty(), "kotlinc must reject {source}");
         assert_eq!(diags(source), expected, "{source}");
     }
 }

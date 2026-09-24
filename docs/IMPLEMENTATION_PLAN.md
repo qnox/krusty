@@ -4358,3 +4358,50 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
 - ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
   realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
   same provenance with their own separators and container rules.
+
+## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
+- ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
+- ✅ One target release per process (`src/kotlin_version.rs`): `-Xkotlin-reference-version=`,
+  else `KRUSTY_LANGUAGE_VERSION`, else the newest manifest entry.
+- ✅ Version-keyed diagnostic wording and positions (`src/diagnostic_wording.rs`).
+- ✅ Test expectations recorded per version range from kotlinc (`tests/recorded/`,
+  `tests/common/recorded.rs`): a missing version records locally and fails under CI.
+- ✅ 2.4.20 backend deltas gated on the target: `@Metadata.xi` visibility bits for synthetic
+  classes, no nullability annotations on annotation implementation classes, anonymous context
+  parameters named in the `LocalVariableTable` and numbered `$1` rather than `#1`
+  (`src/jvm/parameter_names.rs`), and a forwarded `Unit` suspend tail call answering `Unit` unless
+  the callee suspended (`classpath_tail_forward_e2e`).
+- ⬜ CI runs the full suite on the newest version only; older versions run box conformance in CI
+  and the full suite locally through `just test-all`.
+- ⬜ A deferred builder-inference member error names no receiver; kotlinc 2.4.20 renders the
+  unfixed variable (`MutableList<TypeVariable(E)>`).
+- ⬜ A read whose flow type is the intersection of merged assignments (`x` after a loop writes `""`
+  and `42`) names krusty's declared `Any` as the receiver; kotlinc 2.4.20 names none, since the
+  intersection is not class-like (`a_proof_does_not_survive_a_loop_that_overwrites_it`).
+- ✅ Diagnostic ledgers are exact and ordered: diagnostics merged in recovery are sorted per file by
+  position, and `expect` declarations without an `actual` are reported after them in kotlinc's
+  actualization order (classifiers, then callables).
+- ✅ A pure qualifier prefix (a package, or a classifier with no object or companion value) that
+  misses its next segment reports that segment (`Thread.Missing.x` at `Missing`), and a root that
+  names both a default-imported classifier and a package commits to the classifier.
+- ✅ An inapplicable generic call reports the mismatched argument against the parameter type
+  under the receiver and expected result (`s.let(1)` expects `(String) -> Int`).
+- ⬜ With no expected result, kotlinc also reports CANNOT_INFER for the unfixed type parameter and
+  renders it `uninferred R (of fun <T, R> T.let)`; krusty renders the bound.
+- ✅ kotlinc 2.4.20 chooses among a rejected member and the rejected same-name extensions by
+  specificity, then non-generic over generic: one survivor reports its own errors, tied survivors
+  one NONE_APPLICABLE at the callee name, for plain and safe calls; earlier releases keep the
+  member's own error (`unselectable_but_existing_members_are_not_called_unresolved`,
+  `member_extension_function_e2e`).
+- ⬜ kotlinc types a call it resolved to one rejected candidate with that candidate's return type,
+  so `fun h(): Int = K().e()` against `fun K.e(x: Int): String` also reports RETURN_TYPE_MISMATCH;
+  krusty types the call as an error and reports only the missing argument (every version).
+- ⬜ A rejected member whose argument TYPES mismatch (not its mapping) is not weighed against the
+  extensions: `catalog.loadAll(true)` against `loadAll(String)` and `Catalog.loadAll(Int)` reports
+  the extension's mismatch; kotlinc reports the member's (2.4.10) or both together (2.4.20).
+- ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
+  names parameter `p0` where kotlinc names `other`, and 2.4.20 `s?.equals()` on a `String?` joins
+  the member with `String?.equals` but kotlinc also reports the member's missing `other`. Pinned as
+  a divergence (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
+- ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
+  its reasons, anchored at the callee name) differs from krusty's.

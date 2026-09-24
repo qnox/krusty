@@ -1,0 +1,8 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[data_class_body_properties_do_not_declare_components]
+2.4.0..2.4.10:
+  unresolved reference 'component2'.
+2.4.20:
+  unresolved reference 'component2' on receiver of type 'Box'.

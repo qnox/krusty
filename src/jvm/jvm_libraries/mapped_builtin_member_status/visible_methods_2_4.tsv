@@ -1,6 +1,6 @@
 # Collection-facing subset of Kotlin's
 # org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES.
-# Verified identical with the supported Kotlin 2.4.0 and 2.4.10 toolchains.
+# Verified identical with the supported Kotlin 2.4.0, 2.4.10 and 2.4.20 toolchains.
 # This is checked-in policy data; it is not generated during the build.
 # Map.remove(Object,Object) is already declared by MutableMap builtins and is intentionally absent.
 # kotlin source face<TAB>physical JVM owner<TAB>physical method name<TAB>descriptor

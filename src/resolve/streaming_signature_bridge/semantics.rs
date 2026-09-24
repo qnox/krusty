@@ -4743,7 +4743,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
         }
-        Err(self.record_unresolved_reference(scope.owner, origin, spelling))
+        Err(self.record_missing_member(scope, origin, receiver.get(), spelling))
     }
 
     fn select_member_call(

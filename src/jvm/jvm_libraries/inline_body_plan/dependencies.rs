@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn cached_iteration_dependencies_receive_each_classpaths_identity() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {

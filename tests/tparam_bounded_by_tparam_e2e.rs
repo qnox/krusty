@@ -166,21 +166,19 @@ fn incompatible_dependent_bound_calls_are_rejected_exactly() {
         .split(':')
         .next()
         .expect("kotlinc names the rejected file");
+    // kotlinc's whole report, source echoes and carets included, recorded per Kotlin version
+    // (2.4.20 names the one candidate where earlier releases listed candidates).
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    let reference: Vec<String> = result
+        .reference_stderr
+        .replace(reference_path, "Bad.kt")
+        .lines()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(
-        (result.reference_code, result.reference_stderr.as_str()),
-        (
-            1,
-            format!(
-                "{reference_path}:4:47: error: return type mismatch: expected 'String', actual 'U \
-                 (of fun <U> bad)'.\nfun <U> bad(u: U): String = Box(\"x\").orElse {{ u \
-                 }}\n                                              ^\n{reference_path}:5:36: error: \
-                 unresolved reference. None of the following candidates is applicable because of a \
-                 receiver type mismatch:\nfun <R, T : R> Box<T>.orElse(fallback: () -> R): R\nfun \
-                 explicitBad(): String = Box(1).orElse<String, Int> {{ \"x\" }}\n                                   \
-                 ^^^^^^\n"
-            )
-            .as_str()
-        )
+        reference,
+        common::recorded(|| reference.clone()),
+        "kotlinc's report"
     );
     let path = result
         .krusty_stderr

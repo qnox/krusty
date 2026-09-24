@@ -7528,41 +7528,11 @@ mod tests {
     }
 
     fn fake_library_type(supertypes: Vec<String>, constructors: Vec<LibraryMember>) -> LibraryType {
-        LibraryType {
-            is_kotlin: true,
-            access: crate::libraries::ClassifierAccess::Public,
-            source_file: None,
-            stable_declaration: None,
-            is_nested: false,
-            outer_instance: None,
-            kind: TypeKind::Class,
-            inheritance: Default::default(),
-            supertypes: supertypes.into(),
-            supertype_templates: Vec::new(),
-            constructors,
-            hidden_member_properties: Default::default(),
-            declared_callables: std::collections::HashMap::new(),
-            declared_callable_order: Vec::new(),
-            members: vec![],
-            companion: vec![],
-            constants: std::collections::HashMap::new(),
-            sam_eligible: false,
-            callable_signature: None,
-            callable_signatures: Vec::new(),
-            companion_object: None,
-            value_underlying: None,
-            value_underlying_property: None,
-            alias_target: None,
-            type_parameters: crate::types::TypeParameters::default(),
-            own_type_parameter_count: 0,
-            sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: Vec::new(),
-            enum_entries_accessor: None,
-            named_parameter_lists: Vec::new(),
-            annotations: Vec::new(),
-            retention: None,
-            annotation_targets: None,
-        }
+        let mut classifier = LibraryType::declaration_header();
+        classifier.is_kotlin = true;
+        classifier.supertypes = supertypes.into();
+        classifier.constructors = constructors;
+        classifier
     }
 
     struct SamHierarchySource {

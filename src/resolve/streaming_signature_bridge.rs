@@ -18,6 +18,7 @@ mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
 mod delegates;
+mod diagnostics;
 mod header_projection;
 mod local_signatures;
 mod lookups;
@@ -616,19 +617,6 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
-    fn record_unresolved_reference(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        origin: crate::fir::OriginId,
-        spelling: &str,
-    ) -> crate::fir::DiagnosticId {
-        self.record_source_diagnostic(
-            declaration,
-            origin,
-            format!("unresolved reference '{spelling}'."),
-        )
-    }
-
     fn record_unresolved_reference_at(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -989,18 +977,19 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        let candidates = self
-            .with_resolver(scope, |resolver| {
-                Some(
-                    resolver
-                        .receiver_callables(receiver, spelling)
-                        .functions()
-                        .to_vec(),
-                )
-            })
-            .unwrap_or_default();
+        let candidates = match self.with_resolver(scope, |resolver| {
+            Some(
+                resolver
+                    .receiver_callables(receiver, spelling)
+                    .functions()
+                    .to_vec(),
+            )
+        }) {
+            Ok(candidates) => candidates,
+            Err(diagnostic) => return diagnostic,
+        };
         if candidates.is_empty() {
-            self.record_unresolved_reference(scope.owner, origin, spelling)
+            self.record_unresolved_member(scope, origin, receiver, spelling)
         } else {
             self.record_inapplicable_member_call(scope.owner, origin, spelling, &candidates)
         }

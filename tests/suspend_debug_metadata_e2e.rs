@@ -713,9 +713,29 @@ fn continuation_uses_synthetic_kotlin_metadata() {
         .rsplit_once("kotlin.Metadata(")
         .map(|(_, metadata)| metadata)
         .expect("Kotlin metadata");
-    for expected in ["mv=[2,4,0]", "k=3", "xi=48"] {
+    // kotlinc's `xi` for the same continuation, recorded per Kotlin version: 2.4.20 packs the
+    // synthetic class's visibility into bits 8..10 (PROTECTED for a named suspend function's
+    // continuation), where earlier releases carry the flags alone.
+    let xi_of = |metadata: &str| {
+        let start = metadata.find("xi=").expect("xi in metadata");
+        let digits = metadata[start + 3..]
+            .find(|c: char| !c.is_ascii_digit())
+            .expect("xi terminator");
+        metadata[start..start + 3 + digits].to_string()
+    };
+    let xi = common::recorded_line(|| {
+        let reference = kotlinc_class("Synthetic", source, "demo/Service$work$1");
+        let text = disassemble(&reference, "Service$work$1.class", "reference");
+        let metadata = text
+            .rsplit_once("kotlin.Metadata(")
+            .map(|(_, metadata)| metadata)
+            .expect("kotlinc's Kotlin metadata");
+        xi_of(metadata)
+    });
+    for expected in ["mv=[2,4,0]", "k=3"] {
         assert!(metadata.contains(expected), "missing {expected:?}:\n{text}");
     }
+    assert_eq!(xi_of(metadata), xi, "{text}");
     for forbidden in [
         "d1=[",
         "d2=[",

@@ -42,14 +42,8 @@ return component + copied\n\
 fn data_class_body_properties_do_not_declare_components() {
     const SOURCE: &str = "data class Box(val primary: String) { val body: String = \"body\" }\n\
         fun read(box: Box): String = box.component2()\n";
-    let (code, diagnostics) = common::kotlinc_source_result("DataBodyComponent", SOURCE);
-    assert_ne!(
-        code, 0,
-        "kotlinc unexpectedly accepted component2: {diagnostics}"
-    );
-
-    let diagnostics = common::front_end_diagnostics_with_stdlib(SOURCE);
-    assert_eq!(diagnostics, ["unresolved reference 'component2'."]);
+    // kotlinc rejects `component2` (the recording asserts it reported an error), and krusty with it.
+    common::assert_messages_match_kotlinc(SOURCE);
 }
 
 #[test]

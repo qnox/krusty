@@ -34,11 +34,11 @@ fun shadowed(runtime: Runtime?) = run {\n\
     let jdk = common::jdk_modules();
     let diagnostics =
         common::front_end_diagnostics(SRC, &[common::stdlib_jar()], Some(jdk.as_path()));
+    // kotlinc reports the unsafe call alone: `status` exists on `Runtime`.
     assert_eq!(
         diagnostics,
         [
             "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
-            "unresolved reference 'status'.",
         ]
     );
 }

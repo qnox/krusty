@@ -147,6 +147,12 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
+    let version = match opts.kotlin_reference_version {
+        Some(version) => version,
+        None => krusty::kotlin_version::configured_target()
+            .map_err(|error| format!("krusty: {error}\n"))?,
+    };
+    krusty::kotlin_version::set_target(version).map_err(|error| format!("krusty: {error}\n"))?;
     let mut diags = DiagSink::new();
     let mut sources = Vec::new();
     let mut stems = Vec::new();

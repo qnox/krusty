@@ -6,6 +6,13 @@
 
 use crate::ast::{Decl, File};
 use crate::diag::DiagSink;
+// kotlinc's three sentences for an `expect` declaration that carries an implementation, worded per
+// reference version. None varies with the declaration's kind.
+use crate::diagnostic_wording::{
+    expected_declaration_with_body as body_message,
+    expected_delegated_property as delegate_message,
+    expected_property_initializer as initializer_message,
+};
 
 pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
     for declaration in &file.decl_arena {
@@ -54,12 +61,6 @@ fn validate_function(function: &crate::ast::FunDecl, member: bool, diagnostics: 
     }
 }
 
-/// kotlinc's three sentences for an `expect` declaration that carries an implementation. Measured
-/// against the reference compiler; none varies with the declaration's kind.
-const BODY_MESSAGE: &str = "expected declaration cannot have a body.";
-const INITIALIZER_MESSAGE: &str = "expected property cannot have an initializer.";
-const DELEGATE_MESSAGE: &str = "expected property cannot be delegated.";
-
 /// Report every `expect` declaration that carries an implementation, and say whether it found one.
 ///
 /// A header declares; it does not implement. The reference compiler reports this whether or not
@@ -80,7 +81,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
                 // the reference compiler points. It travels with the declaration; nothing here
                 // searches for it, and nothing substitutes another position when it is absent.
                 if !matches!(function.body, crate::ast::FunBody::None) {
-                    diagnostics.error(expect.keyword, BODY_MESSAGE);
+                    diagnostics.error(expect.keyword, body_message());
                 }
             }
             Decl::Property(property) => {
@@ -96,7 +97,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
 fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics: &mut DiagSink) {
     for function in &class.methods {
         if !matches!(function.body, crate::ast::FunBody::None) {
-            diagnostics.error(function.signature_span, BODY_MESSAGE);
+            diagnostics.error(function.signature_span, body_message());
         }
     }
     for property in &class.body_props {
@@ -109,7 +110,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
             // a broken parse product rather than a block to skip: reporting nothing here would drop
             // the diagnostic for an implementation the header really carries.
             match file.init_block_keywords.get(body) {
-                Some(span) => diagnostics.error(*span, BODY_MESSAGE),
+                Some(span) => diagnostics.error(*span, body_message()),
                 None => diagnostics.error(
                     class.span,
                     "internal error: an init block in an expect classifier has no `init` keyword",
@@ -120,7 +121,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
     for entry in &class.enum_entries {
         for function in &entry.methods {
             if !matches!(function.body, crate::ast::FunBody::None) {
-                diagnostics.error(function.signature_span, BODY_MESSAGE);
+                diagnostics.error(function.signature_span, body_message());
             }
         }
     }
@@ -142,7 +143,7 @@ fn validate_expect_property(
     if let Some(init) = property.init {
         // At the initializer EXPRESSION: `expect val x: Int = 3` is reported under the `3`.
         match file.expr_span(init) {
-            Some(at) => diagnostics.error(at, INITIALIZER_MESSAGE),
+            Some(at) => diagnostics.error(at, initializer_message()),
             None => diagnostics.error(declaration, missing("initializer")),
         }
     }
@@ -150,19 +151,19 @@ fn validate_expect_property(
         // A delegate is an implementation too, and gets its own sentence — at the delegate
         // EXPRESSION (`by lazy { 1 }` is reported under `lazy { 1 }`).
         match file.expr_span(delegate) {
-            Some(at) => diagnostics.error(at, DELEGATE_MESSAGE),
+            Some(at) => diagnostics.error(at, delegate_message()),
             None => diagnostics.error(declaration, missing("delegate")),
         }
     }
     if property.getter.is_some() {
         match property.getter_span {
-            Some(at) => diagnostics.error(at, BODY_MESSAGE),
+            Some(at) => diagnostics.error(at, body_message()),
             None => diagnostics.error(declaration, missing("getter")),
         }
     }
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
-            diagnostics.error(setter.span, BODY_MESSAGE);
+            diagnostics.error(setter.span, body_message());
         }
     }
 }

@@ -1,0 +1,30 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_do_while_body_is_invalidated_though_its_first_turn_precedes_the_back_edge]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[a_proof_does_not_reach_a_body_that_overwrites_it]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[a_proof_does_not_reach_the_condition_either]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[a_proof_does_not_survive_a_loop_that_overwrites_it]
+2.4.0..2.4.20:
+  unresolved reference 'length'.
+
+[a_write_only_a_closure_performs_still_invalidates]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.

@@ -13,9 +13,6 @@ use std::path::PathBuf;
 
 use super::common;
 
-const MESSAGE: &str =
-    "this property is marked as @Transient and therefore must have an initializing expression";
-
 /// A use of the rejected class that comes first, so the declaring file is not the first one the
 /// streaming frontend processes.
 const USE: &str = "fun describe(record: Record): Int = record.id\n";
@@ -100,25 +97,27 @@ fn a_transient_property_without_an_initializer_is_rejected_like_kotlinc() {
     ];
     let result =
         common::compiler_diagnostics_with_shared_args(&sources, &classpath(), &[plugin_switch()]);
-    let expected = [(7, 32), (12, 5), (13, 5), (25, 5)]
-        .into_iter()
-        .map(|(line, column)| common::CompilerError {
-            file: "Model.kt".to_string(),
-            line,
-            column,
-            message: MESSAGE.to_string(),
-        })
-        .collect::<Vec<_>>();
+    // The plugin jar comes from the reference kotlinc, so its wording is that release's: 2.4.20's
+    // ends the sentence with a full stop.
+    let render = |errors: Vec<common::CompilerError>| {
+        errors
+            .into_iter()
+            .map(|error| {
+                format!(
+                    "{}:{}:{}: {}",
+                    error.file, error.line, error.column, error.message
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let kotlinc = render(common::compiler_errors(&result.reference_stderr));
+    let expected = common::recorded(|| kotlinc.clone());
     assert_ne!(result.reference_code, 0, "kotlinc accepted the fixture");
-    assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        expected,
-        "kotlinc: {}",
-        result.reference_stderr
-    );
+    assert_eq!(kotlinc, expected, "kotlinc: {}", result.reference_stderr);
     assert_ne!(result.krusty_code, 0, "krusty accepted the fixture");
     let mut krusty = common::compiler_errors(&result.krusty_stderr);
     krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    let krusty = render(krusty);
     assert_eq!(
         krusty, expected,
         "krusty: {}{}",

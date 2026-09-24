@@ -20,7 +20,7 @@
 //!     plugin) → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::plugins::cli::{PluginConfig, KSP_PLUGIN_ID, SERIALIZATION_PLUGIN_ID};
-use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
+use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost};
 
 /// Per-compilation context handed to a native extension's builder.
@@ -34,8 +34,9 @@ pub struct Activation<'a> {
     pub codegen_host: bool,
 }
 
-/// Builds the native `IrPlugin` for an extension, configured from the activation context.
-type NativeBuilder = fn(&Activation) -> Box<dyn IrPlugin>;
+/// Builds the native `IrPlugin` for an extension, configured from the activation context and the
+/// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
+type NativeBuilder = fn(&Activation, Option<&str>) -> Box<dyn IrPlugin>;
 
 /// What a registered extension *is* to krusty.
 pub enum ExtensionKind {
@@ -96,6 +97,29 @@ pub fn declared_registrars(entry: &str) -> Option<Vec<String>> {
             .map(String::from)
             .collect(),
     )
+}
+
+/// The release a plugin classpath entry declares as its manifest's `Implementation-Version`, e.g.
+/// `2.4.10-release-377` for the serialization plugin kotlinc 2.4.10 ships. A plugin bundled with
+/// kotlinc changes with each kotlinc release, so a native reimplementation follows the jar it was
+/// given rather than the Kotlin version krusty targets.
+pub fn declared_release(entry: &str) -> Option<String> {
+    use std::io::Read;
+    const MANIFEST: &str = "META-INF/MANIFEST.MF";
+    let path = std::path::Path::new(entry);
+    let manifest = if path.is_dir() {
+        std::fs::read_to_string(path.join(MANIFEST)).ok()?
+    } else {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+        let mut file = archive.by_name(MANIFEST).ok()?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).ok()?;
+        text
+    };
+    manifest.lines().find_map(|line| {
+        let value = line.strip_prefix("Implementation-Version:")?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 /// A diagnostic emitted while resolving plugins for a compilation. The driver forwards these to the
@@ -164,10 +188,12 @@ pub struct NativePlugins {
     classpath: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct EnabledNative {
     plugin_id: &'static str,
     build: NativeBuilder,
+    /// The activating jar's [`declared_release`].
+    release: Option<String>,
 }
 
 impl NativePlugins {
@@ -200,7 +226,7 @@ impl NativePlugins {
         };
         let mut host = PluginHost::new();
         for native in &self.enabled {
-            host.register((native.build)(&activation));
+            host.register((native.build)(&activation, native.release.as_deref()));
         }
         host
     }
@@ -219,10 +245,14 @@ impl Resolved {
     }
 }
 
-/// Build the native serialization plugin, reading its target ABI from the classpath runtime jar.
-fn build_serialization(act: &Activation) -> Box<dyn IrPlugin> {
+/// Build the native serialization plugin, reading its target ABI from the classpath runtime jar and
+/// its diagnostics' wording from the compiler-plugin jar's release.
+fn build_serialization(act: &Activation, release: Option<&str>) -> Box<dyn IrPlugin> {
     let abi = SerializationAbi::from_classpath(act.classpath).unwrap_or_default();
-    Box::new(SerializationPlugin::new(abi, act.module_name.to_string()))
+    Box::new(
+        SerializationPlugin::new(abi, act.module_name.to_string())
+            .with_compiler_plugin_release(release.and_then(PluginRelease::parse)),
+    )
 }
 
 /// The set of extensions krusty knows about — independent of any compilation.
@@ -277,6 +307,7 @@ impl PluginRegistry {
                     ExtensionKind::Native(build) => Some(EnabledNative {
                         plugin_id: ext.plugin_id,
                         build,
+                        release: None,
                     }),
                     ExtensionKind::CodegenHost => None,
                 })
@@ -323,6 +354,7 @@ impl PluginRegistry {
                     native.enabled.push(EnabledNative {
                         plugin_id: ext.plugin_id,
                         build,
+                        release: jar.as_deref().and_then(declared_release),
                     });
                     diagnostics.push(PluginDiagnostic::NativeSubstitution {
                         plugin_id: ext.plugin_id.to_string(),
@@ -610,6 +642,31 @@ mod tests {
     }
 
     #[test]
+    fn declared_release_reads_the_manifest_implementation_version() {
+        use std::io::Write;
+        let path = scratch().join("released.jar");
+        let mut archive =
+            zip::ZipWriter::new(std::fs::File::create(&path).expect("create the test jar"));
+        archive
+            .start_file(
+                "META-INF/MANIFEST.MF",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start the manifest");
+        archive
+            .write_all(b"Manifest-Version: 1.0\r\nImplementation-Version: 2.4.10-release-377\r\n")
+            .expect("write the manifest");
+        archive.finish().expect("finish the test jar");
+        let path = path.to_string_lossy();
+        assert_eq!(
+            declared_release(&path).as_deref(),
+            Some("2.4.10-release-377")
+        );
+        let unversioned = plugin_jar("unversioned.jar", &[]);
+        assert_eq!(declared_release(&unversioned), None);
+    }
+
+    #[test]
     fn declared_registrars_reads_both_service_files_from_a_jar_or_a_directory() {
         let current = plugin_jar("a.jar", &["p.One", "p.Two"]);
         assert_eq!(
@@ -675,7 +732,7 @@ mod tests {
     fn third_party_native_extension_can_be_registered() {
         // The registry is OPEN: registering a new native extension makes krusty honor its plugin —
         // proving registration is general, not hardcoded to the two builtins.
-        fn build_noop(_: &Activation) -> Box<dyn IrPlugin> {
+        fn build_noop(_: &Activation, _: Option<&str>) -> Box<dyn IrPlugin> {
             struct NoOp;
             impl IrPlugin for NoOp {
                 fn name(&self) -> &str {

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use krusty::features::LangFeatures;
 use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
+use krusty::kotlin_version::KotlinVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 
@@ -68,6 +69,10 @@ pub struct Options {
     /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
     /// extension registry by [`Options::resolve_plugins`].
     pub plugins: PluginConfig,
+    /// `-Xkotlin-reference-version=<major.minor.patch>`: the supported kotlinc release whose output
+    /// (diagnostic wording, class-file details) this compilation reproduces. `None` leaves the
+    /// choice to `KRUSTY_LANGUAGE_VERSION`, then the newest supported release.
+    pub kotlin_reference_version: Option<KotlinVersion>,
 }
 
 impl Default for Options {
@@ -89,6 +94,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            kotlin_reference_version: None,
             jvm_default: JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: LambdaModes::default(),
@@ -298,6 +304,21 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
             // flags keep falling through to `ignored` until each is measured.
             flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
+            flag if flag.starts_with("-Xkotlin-reference-version=") => {
+                let value = flag
+                    .strip_prefix("-Xkotlin-reference-version=")
+                    .unwrap_or_default();
+                match KotlinVersion::parse(value)
+                    .filter(|version| KotlinVersion::supported().contains(version))
+                {
+                    Some(version) => opts.kotlin_reference_version = Some(version),
+                    None => opts.errors.push(format!(
+                        "-Xkotlin-reference-version={value} names no supported Kotlin release \
+                         (supported: {})",
+                        supported_kotlin_versions()
+                    )),
+                }
+            }
             // Compiler plugins, in kotlinc's syntax. They are resolved against the extension registry
             // before compiling, never dropped: a plugin that changes the output must either run
             // natively or fail the compile.
@@ -517,6 +538,16 @@ pub const KOTLIN_SUPPORT: &str = match option_env!("KRUSTY_KOTLIN_SUPPORT") {
     None => "unknown (dev build)",
 };
 
+/// The manifest's reference versions, for an error that names what `-Xkotlin-reference-version`
+/// accepts.
+fn supported_kotlin_versions() -> String {
+    KotlinVersion::supported()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Human-facing `-version` output.
 pub fn version_line() -> String {
     format!(
@@ -547,6 +578,8 @@ Common options (kotlinc-compatible):
                         any other plugin is an error (krusty cannot run FIR/IR plugin jars)
   -P plugin:<id>:<key>=<value>
                         pass an option to a plugin
+  -Xkotlin-reference-version=<v>
+                        reproduce this supported kotlinc release (default: the newest)
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
@@ -560,6 +593,23 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than
+    /// silently reproducing a different kotlinc than the one asked for.
+    #[test]
+    fn the_reference_version_flag_accepts_only_supported_releases() {
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.4.10", "x.kt"]);
+        assert_eq!(
+            parsed.kotlin_reference_version,
+            Some(KotlinVersion::V2_4_10)
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        for bad in ["2.3.0", "2.4", "latest", ""] {
+            let parsed = parse_args(&[&format!("-Xkotlin-reference-version={bad}"), "x.kt"]);
+            assert_eq!(parsed.kotlin_reference_version, None, "{bad:?}");
+            assert_eq!(parsed.errors.len(), 1, "{bad:?}: {:?}", parsed.errors);
+        }
     }
 
     /// Both assertion flags must reach `Options`, not fall through to `ignored`: a missing match arm

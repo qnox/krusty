@@ -263,6 +263,7 @@ fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
         supertype_templates,
         constructors,
         hidden_member_properties: Default::default(),
+        hidden_deprecated_callables: Default::default(),
         declared_callables: HashMap::new(),
         declared_callable_order: Vec::new(),
         members: Vec::new(),

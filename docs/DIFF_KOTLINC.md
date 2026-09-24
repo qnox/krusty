@@ -4,7 +4,7 @@ The differential oracle is the **box-corpus conformance gate** (`tests/kotlin_bo
 it compiles each corpus source with **krusty** and runs `box()` on the JVM, grading against the real
 **kotlinc**'s expectations. The reference kotlinc and the box corpus are **self-provisioned** (downloaded
 + cached under `target/cache/`) at the version pinned by the `kotlin-versions` manifest — currently
-**2.4.0**. No assembled dist or env wrangling is needed.
+**2.4.20**. No assembled dist or env wrangling is needed.
 
 ## Run
 

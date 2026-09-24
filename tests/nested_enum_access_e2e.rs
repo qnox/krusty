@@ -74,11 +74,12 @@ class Catalog {
     let Some(diagnostics) = common::checker_diags_with_stdlib(src) else {
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic == "unresolved reference 'Mode'."),
-        "expected the shadowed enum entry to stay unresolved, got: {diagnostics:?}"
+    // The nested `Mode` wins the classifier namespace; it has no value facet, so `READY` is the
+    // unresolved segment (kotlinc: `unresolved reference 'READY'` at `READY`).
+    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    assert_eq!(
+        diagnostics, expected,
+        "the shadowed enum entry must stay unresolved exactly as kotlinc reports it"
     );
 }
 

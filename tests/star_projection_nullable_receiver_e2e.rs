@@ -111,22 +111,19 @@ fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
         .split(':')
         .next()
         .expect("kotlinc names the rejected file");
-    const SOURCE_LINE: &str = "fun use(xs: List<*>): List<Any> = xs.only()";
-    const RETURN_CARET: &str = "                                  ^^^^^^^^^";
-    const RECEIVER_CARET: &str = "                                     ^^^^";
+    // kotlinc's whole report, source echoes and carets included, recorded per Kotlin version
+    // (2.4.20 names the one candidate where earlier releases listed candidates).
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    let reference: Vec<String> = result
+        .reference_stderr
+        .replace(reference_path, "Strict.kt")
+        .lines()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(
-        (result.reference_code, result.reference_stderr.as_str()),
-        (
-            1,
-            format!(
-                "{reference_path}:2:35: error: return type mismatch: expected 'List<Any>', actual \
-                 'List<Any?>'.\n{SOURCE_LINE}\n{RETURN_CARET}\n{reference_path}:2:38: error: \
-                 unresolved reference. None of the following candidates is applicable because of \
-                 a receiver type mismatch:\nfun <T : Any> Iterable<T>.only(): \
-                 List<T>\n{SOURCE_LINE}\n{RECEIVER_CARET}\n"
-            )
-            .as_str()
-        ),
+        reference,
+        common::recorded(|| reference.clone()),
+        "kotlinc's report"
     );
     let path = result
         .krusty_stderr

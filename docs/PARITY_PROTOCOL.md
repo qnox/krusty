@@ -97,7 +97,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   declaration identity, so overloads that tie on name and arity render their own parameter types
   instead of leaving both unrendered. (Without the feature both modifiers are rejected outright —
   that one IS implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
-  `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
+  `'<rendered declaration>' has no corresponding 'expect' declaration` (`expected declaration`
+  before Kotlin 2.4.20), reported at the declaration's
   NAME. The rendering is the substance: it is kotlinc's own declaration renderer over the RESOLVED
   signature, so which `actual` is unmatched is decided while every file's syntax is live, and the
   message is not built until Pass-1 signature finalization has published the types it names (an

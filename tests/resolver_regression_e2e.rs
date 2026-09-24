@@ -13,6 +13,17 @@ struct ObservedDiagnostic {
     message: String,
 }
 
+/// kotlinc's message for the single error of the running test's `tag` fixture, recorded per Kotlin
+/// version
+/// (2.4.20 names the receiver's type where `x.length` did not smart-cast).
+fn recorded_message(tag: &str, kotlinc_output: &str) -> String {
+    common::recorded_line(|| {
+        let errors = reference_errors(kotlinc_output);
+        assert_eq!(errors.len(), 1, "{tag}: {kotlinc_output}");
+        errors[0].message.clone()
+    })
+}
+
 fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
     let lines = output.lines().collect::<Vec<_>>();
     let (diagnostics, remainder) = lines.as_chunks::<3>();
@@ -48,6 +59,20 @@ fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
             }
         })
         .collect()
+}
+
+fn assert_recorded_reference_ledger(output: &str) {
+    let observed = reference_errors(output)
+        .into_iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}:{}: {}",
+                diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = common::recorded(|| observed.clone());
+    assert_eq!(observed, expected, "kotlinc's complete ordered ledger");
 }
 
 /// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
@@ -352,12 +377,12 @@ fun g(a: Any?, len: Int): Boolean {
             file: "ResolverSafeAsCondition.kt".to_string(),
             line: 4,
             column: 14,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverSafeAsCondition", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message("ResolverSafeAsCondition", &diagnostics)]
     );
 }
 
@@ -377,12 +402,12 @@ fun f(a: Any?, skip: Boolean): Int {
             file: "ResolverConditionalAs.kt".to_string(),
             line: 3,
             column: 59,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverConditionalAs", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message("ResolverConditionalAs", &diagnostics)]
     );
 }
 
@@ -404,12 +429,12 @@ fun f(value: Any?): Int {
             file: "ResolverUnstableAs.kt".to_string(),
             line: 6,
             column: 20,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverUnstableAs", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message("ResolverUnstableAs", &diagnostics)]
     );
 }
 
@@ -507,12 +532,12 @@ fun f(value: Any?): Int {
             file: "ResolverSafeAsStatement.kt".to_string(),
             line: 5,
             column: 18,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverSafeAsStatement", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message("ResolverSafeAsStatement", &diagnostics)]
     );
 }
 
@@ -533,12 +558,15 @@ fun f(value: Any?, skip: Boolean): Int {
             file: "ResolverConditionalAsStatement.kt".to_string(),
             line: 5,
             column: 18,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverConditionalAsStatement", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message(
+            "ResolverConditionalAsStatement",
+            &diagnostics
+        )]
     );
 }
 
@@ -561,12 +589,15 @@ fun f(value: Any?): Int {
             file: "ResolverUnstableAsStatement.kt".to_string(),
             line: 7,
             column: 20,
-            message: "unresolved reference 'length'.".to_string(),
+            message: recorded_message("ResolverUnstableAsStatement", &diagnostics),
         }]
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(src),
-        ["unresolved reference 'length'.".to_string()]
+        [recorded_message(
+            "ResolverUnstableAsStatement",
+            &diagnostics
+        )]
     );
 }
 
@@ -1173,14 +1204,10 @@ fun <U : Marker> outer(): Duo<U, U?> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("RepeatedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
-    assert!(
-        diagnostics.contains("cannot infer type for type parameter 'T'")
-            || diagnostics.contains("type mismatch"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
     );
 }
 
@@ -1195,14 +1222,10 @@ fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("MixedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
-    assert!(
-        diagnostics.contains("cannot infer type for type parameter 'T'")
-            || diagnostics.contains("type mismatch"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
     );
 }
 
@@ -1216,10 +1239,7 @@ fun <T : Marker> outer(): List<T?> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("NullableNestedContext", source);
     assert_ne!(code, 0, "kotlinc accepted the invalid fixture");
-    assert!(
-        diagnostics.contains("only safe (?.) or non-null asserted (!!.) calls are allowed"),
-        "unexpected kotlinc diagnostic: {diagnostics}"
-    );
+    assert_recorded_reference_ledger(&diagnostics);
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
         vec!["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'."]
@@ -1951,7 +1971,10 @@ class MutBox<T>(var v: T) {
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
-        ["unresolved reference 'getOrDefault'.".to_string()]
+        [krusty::diagnostic_wording::unresolved_reference_on(
+            "getOrDefault",
+            Some("MutBox<String>")
+        )]
     );
 }
 
@@ -2140,5 +2163,24 @@ fun CharSequence.f(): Int = choose(1)
     assert_eq!(
         common::front_end_diagnostics_files_with_stdlib(&source_text),
         ["argument type mismatch: actual type is 'Int', but 'String' was expected.".to_string()]
+    );
+}
+
+/// A prefix with no value facet (a classifier with neither an object nor a companion, or a
+/// package) that misses its next segment reports that segment, as kotlinc does. A root spelled
+/// like both a default-imported classifier and the source package commits to the classifier, so
+/// `Package.Outer` misses at `Outer` too.
+#[test]
+fn a_pure_qualifier_prefix_reports_its_missing_segment() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Qualified.kt",
+            "package Package\n\
+             class Outer { class Nested }\n\
+             fun f(): Any = Thread.Missing.x\n\
+             fun g(): Any = Thread.Missing.Nested()\n\
+             fun h(): Any = Package.Outer.Nested()\n",
+        )],
+        &[],
     );
 }

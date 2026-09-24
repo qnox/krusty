@@ -1,0 +1,60 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_pure_qualifier_prefix_reports_its_missing_segment]
+2.4.0..2.4.20:
+  Qualified.kt:3:23: unresolved reference 'Missing'.
+  Qualified.kt:4:23: unresolved reference 'Missing'.
+  Qualified.kt:5:24: unresolved reference 'Outer'.
+
+[closure_mutated_value_does_not_smart_cast_after_as_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[closure_mutated_value_does_not_smart_cast_after_as_statement]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[conditional_as_in_statement_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[conditionally_evaluated_as_cast_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[nested_contextual_nullable_result_keeps_the_lambda_input_nullable]
+2.4.0..2.4.20:
+  NullableNestedContext.kt:5:48: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T? (of fun <T : Marker> outer)'.
+
+[repeated_contextual_result_constraints_do_not_choose_one_occurrence]
+2.4.0..2.4.20:
+  RepeatedContextResult.kt:6:40: cannot infer type for type parameter 'T'. Specify it explicitly.
+  RepeatedContextResult.kt:6:46: cannot infer type for type parameter 'T'. Specify it explicitly.
+  RepeatedContextResult.kt:6:51: unresolved reference 'mark'.
+
+[safe_as_cast_in_condition_does_not_smart_cast_on_fallthrough]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[safe_as_statement_does_not_smart_cast]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any?'.
+
+[symbolic_and_concrete_contextual_result_constraints_conflict]
+2.4.0..2.4.20:
+  MixedContextResult.kt:6:44: cannot infer type for type parameter 'T'. Specify it explicitly.
+  MixedContextResult.kt:6:50: cannot infer type for type parameter 'T'. Specify it explicitly.
+  MixedContextResult.kt:6:55: unresolved reference 'mark'.

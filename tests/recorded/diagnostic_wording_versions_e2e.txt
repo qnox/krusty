@@ -1,0 +1,42 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[implemented_expect]
+2.4.0..2.4.10:
+  Body.kt:2:1: expected declaration cannot have a body.
+  Body.kt:3:21: expected property cannot have an initializer.
+  Body.kt:4:22: expected property cannot be delegated.
+2.4.20:
+  Body.kt:2:1: 'expect' declaration cannot have a body.
+  Body.kt:3:21: 'expect' property cannot have an initializer.
+  Body.kt:4:22: 'expect' property cannot be delegated.
+
+[missing_argument]
+2.4.0..2.4.10:
+  Missing.kt:2:17: no value passed for parameter 'x'.
+2.4.20:
+  Missing.kt:2:16: no value passed for parameter 'x'.
+
+[stray_actual]
+2.4.0..2.4.10:
+  Stray.kt:2:12: 'public final actual fun stray(): Int' has no corresponding expected declaration
+2.4.20:
+  Stray.kt:2:12: 'public final actual fun stray(): Int' has no corresponding 'expect' declaration
+
+[unactualized_expect]
+2.4.0..2.4.10:
+  NoActual.kt:2:1: expected helper has no actual declaration in module <main> for JVM
+2.4.20:
+  NoActual.kt:2:1: the 'expect' declaration 'helper' has no 'actual' declaration in module '<main> for JVM'.
+
+[unresolved_member]
+2.4.0..2.4.10:
+  Member.kt:1:27: unresolved reference 'missing'.
+2.4.20:
+  Member.kt:1:27: unresolved reference 'missing' on receiver of type 'String'.
+
+[unresolved_member_of_a_qualifier_or_type_parameter]
+2.4.0..2.4.20:
+  Qualifier.kt:3:23: unresolved reference 'MISSING'.
+  Qualifier.kt:4:20: unresolved reference 'MISSING'.
+  Qualifier.kt:5:21: unresolved reference 'missing'.
