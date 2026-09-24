@@ -4675,7 +4675,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration` before it) at the declaration's NAME
   (`actual fun simple(): Int = 1` → column 12, under `simple`). krusty used to accept it and emit.
   The message names the declaration the way the reference compiler's own renderer does — the full
-  measured grammar is in `docs/PARITY_PROTOCOL.md` — and that rendering is a HYBRID by necessity:
+  measured grammar is tabulated at the end of this entry — and that rendering is a HYBRID by necessity:
   source syntax owns what the declaration WROTE (kind, name, parameter names, which parameter
   carries `vararg` or a default, and a classifier's modifier words), while resolution owns every
   TYPE, because an inferred return (`actual fun f() = 1` → `Int`) and a supertype named through a
@@ -4885,6 +4885,75 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   because a rendering this detailed is exactly what a transcription gets wrong, and comparing each
   compiler's COMPLETE ordered ledger of errors: a comparison that keeps only this check's own
   sentence cannot see a second diagnostic either compiler started or stopped reporting.
+
+  The measured rendering grammar, taken against kotlinc 2.4.10 so it need not be measured
+  again:
+
+  ```
+  <visibility> <modality> actual [external] [override] [inline] [operator] [infix] [tailrec]
+                          [suspend] <kind> <signature>
+  ```
+
+  A classifier's slot between `actual` and its kind keyword is
+  `[inner] [data] [value] [fun]`, and `enum`/`annotation` belong to the kind keyword itself
+  (`enum class`, `annotation class`). A property's is `[external] [const] [lateinit]`. The
+  modality slot is `final` by default, `abstract` for an interface (or a body-less interface
+  member), and `open`/`abstract`/`sealed` where the declaration says so — with `sealed` winning
+  over an interface's `abstract`, and an `override` of an `open` member rendering `open`.
+
+  | shape | rendering |
+  | --- | --- |
+  | `actual fun simple(): Int` | `public final actual fun simple(): Int` |
+  | `actual fun withParams(a: Int, b: String?): Long` | `… fun withParams(a: Int, b: String?): Long` |
+  | `actual fun <T> generic(t: T): T` | `… fun <T> generic(t: T): T` |
+  | `actual fun Int.receiver(): Int` | `… fun Int.receiver(): Int` |
+  | `actual fun vararged(vararg xs: Int)` | `… fun vararged(vararg xs: Int): Unit` |
+  | `actual fun defaulted(a: Int = 1)` | `… fun defaulted(a: Int = ...): Unit` — the value is literally `...` |
+  | `actual suspend fun` / `actual inline fun` | the keyword follows `actual` |
+  | `actual val prop: Int` / `actual var mutable: String` | `public final actual val prop: Int` |
+  | `actual val <T> List<T>.ext: Int` | type parameters precede the receiver |
+  | `actual class Cls` | `public final actual class Cls : Any` — the supertype is always rendered |
+  | `actual class Derived : Base()` | `… class Derived : Base` — no constructor parens |
+  | `actual class Generic<T>` | `… class Generic<T> : Any` |
+  | `actual data class Data(val x: Int)` | `… actual data class Data : Any` — no value parameters |
+  | `actual enum class Colors` | `… actual enum class Colors : Enum<Colors>` |
+  | `actual annotation class Anno` | `… actual annotation class Anno : Annotation` |
+  | `actual object Obj` | `… actual object Obj : Any` |
+  | `actual interface Iface` | `public abstract actual interface Iface : Any` |
+  | `actual open class` / `actual abstract class` / `actual sealed class` | `open` / `abstract` / `sealed` fill the modality slot |
+  | `internal actual fun` / `private actual fun` | `internal final actual fun` / `private final actual fun` |
+  | `actual fun inferred() = 1` | `… fun inferred(): Int` — the INFERRED return, which syntax cannot supply |
+  | `actual class OnlyIface : I` / `: I, J` / `: Base(), I` | `… : I` / `: I, J` / `: Base, I` — base first, then interfaces |
+  | `actual class GenericBase : GBase<String>()` | `… : GBase<String>` — supertype type arguments are kept |
+  | `actual class ViaAlias : AliasBase()` | `… : Base` — a supertype named through a typealias is EXPANDED |
+  | `actual class BoundedParams<T : Comparable<T>, U>` | `… class BoundedParams<T : Comparable<T>, U> : Any` — a declared bound is rendered, the implicit `Any?` is not |
+  | `actual sealed interface SealedIface` | `public sealed actual interface SealedIface : Any` — `sealed` beats the interface's `abstract` |
+  | `actual fun interface FunIface` | `public abstract actual fun interface FunIface : Any` |
+  | `actual value class Wrapped(val x: Int)` | `… actual value class Wrapped : Any` |
+  | `actual inner data class InnerData(val x: Int)` | `… actual inner data class InnerData : Any` — `inner` precedes `data` |
+  | `actual object ObjWithSuper : Base(), I` | `… actual object ObjWithSuper : Base, I` |
+  | `actual typealias Alias = String` | `public final actual typealias Alias = String` |
+  | `actual typealias GenericAlias<T> = List<T>` | `… typealias GenericAlias<T> = List<T>` — the alias's own parameters bind to its name |
+  | `actual typealias FunAlias = (Int) -> String` | `… typealias FunAlias = (Int) -> String` |
+  | `actual val <T> List<T>.ext: Int` | `public final actual val <T> List<T>.ext: Int` |
+  | `actual external fun` / `actual operator fun` / `actual infix fun` / `actual tailrec fun` | the word follows `actual`, before `fun` |
+  | `actual const val K: Int = 1` / `actual lateinit var v: String` | `… actual const val K: Int` / `… actual lateinit var v: String` |
+  | `actual external override fun e()` | `public open actual external override fun e(): Int` — `external` precedes `override` |
+  | `actual inline infix fun` / `actual inline suspend fun` / `actual inline operator fun` | `inline` precedes `operator`, `infix` and `suspend` |
+  | `actual suspend operator fun invoke()` | `… actual operator suspend fun invoke(): Int` — `operator` precedes `suspend` |
+  | a member `actual` | reported at its OWN name, not the class's |
+  | a member `actual override fun` of an `open` member | `public open actual override fun …` — an override renders `open` |
+  | an interface member with a body / without one | `public open actual fun …` / `public abstract actual fun …` |
+  | an UNMARKED member of an unmatched `actual` classifier | nothing: the diagnostic is about the modifier |
+  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword |
+  | `actual companion object Registry` | `… actual companion object Registry : Any`, at the written name |
+  | a nested `actual class Inner` / `actual object Solo` | `… actual class Inner : Any` / `… actual object Solo : Any` — the declaration's OWN simple name |
+  | a member `actual val Tally.memberExt: Int` | `public final actual val Tally.memberExt: Int`, at the NAME — the receiver binds to it but is not underlined |
+  | `actual annotation class Anno(actual val x: Int)` | the parameter property reports `public final actual val x: Int`, at the parameter's name |
+  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, the owner stands in for the return, underlined from the first MODIFIER through the delegation |
+  | `actual class A { constructor(x: Int) { } }` | nothing: an UNMARKED secondary constructor wrote no modifier to answer for |
+  | `context(tally: Tally) actual val slotted: Int` | `context(tally: Tally) public final actual val slotted: Int` — the group precedes the VISIBILITY slot, and the names are the declaration's own while the types are resolved |
+  | a member under an owner that DID actualize | reported by its OWN outcome — `expect class H { fun kept(): Int }` against `actual class H { actual fun kept() = 1; actual fun extra() = 2 }` reports `extra` alone (measured with the header passed as `-Xcommon-sources`, since the reference compiler rejects a same-module pair before reaching the question) |
 
 - **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
   `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:
