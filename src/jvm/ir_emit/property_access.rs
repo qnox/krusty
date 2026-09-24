@@ -169,7 +169,7 @@ impl Emitter<'_> {
         } else if !value_class {
             // A value class has no runtime type of its own — its values ARE the erased underlying — so
             // narrowing to one would `checkcast` to a class the value is not an instance of.
-            self.narrow_on_stack(physical, ty, code);
+            self.narrow_on_stack(physical, *ty, code);
         }
     }
 }

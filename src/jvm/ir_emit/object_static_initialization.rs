@@ -77,7 +77,6 @@ pub(super) fn emit(
             .map(|(_, property)| property.init)
             .chain(init_body),
     );
-    emitter.generated_initializer = !c.is_source_declared;
     let mut clinit = CodeBuilder::new(0);
     clinit.new_obj(ci);
     clinit.dup();

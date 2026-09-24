@@ -1,9 +1,10 @@
-//! JVM-owned operands synthesized for one checked default call.
+//! JVM-owned provenance for the physical operands of checked calls.
 //!
 //! Common IR retains supplied arguments and omitted semantic parameter ordinals. JVM realization
 //! materializes placeholders, mask words, and the marker. This side table keeps that physical plan
-//! beside the backend, keyed by the stable call expression, so emission never guesses provenance
-//! from a zero/null constant and common IR never carries JVM ABI facts.
+//! beside the backend, keyed by the stable call expression. Suspend lowering also records the exact
+//! operand position into which it inserts a CPS continuation. Emission therefore never guesses
+//! provenance from a zero/null constant, a type or name, and common IR never carries JVM ABI facts.
 
 use std::collections::HashMap;
 
@@ -54,6 +55,10 @@ impl DefaultCallOperand {
 #[derive(Default)]
 pub(crate) struct DefaultCallOperands {
     entries: HashMap<ExprId, Vec<DefaultCallOperand>>,
+    /// Exact physical argument occupied by the CPS continuation after suspend lowering. This is a
+    /// backend representation fact: emission must not rediscover it from the argument's type,
+    /// spelling, or position relative to a descriptor suffix.
+    continuation_positions: HashMap<ExprId, usize>,
 }
 
 impl DefaultCallOperands {
@@ -86,6 +91,29 @@ impl DefaultCallOperands {
         self.entries.contains_key(&call)
     }
 
+    /// The recorded boundary before the JVM-only mask/marker suffix. A suspend continuation is
+    /// inserted at this exact position; consumers must not recover it from descriptor spelling.
+    pub(super) fn abi_suffix_position(&self, call: ExprId) -> Option<usize> {
+        self.entries
+            .get(&call)?
+            .iter()
+            .position(|operand| operand.abi_suffix)
+    }
+
+    pub(super) fn record_continuation(&mut self, call: ExprId, position: usize) -> bool {
+        match self.continuation_positions.entry(call) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(position);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        }
+    }
+
+    pub(super) fn is_continuation(&self, call: ExprId, position: usize) -> bool {
+        self.continuation_positions.get(&call) == Some(&position)
+    }
+
     /// Insert the CPS continuation at the exact boundary recorded when the default ABI operands
     /// were materialized. `None` means this is not a default call; a recorded plan without a suffix
     /// is an invalid backend state and fails closed at its caller.
@@ -108,14 +136,20 @@ impl DefaultCallOperands {
     /// A suspend transform may bind the already-planned operands to fresh locals. Preserve their
     /// supplied/synthesized provenance by position while replacing the exact expression identities.
     pub(super) fn replace_operands(&mut self, call: ExprId, operands: &[ExprId]) -> bool {
-        let Some(plan) = self.entries.get_mut(&call) else {
-            return true;
-        };
-        if plan.len() != operands.len() {
+        if self
+            .continuation_positions
+            .get(&call)
+            .is_some_and(|position| *position >= operands.len())
+        {
             return false;
         }
-        for (planned, replacement) in plan.iter_mut().zip(operands) {
-            planned.expression = *replacement;
+        if let Some(plan) = self.entries.get_mut(&call) {
+            if plan.len() != operands.len() {
+                return false;
+            }
+            for (planned, replacement) in plan.iter_mut().zip(operands) {
+                planned.expression = *replacement;
+            }
         }
         true
     }
@@ -135,6 +169,19 @@ impl DefaultCallOperands {
                 planned.expression = *actual;
             }
         }
+        for (&call, &position) in &self.continuation_positions {
+            let present = match ir.exprs.get(call as usize) {
+                Some(crate::ir::IrExpr::Call { args, .. })
+                | Some(crate::ir::IrExpr::InvokeFunction { args, .. }) => position < args.len(),
+                Some(crate::ir::IrExpr::MethodCall { args, .. }) => {
+                    args.get(position).is_some_and(Option::is_some)
+                }
+                _ => return false,
+            };
+            if !present {
+                return false;
+            }
+        }
         true
     }
 
@@ -146,17 +193,30 @@ impl DefaultCallOperands {
         target: ExprId,
         operands: &[ExprId],
     ) -> bool {
-        let Some(source_plan) = self.entries.get(&source).cloned() else {
+        let source_plan = self.entries.get(&source).cloned();
+        let continuation_position = self.continuation_positions.get(&source).copied();
+        if source_plan.is_none() && continuation_position.is_none() {
             return true;
-        };
-        if source_plan.len() != operands.len() {
+        }
+        if source_plan
+            .as_ref()
+            .is_some_and(|plan| plan.len() != operands.len())
+            || continuation_position.is_some_and(|position| position >= operands.len())
+            || self.entries.contains_key(&target)
+            || self.continuation_positions.contains_key(&target)
+        {
             return false;
         }
-        let mut target_plan = source_plan;
-        for (planned, replacement) in target_plan.iter_mut().zip(operands) {
-            planned.expression = *replacement;
+        if let Some(mut target_plan) = source_plan {
+            for (planned, replacement) in target_plan.iter_mut().zip(operands) {
+                planned.expression = *replacement;
+            }
+            self.entries.insert(target, target_plan);
         }
-        self.entries.insert(target, target_plan).is_none()
+        if let Some(position) = continuation_position {
+            self.continuation_positions.insert(target, position);
+        }
+        true
     }
 }
 
@@ -177,14 +237,29 @@ mod tests {
             ],
         );
 
+        assert_eq!(plans.abi_suffix_position(7), Some(2));
         assert_eq!(plans.insert_continuation(7, 99), Ok(Some(2)));
+        assert!(plans.record_continuation(7, 2));
         assert!(plans.matching(7, &[10, 11, 99, 12, 13]).is_some());
+        assert!(plans.is_continuation(7, 2));
 
         assert!(plans.replace_operands(7, &[20, 21, 29, 22, 23]));
         assert!(plans.matching(7, &[20, 21, 29, 22, 23]).is_some());
 
         assert!(plans.clone_call(7, 8, &[30, 31, 39, 32, 33]));
         assert!(plans.matching(8, &[30, 31, 39, 32, 33]).is_some());
+        assert!(plans.is_continuation(8, 2));
         assert!(!plans.replace_operands(8, &[30]));
+    }
+
+    #[test]
+    fn an_ordinary_suspend_call_keeps_its_exact_continuation_position() {
+        let mut plans = DefaultCallOperands::default();
+        assert!(plans.record_continuation(3, 1));
+        assert!(plans.is_continuation(3, 1));
+        assert!(!plans.is_continuation(3, 0));
+        assert!(plans.replace_operands(3, &[20, 21]));
+        assert!(plans.clone_call(3, 4, &[30, 31]));
+        assert!(plans.is_continuation(4, 1));
     }
 }

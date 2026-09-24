@@ -63,7 +63,7 @@ impl Emitter<'_> {
             return;
         };
         let ret = self.ret;
-        self.emit_value_as(value, &ret, code);
+        self.emit_value_as(value, ret, code);
         // `return <diverging>` has already transferred control and must not grow dead bytecode.
         if self.diverges(value) {
             return;
