@@ -47,13 +47,13 @@ pub(super) struct RewriteSource {
 }
 
 /// A rewritten method's `Code` and every table that moved with it.
-struct Rewritten {
-    code: Vec<u8>,
+pub(super) struct Rewritten {
+    pub(super) code: Vec<u8>,
     max_stack: u16,
     max_locals: u16,
-    exceptions: Vec<(u16, u16, u16, u16)>,
-    lnt: Vec<(u16, u16)>,
-    lvt: Vec<LvtEntry>,
+    pub(super) exceptions: Vec<(u16, u16, u16, u16)>,
+    pub(super) lnt: Vec<(u16, u16)>,
+    pub(super) lvt: Vec<LvtEntry>,
     implicit_void_return_pc: Option<u16>,
     /// The builder with its labels moved and its frames edited, to rebuild the stack map from.
     frames: CodeBuilder,
@@ -265,7 +265,11 @@ impl ClassWriter {
 
     /// `method` after kotlinc's rewrites, or `None` when none applies or the rewritten body could
     /// not be proven to keep its frames.
-    fn rewritten(&self, method: &MethodInfo, source: &RewriteSource) -> Option<Rewritten> {
+    pub(super) fn rewritten(
+        &self,
+        method: &MethodInfo,
+        source: &RewriteSource,
+    ) -> Option<Rewritten> {
         let bytes = method.code.as_ref()?;
         if bytes.is_empty() || source.builder.bytes != *bytes {
             return None;
