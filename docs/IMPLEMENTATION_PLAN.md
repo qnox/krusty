@@ -4447,3 +4447,41 @@ shadow with no output change.
   a divergence (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
 - ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
   its reasons, anchored at the callee name) differs from krusty's.
+
+## JVM unified inliner — one bytecode inliner ported from kotlinc's `MethodInliner`  ◐
+
+kotlinc inlines every call to an `inline` function the same way, whatever the callee's origin: it
+gets the callee as an ASM `MethodNode` (read from the class file for a library, compiled from IR for
+the current module), compiles each inline lambda argument to a `MethodNode` too, and lets
+`MethodInliner` merge them into the call site. The byte shape kotlinc users see comes out of that
+one transform as by-products: the `nop` line anchor, the `$i$f$`/`$i$a$` markers, the inline local
+names, the remapped `LineNumberTable` plus SMAP, and `$$inlined$` regeneration of anonymous objects.
+
+krusty has three paths instead, and none produces all of that: same-module calls are cloned in IR
+(`fir_lower/inlining.rs`), library calls with a recognized body shape are decoded into IR plans
+(`InlineBodyPlan`, `jvm_libraries/inline_body_plan/`), and the rest are spliced as bytes
+(`jvm::inline::splice_unified`). About 2,250 of the 6,283 divergent box files on 2.4.20 differ in
+inline-site shape (`nop` anchors 1,148 files, markers 811, the coroutine helper's
+`$runBlocking$$inlined$Continuation$1` 488). The migration replaces all three with one port, stage by
+stage; each stage reports box passes, byte-identical files and divergent classes, and none may
+regress.
+
+- ✅ 1. `jvm::method_node`: ASM's tree form (label, line and instruction nodes, symbolic operands,
+  try/catch and local ranges on labels), a reader from class-file bodies and an assembler against
+  any constant pool, interning in ASM `MethodWriter` order. Every method of the stdlib reads, lays
+  out and reads back unchanged. No output change.
+- ☐ 2. Call-site codegen and the `MethodInliner` core for callees without inline lambda arguments,
+  replacing `splice_unified`'s plain path: arguments stored to fresh temporaries (`IrInlineCodegen`),
+  the `nop` anchor, `$i$f$` markers, local remapping and renaming, return normalization, in-place
+  arguments for `@InlineOnly`, reified operations, `LineNumberTable` remapping and SMAP
+  (`SourceMapCopier`).
+- ☐ 3. Inline lambdas: each lambda body is emitted to a node, invoke sites are found by kotlinc's
+  source analysis (`markPlacesForInlineAndRemoveInlinable`), captured values and `$i$a$` markers,
+  non-local returns. Replaces the lambda splice (`try_inline_unified`).
+- ☐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
+  are regenerated as `$$inlined$` classes.
+- ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
+- ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
+  inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
+- ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
+  on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
