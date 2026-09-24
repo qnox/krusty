@@ -26,6 +26,7 @@ mod member_specialization;
 mod overload_selection;
 mod qualified_classifiers;
 mod sam;
+mod scope_level_callables;
 mod selected_call_instantiation;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
@@ -63,6 +64,7 @@ use overload_selection::{
 };
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
 pub(crate) use sam::{semantic_sam_signature, SamSignature};
+use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LambdaCallShape {
@@ -2240,9 +2242,11 @@ impl<'a> SymbolResolver<'a> {
             // tiers in `select_overload_tracking_with_functions`); an annotated declaration that
             // does not fit falls through to the ordinary candidates collected below.
             for level in &levels {
-                let scoped = callables_from_symbols(&level.symbols);
-                let mut ranked =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                let mut ranked = ranked_extension_candidates(
+                    &self.src,
+                    receiver,
+                    level_functions(&level.symbols),
+                );
                 self.retain_accessible_extensions(&mut ranked, &mut inaccessible_extensions, true);
                 functions.extend(ranked.into_iter().map(|(rank, _, function)| {
                     let mut function = function.clone();
@@ -2253,13 +2257,10 @@ impl<'a> SymbolResolver<'a> {
             }
             let mut extension_property_level_found = false;
             for (scope_rank, level) in levels.into_iter().enumerate() {
-                let scoped = callables_from_symbols(&level.symbols);
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope level name={name} receiver={receiver:?} functions={:?}",
-                    scoped
-                        .functions()
-                        .iter()
+                    level_functions(&level.symbols)
                         .map(|function| (function.kind, function.semantic_receiver()))
                         .collect::<Vec<_>>()
                 );
@@ -2267,8 +2268,11 @@ impl<'a> SymbolResolver<'a> {
                 // time here would put two copies of one declaration in the same priority bucket and
                 // read as an ambiguity. A level holding ONLY annotated declarations is therefore
                 // empty for tower purposes and the walk continues past it.
-                let mut extensions =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                let mut extensions = ranked_extension_candidates(
+                    &self.src,
+                    receiver,
+                    level_functions(&level.symbols),
+                );
                 self.retain_accessible_extensions(
                     &mut extensions,
                     &mut inaccessible_extensions,
@@ -2289,9 +2293,7 @@ impl<'a> SymbolResolver<'a> {
                 let extension_properties = if extension_property_level_found {
                     Vec::new()
                 } else {
-                    scoped
-                        .properties()
-                        .iter()
+                    level_properties(&level.symbols)
                         .filter(|property| property.kind == PropKind::Extension)
                         .cloned()
                         .collect::<Vec<_>>()
@@ -2721,8 +2723,11 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
         for symbols in self.symbol_levels_in_scope(name) {
-            let callables = callables_from_symbols(&symbols);
-            match self.select_extension_property_from_callables(receiver, name, &callables)? {
+            match self.select_extension_property_from_callables(
+                receiver,
+                name,
+                level_properties(&symbols),
+            )? {
                 Some(property) => return Ok(Some(property)),
                 None => continue,
             }
@@ -2730,22 +2735,20 @@ impl<'a> SymbolResolver<'a> {
         Ok(None)
     }
 
-    fn select_extension_property_from_callables(
+    fn select_extension_property_from_callables<'p>(
         &self,
         receiver: Ty,
         name: &str,
-        callables: &Callables,
+        properties: impl IntoIterator<Item = &'p PropertyInfo>,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
-        if callables.properties().is_empty() {
+        let mut properties = properties.into_iter().peekable();
+        if properties.peek().is_none() {
             return Ok(None);
         }
         let receiver_mro = ReceiverMro::new(&self.src, receiver);
-        let mut candidates = callables
-            .properties()
-            .iter()
+        let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| source_property_visible(self.lib, property))
-            .cloned()
             .filter(|property| {
                 generic_bounds_admit(
                     &self.src,
@@ -2764,7 +2767,7 @@ impl<'a> SymbolResolver<'a> {
                     property.setter.is_some(),
                     property.source_key,
                 );
-                rank.map(|rank| (rank, property))
+                rank.map(|rank| (rank, property.clone()))
             })
             .collect::<Vec<_>>();
         let Some(nearest) = candidates.iter().map(|(rank, _)| *rank).min() else {
@@ -3480,7 +3483,7 @@ impl<'a> SymbolResolver<'a> {
                     extension_call.is_some(),
                 );
                 let extension_property = self
-                    .select_extension_property_from_callables(ty, name, &callables)
+                    .select_extension_property_from_callables(ty, name, callables.properties())
                     .ok()
                     .flatten();
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
@@ -5629,20 +5632,6 @@ fn tagged_symbol_levels_in_function_scope(
             result
         }
     }
-}
-
-fn function_set_from_symbols(
-    symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>],
-) -> FunctionSet {
-    let capacity = symbols
-        .iter()
-        .map(|record| record.callables.functions().len())
-        .sum();
-    let mut overloads = Vec::with_capacity(capacity);
-    for record in symbols {
-        overloads.extend(record.callables.functions().iter().cloned());
-    }
-    FunctionSet { overloads }
 }
 
 fn callables_from_symbols(symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>]) -> Callables {
