@@ -22,6 +22,17 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
+/// Whether a source-language binding read may observe a later assignment to that binding.
+///
+/// This is a semantic property of the binding, not of any backend storage chosen for it. Function
+/// parameters, `val` locals, destructuring `val`s, loop variables, and catch parameters are stable;
+/// a source `var` is mutable even when the current backend happens to keep it in an ordinary local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrBindingStability {
+    Stable,
+    Mutable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrNodeOrigin {
     Fir(crate::fir::OriginId),
@@ -1246,7 +1257,7 @@ pub struct IrFunction {
     /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
-    pub param_checks: Vec<Option<String>>,
+    pub param_checks: Vec<Option<IrParameterCheck>>,
 }
 
 /// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index
@@ -1404,6 +1415,9 @@ impl IrField {
 pub struct IrCtorArg {
     /// Source parameter name. Synthetic constructor parameters have no name.
     pub name: Option<String>,
+    /// Exact source role for a classifier context parameter. `None` means an ordinary or
+    /// compiler-generated constructor argument; targets must not infer this from `name`.
+    pub context_kind: crate::types::ContextParameterKind,
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
@@ -1463,7 +1477,7 @@ pub struct IrProperty {
     pub name: String,
     /// Named context parameters in source order. Metadata records these separately from ordinary
     /// value parameters, and checked call sites supply their operands implicitly.
-    pub context_params: Vec<(String, Ty)>,
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
     /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
     /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
     pub source_order: u32,
@@ -1950,7 +1964,8 @@ impl IrClass {
             .iter()
             .enumerate()
             .map(|(field, parameter)| IrCtorArg {
-                name: None,
+                name: parameter.name.as_deref().map(str::to_owned),
+                context_kind: parameter.kind,
                 ty: crate::types::stored_value_ty(parameter.ty.get()),
                 declared_ty: Some(parameter.ty.get()),
                 is_field: true,
@@ -2408,6 +2423,19 @@ pub struct IrFile {
     /// The value is their final semantic result type. Backends use this to preserve value flow and
     /// emit the mandatory no-match failure path without re-running exhaustiveness analysis.
     pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
+    /// Source binding reads and the checked binding's reassignment contract. The expression key is
+    /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
+    pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,
+    /// The null guard of every lowered safe call (`a?.f()`), and of an elvis over one
+    /// (`a?.f() ?: b`), keyed by its `When`: the first branch tests the temporary against `null` and
+    /// yields the null result (the elvis's right side), the `else` is the selector (the elvis's
+    /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
+    /// compiler does without recognizing the shape again.
+    pub null_guards: std::collections::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
+    /// need this provenance when statement emission differs from a safe call's literal-null arm;
+    /// it must not recover that distinction from the lowered branch shape.
+    pub elvis_safe_call_guards: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
@@ -2426,10 +2454,11 @@ pub struct IrFile {
     /// side table filled at lowering, where the AST member is still in hand. Only members that
     /// actually spell an alias get an entry.
     pub fn_declared_spellings: std::collections::HashMap<u32, crate::spelling::DeclaredSpellings>,
-    /// Source declaration name for a function whose target realization renamed it. Common lowering
-    /// initially keeps the Kotlin name on [`IrFunction`]; a backend records that name here before
-    /// replacing it with a physical spelling such as JVM `@JvmName` or a later value-class mangle.
-    /// Metadata/reflection consume this semantic name while calls use the realized function name.
+    /// Exact source declaration name for every checked function realization. Common lowering
+    /// publishes it while the stable declaration identity is live; a backend may then replace
+    /// [`IrFunction::name`] with a physical spelling such as JVM `@JvmName` or a value-class mangle.
+    /// Metadata, reflection, and receiver-name projection consume this semantic name and never
+    /// recover it from the realized function spelling.
     pub fn_source_names: std::collections::HashMap<u32, String>,
     /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
     /// bounds), keyed by the class's fully-qualified name.
@@ -2746,12 +2775,11 @@ pub struct IrFile {
     /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
-    /// Call `ExprId` → reified-type substitution for a `<reified T>` CLASSPATH inline extension whose
-    /// compiled body the backend must splice: `[(type-parameter name, concrete JVM internal name)]`
-    /// (`[("T", "lib/Prov")]`). The bytecode splicer feeds this to `substitute_reified` so a
-    /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type — the
-    /// classpath analogue of the IR inliner's `reified_subst` (which only has same-file bodies). The
-    /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
+    /// Call `ExprId` → checked reified-type substitutions for a classpath inline declaration whose
+    /// compiled body a target may splice. The values stay backend-agnostic [`Ty`]s here. At the JVM
+    /// boundary, a concrete value becomes a class-pool operand while a reified parameter of the host
+    /// declaration keeps the callee's `reifiedOperationMarker` for the host's caller to specialize.
+    /// This is the classpath analogue of the IR inliner's same-file `reified_subst`.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
     /// Exact methods the serialization child cache generated: its factories and accessor.
     ///
@@ -2965,6 +2993,7 @@ pub struct IrPackageProperty {
     pub receiver: Option<Ty>,
     pub context_parameters: Vec<Ty>,
     pub context_parameter_names: Vec<String>,
+    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     pub is_const: bool,
     pub has_constant: bool,
     pub visibility: crate::types::Visibility,
@@ -3073,6 +3102,7 @@ pub struct IrPropertyOverride {
     pub implementation_type: Ty,
     pub overridden_mutable: bool,
     pub implementation_mutable: bool,
+    pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }
 
@@ -3096,6 +3126,7 @@ pub struct IrFunctionOverride {
     pub implementation_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub implementation_result: Ty,
     pub suspend: bool,
+    pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }
 
@@ -3498,9 +3529,6 @@ impl IrFile {
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
-    pub fn param_names(&self, fid: u32) -> Option<&[String]> {
-        Some(&self.fn_params.get(&fid)?.names)
-    }
     pub(crate) fn set_debug_local_provenance(
         &mut self,
         declaration: ExprId,
@@ -3599,7 +3627,10 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod function_parameters;
-pub use function_parameters::FnParamInfo;
+pub use function_parameters::{
+    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
+    IrParameterProvenance, IrParameterRole,
+};
 mod traversal;
 pub use traversal::*;
 mod clone;

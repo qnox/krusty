@@ -800,6 +800,7 @@ pub struct SemanticSupertype {
 
 impl LibraryMember {
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
+        let call_sig = CallSig::metadata_plain(params.len());
         LibraryMember {
             external_identity: None,
             external_default_provider: None,
@@ -822,7 +823,7 @@ impl LibraryMember {
             reified: false,
             inline_body_plan: None,
             visibility: Visibility::Public,
-            call_sig: CallSig::default(),
+            call_sig,
             context_count: 0,
             annotations: Vec::new(),
             contract: None,
@@ -1254,6 +1255,10 @@ pub struct CallSig {
     pub only_input_type_formals: Vec<String>,
     /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
     pub param_names: Vec<String>,
+    /// Provider-published semantic identities parallel to the logical parameter list. Context
+    /// roles are typed at the declaration boundary; consumers never rediscover them from `_`, an
+    /// empty metadata name, or another spelling convention.
+    pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
     pub param_defaults: Vec<bool>,
     /// Per logical parameter: the declared type is annotated with Kotlin's internal `@Exact`, so
@@ -1572,6 +1577,11 @@ impl CallSig {
         CallSig {
             only_input_type_formals: self.only_input_type_formals.clone(),
             param_names: self.param_names[start..].to_vec(),
+            parameter_identities: self
+                .parameter_identities
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
             param_defaults: self
                 .param_defaults
                 .get(start..)
@@ -1671,6 +1681,19 @@ impl CallSig {
             })
             .collect();
         CallSig {
+            parameter_identities: param_names
+                .iter()
+                .enumerate()
+                .map(|(ordinal, name)| {
+                    if name.is_empty() {
+                        crate::fir::ResolvedParameterIdentity::Unnamed {
+                            ordinal: ordinal as u32,
+                        }
+                    } else {
+                        crate::fir::ResolvedParameterIdentity::Source(name.as_str().into())
+                    }
+                })
+                .collect(),
             param_names,
             param_defaults,
             lambda_param_types,
@@ -1700,7 +1723,6 @@ impl CallSig {
     /// Build the source call shape for a Kotlin function decoded from metadata. `param_count` is
     /// always the source VALUE-parameter count: dispatch and extension receivers are not call
     /// arguments and therefore never appear in this structure.
-    #[allow(clippy::too_many_arguments)]
     pub fn metadata_function(
         param_count: usize,
         names: Vec<String>,
@@ -1749,12 +1771,63 @@ impl CallSig {
         };
         CallSig {
             required: required_arity(param_count, &defaults),
+            parameter_identities: (0..param_count)
+                .map(
+                    |ordinal| match names.get(ordinal).filter(|name| !name.is_empty()) {
+                        Some(name) => {
+                            crate::fir::ResolvedParameterIdentity::Source(name.as_str().into())
+                        }
+                        None => crate::fir::ResolvedParameterIdentity::Unnamed {
+                            ordinal: ordinal as u32,
+                        },
+                    },
+                )
+                .collect(),
             param_names: names,
             param_defaults: defaults,
             vararg: vararg_index.is_some(),
             vararg_index,
             ..Default::default()
         }
+    }
+
+    /// Insert a typed extension-receiver identity into this provider-published logical list.
+    pub fn physical_parameter_identities(
+        &self,
+        physical_count: usize,
+        context_count: usize,
+        extension_receiver_position: Option<usize>,
+    ) -> Option<Box<[crate::fir::ResolvedParameterIdentity]>> {
+        let logical_count =
+            physical_count.checked_sub(usize::from(extension_receiver_position.is_some()))?;
+        if self.parameter_identities.len() != logical_count || context_count > logical_count {
+            return None;
+        }
+        let identities_are_typed = self.parameter_identities.iter().enumerate().all(
+            |(ordinal, identity)| {
+                let context = matches!(
+                    identity,
+                    crate::fir::ResolvedParameterIdentity::ContextValue { .. }
+                        | crate::fir::ResolvedParameterIdentity::AnonymousContextParameter { .. }
+                        | crate::fir::ResolvedParameterIdentity::LegacyContextReceiver { .. }
+                );
+                context == (ordinal < context_count)
+            },
+        );
+        if !identities_are_typed {
+            return None;
+        }
+        let mut identities = self.parameter_identities.clone();
+        if let Some(position) = extension_receiver_position {
+            if position > identities.len() {
+                return None;
+            }
+            identities.insert(
+                position,
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+            );
+        }
+        Some(identities.into_boxed_slice())
     }
 }
 
@@ -2071,6 +2144,10 @@ impl FunctionInfo {
     }
 
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
+        let logical_parameter_count = callable
+            .params
+            .len()
+            .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
             companion_extension: false,
@@ -2085,7 +2162,7 @@ impl FunctionInfo {
             overload_rank: 0,
             generic_sig: None,
             projected_return_hazard: false,
-            call_sig: CallSig::default(),
+            call_sig: CallSig::metadata_plain(logical_parameter_count),
             default_values: Vec::new(),
             context_count: 0,
             source_file: None,
@@ -2409,6 +2486,9 @@ pub struct PropertyInfo {
     pub context_count: usize,
     /// Source names parallel to the context parameters, retained for diagnostics.
     pub context_param_names: Vec<String>,
+    /// Typed semantic identities parallel to the context prefix. Providers publish these while
+    /// declaration metadata is available; consumers must not classify context roles from names.
+    pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.
@@ -2416,6 +2496,9 @@ pub struct PropertyInfo {
     /// The setter's own visibility. Accessors can differ, so property visibility cannot stand in for
     /// this fact.
     pub setter_visibility: Visibility,
+    /// Source identity of an explicitly declared setter value parameter. `None` means the setter is
+    /// implicit and its target backend must project the language-defined generated role.
+    pub setter_parameter_name: Option<String>,
     /// `const val` — a compile-time constant whose value use sites inline.
     pub is_const: bool,
     /// Kotlin's compiler-known integer-coercion marker on this constant declaration. Providers
@@ -3046,9 +3129,11 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             ty,
             context_count: 0,
             context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
             getter,
             setter: None,
             setter_visibility: Visibility::Private,
+            setter_parameter_name: None,
             is_const: false,
             implicit_integer_coercion: false,
             compile_time_constant: None,

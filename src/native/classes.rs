@@ -2300,6 +2300,7 @@ mod tests {
                 implementation_parameter_identities: Vec::new(),
                 implementation_result: Ty::Unit,
                 suspend: false,
+                has_kotlin_superclass_override: false,
                 depth: 1,
             });
     }
@@ -2580,6 +2581,7 @@ mod tests {
             .ctor_args
             .push(crate::ir::IrCtorArg {
                 name: Some("rest".to_string()),
+                context_kind: crate::types::ContextParameterKind::None,
                 ty: Ty::obj_args("kotlin/Array", &[Ty::Int]),
                 declared_ty: None,
                 is_field: false,
@@ -2644,6 +2646,7 @@ mod tests {
                 implementation_parameter_identities: Vec::new(),
                 implementation_result: Ty::Unit,
                 suspend: false,
+                has_kotlin_superclass_override: false,
                 depth: 1,
             });
     }

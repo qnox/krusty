@@ -879,6 +879,7 @@ pub(super) fn accept_constructor_body(
                 let flags = parameter.flags();
                 IrCtorArg {
                     name: Some(name.clone()),
+                    context_kind: crate::types::ContextParameterKind::None,
                     ty: *ty,
                     declared_ty: Some(*semantic_ty),
                     is_field: flags.is_property(),

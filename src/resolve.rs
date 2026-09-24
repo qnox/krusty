@@ -28,7 +28,9 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod abstract_obligations;
 mod actualization_names;
+mod alias_constructor_application;
 mod annotation_applications;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -65,6 +67,7 @@ mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
 mod plugin_expression_annotations;
+mod postponed_applicability;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod receiver_flow;
@@ -2066,6 +2069,7 @@ pub struct DeclaredPropertySig {
     pub annotations: Vec<TypeName>,
     pub getter_name: String,
     pub setter_name: Option<String>,
+    pub setter_parameter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
     /// property's visibility, while an explicit `private set` narrows only this value. Keeping it beside
     /// `setter_name` prevents backend accessor synthesis from accidentally widening the source ABI.
@@ -3597,9 +3601,12 @@ pub struct SourcePropertySig {
     pub context_params: Vec<Ty>,
     /// Source names parallel to `context_params`, retained for diagnostics after resolution.
     pub context_param_names: Vec<String>,
+    /// Typed identities parallel to `context_params`, captured while source syntax is live.
+    pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub package: String,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
+    pub setter_parameter_name: Option<String>,
     pub read_stability: crate::libraries::PropertyReadStability,
     /// Resolved declaration annotation identities projected into the finalized declaration header.
     pub annotations: Vec<TypeName>,
@@ -6248,6 +6255,7 @@ fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
     CallSig {
         only_input_type_formals: sig.only_input_type_formals.clone(),
         param_names: selected(&sig.param_names, parameters),
+        parameter_identities: selected(&sig.parameter_identities, parameters),
         exact_params: selected(&sig.exact_params, parameters),
         no_infer_params: selected(&sig.no_infer_params, parameters),
         implicit_integer_coercion: selected(&sig.implicit_integer_coercion, parameters),
@@ -18698,6 +18706,7 @@ impl<'a> Checker<'a> {
             args,
             arg_tys,
         } = call_args;
+        let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let primary = matches!(
             &selected.target,
             ResolvedCtorDelegationTarget::ThisPrimary { .. }
@@ -18924,7 +18933,7 @@ impl<'a> Checker<'a> {
             class.internal_name(),
             inferred,
             bound_outer,
-            applied_classifier.or(expected),
+            Self::alias_constructor_result_constraint(applied_classifier, expected),
         )
     }
 
@@ -30973,9 +30982,11 @@ fun box(): String {
                             ty: Ty::String,
                             context_count: 0,
                             context_param_names: Vec::new(),
+                            context_parameter_identities: Vec::new(),
                             getter,
                             setter: None,
                             setter_visibility: Visibility::Private,
+                            setter_parameter_name: None,
                             is_const: false,
                             implicit_integer_coercion: false,
                             compile_time_constant: None,
@@ -38462,6 +38473,7 @@ fn install_anonymous_object_captures(
                         annotations: Vec::new(),
                         getter_name: property_getter_name(&capture.name),
                         setter_name: None,
+                        setter_parameter_name: None,
                         setter_visibility: None,
                         has_custom_getter: false,
                         is_abstract: false,
@@ -46357,7 +46369,7 @@ impl<'a> Checker<'a> {
                         if whole_array {
                             return Some(element);
                         }
-                        if actual.map_or(false, |actual| {
+                        if actual.is_some_and(|actual| {
                             !crate::assignable::is_assignable(
                                 &crate::assignable::TyCtx::new(),
                                 self,
@@ -46506,21 +46518,14 @@ impl<'a> Checker<'a> {
                         // shaped. Real overload inference owns type-variable constraint merging;
                         // rejecting a generic shape here would duplicate that selector and cannot
                         // model variance/LUB constraints (`Sink<Int>`, `Sink<String>`, `Sink<Long>`).
-                        if declared
-                            .is_some_and(|declared| ty_mentions_param(declared, &semantic.formals))
+                        if let Some(declared) = declared
+                            .filter(|declared| ty_mentions_param(*declared, &semantic.formals))
                         {
-                            // Postpone constraints on type variables, not the fixed type constructor
-                            // surrounding them. `() -> T?` can infer `T` later, but it can never accept
-                            // a known `Int`. Keeping that overload alive here lets its lambda expectation
-                            // win before real overload selection (`generateSequence(1) { ... }` then
-                            // shapes `1` as the seed function overload).
-                            if declared.is_some_and(|declared| {
-                                matches!(declared.non_null(), Ty::Fun(_))
-                                    && actual.non_null().fun_arity().is_none()
-                            }) {
-                                return false;
-                            }
-                            return true;
+                            return self.postponed_argument_fits(
+                                declared,
+                                actual,
+                                &semantic.formals,
+                            );
                         }
                         expected.is_some_and(|expected| {
                             crate::assignable::is_assignable(
@@ -54804,78 +54809,6 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(expansion, &bindings)
     }
 
-    fn scoped_source_alias_call_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        name: &str,
-        expected: Option<Ty>,
-    ) -> Option<Ty> {
-        let (formals, expansion) = if let Some(alias) = scope.type_alias(name) {
-            (alias.formals, alias.expansion)
-        } else if let Some(alias) = self.qualified_body_local_type_alias(scope, name) {
-            (alias.formals, alias.expansion)
-        } else {
-            let identity = self.scoped_source_alias_identity(scope, name)?;
-            self.source_alias_expansion(identity)?
-        };
-        let arguments = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default();
-        // Constructor syntax may omit a generic alias's arguments and infer them from value
-        // arguments (`AliasedCell(MyClass())`). This early probe exists only to recognize aliases
-        // of compiler-defined arrays; diagnosing the empty argument list here rejects an ordinary
-        // alias before constructor inference sees it. Preserve the declaration-owned expansion with
-        // its open alias formals. If it is not an array, the caller falls through to normal
-        // constructor selection; if it is, the array constructor consumes the same semantic shape.
-        if arguments.is_empty() {
-            if !formals.is_empty() {
-                let signature = GenericSig {
-                    formals: formals.clone(),
-                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]; formals.len()],
-                    receiver: None,
-                    params: Vec::new(),
-                    ret: expansion,
-                    return_policy: GenericReturnPolicy::Exact,
-                };
-                self.contextual_constructor_signatures
-                    .insert(call, signature.clone());
-                // Omitted alias arguments participate in the constructor call's expected-type
-                // inference. Keep the alias declaration's own variables as the shape side of
-                // unification: `Alias()`, where `Alias<Y> = Pair<Y, Concrete>`, under an expected
-                // `Pair<X, T>` becomes `Pair<X, Concrete>`. Treating the bare expansion as already
-                // applied leaves the unrelated declaration name `Y` in the checked expression and
-                // later compares it nominally with `X` instead of sharing the call constraint.
-                let bindings = expected
-                    .filter(|expected| *expected != Ty::Error)
-                    .and_then(|expected| {
-                        let source = self.fed_source();
-                        crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-                            &source,
-                            &signature,
-                            expected.non_null(),
-                            |actual, bound| self.receiver_is_assignable(actual, bound),
-                        )
-                    })
-                    .unwrap_or_default();
-                return Some(crate::symbol_resolver::ty_subst_keep_unbound(
-                    expansion, &bindings,
-                ));
-            }
-        }
-        Some(self.alias_application_ty(
-            scope,
-            formals,
-            expansion,
-            name,
-            &arguments,
-            self.call_callee_name_span(call),
-        ))
-    }
-
     /// The erased signature key of a function, using the type parameters visible in `scope` plus the
     /// function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
     /// formatting belongs in the backend.
@@ -58189,207 +58122,6 @@ impl<'a> Checker<'a> {
             self.diags
                 .error(declaration_span, EXPLICIT_PROPERTY_TYPE_MESSAGE);
         }
-    }
-
-    /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
-    /// concrete. Providers expose only direct declarations and direct supertypes; core performs the
-    /// complete traversal. The class chain decides before interfaces at every depth (a class-side
-    /// abstract declaration suppresses an interface default), while equally-near interface
-    /// declarations merge so a concrete default satisfies the shared semantic signature.
-    fn has_no_unimplemented_abstract_members(&self, owner: TypeName) -> bool {
-        type MemberKey = (String, Vec<ErasedTypeKey>);
-
-        let resolver = self.resolver();
-        let root = resolver.classifier(owner).map_or_else(
-            || Ty::obj_name(owner),
-            |classifier| {
-                let arguments = classifier
-                    .type_params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, parameter)| {
-                        Ty::ty_param(
-                            parameter,
-                            classifier
-                                .type_param_bounds
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Ty::obj_args_name(owner, &arguments)
-            },
-        );
-        let source = self.fed_source();
-        let hierarchy = crate::symbol_resolver::applied_hierarchy(&source, root);
-        if hierarchy.is_empty() {
-            return false;
-        }
-        let names = hierarchy
-            .iter()
-            .filter_map(|(owner, _, _)| source.classifier(*owner))
-            .flat_map(|classifier| {
-                classifier
-                    .declared_callables
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .collect::<std::collections::HashSet<_>>();
-        let families = names
-            .iter()
-            .map(|name| {
-                (
-                    name.clone(),
-                    crate::symbol_resolver::members_in_hierarchy(&source, root, name),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        // A dependency property accessor can also be exposed as its physical Java method. It is
-        // one Kotlin declaration and therefore one obligation: validate the selected semantic
-        // property below and do not count its duplicate function facet independently.
-        let property_accessor_targets = families
-            .iter()
-            .flat_map(|(_, callables)| callables.properties())
-            .flat_map(|property| {
-                std::iter::once(property.getter.external_identity).chain(std::iter::once(
-                    property
-                        .setter
-                        .as_ref()
-                        .and_then(|setter| setter.external_identity),
-                ))
-            })
-            .flatten()
-            .collect::<std::collections::HashSet<_>>();
-        let function_shape = |function: &crate::libraries::FunctionInfo| {
-            let formals = function
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formals.as_slice())
-                .unwrap_or_default();
-            function
-                .semantic_params()
-                .iter()
-                .copied()
-                .map(|parameter| crate::types::ty_canonicalize_params(parameter, formals))
-                .collect::<Vec<_>>()
-        };
-        let concrete_functions = families
-            .iter()
-            .flat_map(|(name, callables)| {
-                callables
-                    .functions()
-                    .iter()
-                    .filter(|function| !function.flags.is_abstract)
-                    .map(|function| {
-                        (
-                            name.clone(),
-                            function_shape(function),
-                            function.flags.suspend,
-                        )
-                    })
-            })
-            .collect::<std::collections::HashSet<_>>();
-
-        // Interface delegation is a concrete source declaration even though it has no handwritten
-        // member AST. Pass 1 has already selected every forwarded declaration and published its
-        // exact semantic signature; consume those stable plans while checking subclasses.
-        let mut delegated_functions = std::collections::HashSet::<MemberKey>::new();
-        let mut delegated_properties = std::collections::HashSet::<String>::new();
-        if let Some(index) = self.resolved_index {
-            for (classifier, _, _) in &hierarchy {
-                let Some(declaration) = index.classifier_declaration(*classifier) else {
-                    continue;
-                };
-                let Some(header) = index.classifier_header(declaration) else {
-                    continue;
-                };
-                for delegation in &header.interface_delegations {
-                    for member in &delegation.members {
-                        match member {
-                            crate::fir::ResolvedDelegatedMember::Function(function) => {
-                                delegated_functions.insert((
-                                    function.name.to_string(),
-                                    function
-                                        .overridden
-                                        .parameters
-                                        .iter()
-                                        .map(|parameter| erased_type_key(parameter.get()))
-                                        .collect(),
-                                ));
-                            }
-                            crate::fir::ResolvedDelegatedMember::Property(property) => {
-                                delegated_properties.insert(property.name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut unresolved = std::collections::HashSet::<MemberKey>::new();
-        for (name, callables) in &families {
-            for function in callables.functions().iter().filter(|function| {
-                function.flags.is_abstract
-                    && function
-                        .callable
-                        .external_identity
-                        .is_none_or(|identity| !property_accessor_targets.contains(&identity))
-            }) {
-                if concrete_functions.contains(&(
-                    name.clone(),
-                    function_shape(function),
-                    function.flags.suspend,
-                )) {
-                    continue;
-                }
-                let key = (
-                    name.clone(),
-                    function
-                        .semantic_params()
-                        .iter()
-                        .copied()
-                        .map(erased_type_key)
-                        .collect(),
-                );
-                if !delegated_functions.contains(&key) {
-                    unresolved.insert(key);
-                }
-            }
-            // Abstract-property obligations are accessor capabilities over the complete applied
-            // hierarchy. Selecting one property is order-sensitive when an interface contributes
-            // an abstract accessor and a superclass contributes its concrete implementation (for
-            // example `CoroutineContext.Element.key` via
-            // `AbstractCoroutineContextElement`). A concrete getter discharges a getter
-            // obligation; a mutable property's setter is tracked independently.
-            let mut requires_getter = false;
-            let mut requires_setter = false;
-            let mut has_concrete_getter = false;
-            let mut has_concrete_setter = false;
-            for property in callables.properties() {
-                requires_getter |= property.getter.is_abstract;
-                has_concrete_getter |= !property.getter.is_abstract;
-                if let Some(setter) = property.setter.as_ref() {
-                    requires_setter |= setter.is_abstract;
-                    has_concrete_setter |= !setter.is_abstract;
-                }
-            }
-            let delegated = delegated_properties.contains(name);
-            if (requires_getter && !has_concrete_getter && !delegated)
-                || (requires_setter && !has_concrete_setter && !delegated)
-            {
-                unresolved.insert((name.clone(), Vec::new()));
-            }
-        }
-        crate::trace_compiler!(
-            "resolve",
-            "abstract obligations owner={} unresolved={unresolved:?}",
-            owner.render(),
-        );
-        unresolved.is_empty()
     }
 
     /// A concrete result constraint available without resolving every read in a local property's
@@ -66000,7 +65732,11 @@ impl<'a> Checker<'a> {
                 (Ty::TyParam(formal, bound), actual)
                     if formals.iter().any(|declared| declared == formal) =>
                 {
+                    // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
+                    // bounded by `Any?`; the Java target completes the same position from its own
+                    // flexible bound `Any!`. Both are the declaration fallback.
                     actual == *bound
+                        || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
                 }
                 (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
                     symbolic_name == actual_name
@@ -76504,6 +76240,7 @@ impl<'a> Checker<'a> {
             names,
             trailing_lambda,
         };
+        let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let explicit_type_arguments = applied_classifier
             .filter(|applied| {
                 applied.kotlin_class_internal() == Some(internal)
@@ -76511,7 +76248,8 @@ impl<'a> Checker<'a> {
             })
             .map(|applied| applied.type_args().to_vec())
             .unwrap_or_else(|| self.resolved_explicit_type_args(scope, call));
-        let expected_classifier = applied_classifier.or(expected);
+        let expected_classifier =
+            Self::alias_constructor_result_constraint(applied_classifier, expected);
         let mut members = Vec::new();
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
@@ -77256,8 +76994,10 @@ impl<'a> Checker<'a> {
         applied_classifier: Option<Ty>,
     ) -> Ty {
         self.reject_abstract_construction(internal, self.span(call));
+        let fixed = self.alias_constructor_fixed_application(call, applied_classifier);
         if let Some(applied) = applied_classifier.filter(|applied| {
-            applied.kotlin_class_internal() == Some(internal)
+            fixed == Some(*applied)
+                && applied.kotlin_class_internal() == Some(internal)
                 && self.resolved_type_name(internal).is_some_and(|classifier| {
                     applied.type_args().len() == classifier.type_params().len()
                 })
