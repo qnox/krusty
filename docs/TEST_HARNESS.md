@@ -102,9 +102,27 @@ CI builds the conformance test binary once and runs that artifact against every 
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
 uses the same configurable process-group conformance deadline as the local harness, including its
-spawned compiler and runner JVMs. Each leg must score at least 55% of backend-applicable cases before
-a release can publish. Unsupported and miscompiled applicable cases count against that floor; cases
-excluded solely by the selected backend do not.
+spawned compiler and runner JVMs. A release publishes only after every leg matches its expected-failure
+list.
+
+## Box Expected-Failure Lists
+
+`tests/box_expected_failures/<version>.txt` names, one path per line relative to
+`compiler/testData/codegen/box`, the corpus files krusty is still allowed to fail against that Kotlin
+release. The conformance test fails when a file outside the list fails (a regression) or a file in the
+list passes (a fix: delete the entry in the same change). A listed path that is absent from the corpus
+or not applicable to the JVM backend fails as a stale entry. Sharded and filtered runs judge only the
+files they ran. A version without a list must pass every applicable file.
+
+After a change that fixes or deliberately trades box files, rewrite the list from a full run and commit
+the diff with the change, so review sees exactly which files moved:
+
+```sh
+KRUSTY_BLESS_BOX_FAILURES=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
+```
+
+Blessing is refused under CI and on a partial run. The goal is to empty every list; once they are
+empty the lists and `tests/box_ratchet.rs` are deleted.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
@@ -232,6 +250,8 @@ Optional profiling knobs:
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
 - `KRUSTY_FAIL_CAP=<n>` caps reported conformance failures.
+- `KRUSTY_BLESS_BOX_FAILURES=1` rewrites the Kotlin version's box expected-failure list from a full
+  conformance run instead of checking against it.
 
 Optional compiler trace:
 

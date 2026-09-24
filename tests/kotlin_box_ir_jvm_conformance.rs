@@ -12,9 +12,13 @@
 //! Env vars:
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
+//!   KRUSTY_BLESS_BOX_FAILURES  rewrite tests/box_expected_failures/<version>.txt (full runs only)
+//!
+//! Every run is held to that version's expected-failure list; see `box_ratchet`.
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
 //! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -30,6 +34,7 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 
+use super::box_ratchet::{self, Outcome};
 use super::common;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
@@ -1175,6 +1180,12 @@ fn kotlin_codegen_box_conformance() {
         .unwrap_or(usize::MAX);
 
     let mut files = krusty::conformance::kotlin_files(&box_dir);
+    let corpus: BTreeSet<String> = files
+        .iter()
+        .map(|file| box_ratchet::corpus_key(&box_dir, file))
+        .collect();
+    let full_run =
+        env("KRUSTY_BOX_ONLY").is_none() && limit == usize::MAX && conformance_shard().is_none();
     // KRUSTY_BOX_ONLY: run only files whose path contains this substring — a focused single-test debug
     // loop (pair with a `trace`-feature build + KRUSTY_TRACE=<category>). Empty/unset runs the corpus.
     if let Some(only) = env("KRUSTY_BOX_ONLY") {
@@ -1588,15 +1599,69 @@ fn kotlin_codegen_box_conformance() {
         fs::write(&path, conformance_report(files.len(), passed))
             .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
-    let applicable = files.len() - not_applicable;
-    assert!(
-        passed * 100 >= applicable * 55,
-        "box conformance is below 55% of backend-applicable cases: {passed}/{applicable} passed; {} failed; {not_applicable} not applicable",
-        failures.len()
-    );
+    if no_run {
+        eprintln!("box ratchet: skipped (KRUSTY_NO_RUN compiles without running box())");
+    } else {
+        check_expected_failures(&box_dir, &results, &corpus, full_run);
+    }
     assert!(
         passed > 0,
         "no box() cases ran — check Kotlin box corpus discovery / JDK"
+    );
+}
+
+/// Hold the run to `tests/box_expected_failures/<version>.txt` (see `box_ratchet`), or rewrite that
+/// list under `KRUSTY_BLESS_BOX_FAILURES=1`.
+fn check_expected_failures(
+    box_dir: &Path,
+    results: &[(PathBuf, TestResult)],
+    corpus: &BTreeSet<String>,
+    full_run: bool,
+) {
+    let version = krusty::kotlin_version::target();
+    let outcomes: BTreeMap<String, Outcome> = results
+        .iter()
+        .map(|(file, result)| {
+            let outcome = match result {
+                TestResult::Pass => Outcome::Pass,
+                TestResult::Fail(_) => Outcome::Fail,
+                TestResult::NotApplicable => Outcome::NotApplicable,
+            };
+            (box_ratchet::corpus_key(box_dir, file), outcome)
+        })
+        .collect();
+    if env("KRUSTY_BLESS_BOX_FAILURES").is_some() {
+        assert!(
+            full_run,
+            "KRUSTY_BLESS_BOX_FAILURES needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
+        );
+        assert!(
+            env("CI").is_none(),
+            "KRUSTY_BLESS_BOX_FAILURES is refused under CI: a list is blessed locally and reviewed"
+        );
+        let failing: BTreeSet<String> = outcomes
+            .iter()
+            .filter(|(_, outcome)| **outcome == Outcome::Fail)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let path = box_ratchet::list_path(version);
+        fs::create_dir_all(path.parent().expect("list directory")).expect("create list directory");
+        fs::write(&path, box_ratchet::render(version, &failing))
+            .unwrap_or_else(|err| panic!("failed to write {}: {err}", path.display()));
+        eprintln!(
+            "box ratchet: blessed {} expected failures into {}",
+            failing.len(),
+            path.display()
+        );
+        return;
+    }
+    let expected = box_ratchet::load(version);
+    let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
+    assert!(mismatches.is_empty(), "{}", mismatches.report(version));
+    eprintln!(
+        "box ratchet: matches {} ({} expected failures)",
+        box_ratchet::list_path(version).display(),
+        expected.len()
     );
 }
 
