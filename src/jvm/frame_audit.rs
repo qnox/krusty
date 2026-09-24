@@ -225,7 +225,7 @@ fn decode_table(
             4 => VerificationType::Long,
             5 => VerificationType::Null,
             6 => VerificationType::UninitializedThis,
-            7 => VerificationType::Reference(pool.class_name(u2(at)?)?.to_string()),
+            7 => VerificationType::Reference(pool.class_name(u2(at)?)?.into()),
             8 => {
                 let pc = usize::from(u2(at)?);
                 VerificationType::Uninitialized(offsets.binary_search(&pc).ok()?)
@@ -293,10 +293,7 @@ fn compare(stored: &[StoredFrame], computed: &[ComputedFrame], offsets: &[usize]
     };
     let unreachable = |frame: &ComputedFrame| {
         frame.locals.is_empty()
-            && frame.stack
-                == [VerificationType::Reference(
-                    "java/lang/Throwable".to_string(),
-                )]
+            && frame.stack == [VerificationType::Reference("java/lang/Throwable".into())]
     };
     let mut s = stored.iter().peekable();
     let mut c = computed.iter().peekable();
@@ -382,7 +379,7 @@ fn render_type(value: &VerificationType) -> String {
         VerificationType::Null => "null".to_string(),
         VerificationType::UninitializedThis => "uninitializedThis".to_string(),
         VerificationType::Uninitialized(index) => format!("uninitialized@{index}"),
-        VerificationType::Reference(name) => name.clone(),
+        VerificationType::Reference(name) => name.to_string(),
     }
 }
 
