@@ -242,28 +242,26 @@ fn descriptor_type(descriptor: &str) -> Option<VerificationType> {
 pub(super) fn method_types(
     descriptor: &str,
 ) -> Option<(Vec<VerificationType>, Option<VerificationType>)> {
-    let inner = descriptor.strip_prefix('(')?;
-    let close = inner.find(')')?;
-    let (params, ret) = (&inner[..close], &inner[close + 1..]);
+    // Parameters are read type by type up to the `)` that follows one: a class name may itself
+    // contain `(` or `)` (a backticked Kotlin name), so the first `)` is not necessarily the end.
+    let bytes = descriptor.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return None;
+    }
     let mut out = Vec::new();
-    let bytes = params.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
+    let mut at = 1;
+    while *bytes.get(at)? != b')' {
         let start = at;
         while bytes.get(at) == Some(&b'[') {
             at += 1;
         }
         if bytes.get(at) == Some(&b'L') {
-            while bytes.get(at) != Some(&b';') {
-                at += 1;
-                if at > bytes.len() {
-                    return None;
-                }
-            }
+            at += descriptor.get(at..)?.find(';')?;
         }
         at += 1;
-        out.push(descriptor_type(params.get(start..at)?)?);
+        out.push(descriptor_type(descriptor.get(start..at)?)?);
     }
+    let ret = descriptor.get(at + 1..)?;
     let ret = match ret {
         "V" => None,
         other => Some(descriptor_type(other)?),
@@ -928,6 +926,20 @@ mod tests {
         fn loadable_constant(&self, index: u16) -> Option<VerifType> {
             self.constants.get(&index).cloned()
         }
+    }
+
+    #[test]
+    fn a_descriptor_naming_a_class_with_parentheses_reads_to_its_own_close() {
+        let (params, ret) = method_types("(L();I[J)L();").expect("descriptor reads");
+        assert_eq!(
+            params,
+            vec![
+                VerificationType::Reference("()".to_string()),
+                VerificationType::Integer,
+                VerificationType::Reference("[J".to_string()),
+            ]
+        );
+        assert_eq!(ret, Some(VerificationType::Reference("()".to_string())));
     }
 
     fn plain(op: u8) -> Insn {

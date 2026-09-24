@@ -398,27 +398,19 @@ fn merge_one(dst: &mut VerificationType, src: &VerificationType) -> bool {
 
 /// Two different reference types' merge under ASM's array rules.
 fn merge_references(a: &str, b: &str) -> String {
-    let (a_dim, a_elem) = split_array(a);
-    let (b_dim, b_elem) = split_array(b);
-    let a_ref = is_reference_element(a_elem);
-    let b_ref = is_reference_element(b_elem);
+    let (a_dim, a_ref) = array_shape(a);
+    let (b_dim, b_ref) = array_shape(b);
     let dim = if a_dim == b_dim && a_ref == b_ref {
         if a_ref {
             a_dim
         } else {
+            // Equal dimensions of different primitive elements: e.g. `[I` and `[J` meet at `Object`.
             a_dim - 1
         }
     } else {
-        let a_eff = if a_dim > 0 && !a_ref {
-            a_dim - 1
-        } else {
-            a_dim
-        };
-        let b_eff = if b_dim > 0 && !b_ref {
-            b_dim - 1
-        } else {
-            b_dim
-        };
+        // A primitive array counts one dimension less: its elements are not references.
+        let a_eff = if a_ref { a_dim } else { a_dim - 1 };
+        let b_eff = if b_ref { b_dim } else { b_dim - 1 };
         a_eff.min(b_eff)
     };
     if dim == 0 {
@@ -428,20 +420,12 @@ fn merge_references(a: &str, b: &str) -> String {
     }
 }
 
-/// The array dimension of an internal name or descriptor, and its element part.
-fn split_array(name: &str) -> (usize, &str) {
+/// The array dimension of an internal name or array descriptor, and whether its innermost element
+/// is a reference. A plain class name (dimension zero) is a reference whatever it is called, so a
+/// class named `I` is not mistaken for `int`; a primitive array always has dimension one or more.
+fn array_shape(name: &str) -> (usize, bool) {
     let dim = name.bytes().take_while(|&b| b == b'[').count();
-    (dim, &name[dim..])
-}
-
-/// Whether an element (after the `[`s) is a reference: a class name when the dimension is zero,
-/// else an `L...;` descriptor.
-fn is_reference_element(element: &str) -> bool {
-    element.len() != 1
-        || !matches!(
-            element.as_bytes()[0],
-            b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D'
-        )
+    (dim, dim == 0 || name.as_bytes().get(dim) == Some(&b'L'))
 }
 
 #[cfg(test)]

@@ -4377,6 +4377,30 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
   same provenance with their own separators and container rules.
 
+## JVM method pipeline — computed stack-map frames, stage 1  ◐
+
+kotlinc writes classes with ASM `ClassWriter(COMPUTE_MAXS | COMPUTE_FRAMES)` and a
+`getCommonSuperClass` that always answers `java/lang/Object`, so its `StackMapTable` is a pure function
+of the final instructions and handlers. krusty records frames by hand during emission from declared
+types. The migration replaces recording with computation in stages; stage 1 adds the computer in
+shadow with no output change.
+
+- ✅ 1a. `bytecode_analysis::FrameComputation` ports ASM's `computeAllFrames`: blocks split at labels
+  and after jumps, switches, returns and throws; ASM's reference merge (null absorbs, equal array
+  dimension joins to that dimension of `Object`, otherwise `Object` at the lower dimension); handler
+  inputs merge every covered block's locals; frames only at reachable jump targets and handler
+  starts; unreachable blocks become `[] / [Throwable]` frames.
+- ✅ 1b. `jvm::frame_audit` and the `framecheck` binary compare a class file's `StackMapTable` with
+  the computed frames. On the kotlinc-built stdlib and coroutines jars every Kotlin method matches
+  (`tests/frame_computation_e2e.rs` guards it); javac-compiled classes are skipped.
+- ✅ 1c. Snapshot at stage 1 (kotlinc 2.4.20 box corpus, divergent files only): kotlinc's classes all
+  match; krusty's differ in 4,592 methods — locals dropped to top while still live, unreachable code
+  kept and framed, locals typed differently, frames with no jump, and a few dozen methods that do not
+  verify. These are historical counts, not a tracked figure.
+- ☐ 2. Write computed frames instead of recorded ones and delete the recording sites.
+- ☐ 3–6. Symbolic method body and assembler, `FrameMap`-style slot allocator, kotlinc's
+  transformer order, and label-based line/local tables.
+
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
 - ✅ One target release per process (`src/kotlin_version.rs`): `-Xkotlin-reference-version=`,
