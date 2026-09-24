@@ -795,11 +795,66 @@ fn fold_null_checks(
         ));
     }
     // The existing temporary/NOP cleanup must not apply only half of kotlinc's coupled safe-call
-    // transformation. If a candidate could not be proven foldable, preserve the original method.
-    if working.nodes.windows(2).any(is_candidate) {
+    // transformation. If a candidate kotlinc's matcher could still rewrite was not proven foldable,
+    // preserve the original method. One its matcher cannot match stays as it is in kotlinc too.
+    if (0..working.nodes.len().saturating_sub(1)).any(|at| {
+        is_candidate(&working.nodes[at..at + 2]) && kotlinc_could_rewrite_null_check(working, at)
+    }) {
         return None;
     }
     Some(removed)
+}
+
+/// Whether kotlinc's `simplifyKnownSafeCallPatterns` could rewrite the `aload v; ifnull`/`ifnonnull`
+/// pair at `at`. Its matcher walks raw instruction successors: a label or line number between the
+/// load and the jump ends the match, and so does one in front of the reload it expects — `aload v`,
+/// or `aload x`/a one-word `getstatic` followed by `aload v` ([`Working::reload`]). `ifnonnull` also
+/// needs to be its target's only predecessor; `ifnull` rewrites a target only when every jump to it
+/// is such a part. A pair failing those tests is one kotlinc leaves unchanged.
+///
+/// A target something besides two-byte branches reaches has another predecessor in kotlinc too —
+/// a fall-through (a return's dead `nop` included), a switch or a handler edge — which neither
+/// rewrite accepts. Only a protected range's bound is reached by no predecessor of its own, so
+/// that one answers that kotlinc could, keeping the caller conservative.
+fn kotlinc_could_rewrite_null_check(working: &Working, at: usize) -> bool {
+    let part = |jump_at: usize| {
+        let Some(checked) = jump_at.checked_sub(1) else {
+            return false;
+        };
+        let Some(VarOp::Load(Kind::Reference, slot)) = var_op(&working.nodes[checked].0) else {
+            return false;
+        };
+        if !working.raw_sequence(checked, 2) {
+            return false;
+        }
+        match jump(&working.nodes[jump_at].0) {
+            Some((IFNONNULL, target)) => {
+                !working.body.marks[target]
+                    && working.reload(working.group_start(target), slot).is_some()
+            }
+            Some((IFNULL, _)) => {
+                jump_at + 1 < working.nodes.len()
+                    && !working.labelled(jump_at + 1)
+                    && working.reload(jump_at + 1, slot).is_some()
+            }
+            _ => false,
+        }
+    };
+    let Some((op, target)) = jump(&working.nodes[at + 1].0) else {
+        return false;
+    };
+    let Some(jumps) = working.only_jumps_to(target) else {
+        return working
+            .body
+            .handlers
+            .iter()
+            .any(|handler| handler.start == target || handler.end == target);
+    };
+    if op == IFNONNULL {
+        jumps == [at + 1] && part(at + 1)
+    } else {
+        jumps.iter().all(|&jump_at| part(jump_at))
+    }
 }
 
 /// Decide kotlinc's rewrite of `body`, or `None` when nothing applies or the body is outside what
@@ -1294,6 +1349,36 @@ mod tests {
     }
 
     #[test]
+    fn a_null_check_kotlinc_cannot_match_does_not_hold_back_the_temporaries() {
+        // `aload; ifnonnull L` whose target starts with an `iconst` is no safe call to kotlinc's
+        // matcher, so the method's other rules still apply: the temporary folds.
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(ALOAD_1),
+            Insn::Branch {
+                op: IFNONNULL,
+                target: BranchTarget::Internal(6),
+            },
+            op(0x03), // iconst_0
+            op(0xac), // ireturn
+            op(0x04), // iconst_1
+            op(0xac), // ireturn
+        ];
+        assert_eq!(
+            rewrite(&insns, &[6], &[]),
+            Some(vec![
+                op(ALOAD_0),
+                branch(IFNONNULL, 6),
+                op(0x03),
+                op(0xac),
+                op(0x04),
+                op(0xac),
+            ])
+        );
+    }
+
+    #[test]
     fn a_line_mark_between_store_and_load_does_not_intervene() {
         let insns = [op(ALOAD_0), op(ASTORE_1), op(ALOAD_1), op(ARETURN)];
         assert_eq!(
@@ -1458,18 +1543,34 @@ mod tests {
     }
 
     #[test]
-    fn a_safe_call_exposed_by_nop_cleanup_is_still_left_unchanged() {
+    fn a_safe_call_exposed_by_nop_cleanup_is_rewritten_whole() {
         let insns = [
             op(ALOAD_0),
             op(NOP),
             Insn::Branch {
                 op: IFNONNULL,
-                target: BranchTarget::Internal(4),
+                target: BranchTarget::Internal(5),
             },
             op(0x01), // aconst_null
+            op(0xbf), // athrow: the jump is the target's only predecessor
+            op(ALOAD_0),
             op(ARETURN),
         ];
-        assert_eq!(rewrite(&insns, &[4], &[]), None);
+        assert_eq!(
+            rewrite(&insns, &[5], &[]),
+            Some(vec![
+                op(ALOAD_0),
+                op(0x59), // dup
+                Insn::Branch {
+                    op: IFNONNULL,
+                    target: BranchTarget::Internal(5),
+                },
+                op(POP),
+                op(0x01),
+                op(0xbf),
+                op(ARETURN),
+            ])
+        );
     }
 
     #[test]
