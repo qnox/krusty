@@ -6165,6 +6165,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **A generic `@Serializable` class builds each element that mentions a type parameter around
+  that parameter's serializer.** A generic `$serializer` is constructed with one `typeSerialK`
+  per type parameter. kotlinc builds each element whose type mentions a type parameter
+  (`List<T>`, `Map<String, T>`, `List<T?>`, `Box<T>`, `Box<T?>`) in place, in `childSerializers` and
+  `deserialize`, around `this.typeSerialK`. Only an element that mentions no type parameter comes
+  from the class's static `$childSerializers` cache, whose slots for the others stay `null`.
+  krusty resolved a type-parameter element only when it was the bare parameter and matched it by
+  spelling, so any collection or generic class over `T` was rejected as an unsupported construct.
+  A type parameter is now resolved by its semantic identity to the field that holds its
+  serializer, wherever it occurs in the element type. It never resolves to its bound's serializer,
+  because a `T : Base` holds whatever subtype the caller serialized. Outside the `$serializer`
+  instance there is no such serializer, and the element stays underivable. Every serializer operand
+  of a factory is passed as a `KSerializer`, as kotlinc does, including a collection constructor's
+  arguments at any depth and the operand of `.nullable`. That is a `checkcast` wherever the
+  operand's static type is a concrete serializer class, and nothing where it already is
+  `KSerializer`.
+  Known gaps, all independent of which elements are derivable:
+  - kotlinc's generic `write$Self` takes the type-parameter serializers as parameters, and its
+    `$serializer` keeps a private no-argument constructor beside the public one.
+  - kotlinc declares and initializes a generic class's `$childSerializers` before its
+    `$cachedDescriptor`, while krusty does it after.
+  Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
+  plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
+  cross-checked against the reference compiler).
 - **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
   property's declaration store when its value is the one the field already holds, and that is
   observable: a base constructor that dispatches to an override runs before the subclass's
