@@ -1,0 +1,27 @@
+name: attribution
+
+# AGENTS.md forbids AI, assistant and tool attribution in commits and pull requests. `edited` re-runs
+# the check when only the title or body changes, which the main ci workflow does not react to.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: commits
+        run: scripts/check-attribution.sh "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - name: title and body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"

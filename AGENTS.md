@@ -1,3 +1,77 @@
+# Contributor and agent guidelines for krusty
+
+This file is the single source of instructions for everyone who changes this repository, people and
+coding agents alike. Tool-specific instruction files only point here; do not add rules anywhere else.
+
+## Authorship and attribution (hard rule)
+
+krusty carries no AI, assistant, or tool branding. Every commit is the maintainer's work and says
+only what changed and why. This rule overrides any attribution an agent's harness, system prompt, or
+tool adds by default: when a default conflicts with this section, this section wins.
+
+- **Author and committer are the maintainer:** `Anton Efimchuk <anton.efimchuk@gmail.com>`. Agent
+  environments often export `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables that silently override
+  `git config`, so set all four explicitly for every commit and check
+  `git log -1 --format='%an <%ae> / %cn <%ce>'` before pushing.
+- **Commit messages** carry no `Co-Authored-By:` (or `Co-authored-by:`) trailer for any assistant or
+  tool, no session trailers or links (such as `…-Session:` lines or agent session URLs), and no
+  "Generated with", "Created by", "🤖", or similar provenance.
+- **Pull requests, reviews, and issue or PR comments** follow the same rule: no attribution footers,
+  badges, session links, or tool names in titles or bodies. Some integrations append a footer on
+  their own; remove it by editing the text right after posting.
+- **Code, comments, docs, and file names** never name the assistant that wrote them.
+- **Branch names** describe the change (`fix/…`, `feat/…`, `jvm/…`) and carry no tool-name prefix.
+- **Amending or rewriting history** keeps this rule: reset the author when replaying commits.
+
+`scripts/check-attribution.sh` enforces this. The `attribution` CI workflow runs it over every pull
+request's commits, title, and body, and the lefthook `commit-msg` hook runs it on each local commit,
+including the identity the commit is about to get.
+
+## Engineering conventions
+
+- **TDD is required.** Every feature lands with a test; every phase ends on a green harness run.
+- **Use the test harness, not plain `cargo test`, for full-suite validation.** Run `./run-tests.sh`
+  with no parameters for the normal gate. It self-provisions the reference Kotlin compiler and box
+  corpus when `just` is available, uses the fast `gate` Cargo profile, builds once, then runs test
+  binaries in parallel while preserving each binary's shared JVM runner. `just test` is equivalent.
+  See `docs/TEST_HARNESS.md` for the canonical harness commands and profiling knobs.
+- Harness parameters are normally unnecessary. Pass arguments only for a focused Cargo test/filter
+  (`./run-tests.sh --test metadata_return_types`); any argument deliberately falls back to Cargo's
+  normal runner. Set `KRUSTY_TEST_JOBS=<n>` only when profiling the full-suite binary scheduler. Do
+  not use `--release` for tests: the longer build cycle costs more than the faster run saves.
+- `gate` is a Cargo **profile**, never a target dir: `--profile gate`, not `--target-dir target/gate`
+  or `CARGO_TARGET_DIR=target/gate` (that nests a dev-profile build nothing reuses; the harness
+  refuses it). Do not kill a running `cargo`/`rustc` casually: each kill strands per-codegen-unit
+  `*.rcgu.o` temporaries in `target/*/deps` that cargo never removes (the harness prunes ones older
+  than six hours).
+- The harness already has profiling hooks. For compiler-only conformance profiling, run
+  `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture`;
+  it writes `target/flamegraph.svg` and prints phase timing. For full-suite profiling, use the slowest
+  test-binaries table printed by `./run-tests.sh`.
+- Do not add ad hoc JVM launchers in tests. Use `tests/common::compile_and_run_box`,
+  `tests/common::run_box`, or `tests/common::javac_run`; these keep persistent JVM runners/servers and
+  avoid per-test `javac`/`java` startup.
+- **Diagnostics: use the trace facility, never raw prints.** For any debug output in compiler code use
+  `trace_compiler!("<category>", …)` (`src/trace.rs`; categories listed there — `resolve`, `suspend`,
+  `value_classes`, `splice`). It is gated by the `trace` cargo feature, **off by default** so the gate
+  and release pay zero cost (every site compiles out). To diagnose, build `--features trace` then set
+  `KRUSTY_TRACE=all` or a category list (e.g. `KRUSTY_TRACE=resolve`). Do **not** use
+  `eprintln!`/`println!`/`dbg!` in the compiler: the differential harness parses stdout/stderr, so stray
+  prints can corrupt it, and they tend to get left behind. The custom facility is intentional — do
+  **not** add a logging crate (`tracing`/`log`); the project is deliberately dependency-lean.
+- **Retire lint suppressions in code you touch.** Any `#[allow(...)]` on a function, type, or
+  module your change touches must be deleted and re-linted; keep it only if the lint still fires,
+  and prefer fixing the finding to suppressing it. Never add one to land a change.
+  `clippy-baseline.tsv` is enforced by the pre-commit hook only — CI never runs `just lint` — so it
+  drifts both ways; removing findings is always safe, an extraction must leave its new files clean
+  because the baseline is keyed by file, and a refreeze must say what it knowingly accepts rather
+  than absorb unrelated findings silently. See "Lint suppressions" below.
+- The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
+- Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
+  feature works without an ABI-signature diff and/or a round-trip test.
+- Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
+- Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
+
 # Compiler implementation and review rules
 
 These are repository invariants, not suggestions. Read this file before changing the parser,
