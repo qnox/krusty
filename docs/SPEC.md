@@ -2123,6 +2123,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier-value-only tracking set; `scope.m { it.foo() }`
   therefore reports both the uninferable `T` and the unresolved body member. Test:
   `tests/postponed_lambda_probe_e2e.rs`.
+- **A postponed candidate still needs a type constructor that can fit.** While a call's lambda is
+  unshaped, an already-typed argument keeps an overload alive when SOME binding of the callee's type
+  variables could make it fit. The binding is postponed; the constructor around it is not. kotlinc
+  rejects `Iterable<T>.zip(other: Array<out R>, transform)` for a `List<Long>` argument before it
+  analyzes `{ a, b -> b - a }`. krusty kept every parameter that mentioned a formal alive (only a
+  function-typed parameter against a non-function value was declined). The array `zip` then shaped
+  the lambda with an unbound `R`, and under an outer expected type the provisional `List<Nothing>`
+  result became the lambda's expectation (`inferred type is Long but Nothing was expected`), for
+  stdlib and dependency overloads alike. `postponed_argument_fits` (`src/resolve/postponed_applicability.rs`)
+  now judges a class-typed parameter by assignability to its constructor shape: every type argument
+  that mentions a formal becomes `*`, the classifier and nullability stay. A bare formal still fits
+  anything. A function value against a class shape is left to final selection (SAM conversion).
+  Test: `tests/postponed_constructor_applicability_e2e.rs`.
 - **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
   packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
   instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
