@@ -6164,7 +6164,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lexical-prefix walk in the compiler already understands; nothing in the source is rewritten to
   match, because the SOURCE name is bound in `Ns::Classifier` and resolves where it was written.
   A local class is NOT a member class: its `InnerClasses` entry carries `outer_class_info_index = 0`
-  and it gets an `EnclosingMethod` attribute naming the scope it was LOWERED in, recorded on the
+  and its SOURCE name (`Scope$getterLocal$GetterLocal` is listed as `GetterLocal`, not
+  `getterLocal$GetterLocal`), while a class nested in a local class is a member of it and names it
+  as its outer class. It gets an `EnclosingMethod` attribute naming the scope it was LOWERED in, recorded on the
   class (`IrClass::enclosure`) when lowering creates it rather than recovered from its binary name.
   As kotlinc writes it: a class in a function (a lambda's class in the named function around the
   lambda, a local function's in that function's own lowered method) names that function and its JVM

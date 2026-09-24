@@ -73,7 +73,7 @@ impl InnerClasses {
             });
         }
 
-        for class in &ir.classes {
+        for (class_id, class) in ir.classes.iter().enumerate() {
             let identity = class.fq_name_id();
             if serializers.contains(&identity) || class.is_companion {
                 continue;
@@ -127,14 +127,21 @@ impl InnerClasses {
                 }
             };
 
-            // A local class is not a member of the textual classifier prefix in its generated JVM
-            // name. A coroutine state machine is anonymous in `InnerClasses` even though its own IR
-            // class is not a source anonymous-object declaration.
+            // A class declared in a body (it has an enclosing scope) is not a member of the textual
+            // classifier prefix in its generated JVM name, and kotlinc lists it under its source
+            // name, the last segment of its naming provenance. A class nested in a local class is a
+            // member of that class. A coroutine state machine is anonymous in `InnerClasses` even
+            // though its own IR class is not a source anonymous-object declaration.
             let coroutine = is_coroutine_state_machine(class);
-            let member = !coroutine && !class.is_local_class;
+            let local = class.enclosure.is_some();
+            let name = if local {
+                source_name(ir, class_id).unwrap_or(name)
+            } else {
+                name
+            };
             specs.push(InnerClassSpec {
                 inner: identity.render(),
-                outer: member.then_some(outer),
+                outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
                     0x0008 | 0x0010
@@ -152,6 +159,16 @@ impl InnerClasses {
             writer.add_inner_class(spec.clone());
         }
     }
+}
+
+/// The source name of a named local class: the last segment of its naming provenance.
+fn source_name(ir: &IrFile, class: usize) -> Option<String> {
+    let class = u32::try_from(class).expect("class id overflow");
+    let provenance = ir.local_class_name_provenance.get(&class)?;
+    if provenance.ordinal.is_some() {
+        return None;
+    }
+    provenance.segments.last().cloned()
 }
 
 fn is_coroutine_state_machine(class: &IrClass) -> bool {
