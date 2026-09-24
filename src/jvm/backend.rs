@@ -70,26 +70,29 @@ pub(crate) struct BackendPassFacts {
 /// 4. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization. Common IR retains them for targets without zero-initialized fields.
 ///
-/// 5. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 5. `realize_call_result_boundaries` — compare checked semantic call results after JVM generic
+///    erasure and record only the conversions whose physical result slot actually differs.
+///
+/// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 6. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 7. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
 ///
-/// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
 ///
-/// 8. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
+/// 9. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
 ///    value-class lowering has fixed their physical carriers.
 ///
-/// 9. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+/// 10. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
 ///
-/// 10. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 11. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
 ///
-/// 11. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 12. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///     (`require`/`check`) message lambda; it is spliced at the call site.
 ///
-/// 12. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 13. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///     its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///     be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///     ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -150,6 +153,10 @@ fn run_backend_passes_after_plugins(
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
     crate::jvm::reified_operations::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
+    // The checked call and its semantic coercion remain target-neutral through common lowering.
+    // Now that source declarations have their JVM type-parameter erasure, record only real result
+    // slot boundaries; value-class realization below consumes the same declaration identities.
+    crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
@@ -1511,6 +1518,10 @@ mod tests {
             (
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "realize_call_result_boundaries(",
+                &["src/jvm/call_result_boundaries.rs", "src/jvm/backend.rs"],
             ),
             ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
         ];
