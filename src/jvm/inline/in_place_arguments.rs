@@ -214,10 +214,9 @@ fn whitelisted_static(insn: &Insn, body: &MethodCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{splice_unified, spliced_frame, ParameterBinding, VType};
+    use super::super::{splice_unified, spliced_frame, ParameterBinding, ReifiedArguments, VType};
     use super::*;
     use crate::jvm::classfile::ClassWriter;
-    use std::collections::HashMap;
 
     fn body(code: Vec<u8>, max_locals: u16) -> MethodCode {
         MethodCode {
@@ -291,7 +290,7 @@ mod tests {
             ParameterBinding::InPlace(&plan),
             0,
             &mut writer,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("splice");
         assert_eq!(splice.bytes, vec![0x60]);
@@ -309,7 +308,7 @@ mod tests {
             ParameterBinding::InPlace(&plan),
             0,
             &mut writer,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("splice");
         assert_eq!(splice.bytes, vec![0x59, 0xbe, 0x57]);
@@ -354,7 +353,7 @@ mod tests {
             ParameterBinding::InPlace(&plan),
             0,
             &mut writer,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("splice");
         assert_eq!(
@@ -378,7 +377,7 @@ mod tests {
             ParameterBinding::Stored(&[]),
             0,
             &mut writer,
-            &HashMap::new(),
+            &ReifiedArguments::default(),
         )
         .expect("stored splice");
         assert_eq!(splice.bytes, vec![0x36, 0x04, 0x3e, 0x1d, 0x15, 0x04, 0x60]);
