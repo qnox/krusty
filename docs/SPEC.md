@@ -1026,17 +1026,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic `(): Tagged`: the declaration `areturn`s the carrier and the caller reads it directly.
   Type arguments have no JVM representation, so a declared result whose JVM type already equals the
   call's own result crosses no physical boundary. Common lowering records only the declaration and
-  substituted semantic types; JVM result-boundary realization compares their target representations
-  after generic erasure. Only a result that erases differently (a bare `T` instantiated with a value
-  class, which comes back through its erased bound as a box) keeps the physical slot the value-class
-  pass reads as `Boxed`. Recording the semantic `Tagged` classifier as that physical slot made the
-  pass `checkcast`+`unbox-impl` a carrier that was never boxed, a VerifyError at the caller. Only the
-  coercion common lowering places between a declaration's result and its substitution (recorded in
-  `IrFile::declaration_result_coercions`) is such a slot: a reference adaptation widening a
-  cross-file `Id` result to `Any` converts an already-realized value and must still `box-impl` it.
-  An erased slot read as a primitive and then widened to that primitive's nullable type
-  (`fun <T> f(): T` stored into an `Int?`) is one reference conversion, `checkcast Integer`, never
-  an unbox and rebox of a possibly-null reference; the same JVM pass folds it. Tests:
+  substituted semantic types and marks the exact coercion between them. JVM result-boundary
+  realization first records the declaration's generic erasure; value-class lowering then refines
+  only those marked slots after the carrier inventory is available. Only a result that erases
+  differently (a bare `T` instantiated with a value class, which comes back through its erased bound
+  as a box) keeps the physical slot the value-class pass reads as `Boxed`. Recording the semantic
+  `Tagged` classifier as that physical slot made the pass `checkcast`+`unbox-impl` a carrier that was
+  never boxed, a VerifyError at the caller. A reference adaptation widening a cross-file `Id` result
+  to `Any` is not a declaration-result coercion and must still `box-impl` the already-realized
+  carrier. An erased slot read as a primitive and then widened to that primitive's nullable type
+  (`fun <T> f(): T` stored into an `Int?`) is one reference conversion, `checkcast Integer`, never an
+  unbox and rebox of a possibly-null reference; the JVM boundary folds it. Tests:
   `tests/generic_value_class_result_e2e.rs` (the caller's facade byte-compared with kotlinc, including
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
