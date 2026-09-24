@@ -36,7 +36,40 @@ pub(super) enum ElementSerializerPlan {
     },
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
+    /// A class type parameter's serializer, which the generic `$serializer` holds in `field`.
+    TypeParameter {
+        serializer_class: ClassId,
+        field: u32,
+    },
     Builtin(TypeName),
+}
+
+/// The serializers a generic `$serializer` is constructed with, one per type parameter of the class
+/// it serves. An element whose type is, or contains, one of those parameters reads it off the
+/// `$serializer` (`this.typeSerial<k>`), so only code running on that instance can use it.
+#[derive(Clone, Copy)]
+pub(super) struct TypeParameterSerializers<'a> {
+    pub(super) serializer_class: ClassId,
+    /// The semantic identity of each type parameter, in declaration order. Parameter `k`'s
+    /// serializer is field `1 + k`; field 0 is the descriptor.
+    pub(super) identities: &'a [&'static str],
+}
+
+impl TypeParameterSerializers<'_> {
+    /// No type parameter has a serializer: a non-generic class, or code that is not on the
+    /// `$serializer` instance.
+    pub(super) const NONE: TypeParameterSerializers<'static> = TypeParameterSerializers {
+        serializer_class: 0,
+        identities: &[],
+    };
+
+    /// The `$serializer` field holding the serializer for the type parameter `identity`.
+    pub(super) fn field(&self, identity: &str) -> Option<u32> {
+        self.identities
+            .iter()
+            .position(|candidate| *candidate == identity)
+            .map(|k| 1 + k as u32)
+    }
 }
 
 /// The type requires a child-cache slot, but no complete serializer plan can be selected for it.
@@ -54,6 +87,11 @@ pub(super) fn child_cache_element_plan(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
+    // A static cache cannot hold a serializer built from an instance's type-parameter serializers;
+    // kotlinc builds such an element in `childSerializers` itself.
+    if ty.mentions_ty_param() {
+        return Ok(None);
+    }
     let Some(classifier) = ty.kotlin_class_internal() else {
         return Ok(None);
     };
@@ -222,7 +260,29 @@ pub(super) fn element_serializer_plan(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ElementSerializerPlan> {
+    element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+}
+
+/// [`element_serializer_plan`] where the class type parameters in `scope` have serializers: an
+/// element of such a parameter's type reads the one its `$serializer` was constructed with.
+pub(super) fn element_serializer_plan_in(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ElementSerializerPlan> {
     let nn = ty.non_null();
+    // A type parameter's serializer is the one supplied for it, never its bound's: `T : Base`
+    // holds whatever subtype the caller serialized. Outside a scope that supplies one, there is
+    // none to use.
+    if let Some(identity) = nn.ty_param_name() {
+        return scope
+            .field(identity)
+            .map(|field| ElementSerializerPlan::TypeParameter {
+                serializer_class: scope.serializer_class,
+                field,
+            });
+    }
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
     // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
     // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
@@ -284,7 +344,7 @@ pub(super) fn element_serializer_plan(
                 // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
                 // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
                 // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                let element = element_serializer_plan(ir, ctx, a)?;
+                let element = element_serializer_plan_in(ir, ctx, a, scope)?;
                 arguments.push(if is_nullable(a) {
                     ElementSerializerPlan::Nullable(Box::new(element))
                 } else {
@@ -349,7 +409,7 @@ pub(super) fn element_serializer_plan(
                 Ty::InProjection(_) => return None,
                 _ => *argument,
             };
-            arguments.push(element_serializer_plan(ir, ctx, &readable)?);
+            arguments.push(element_serializer_plan_in(ir, ctx, &readable, scope)?);
         }
         if arguments.len() != n_tp {
             return None;
@@ -429,7 +489,7 @@ pub(super) fn element_serializer_plan(
                 if parameters_match {
                     let arguments = readable_arguments
                         .iter()
-                        .map(|argument| element_serializer_plan(ir, ctx, argument))
+                        .map(|argument| element_serializer_plan_in(ir, ctx, argument, scope))
                         .collect::<Option<Vec<_>>>()?;
                     return Some(ElementSerializerPlan::LocalConstructed {
                         serializer: serializer_id as ClassId,
@@ -472,22 +532,13 @@ fn emit_collection_serializer(
     ir: &mut IrFile,
     builder: TypeName,
     arguments: Vec<ElementSerializerPlan>,
-    narrow_arguments: bool,
 ) -> ExprId {
     let arity = arguments.len();
     let arguments = arguments
         .into_iter()
         .map(|argument| {
             let argument = emit_element_serializer(ir, argument);
-            if narrow_arguments {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: argument,
-                    type_operand: class_ty(KSERIALIZER_FQ),
-                })
-            } else {
-                argument
-            }
+            narrow_to_kserializer(ir, argument)
         })
         .collect();
     // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the same
@@ -504,6 +555,18 @@ fn emit_collection_serializer(
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
+    })
+}
+
+/// kotlinc passes every serializer operand of a serializer factory (a collection constructor, the
+/// `nullable` extension) as a `KSerializer`: the cast is a `checkcast` wherever the operand's static
+/// type is a concrete serializer class (`StringSerializer.INSTANCE`) and vanishes where it already
+/// is `KSerializer` (a type parameter's serializer, another factory's result).
+fn narrow_to_kserializer(ir: &mut IrFile, serializer: ExprId) -> ExprId {
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(KSERIALIZER_FQ),
     })
 }
 
@@ -527,10 +590,11 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             )
         }
         ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments, false)
+            emit_collection_serializer(ir, builder, arguments)
         }
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
+            let inner = narrow_to_kserializer(ir, inner);
             wrap_nullable_serializer(ir, inner)
         }
         ElementSerializerPlan::Contextual(classifier) => {
@@ -566,6 +630,17 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
             super::cached_serializer::object_serializer(ir, object, name, serial_info_unsupported)
         }
+        ElementSerializerPlan::TypeParameter {
+            serializer_class,
+            field,
+        } => {
+            let this = ir.add_expr(IrExpr::GetValue(0));
+            ir.add_expr(IrExpr::GetField {
+                receiver: this,
+                class: serializer_class,
+                index: field,
+            })
+        }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,
             ty: class,
@@ -588,24 +663,15 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
 
 /// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
 ///
-/// kotlinc narrows each direct collection-constructor operand and the resulting serializer to
-/// `KSerializer`. Keeping that representation detail here lets the emitter build the intended IR
-/// once; callers never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
+/// kotlinc narrows the resulting serializer to `KSerializer`, as it does each of its operands.
+/// Keeping that representation detail here lets the emitter build the intended IR once; callers
+/// never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
 pub(super) fn emit_cached_element_serializer(
     ir: &mut IrFile,
     plan: ElementSerializerPlan,
 ) -> ExprId {
-    let serializer = match plan {
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            emit_collection_serializer(ir, builder, arguments, true)
-        }
-        plan => emit_element_serializer(ir, plan),
-    };
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(KSERIALIZER_FQ),
-    })
+    let serializer = emit_element_serializer(ir, plan);
+    narrow_to_kserializer(ir, serializer)
 }
 
 pub(super) fn element_serializer_expr(
@@ -613,6 +679,17 @@ pub(super) fn element_serializer_expr(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ExprId> {
-    let plan = element_serializer_plan(ir, ctx, ty)?;
+    element_serializer_expr_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+}
+
+/// [`element_serializer_expr`] inside a generic `$serializer`, whose type-parameter serializers
+/// `scope` names.
+pub(super) fn element_serializer_expr_in(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+) -> Option<ExprId> {
+    let plan = element_serializer_plan_in(ir, ctx, ty, scope)?;
     Some(emit_element_serializer(ir, plan))
 }

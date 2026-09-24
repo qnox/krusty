@@ -434,6 +434,8 @@ pub(super) struct ChildSerializersBody<'a> {
     /// Element types as the SERIALIZER sees them, which is not always the field's own type.
     pub(super) serializer_field_types: &'a [Ty],
     pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serializers of the class's type parameters, on the generic `$serializer`.
+    pub(super) type_parameter_serializers: super::element_serializer::TypeParameterSerializers<'a>,
     /// The serialized class's cache plan, or `None` when it has no cache.
     pub(super) plan: Option<ChildSerializerCachePlan>,
 }
@@ -448,6 +450,7 @@ impl ChildSerializersBody<'_> {
             fields,
             serializer_field_types,
             type_parameter_serializer_fields,
+            type_parameter_serializers,
             plan,
         } = self;
         // Return the per-field element-serializer array (arity == field count): one
@@ -507,10 +510,11 @@ impl ChildSerializersBody<'_> {
                     } else {
                         base
                     }
-                } else if let Some(e) = super::element_serializer_expr(
+                } else if let Some(e) = super::element_serializer::element_serializer_expr_in(
                     ir,
                     ctx,
                     &serializer_field_types[i],
+                    type_parameter_serializers,
                 )
                 .map(|base| {
                     // A NULLABLE property's element serializer is the base one wrapped

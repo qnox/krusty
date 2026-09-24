@@ -36,7 +36,7 @@ use crate::plugins::{
 use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
-use element_serializer::{element_serializer_expr, element_serializer_plan};
+use element_serializer::element_serializer_expr;
 use generated_classifier::generated_serializer_classifier_fact;
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
@@ -2138,24 +2138,42 @@ impl IrPlugin for SerializationPlugin {
                     None => None,
                 })
                 .collect();
+            // The serializers this generic `$serializer` is constructed with, by the semantic
+            // identity of the class type parameter each one serves.
+            // Only a generic class records a signature; one that declares type parameters without
+            // it would leave its serializers unaddressable, which no fallback may paper over.
+            let declared_type_parameters = ir.classes[class_id as usize].type_params.len();
+            let type_parameter_identities: Vec<&'static str> = if declared_type_parameters == 0 {
+                Vec::new()
+            } else {
+                let signature = ir
+                    .class_signature(&ir.classes[class_id as usize].fq_name())
+                    .expect("a generic class records its generic signature");
+                assert_eq!(
+                    signature.type_params.len(),
+                    declared_type_parameters,
+                    "a generic class's signature declares each of its type parameters"
+                );
+                signature
+                    .type_params
+                    .iter()
+                    .map(|parameter| crate::types::intern(&parameter.semantic_name))
+                    .collect()
+            };
+            let type_parameter_serializers = element_serializer::TypeParameterSerializers {
+                serializer_class: ser_idx as u32,
+                identities: &type_parameter_identities,
+            };
             // For each field: the `$serializer` field index (`1..=N`) holding its element serializer when
             // the property's declared type IS a class type parameter (`val boxed: T` on a generic class).
             // `None` for a concrete-typed field. Lets serialize/deserialize/childSerializers route a
             // type-param element through the ctor-supplied `this.typeSerialK` instead of a fixed serializer.
-            let class_type_params: Vec<String> = ir.classes[class_id as usize].type_params.clone();
-            let field_tps: Vec<Option<String>> = ir.classes[class_id as usize]
-                .fields
+            let tp_field: Vec<Option<u32>> = fields
                 .iter()
-                .map(|f| f.type_param.clone())
-                .collect();
-            let tp_field: Vec<Option<u32>> = (0..fields.len())
-                .map(|i| {
-                    field_tps.get(i).and_then(|o| o.as_ref()).and_then(|tp| {
-                        class_type_params
-                            .iter()
-                            .position(|t| t == tp)
-                            .map(|k| 1 + k as u32)
-                    })
+                .map(|(_, ty)| {
+                    ty.non_null()
+                        .ty_param_name()
+                        .and_then(|identity| type_parameter_serializers.field(identity))
                 })
                 .collect();
             for fid in ir.classes[ser_idx].methods.clone() {
@@ -2242,6 +2260,7 @@ impl IrPlugin for SerializationPlugin {
                             field_defaults: &field_defaults,
                             nested_serializers: &nested,
                             type_parameter_serializer_fields: &tp_field,
+                            type_parameter_serializers,
                             write_self: self
                                 .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
                             write_self_name: self.write_self_name(),
@@ -2257,6 +2276,7 @@ impl IrPlugin for SerializationPlugin {
                             serialized_class: foo_id,
                             fields: &fields,
                             type_parameter_serializer_fields: &tp_field,
+                            type_parameter_serializers,
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
@@ -2271,6 +2291,7 @@ impl IrPlugin for SerializationPlugin {
                             fields: &fields,
                             serializer_field_types: &serializer_field_types,
                             type_parameter_serializer_fields: &tp_field,
+                            type_parameter_serializers,
                             plan: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
@@ -2278,8 +2299,8 @@ impl IrPlugin for SerializationPlugin {
                     }
                     // A serializer without type parameters keeps the semantic interface-default
                     // delegation installed when its member was declared.
-                    "typeParametersSerializers" if !class_type_params.is_empty() => {
-                        let elements: Vec<ExprId> = (1..=class_type_params.len() as u32)
+                    "typeParametersSerializers" if !type_parameter_identities.is_empty() => {
+                        let elements: Vec<ExprId> = (1..=type_parameter_identities.len() as u32)
                             .map(|fidx| {
                                 let this = ir.add_expr(IrExpr::GetValue(0));
                                 ir.add_expr(IrExpr::GetField {
@@ -2841,6 +2862,21 @@ mod tests {
         c.ctor_param_count = 1;
         let id = ir.add_class(c);
         ir.record_class_source_qualified_name(id, "demo.Box");
+        ir.insert_class_signature(
+            "demo/Box",
+            crate::ir::IrGenericSig {
+                type_params: vec![crate::ir::IrTypeParameter {
+                    name: "T".to_string(),
+                    semantic_name: "T".to_string(),
+                    bounds: Vec::new(),
+                    variance: crate::types::TypeVariance::Invariant,
+                    reified: false,
+                }],
+                params: Vec::new(),
+                ret: None,
+                supers: Vec::new(),
+            },
+        );
         let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(id, vec![type_name(SERIALIZABLE_FQ)]);
