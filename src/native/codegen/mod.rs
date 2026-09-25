@@ -103,7 +103,7 @@ impl Backend for CraneliftBackend {
         // generator's own object is built from; see `native::dependency_references`.
         let properties = super::dependency_references::realize_properties(&mut file.ir);
         if state.runtime_symbols.is_none() {
-            match super::linker::runtime_symbols(self.target.arch) {
+            match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
                 Err(error) => {
                     diags.error(
