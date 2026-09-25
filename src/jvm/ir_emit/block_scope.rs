@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::frame_map::Mark;
 use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
 
 impl Emitter<'_> {
@@ -74,10 +75,26 @@ impl Emitter<'_> {
         }
     }
 
-    /// Restore the lexical value map while retaining the backend's monotonic physical slot cursor.
-    pub(super) fn restore_slot_scope(&mut self, slots: HashMap<u32, (u16, Ty)>) {
-        self.slots = slots;
+    /// Open a lexical slot scope: the value map to restore and the frame point to leave back to.
+    pub(super) fn open_slot_scope(&self) -> SlotScope {
+        SlotScope {
+            slots: self.slots.clone(),
+            frame: self.frame.mark(),
+        }
+    }
+
+    /// Close a lexical slot scope: restore the value map and leave the locals declared in it, as
+    /// kotlinc's block end does.
+    pub(super) fn restore_slot_scope(&mut self, scope: SlotScope) {
+        self.slots = scope.slots;
         self.unassigned_values
             .retain(|value| self.slots.contains_key(value));
+        self.frame.leave_block(scope.frame);
     }
+}
+
+/// An open lexical slot scope; see [`Emitter::open_slot_scope`].
+pub(super) struct SlotScope {
+    slots: HashMap<u32, (u16, Ty)>,
+    frame: Mark,
 }
