@@ -6960,6 +6960,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc; a consumer linking against kotlinc-built `<T : IC?>` functions; a dash inside a hash).
   Corpus: `boxReturnValueOnOverride/overrideGenericWithNullableInlineClassUpperBound*` and
   `inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes*`.
+- **Member property modality and accessors in `@Metadata`.** A property's recorded modality is
+  its own: `open` or a non-`final` `override` is OPEN, `abstract` or a getter-less interface member
+  is ABSTRACT, an interface member with a getter is OPEN. A getter written in source, a setter
+  body, a `private set` and a delegated property's accessors are not the default accessor, which
+  the accessor flag word records; a bodiless `set` is. A non-default setter records its value
+  parameter (the written name, else `value`, or `<set-?>` when delegated), and a delegated property
+  records its `x$delegate` field; `lateinit` and delegation are property flags. Measured against kotlinc
+  2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_property_flags_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part

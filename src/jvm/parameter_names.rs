@@ -121,6 +121,17 @@ fn function_local_variable(
     local_variable(identity, "")
 }
 
+/// The name source wrote for a setter's value parameter, which Kotlin metadata records. The final
+/// semantic parameter is the setter value by the accessor contract; its typed IR identity
+/// distinguishes a written name from the compiler-generated implicit setter value.
+pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String> {
+    let identity = ir.function_parameter_identities(setter?)?.last()?;
+    (identity.role == IrParameterRole::Value
+        && identity.provenance == crate::ir::IrParameterProvenance::SourceDeclared)
+        .then(|| metadata(identity).map(str::to_owned))
+        .flatten()
+}
+
 /// Kotlin metadata accepts only a declaration/producer-published semantic name.
 pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
     match identity.role {

@@ -116,17 +116,6 @@ fn is_jvm_interface(c: &IrClass) -> bool {
     c.is_interface || c.is_annotation
 }
 
-/// Kotlin metadata records a setter value parameter only when source declared its identity.
-/// The final semantic parameter is the setter value by the accessor contract; its typed IR
-/// identity distinguishes a written name from the compiler-generated implicit setter value.
-pub(super) fn explicit_setter_parameter_name(ir: &IrFile, setter: Option<u32>) -> Option<String> {
-    let identity = ir.function_parameter_identities(setter?)?.last()?;
-    (identity.role == crate::ir::IrParameterRole::Value
-        && identity.provenance == crate::ir::IrParameterProvenance::SourceDeclared)
-        .then(|| crate::jvm::parameter_names::metadata(identity).map(str::to_owned))
-        .flatten()
-}
-
 fn declared_jvm_interface(ir: &IrFile, owner: TypeName) -> bool {
     ir.classes
         .iter()
@@ -1282,6 +1271,10 @@ fn build_class_metadata(
                         .then(|| (default_setter, format!("({})V", desc(field.ty))))
                     })
                 });
+            // A delegated property's JVM field is its `x$delegate` storage, which metadata names.
+            let delegate = property
+                .delegate_field
+                .and_then(|i| c.fields.get(i as usize));
             (
                 property.source_order,
                 PropMeta {
@@ -1306,9 +1299,11 @@ fn build_class_metadata(
                         |s| !s.is_var && static_fields::const_value_idx_peek(ir, s.init),
                     ),
                     is_const: false,
-                    is_abstract: c.is_interface && property.getter.is_none(),
+                    modifiers: property.modifiers,
+                    setter_is_private: property.setter_is_private,
                     has_backing_field: !c.is_annotation
                         && (backing.is_some()
+                            || delegate.is_some()
                             || hoisted_static_for(ir, c, property_index).is_some())
                         && !c.is_interface,
                     tparam: match property.ty {
@@ -1342,14 +1337,21 @@ fn build_class_metadata(
                     type_params: Vec::new(),
                     getter,
                     setter,
-                    setter_parameter_name: explicit_setter_parameter_name(ir, property.setter),
+                    setter_parameter_name: super::parameter_names::explicit_setter(
+                        ir,
+                        property.setter,
+                    ),
                     field_desc: backing
-                        .filter(|(_, field)| property.ty != field.ty)
-                        .map(|(_, field)| desc(field.ty)),
+                        .map(|(_, field)| field)
+                        .or(delegate)
+                        .filter(|field| property.ty != field.ty)
+                        .map(|field| desc(field.ty)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
-                        .map(|(_, field)| instance_field_jvm_name(ir, c, field))
+                        .map(|(_, field)| field)
+                        .or(delegate)
+                        .map(|field| instance_field_jvm_name(ir, c, field))
                         .filter(|physical| *physical != property.name),
                     // A property-targeted annotation lives on its synthetic marker method; the
                     // record here is what connects the property to it (and the marker's FINAL name,
@@ -1386,7 +1388,8 @@ fn build_class_metadata(
                 visibility: prop.visibility,
                 has_constant: true,
                 is_const: true,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1425,6 +1428,7 @@ fn build_class_metadata(
                 )
             })
         };
+        let ext_delegate = ext.delegate_field.and_then(|i| c.fields.get(i as usize));
         props.push(PropMeta {
             spellings: ir
                 .prop_declared_spellings
@@ -1438,16 +1442,19 @@ fn build_class_metadata(
             visibility: ext.visibility,
             has_constant: false,
             is_const: false,
-            is_abstract: ext.is_abstract,
-            has_backing_field: false,
+            modifiers: ext.modifiers,
+            setter_is_private: false,
+            has_backing_field: ext_delegate.is_some(),
             tparam: None,
             receiver: Some(ext.receiver),
             type_params: ext.type_params.clone(),
             getter: accessor_sig(ext.getter),
             setter: ext.setter.and_then(accessor_sig),
-            setter_parameter_name: explicit_setter_parameter_name(ir, ext.setter),
-            field_desc: None,
-            field_name: None,
+            setter_parameter_name: super::parameter_names::explicit_setter(ir, ext.setter),
+            field_desc: ext_delegate
+                .filter(|field| field.ty != ext.ty)
+                .map(|field| desc(field.ty)),
+            field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_marker_annotations(ir, c, &ext.name),
             field_annotations: Vec::new(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),

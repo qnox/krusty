@@ -25,7 +25,12 @@ pub(crate) mod property_flags {
     pub const HAS_SETTER: u64 = 1 << 10;
     pub const IS_CONST: u64 = 1 << 11;
     pub const HAS_CONSTANT: u64 = 1 << 13;
+    pub const MODALITY_OPEN: u64 = 1 << 4;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
+    pub const IS_LATEINIT: u64 = 1 << 12;
+    pub const IS_DELEGATED: u64 = 1 << 15;
+    /// Accessor flag word bit 6: the accessor is not the compiler default.
+    pub const ACCESSOR_IS_NOT_DEFAULT: u64 = 1 << 6;
     /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an
     /// accessor's default is derived from its property.
     pub const MODALITY_MASK: u64 = 0b11_0000;
