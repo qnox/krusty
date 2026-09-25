@@ -7,7 +7,9 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
     // recorded visibility stay public.
+    // A classifier declared in executable code, or nested in one, is LOCAL (5) whatever it says.
     let visibility: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
+        _ if super::local_classifiers::is_local(ir, c) => 5,
         Some(crate::types::Visibility::Internal) => 0,
         Some(crate::types::Visibility::Private) => 1,
         Some(crate::types::Visibility::Protected) => 2,

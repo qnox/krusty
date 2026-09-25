@@ -625,7 +625,13 @@ pub struct ClassTail<'a> {
     /// BINARY/RUNTIME-retained annotations declared on the PRIMARY constructor — `Constructor.annotation`
     /// (f3) of the primary record, the counterpart of [`CtorMeta::annotations`] for the secondaries.
     pub primary_ctor_annotations: &'a [crate::ir::AppliedAnnotation],
+    /// The file's local classifiers (declared in executable code or nested in one). The string
+    /// table names each by its raw internal name, marked local, wherever it appears.
+    pub local_classifiers: &'a std::collections::HashSet<TypeName>,
 }
+
+static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeName>> =
+    std::sync::LazyLock::new(Default::default);
 
 impl Default for ClassTail<'_> {
     fn default() -> Self {
@@ -658,6 +664,7 @@ impl Default for ClassTail<'_> {
             supertypes: &[],
             annotations: &[],
             primary_ctor_annotations: &[],
+            local_classifiers: &NO_LOCAL_CLASSIFIERS,
         }
     }
 }
@@ -684,7 +691,7 @@ pub fn build_class(
     let class_flags = tail.flags;
     let companion_name = tail.companion;
     let nested_class_names = tail.nested;
-    let mut st = StringTable::default();
+    let mut st = StringTable::with_local_classifiers(tail.local_classifiers);
 
     // STRINGS ARE INTERNED IN kotlinc's ORDER (fq_name, supertype, constructors, properties'
     // JVM signatures, functions, enum entries, then the companion + nested names LAST) even though the
@@ -1469,26 +1476,6 @@ pub fn build_class(
 /// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
 /// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
 /// localName in the string table>, supertype* }` — no members, no constructor record.
-pub fn build_anonymous_class(internal: &str, supertypes: &[Ty]) -> (Vec<u8>, Vec<String>) {
-    let mut st = StringTable::default();
-    let mut class = Pb::new();
-    class.field_varint(1, 10); // flags: visibility LOCAL (5 << 1), final, kind CLASS
-    let self_idx = st.local_class_id(internal);
-    class.field_varint(3, self_idx as u64); // Class.fq_name = 3
-    for &supertype in supertypes {
-        let sup = type_pb(&mut st, supertype, &TypeParameters::new());
-        class.field_message(6, &sup); // Class.supertype = 6
-    }
-    let stt = st.serialize_types();
-    let mut bytes = vec![0x00u8]; // UTF8 mode marker
-    let mut prefix = Pb::new();
-    prefix.varint(stt.as_bytes().len() as u64); // writeDelimitedTo length prefix
-    bytes.extend_from_slice(&prefix.into_bytes());
-    bytes.extend_from_slice(stt.as_bytes());
-    bytes.extend_from_slice(class.canonical().as_bytes());
-    (bytes, st.into_strings())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

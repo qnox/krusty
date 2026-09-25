@@ -38,6 +38,7 @@ pub mod jvm_class_map;
 pub mod jvm_libraries;
 mod lifted_names;
 mod local_class_names;
+mod local_classifiers;
 mod local_properties;
 mod mapped_builtin_declarations;
 pub mod metadata;

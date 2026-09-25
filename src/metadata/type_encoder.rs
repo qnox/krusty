@@ -68,9 +68,23 @@ pub(crate) struct StringTable {
     /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
     /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
     local_names: Vec<u32>,
+    /// Indices of literal class ids; each opens a new `Record` rather than extending a plain run.
+    record_starts: Vec<u32>,
+    /// Classifiers declared in executable code (or nested in one): named by their raw internal
+    /// name, marked local, wherever a class id is interned.
+    local_classifiers: std::collections::HashSet<TypeName>,
 }
 
 impl StringTable {
+    pub(crate) fn with_local_classifiers(
+        local_classifiers: &std::collections::HashSet<TypeName>,
+    ) -> Self {
+        StringTable {
+            local_classifiers: local_classifiers.clone(),
+            ..StringTable::default()
+        }
+    }
+
     fn intern(&mut self, string: String, record: Pb) -> u32 {
         let key = (string.clone(), record.as_bytes().to_vec());
         if let Some(&index) = self.dedup.get(&key) {
@@ -94,6 +108,10 @@ impl StringTable {
     }
 
     pub(crate) fn class_id(&mut self, classifier: TypeName) -> u32 {
+        if self.local_classifiers.contains(&classifier) {
+            let literal = self.local_class_literal(classifier);
+            return self.class_literal(literal, true);
+        }
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
@@ -103,21 +121,56 @@ impl StringTable {
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
             return self.intern(format!("L{};", classifier.render()), record);
         }
-        self.intern(encoded.literal, Pb::new())
+        self.class_literal(encoded.literal, false)
+    }
+
+    /// A local classifier's id: the raw internal name of the classifier declared in executable
+    /// code, then `.`-separated segments for the classes nested in it (`app/AKt$make$Local.In`).
+    fn local_class_literal(&self, classifier: TypeName) -> String {
+        let mut nested = Vec::new();
+        let mut outer = classifier;
+        while let Some(owner) = outer
+            .nested_owner()
+            .filter(|owner| self.local_classifiers.contains(owner))
+        {
+            nested.push(
+                outer
+                    .nested_segment_within(owner)
+                    .expect("a recorded nested owner must own the classifier segment"),
+            );
+            outer = owner;
+        }
+        let mut literal = outer.render();
+        for segment in nested.into_iter().rev() {
+            literal.push('.');
+            literal.push_str(segment);
+        }
+        literal
+    }
+
+    /// kotlinc's `JvmStringTable.getQualifiedClassNameIndex` for a class id stored literally (a
+    /// local classifier, or a name with a `$`): it reuses an equal string only when that string's
+    /// locality matches, and always opens a new record, which the plain strings after it extend.
+    fn class_literal(&mut self, literal: String, local: bool) -> u32 {
+        let key = (literal, Vec::new());
+        if let Some(&index) = self.dedup.get(&key) {
+            if local == self.local_names.contains(&index) {
+                return index;
+            }
+        }
+        let index = self.strings.len() as u32;
+        self.strings.push(key.0.clone());
+        self.records.push(Pb::new());
+        self.dedup.insert(key, index);
+        if local {
+            self.local_names.push(index);
+        }
+        self.record_starts.push(index);
+        index
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
-        serialize_string_table_types(&self.records, &self.local_names)
-    }
-
-    /// Intern a LOCAL/ANONYMOUS class's RAW internal name as a class id: an EMPTY record plus a
-    /// `StringTableTypes.localName` entry marking the index (kotlinc's local-class encoding).
-    pub(crate) fn local_class_id(&mut self, internal: &str) -> u32 {
-        let index = self.intern(internal.to_string(), Pb::new());
-        if !self.local_names.contains(&index) {
-            self.local_names.push(index);
-        }
-        index
+        serialize_string_table_types(&self.records, &self.local_names, &self.record_starts)
     }
 
     pub(crate) fn into_strings(self) -> Vec<String> {

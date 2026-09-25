@@ -396,20 +396,6 @@ pub(super) struct EmitEnv<'a> {
     java_parameters: bool,
 }
 
-/// kotlinc's `IrClass.isLocal` for a declared classifier: a class declared in executable code (a
-/// local class or an anonymous object) or nested, at any depth, in one. kotlinc's lambda and
-/// callable-reference classes are local too; their writers here annotate nothing to begin with.
-fn is_local_classifier(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
-    class.is_local_class
-        || class.is_anonymous_object
-        || class
-            .fq_name_id()
-            .existing_nested_owners()
-            .into_iter()
-            .find_map(|owner| ir.class_id_by_name(owner))
-            .is_some_and(|owner| is_local_classifier(ir, &ir.classes[owner as usize]))
-}
-
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
 ///
 /// The two strategies produce different CLASS SETS, so this is an emitter selection rather than an
@@ -1115,6 +1101,11 @@ fn build_class_metadata(
         return None;
     }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let local_classifiers = super::local_classifiers::names(ir);
+    // A reader maps a declared type to its JVM descriptor by class id, and a local classifier's id
+    // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
+    let names_local =
+        |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
     let const_fields = init_body_constant_fields(ir, c);
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
@@ -1276,7 +1267,7 @@ fn build_class_metadata(
                     field_desc: backing
                         .map(|(_, field)| field)
                         .or(delegate)
-                        .filter(|field| property.ty != field.ty)
+                        .filter(|field| property.ty != field.ty || names_local(field.ty))
                         .map(|field| desc(field.ty)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
@@ -1714,7 +1705,7 @@ fn build_class_metadata(
                         }),
                     metadata_ret,
                     &physical,
-                    &Default::default(),
+                    &local_classifiers,
                 )
                 .then_some(physical);
                 Some(FnMeta {
@@ -2125,8 +2116,10 @@ fn build_class_metadata(
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
+            // A classifier declared in executable code is nobody's member; one nested in a local
+            // class is that class's member like any other.
             candidate.is_source_declared
-                && !candidate.is_local_class
+                && candidate.enclosure.is_none()
                 && candidate.fq_name.nested_owner() == Some(c.fq_name)
         })
         .map(|(index, candidate)| {
@@ -2280,7 +2273,9 @@ fn build_class_metadata(
             // primary record either (its `Class.constructor` entries are the secondaries below).
             // Every other class keeps its (possibly implicit) primary record — an `enum class`
             // without a declared constructor still records the implicit private `(String, I)` one.
+            // An anonymous object's constructor is not a declaration a reader can call.
             emit_primary_ctor: !c.is_interface
+                && !c.is_anonymous_object
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
             // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the
@@ -2313,6 +2308,7 @@ fn build_class_metadata(
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
+            local_classifiers: &local_classifiers,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -2361,11 +2357,7 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// value class but the transitive check independently admits it, a mentioning class publishes a type
 /// a downstream compiler reads as an ordinary box.
 fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    // Local/anonymous classifiers cannot be named by another compilation unit. Their lexical type
-    // parameters are not declarations of the generated class, so publishing a class metadata record
-    // would require falsely redeclaring them; omit the non-observable record instead.
-    !(c.is_local_class
-        || c.enum_entry_of.is_some()
+    !(c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
         // A published secondary constructor is described from its recorded semantic parameter
@@ -3335,7 +3327,7 @@ fn new_classifier_writer(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_nullability_annotations(!is_local_classifier(ir, c));
+    cw.set_nullability_annotations(!super::local_classifiers::is_local(ir, c));
     cw
 }
 
@@ -6272,30 +6264,8 @@ fn emit_class(
     }
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
-    // An ANONYMOUS class gets kotlinc's minimal k=1 record (LOCAL flags, raw-internal fq_name via
-    // the string table's localName marker, supertypes — no members).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| {
-            if c.is_anonymous_object {
-                let mut supers: Vec<Ty> = Vec::new();
-                if c.has_non_top_superclass() {
-                    supers.push(Ty::obj_name(c.superclass));
-                }
-                supers.extend(c.interfaces.iter_ids().map(Ty::obj_name));
-                let (d1_bytes, d2) =
-                    crate::metadata::class_builder::build_anonymous_class(&fq_name, &supers);
-                let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
-                Some(KotlinMetadata {
-                    k: 1,
-                    mv: vec![2, 4, 0],
-                    xi: 48,
-                    d1: vec![d1],
-                    d2,
-                })
-            } else {
-                build_class_metadata(ir, c, opts)
-            }
-        })
+        .then(|| build_class_metadata(ir, c, opts))
         .flatten();
     // `-jvm-default=disable`: the interface holds no bodies, so a class that inherits one gets an
     // explicit override forwarding to the holder. Without these the class does not implement its own
