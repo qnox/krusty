@@ -28,6 +28,10 @@ pub(super) fn realize(
     ir: &mut IrFile,
     classpath: Rc<Classpath>,
 ) -> Result<(), RangeRealizationFailure> {
+    crate::backend::counted_loops::realize(
+        ir,
+        crate::backend::counted_loops::CounterLoopStyle::JavaLike,
+    );
     let runtime = JvmLibraries::new(classpath).map_err(RangeRealizationFailure::Initialization)?;
     let expression_count = ir.exprs.len();
     for expression in 0..expression_count {
@@ -107,6 +111,7 @@ pub(super) fn realize(
         match ir.exprs[expression].clone() {
             IrExpr::Checked(IrCheckedOperation::RangeLoop {
                 variable,
+                variable_name,
                 counter,
                 operation,
                 start,
@@ -115,7 +120,18 @@ pub(super) fn realize(
                 label,
             }) => {
                 let replacement = unsigned_range_loop(
-                    ir, &runtime, variable, counter, operation, start, end, body, label,
+                    ir,
+                    &runtime,
+                    UnsignedRangeLoop {
+                        variable,
+                        variable_name,
+                        counter,
+                        operation,
+                        start,
+                        end,
+                        body,
+                        label,
+                    },
                 )
                 .ok_or(RangeRealizationFailure::Operation(
                     RangeOperationFailure {
@@ -221,18 +237,32 @@ pub(super) fn realize(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn unsigned_range_loop(
-    ir: &mut IrFile,
-    runtime: &JvmLibraries,
+struct UnsignedRangeLoop {
     variable: u32,
+    variable_name: Option<Box<str>>,
     counter: Ty,
     operation: FirRangeOperation,
     start: ExprId,
     end: ExprId,
     body: ExprId,
     label: String,
+}
+
+fn unsigned_range_loop(
+    ir: &mut IrFile,
+    runtime: &JvmLibraries,
+    lp: UnsignedRangeLoop,
 ) -> Option<IrExpr> {
+    let UnsignedRangeLoop {
+        variable,
+        variable_name,
+        counter,
+        operation,
+        start,
+        end,
+        body,
+        label,
+    } = lp;
     let end_slot = next_value_slot(ir);
     let variable_declaration = ir.add_expr(IrExpr::Variable {
         index: variable,
@@ -240,6 +270,9 @@ fn unsigned_range_loop(
         init: Some(start),
         named: true,
     });
+    if let Some(name) = variable_name {
+        ir.value_names.insert(variable_declaration, name.into());
+    }
     let end_declaration = ir.add_expr(IrExpr::Variable {
         index: end_slot,
         ty: counter,
@@ -436,6 +469,7 @@ fn next_value_slot(ir: &IrFile) -> u32 {
                 | IrExpr::SetValue { var: index, .. }
                 | IrExpr::Variable { index, .. } => Some(*index),
                 IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).max(),
+                IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => Some(*variable),
                 _ => None,
             };
             index.map_or(highest, |index| highest.max(index + 1))
@@ -481,5 +515,33 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if let Some(line) = ir.expr_end_lines.get(&source).copied() {
         ir.expr_end_lines.insert(target, line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_value_slot;
+    use crate::fir::FirRangeOperation;
+    use crate::ir::{IrCheckedOperation, IrConst, IrExpr, IrFile};
+    use crate::types::Ty;
+
+    #[test]
+    fn a_checked_range_declaration_reserves_its_value_slot() {
+        let mut ir = IrFile::default();
+        let start = ir.add_expr(IrExpr::Const(IrConst::UInt(0)));
+        let end = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+            variable: 7,
+            variable_name: None,
+            counter: Ty::UInt,
+            operation: FirRangeOperation::Through,
+            start,
+            end,
+            body,
+            label: "loop".to_string(),
+        }));
+
+        assert_eq!(next_value_slot(&ir), 8);
     }
 }

@@ -571,6 +571,9 @@ pub enum IrCheckedOperation {
     },
     RangeLoop {
         variable: u32,
+        /// Source identity of the loop variable. A representation backend attaches it to the
+        /// declaration it creates; it must not recover the name from a slot or generated spelling.
+        variable_name: Option<Box<str>>,
         counter: Ty,
         operation: crate::fir::FirRangeOperation,
         start: ExprId,

@@ -6979,6 +6979,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inlineClasses/interfaceDelegation/memberExt{Val,Var}DelegationWithInlineClassParameterTypes*`
   and `delegation/genericProperty`.
 
+- **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
+  publishes one target-neutral `RangeLoop`; the named backend-boundary pass in
+  `src/backend/counted_loops.rs` then ports `ProgressionHeaderInfo`. `until` and `..<` have an exclusive
+  bound; when the JVM backend selects its Java-like counter-loop shape,
+  `..` and `downTo` with a constant bound that can move one step outward become exclusive too
+  (`0..10` iterates while `i < 11`, `n downTo 0` while
+  `-1 < i`). An exclusive bound gives a Java counter loop, tested at the top and stepped at the
+  bottom. An inclusive bound may be the extreme value of its type, so the loop is guarded by the entry
+  test, leaves by comparing the counter with the bound before stepping, and jumps back into the body.
+  A decreasing comparison reads the bound first (`last < i`), the step is an addition of `-1` when
+  decreasing, a guard between two `Int`-sized constants is decided at compile time (a `Long` one is
+  not, matching kotlinc), and the bound is copied into a temporary only when it can change while the
+  loop runs: a constant or a read of an immutable local of the counter's own type is re-read in place
+  (`createLoopTemporaryVariableIfNecessary`), while a widened bound such as `0L..n` is a conversion
+  and is copied. The JS backend retains its own pre-tested loop shape instead of inheriting a JVM
+  policy through common lowering. (`tests/counted_loop_shape_e2e.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

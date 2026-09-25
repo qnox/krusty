@@ -592,7 +592,8 @@ KRef kt_comparable_range_end(KRef range);
 
 /* `for (x in range)` over a range the program materialized. The iterator is its own object because
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
-   because common lowering turns that into a counted loop before this backend sees it. */
+   because checked common IR preserves that literal as a range-loop operation for this backend to
+   realize directly, without materializing a range object. */
 KRef kt_range_iterator(KRef range);
 
 /* ---- progressions ---------------------------------------------------------------------------

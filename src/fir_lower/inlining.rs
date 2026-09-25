@@ -673,6 +673,7 @@ fn value_indices(expression: &IrExpr) -> Vec<u32> {
         | IrExpr::SetValue { var: index, .. }
         | IrExpr::Variable { index, .. } => vec![*index],
         IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).collect(),
+        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => vec![*variable],
         _ => Vec::new(),
     }
 }
@@ -710,6 +711,9 @@ fn rebase_values(
             for catch in catches {
                 rebase_index(&mut catch.var, parameter_count, operands, local_base)?;
             }
+        }
+        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => {
+            rebase_index(variable, parameter_count, operands, local_base)?;
         }
         _ => {}
     }
@@ -1311,6 +1315,32 @@ fn tail_statement_block_chain(
             return Some(chain);
         }
         current = last;
+    }
+}
+
+#[cfg(test)]
+mod value_rebasing_tests {
+    use super::{rebase_values, value_indices};
+    use crate::fir::FirRangeOperation;
+    use crate::ir::{IrCheckedOperation, IrExpr};
+    use crate::types::Ty;
+
+    #[test]
+    fn a_checked_range_loop_reserves_and_rebases_its_declared_value() {
+        let mut expression = IrExpr::Checked(IrCheckedOperation::RangeLoop {
+            variable: 4,
+            variable_name: Some("element".into()),
+            counter: Ty::Int,
+            operation: FirRangeOperation::Until,
+            start: 0,
+            end: 1,
+            body: 2,
+            label: "loop".to_string(),
+        });
+
+        assert_eq!(value_indices(&expression), vec![4]);
+        assert_eq!(rebase_values(&mut expression, 2, &[], 20), Some(()));
+        assert_eq!(value_indices(&expression), vec![22]);
     }
 }
 
