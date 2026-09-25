@@ -74,25 +74,55 @@ pub(super) fn source_ordered_members<'a>(
     class: &'a IrClass,
     deferred_serialization_constructor: Option<u32>,
 ) -> Vec<SourceOrderedMember<'a>> {
-    let mut ordered = Vec::with_capacity(
+    let function_order = |function: u32| {
+        ir.fn_source_order
+            .get(&function)
+            .copied()
+            .unwrap_or(u32::MAX)
+    };
+    // A property's accessors are one source-owned unit. A property with an accessor function (a
+    // custom accessor, a generated serializer `descriptor`, a delegation forwarder) takes that
+    // function's slot and placement, so an implicit peer accessor cannot overtake it.
+    let accessor_owner = |function: u32| {
+        class
+            .properties
+            .iter()
+            .find(|property| property.getter == Some(function) || property.setter == Some(function))
+    };
+    let first_accessor = |property: &IrProperty| property.getter.or(property.setter);
+    let mut ordered: Vec<(u32, SourceOrderedMember<'a>)> = Vec::with_capacity(
         class.properties.len() + class.methods.len() + class.secondary_ctors.len(),
     );
-    ordered.extend(class.properties.iter().map(SourceOrderedMember::Property));
+    ordered.extend(
+        class
+            .properties
+            .iter()
+            .filter(|property| first_accessor(property).is_none())
+            .map(|property| {
+                (
+                    property.source_order,
+                    SourceOrderedMember::Property(property),
+                )
+            }),
+    );
     ordered.extend(
         class
             .methods
             .iter()
             .copied()
-            // A property's custom accessors are part of that property's one source-owned member
-            // unit. Emitting them as independent entries lets an implicit peer overtake them when
-            // both carry the same source order (`custom get`, implicit `set`).
-            .filter(|function| {
-                !class.properties.iter().any(|property| {
-                    property.getter == Some(*function) || property.setter == Some(*function)
-                })
-            })
             .filter(|function| !ir.serialization_cache_methods.contains(function))
-            .map(SourceOrderedMember::Function),
+            .filter_map(|function| match accessor_owner(function) {
+                Some(property) => (first_accessor(property) == Some(function)).then(|| {
+                    (
+                        function_order(function),
+                        SourceOrderedMember::Property(property),
+                    )
+                }),
+                None => Some((
+                    function_order(function),
+                    SourceOrderedMember::Function(function),
+                )),
+            }),
     );
     ordered.extend(
         class
@@ -103,18 +133,15 @@ pub(super) fn source_ordered_members<'a>(
                 !defer_serialization_constructor(*ordinal, deferred_serialization_constructor)
             })
             .map(|(ordinal, constructor)| {
-                SourceOrderedMember::SecondaryConstructor(ordinal, constructor)
+                (
+                    constructor.source_order,
+                    SourceOrderedMember::SecondaryConstructor(ordinal, constructor),
+                )
             }),
     );
-    ordered.sort_by_key(|member| match member {
-        SourceOrderedMember::Property(property) => property.source_order,
-        SourceOrderedMember::Function(function) => ir
-            .fn_source_order
-            .get(function)
-            .copied()
-            .unwrap_or(u32::MAX),
-        SourceOrderedMember::SecondaryConstructor(_, constructor) => constructor.source_order,
-    });
+    ordered.sort_by_key(|(order, _)| *order);
+    let mut ordered: Vec<SourceOrderedMember<'a>> =
+        ordered.into_iter().map(|(_, member)| member).collect();
     let mut functions: Vec<u32> = ordered
         .iter()
         .filter_map(|member| match member {
