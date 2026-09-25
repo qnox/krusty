@@ -19,7 +19,7 @@ use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, Insn, LabelId, MethodNode, Node};
 
 /// A finished method's body and the label of its implicit `return`, if it has one.
-pub(super) struct FinishedNode {
+pub(in crate::jvm::classfile) struct FinishedNode {
     pub node: MethodNode,
     pub implicit_return: Option<LabelId>,
 }
@@ -28,7 +28,7 @@ impl ClassWriter {
     /// The finished `method` read into a node against the writer's own pool. A local-variable entry
     /// without a start covers the method from its first instruction, one without a length runs to
     /// its end; a range reaching past the code is cut at its end.
-    pub(super) fn finished_node(
+    pub(in crate::jvm::classfile) fn finished_node(
         &self,
         method: &MethodInfo,
         source: &RewriteSource,

@@ -56,8 +56,14 @@ impl Emitter<'_> {
             }
         }
         let suspension = self.machine_before(expression, code);
+        self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
         self.machine_after(suspension, code);
+        if self.transformed_result(expression).is_some() {
+            // kotlinc discards the erased result itself, without coercing it first.
+            self.close_transformed_suspension(expression, true, code);
+            return;
+        }
         // A successfully spliced bottom-typed expression has already transferred control (for
         // example, an inline lambda's non-local `return`). It leaves no value to discard. The
         // semantic type is retained on the IR expression even when the selected callable's physical

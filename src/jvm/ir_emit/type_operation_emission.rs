@@ -346,12 +346,17 @@ impl Emitter<'_> {
         operand: ExprId,
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
-        let physical = self
-            .ir
-            .physical_types
-            .get(&operand)
-            .map(ir_ty_to_jvm)
-            .unwrap_or_else(|| self.value_ty(operand));
+        // A suspension point the transformer takes leaves its callee's declared result, not the
+        // erased result the common IR records.
+        let physical = match self.transformed_result(operand) {
+            Some(_) => self.value_ty(operand),
+            None => self
+                .ir
+                .physical_types
+                .get(&operand)
+                .map(ir_ty_to_jvm)
+                .unwrap_or_else(|| self.value_ty(operand)),
+        };
         let semantic = self
             .ir
             .logical_types

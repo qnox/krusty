@@ -7,10 +7,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod annotation_values;
 pub(crate) mod bytecode_analysis;
+mod codegen_markers;
 mod constant_pool_queries;
 mod control_flow;
 mod coroutine_markers;
+mod coroutine_transform;
 mod descriptor_mentions;
 mod line_numbers;
 mod method_parameters;
@@ -20,6 +23,7 @@ mod stack_maps;
 use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
+pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -665,6 +669,8 @@ pub struct ClassWriter {
     /// body is spliced and rendered into `SourceDebugExtension` at the end. A class with nothing
     /// inlined carries no attribute. See [`crate::jvm::source_map`].
     source_map: crate::jvm::source_map::SourceMap,
+    /// The methods the coroutine transformer rewrites when the class is written, and its results.
+    coroutines: coroutine_transform::Coroutines,
     /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
@@ -773,6 +779,7 @@ impl ClassWriter {
             major: MAJOR_JAVA8,
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
+            coroutines: coroutine_transform::Coroutines::default(),
             enclosing_method: None,
             internal_name: internal_name.to_string(),
         }
@@ -1443,154 +1450,6 @@ impl ClassWriter {
         u2(&mut body, n_v);
         self.ev_int(&mut body, v);
         self.runtime_annotations.push(body);
-    }
-
-    fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
-        out.push(b'I');
-        let idx = self.cp.integer(v);
-        u2(out, idx);
-    }
-    fn ev_str(&mut self, out: &mut Vec<u8>, s: &str) {
-        out.push(b's');
-        let idx = self.cp.utf8(s);
-        u2(out, idx);
-    }
-    /// An annotation `element_value` holding a Kotlin string VALUE (see [`KtString`]).
-    fn ev_str_kt(&mut self, out: &mut Vec<u8>, s: &KtString) {
-        out.push(b's');
-        let idx = self.cp.utf8_kt(s);
-        u2(out, idx);
-    }
-    fn ev_int_array(&mut self, out: &mut Vec<u8>, vs: &[i32]) {
-        out.push(b'[');
-        u2(out, vs.len() as u16);
-        for &v in vs {
-            self.ev_int(out, v);
-        }
-    }
-    fn ev_str_array(&mut self, out: &mut Vec<u8>, ss: &[String]) {
-        out.push(b'[');
-        u2(out, ss.len() as u16);
-        for s in ss {
-            self.ev_str(out, s);
-        }
-    }
-
-    /// Encode one `element_value` (JVMS §4.7.16.1) for a resolved annotation argument.
-    fn ev_value(&mut self, out: &mut Vec<u8>, v: &crate::ir::AnnoValue) {
-        use crate::ir::{AnnoValue, IrConst};
-        match v {
-            AnnoValue::Const(c) => match c {
-                IrConst::Boolean(b) => {
-                    out.push(b'Z');
-                    let i = self.cp.integer(*b as i32);
-                    u2(out, i);
-                }
-                // An unsigned annotation argument is emitted under the signed primitive its
-                // value class wraps, which is the element type the annotation's own descriptor
-                // names.
-                IrConst::UByte(x) => {
-                    out.push(b'B');
-                    let i = self.cp.integer(i32::from(*x as i8));
-                    u2(out, i);
-                }
-                IrConst::UShort(x) => {
-                    out.push(b'S');
-                    let i = self.cp.integer(i32::from(*x as i16));
-                    u2(out, i);
-                }
-                IrConst::UInt(x) => {
-                    out.push(b'I');
-                    let i = self.cp.integer(*x as i32);
-                    u2(out, i);
-                }
-                IrConst::ULong(x) => {
-                    out.push(b'J');
-                    let i = self.cp.long(*x as i64);
-                    u2(out, i);
-                }
-                IrConst::Byte(x) => {
-                    out.push(b'B');
-                    let i = self.cp.integer(*x as i32);
-                    u2(out, i);
-                }
-                IrConst::Short(x) => {
-                    out.push(b'S');
-                    let i = self.cp.integer(*x as i32);
-                    u2(out, i);
-                }
-                IrConst::Char(x) => {
-                    out.push(b'C');
-                    let i = self.cp.integer(*x as i32);
-                    u2(out, i);
-                }
-                IrConst::Int(x) => {
-                    out.push(b'I');
-                    let i = self.cp.integer(*x);
-                    u2(out, i);
-                }
-                IrConst::Long(x) => {
-                    out.push(b'J');
-                    let i = self.cp.long(*x);
-                    u2(out, i);
-                }
-                IrConst::Float(x) => {
-                    out.push(b'F');
-                    let i = self.cp.float(*x);
-                    u2(out, i);
-                }
-                IrConst::Double(x) => {
-                    out.push(b'D');
-                    let i = self.cp.double(*x);
-                    u2(out, i);
-                }
-                IrConst::String(s) => self.ev_str_kt(out, s),
-                IrConst::Null => self.ev_str(out, ""),
-            },
-            AnnoValue::Enum(ty, name) => {
-                out.push(b'e');
-                let ty = ty.render();
-                // An enum value's TYPE is a reference too: kotlinc records an `InnerClasses` entry
-                // for a nested enum used purely as an annotation argument (verified on 2.4.10).
-                self.annotation_class_refs.insert(ty.clone());
-                let ti = self.cp.utf8(&format!("L{ty};"));
-                u2(out, ti);
-                let ni = self.cp.utf8(name);
-                u2(out, ni);
-            }
-            AnnoValue::Class(internal) => {
-                out.push(b'c');
-                let internal = super::jvm_class_map::to_jvm_type_name(*internal).render();
-                self.annotation_class_refs.insert(internal.clone());
-                let ci = self.cp.utf8(&format!("L{internal};"));
-                u2(out, ci);
-            }
-            AnnoValue::Annotation(a) => {
-                out.push(b'@');
-                self.ev_annotation(out, a);
-            }
-            AnnoValue::Array(items) => {
-                out.push(b'[');
-                u2(out, items.len() as u16);
-                for it in items {
-                    self.ev_value(out, it);
-                }
-            }
-        }
-    }
-
-    /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
-    fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
-        let internal = a.internal.render();
-        self.annotation_class_refs.insert(internal.clone());
-        let ti = self.cp.utf8(&format!("L{internal};"));
-        u2(out, ti);
-        u2(out, a.values.len() as u16);
-        for (name, v) in &a.values {
-            let ni = self.cp.utf8(name);
-            u2(out, ni);
-            self.ev_value(out, v);
-        }
     }
 
     /// Queue the applied annotations for the class's `RuntimeVisibleAnnotations` (JVMS §4.7.16). They join
@@ -2621,8 +2480,27 @@ impl ClassWriter {
             .sort_by(|a, b| a.inner.cmp(&b.inner));
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
-        // Every method's tables are final now; kotlinc's bytecode rewrites run over them.
+    pub fn finish(self) -> Vec<u8> {
+        let (bytes, coroutines) = self.finish_with_coroutines();
+        assert!(
+            coroutines.is_empty(),
+            "a class with transformed coroutines is finished through `finish_with_coroutines`"
+        );
+        bytes
+    }
+
+    /// [`Self::finish`] for a class whose suspend functions the coroutine transformer rewrites:
+    /// the class, and what each transformation found, which its continuation class is built from.
+    pub(crate) fn finish_with_coroutines(
+        mut self,
+    ) -> (Vec<u8>, Vec<coroutine_transform::TransformedCoroutine>) {
+        // Every method's tables are final now: the coroutine transformer runs over the suspend
+        // functions it was asked for, then kotlinc's bytecode rewrites over the rest.
+        let coroutines = self.transform_coroutines();
+        (self.write(), coroutines)
+    }
+
+    fn write(mut self) -> Vec<u8> {
         self.rewrite_methods();
         // Every body is final now: write the frames it implies.
         self.compute_stack_maps();
