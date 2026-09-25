@@ -822,3 +822,56 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(src), "OK");
 }
+
+/// Lowering temporaries follow kotlinc's: a destructuring declaration of an immutable binding has no
+/// container temporary (kotlinc's `JvmOptimizationLowering` drops the `<destruct>` read of a `val`),
+/// so the components take the slots right after the binding. The whole class matches kotlinc.
+#[test]
+fn destructuring_an_immutable_binding_needs_no_container_slot() {
+    byte_identical(
+        "slotTempDestructureStable",
+        "data class P(val a: String, val b: Int)\n\
+fun parameter(p: P): String {\n\
+    val (a, b) = p\n\
+    val q = a.length\n\
+    return a + b + q\n\
+}\n\
+fun local(): String {\n\
+    val p = P(\"x\", 1)\n\
+    val (a, b) = p\n\
+    val q = a.length\n\
+    return a + b + q\n\
+}\n\
+fun variable(): String {\n\
+    var p = P(\"x\", 1)\n\
+    val (a, b) = p\n\
+    p = P(\"y\", 2)\n\
+    return a + b + p\n\
+}\n",
+        "SlotTempDestructureStableKt",
+    );
+}
+
+/// A destructured `for` element is an immutable binding too: its components are read from the
+/// element's slot. krusty still names the element in the table (`$dest$`), kotlinc does not, so
+/// only the source locals are compared.
+#[test]
+fn a_destructured_loop_element_needs_no_container_slot() {
+    same_local_slots_of(
+        "slotTempDestructureLoop",
+        "class C(val i: Int) {\n\
+    operator fun component1() = i + 1\n\
+    operator fun component2() = i + 2\n\
+}\n\
+fun loop(xs: List<C>): String {\n\
+    var s = \"\"\n\
+    for ((a, b) in xs) {\n\
+        s += \"$a:$b;\"\n\
+    }\n\
+    return s\n\
+}\n",
+        "SlotTempDestructureLoopKt",
+        &[],
+        |local| !local.starts_with('$'),
+    );
+}

@@ -63,21 +63,34 @@ impl BodyLowering<'_> {
                 entries,
             } => {
                 let initializer_value = self.expression(*initializer)?;
-                let temporary = self.allocate_temporary();
-                let initializer_ty = self
-                    .body
-                    .expr(*initializer)
-                    .ok_or(FirLoweringFailure::MissingExpression(*initializer))?
-                    .ty
-                    .get();
-                let mut statements = vec![self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: initializer_ty,
-                    init: Some(initializer_value),
-                    named: false,
-                })];
-                let initializer_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                self.set_expression_state(*initializer, LoweringState::Lowered(initializer_read));
+                // The container of a destructuring declaration is a compiler temporary. A read of
+                // an immutable binding is its own snapshot, so each component call reads that
+                // binding again instead (kotlinc drops the `<destruct>` temporary initialized from
+                // one in `JvmOptimizationLowering`). Any other container is evaluated once here.
+                let mut statements = Vec::new();
+                if self
+                    .stable_value_read(*initializer, initializer_value)
+                    .is_none()
+                {
+                    let temporary = self.allocate_temporary();
+                    let initializer_ty = self
+                        .body
+                        .expr(*initializer)
+                        .ok_or(FirLoweringFailure::MissingExpression(*initializer))?
+                        .ty
+                        .get();
+                    statements.push(self.ir.add_expr(IrExpr::Variable {
+                        index: temporary,
+                        ty: initializer_ty,
+                        init: Some(initializer_value),
+                        named: false,
+                    }));
+                    let initializer_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                    self.set_expression_state(
+                        *initializer,
+                        LoweringState::Lowered(initializer_read),
+                    );
+                }
                 for entry in entries {
                     match *entry {
                         crate::fir::FirDestructureEntry::Binding {

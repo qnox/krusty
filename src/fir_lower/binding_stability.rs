@@ -90,4 +90,26 @@ impl BodyLowering<'_> {
     pub(super) fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
         self.binding_stability.get(&value) == Some(&IrBindingStability::Mutable)
     }
+
+    /// The value slot `lowered` reads when the checked `operand` is a read of an immutable binding
+    /// and lowered to exactly that read. Such a read is already its own snapshot: kotlinc's
+    /// `irLetS` binds an immutable `IrGetValue` without a temporary, and `JvmOptimizationLowering`
+    /// removes an `IR_TEMPORARY_VARIABLE` initialized from one. A read that lowered to anything
+    /// else (a shared cell, a conversion) is not a plain read and still needs its own value.
+    pub(super) fn stable_value_read(
+        &self,
+        operand: crate::fir::FirExprId,
+        lowered: crate::ir::ExprId,
+    ) -> Option<u32> {
+        let FirExprKind::ValueRead(value) = &self.body.expr(operand)?.kind else {
+            return None;
+        };
+        let value = *value;
+        if self.local_value_is_mutable(value) {
+            return None;
+        }
+        let slot = self.value_slot(value);
+        matches!(self.ir.expr(lowered), crate::ir::IrExpr::GetValue(read) if *read == slot)
+            .then_some(slot)
+    }
 }
