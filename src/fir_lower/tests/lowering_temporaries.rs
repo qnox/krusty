@@ -117,7 +117,8 @@ fn a_when_subject_is_held_even_when_it_reads_an_immutable_binding() {
 #[test]
 fn a_safe_cast_of_an_immutable_binding_needs_no_temporary() {
     let ir = lower_single_source(
-        "fun parameter(x: Any): Int { val r = x as? String; return r?.length ?: 0 }\n",
+        "class S(val n: Int)\n\
+         fun parameter(x: Any): Int { val r = x as? S; return r?.n ?: 0 }\n",
         "SafeCastStable",
     );
     let cast_operands = |ir: &IrFile| {
@@ -142,7 +143,8 @@ fn a_safe_cast_of_an_immutable_binding_needs_no_temporary() {
     );
 
     let ir = lower_single_source(
-        "fun variable(y: Any): Int { var x = y; val r = x as? String; x = 1; return r?.length ?: 0 }\n",
+        "class S(val n: Int)\n\
+         fun variable(y: Any): Int { var x = y; val r = x as? S; x = 1; return r?.n ?: 0 }\n",
         "SafeCastMutable",
     );
     let variable = named_slot(&ir, "x");

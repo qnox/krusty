@@ -7866,10 +7866,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `UIntArray(size) { … }`, whose lambda parameter keeps a local there.
 
   Tests: `fir_lower::tests::lowering_temporaries` checks each lowered shape, and
-  `tests/block_slot_reuse_e2e.rs` compares full class bytes for destructuring and a `when`
-  subject, local-variable slots for a destructured loop element, a safe cast and both array
-  constructor forms, and runs an array constructor whose size and function value log their
-  evaluation and an `::Array` reference passed as a function.
+  `tests/block_slot_reuse_e2e.rs` compares full class bytes for destructuring, a `when`
+  subject, a safe cast and the array constructor with a stable, a computed and a constant size,
+  and local-variable slots for a destructured loop element. It runs an array constructor whose
+  size and function value log their evaluation (a negative size logs only the size, as under
+  kotlinc) and `::Array` and `::IntArray` references passed as functions.
 
 - **The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to
   it:** nothing stands between them, so the jump would be to the next instruction. Every other

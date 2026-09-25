@@ -15,15 +15,6 @@ fn byte_identical(name: &str, src: &str, class: &str) {
     }
 }
 
-/// As [`byte_identical`], with the standard library on both compilers' classpath.
-fn byte_identical_with_stdlib(name: &str, src: &str, class: &str) {
-    match common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()]) {
-        None => eprintln!("skip ({name}: reference toolchain unavailable)"),
-        Some(Ok(())) => {}
-        Some(Err(e)) => panic!("{e}"),
-    }
-}
-
 /// Every method's `LocalVariableTable` rows as `slot name descriptor`, in table order, from
 /// `javap -l`. Start and length are left out: they follow instruction offsets, which differ for
 /// reasons other than slot choice.
@@ -139,7 +130,7 @@ fn local_slot_rows(
 }
 
 fn run(src: &str) -> String {
-    common::compile_and_run_with_stdlib(src, "Main").expect("box() ran")
+    common::expect_box_run_with_stdlib(src, "Main")
 }
 
 /// `a`, `b` and `z` all take slot 3: each branch's local is left at the end of its branch.
@@ -842,13 +833,13 @@ fn destructuring_an_immutable_binding_needs_no_container_slot() {
         "data class P(val a: String, val b: Int)\n\
 fun parameter(p: P): String {\n\
     val (a, b) = p\n\
-    val q = a.length\n\
+    val q = b + 1\n\
     return a + b + q\n\
 }\n\
 fun local(): String {\n\
     val p = P(\"x\", 1)\n\
     val (a, b) = p\n\
-    val q = a.length\n\
+    val q = b + 1\n\
     return a + b + q\n\
 }\n\
 fun variable(): String {\n\
@@ -895,7 +886,7 @@ fn a_when_subject_reading_an_immutable_binding_is_held_like_kotlinc() {
         "slotTempWhenSubject",
         "fun switch(x: Int): String {\n\
     val r = when (x) { 1 -> \"a\"; 2 -> \"b\"; else -> \"c\" }\n\
-    val k = r.length\n\
+    val k = x + 1\n\
     return r + k\n\
 }\n\
 fun single(p: Int): Int {\n\
@@ -908,7 +899,8 @@ fun strings(s: String): Int {\n\
     val r = when (s) { \"a\" -> 1; \"b\" -> 2; else -> 3 }\n\
     return r + y\n\
 }\n\
-fun types(a: Any): Int = when (a) { is String -> a.length; is Int -> a; else -> 0 }\n",
+class W(val n: Int)\n\
+fun types(a: Any): Int = when (a) { is W -> a.n; is Int -> a; else -> 0 }\n",
         "SlotTempWhenSubjectKt",
     );
 }
@@ -917,18 +909,20 @@ fun types(a: Any): Int = when (a) { is String -> a.length; is Int -> a; else -> 
 /// (kotlinc's `irLetS`), so `r` and `q` keep kotlinc's slots and the whole class matches.
 #[test]
 fn a_safe_cast_of_an_immutable_binding_needs_no_slot() {
-    byte_identical_with_stdlib(
+    byte_identical(
         "slotTempSafeCast",
-        "fun parameter(x: Any): Int {\n\
-    val r = x as? String\n\
+        "interface Sized { val n: Int }\n\
+class S(override val n: Int) : Sized\n\
+fun parameter(x: Any): Int {\n\
+    val r = x as? S\n\
     val q = 1\n\
-    return (r?.length ?: 0) + q\n\
+    return (r?.n ?: 0) + q\n\
 }\n\
 fun local(y: Any): Int {\n\
     val x: Any = y\n\
-    val r = x as? CharSequence\n\
+    val r = x as? Sized\n\
     val q = 2\n\
-    return (r?.length ?: 0) + q\n\
+    return (r?.n ?: 0) + q\n\
 }\n",
         "SlotTempSafeCastKt",
     );
@@ -940,21 +934,21 @@ fun local(y: Any): Int {\n\
 /// place. `arr`, `q` and the lambda's own `sq` keep kotlinc's slots and the whole class matches.
 #[test]
 fn array_constructor_temporaries_take_kotlinc_slots() {
-    byte_identical_with_stdlib(
+    byte_identical(
         "slotTempArrayConstructor",
         "fun stable(n: Int): Int {\n\
     val arr = IntArray(n) { it * 2 }\n\
-    val q = arr.size\n\
+    val q = arr[1]\n\
     return q\n\
 }\n\
 fun computed(n: Int, m: Int): Int {\n\
     val arr = IntArray(n + 1) { it * m }\n\
-    val q = arr.size\n\
+    val q = arr[1]\n\
     return q\n\
 }\n\
-fun constant(): Int {\n\
-    val arr = LongArray(4) { i -> val sq = i.toLong() * i; sq + 1 }\n\
-    val q = arr.size\n\
+fun constant(): Long {\n\
+    val arr = LongArray(4) { i -> val sq = i * 3L; sq + 1 }\n\
+    val q = arr[1]\n\
     return q\n\
 }\n",
         "SlotTempArrayConstructorKt",
@@ -962,18 +956,25 @@ fun constant(): Int {\n\
 }
 
 /// kotlinc evaluates the size, allocates the array and only then evaluates a function-value
-/// initializer; each is evaluated once and the elements see their own index.
+/// initializer; each is evaluated once and the elements see their own index. A negative size
+/// throws at the allocation, before the function value is evaluated (kotlinc 2.4.20 logs `n`).
 #[test]
 fn array_constructor_evaluates_its_function_value_after_the_array() {
     let src = "var log = \"\"\n\
-fun size(): Int { log += \"n\"; return 2 }\n\
+var n = 2\n\
+fun size(): Int { log += \"n\"; return n }\n\
 fun init(): (Int) -> String { log += \"f\"; return { \"y$it\" } }\n\
 fun box(): String {\n\
     val arr = Array(size(), init())\n\
     var k = 1\n\
     val sums = IntArray(3) { k += it; k }\n\
-    val r = arr.joinToString() + log + sums.joinToString() + k\n\
-    return if (r == \"y0, y1nf1, 2, 44\") \"OK\" else r\n\
+    if (arr[0] != \"y0\" || arr[1] != \"y1\") return \"FAIL: elements\"\n\
+    if (log != \"nf\") return \"FAIL: order $log\"\n\
+    if (sums[0] != 1 || sums[1] != 2 || sums[2] != 4 || k != 4) return \"FAIL: sums\"\n\
+    log = \"\"\n\
+    n = -1\n\
+    try { Array(size(), init()) } catch (e: Throwable) { log += \"!\" }\n\
+    return if (log == \"n!\") \"OK\" else \"FAIL: a negative size ran $log\"\n\
 }\n";
     assert_eq!(run(src), "OK");
 }
@@ -984,9 +985,13 @@ fun box(): String {\n\
 fn an_array_constructor_reference_keeps_its_parameters() {
     let src =
         "fun g(b: (Int, (Int) -> String) -> Array<String>): Array<String> = b(2) { \"O$it\" }\n\
+fun h(b: (Int, (Int) -> Int) -> IntArray): IntArray = b(3, ::twice)\n\
 fun box(): String {\n\
-    val r = g(::Array).joinToString() + IntArray(3, ::twice).sum()\n\
-    return if (r == \"O0, O16\") \"OK\" else r\n\
+    val strings = g(::Array)\n\
+    val ints = h(::IntArray)\n\
+    if (strings[0] != \"O0\" || strings[1] != \"O1\") return \"FAIL: strings\"\n\
+    if (ints[0] != 0 || ints[1] != 2 || ints[2] != 4) return \"FAIL: ints\"\n\
+    return \"OK\"\n\
 }\n\
 fun twice(i: Int) = i * 2\n";
     assert_eq!(run(src), "OK");
