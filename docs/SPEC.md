@@ -4542,6 +4542,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before that method's `Signature` or `RuntimeInvisibleParameterAnnotations`. `Code` now joins the
   per-method first-use sequence. Test:
   `tests/method_pool_order_e2e.rs::an_abstract_first_method_interns_its_attribute_names_before_code`.
+- **Compiler-written members intern in visit order too.** An inherited interface forwarder
+  (`class Plain : Greeter` calling `Greeter.greet` through `invokespecial`) interns its name,
+  descriptor and `@NotNull`/`@Nullable` types before its body, as ASM visits the header and its
+  annotations before the code. An anonymous object's constructor is seeded like any class with a
+  computed `@Metadata`, so its `this` local follows the constructor rather than the members after
+  it. A sealed class's nested subclasses intern where the `InnerClasses` table is written, after
+  `@Metadata`, not ahead of the constructor. Tests:
+  `tests/method_pool_order_e2e.rs::an_inherited_forwarder_interns_its_annotations_before_its_body`,
+  `::an_anonymous_object_constructor_interns_this_before_its_members` and
+  `::a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
