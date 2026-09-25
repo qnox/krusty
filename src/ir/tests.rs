@@ -149,6 +149,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
     let end = f.add_expr(IrExpr::Const(IrConst::Int(1)));
     let range = f.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
         variable: 1,
+        variable_name: Some("item".into()),
         counter: Ty::Int,
         operation: crate::fir::FirRangeOperation::Through,
         start,

@@ -2,6 +2,7 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
+pub(crate) mod counted_loops;
 pub(crate) mod local_properties;
 mod module_facts;
 

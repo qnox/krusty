@@ -1943,6 +1943,11 @@ pub(super) fn rehome_inline_body_values(
                     *local_count = (*local_count).max(count);
                 }
             }
+            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
+                let (mapped, count) = mapped(*variable, formal_slots, local_base)?;
+                *variable = mapped;
+                *local_count = (*local_count).max(count);
+            }
             _ => {}
         }
         if let IrExpr::Lambda { captures, .. } = &ir.exprs[expression as usize] {

@@ -53922,20 +53922,16 @@ impl<'a> Checker<'a> {
         }
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
-                if !r.is_import() {
-                    if !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                        if let Some(access) =
-                            self.resolver().inaccessible_classifier_access(internal)
-                        {
-                            self.diags.error_with_identity(
-                                r.span,
-                                DiagnosticIdentity::ClassifierAccess {
-                                    reference: r.span,
-                                    classifier: internal,
-                                },
-                                inaccessible_classifier_message(&r.name, access),
-                            );
-                        }
+                if !r.is_import() && !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
+                        self.diags.error_with_identity(
+                            r.span,
+                            DiagnosticIdentity::ClassifierAccess {
+                                reference: r.span,
+                                classifier: internal,
+                            },
+                            inaccessible_classifier_message(&r.name, access),
+                        );
                     }
                 }
             }

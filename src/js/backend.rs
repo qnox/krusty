@@ -20,6 +20,10 @@ impl Backend for JsBackend {
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
+        crate::backend::counted_loops::realize(
+            &mut file.ir,
+            crate::backend::counted_loops::CounterLoopStyle::PreTested,
+        );
         if let Err(target) = crate::backend::local_properties::realize(&mut file.ir) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -163,5 +167,23 @@ mod tests {
         // this backend renders the rewrite's output directly, so it is the cheapest place to see
         // that the member rewrite reaches every backend and not only the JVM one.
         assert!(source.contains("continue $tailrec;"), "{source}");
+    }
+
+    #[test]
+    fn js_backend_realizes_checked_range_loop_with_its_own_shape() {
+        let (outputs, diags) = compile_js_sources(&[(
+            "Main",
+            "fun sum(n: Int): Int { var total = 0; for (item in 0..<n) total += item; return total }",
+        )]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function sum(v0) {\n  let v1 = 0;\n  let v2 = 0;\n  $fir_control_0_1:\n  while ((v2 < v0)) {\n    v1 = (v1 + v2);\n    v2 = (v2 + 1);\n  }\n  return v1;\n}\n"
+                    .to_vec(),
+            )]
+        );
     }
 }

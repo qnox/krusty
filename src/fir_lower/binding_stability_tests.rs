@@ -1,4 +1,5 @@
-use crate::ir::{IrBindingStability, IrExpr, IrFile, IrTypeOp};
+use crate::fir::FirRangeOperation;
+use crate::ir::{IrBindingStability, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
 #[test]
@@ -29,4 +30,31 @@ fn immutable_binding_read_survives_clone_and_inline_rehome() {
         ir.binding_read_stability.get(&copied_read),
         Some(&IrBindingStability::Stable)
     );
+}
+
+#[test]
+fn inline_rehome_moves_a_checked_range_loops_declared_value() {
+    let mut ir = IrFile::default();
+    let start = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+    let end = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(3)));
+    let body = ir.add_expr(IrExpr::UnitInstance);
+    let range = ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        variable: 2,
+        variable_name: Some("element".into()),
+        counter: Ty::Int,
+        operation: FirRangeOperation::Until,
+        start,
+        end,
+        body,
+        label: "loop".to_string(),
+    }));
+
+    assert_eq!(
+        super::source_calls::rehome_inline_body_values(&mut ir, range, &[37], 100),
+        Some(2)
+    );
+    assert!(matches!(
+        ir.expr(range),
+        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable: 101, .. })
+    ));
 }

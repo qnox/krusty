@@ -1883,7 +1883,7 @@ impl ResolvedDelegatedCall {
 }
 
 fn type_parameters_payload_bytes(parameters: &[ResolvedDelegatedTypeParameter]) -> usize {
-    parameters.len() * std::mem::size_of::<ResolvedDelegatedTypeParameter>()
+    std::mem::size_of_val(parameters)
         + parameters
             .iter()
             .map(|parameter| {
