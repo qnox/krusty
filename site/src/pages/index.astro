@@ -2,7 +2,7 @@
 const repo = "https://github.com/qnox/krusty";
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
-  "krusty is a Kotlin compiler written in Rust. A drop-in replacement for kotlinc on the JVM: the same flags, and .class files byte-for-byte identical to kotlinc's.";
+  "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: the same flags, aiming for .class files byte-for-byte identical to kotlinc's.";
 const badge = (file: string) =>
   `https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F${file}`;
 const jsonLd = {
@@ -43,7 +43,7 @@ const jsonLd = {
       <h1>krusty</h1>
       <p class="tag">A Kotlin compiler written in Rust.</p>
       <p>
-        A drop-in replacement for <code>kotlinc</code> on the JVM: the same command-line flags in, and <code>.class</code> files byte-for-byte identical to <code>kotlinc</code>'s out, from a single native binary.
+        Built to be a drop-in replacement for <code>kotlinc</code> on the JVM: the same command-line flags, and <code>.class</code> files that aim to be byte-for-byte identical to <code>kotlinc</code>'s, from a single native binary. The conformance badge shows how much of Kotlin's own test suite it passes today.
       </p>
       <p class="badges">
         <img src={badge("krusty-kotlin.json")} alt="Latest supported Kotlin version" height="20" />
@@ -55,7 +55,7 @@ const jsonLd = {
 
       <h2>Install</h2>
       <p>
-        Download <code>krusty</code> for Linux, macOS or Windows from the <a href={`${repo}/releases/latest`}>latest release</a> and put it on your <code>PATH</code>. Requires a JDK.
+        Download <code>krusty</code> for Linux, macOS or Windows from the <a href={`${repo}/releases/latest`}>latest release</a> and put it on your <code>PATH</code>. krusty needs no JVM to run, but reads the class library of an installed JDK.
       </p>
 
       <h2>Usage</h2>
@@ -65,16 +65,26 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
 
       <h2>Features</h2>
       <ul>
-        <li><strong>Drop-in for kotlinc.</strong> Same flags, byte-for-byte identical output.</li>
-        <li><strong>Light on resources.</strong> A single native binary using about a third of kotlinc's memory.</li>
-        <li><strong>kotlinx.serialization and KSP</strong> work out of the box.</li>
+        <li><strong>kotlinc's command line.</strong> Same flags, output to a class directory or a jar.</li>
+        <li><strong>Byte-level fidelity.</strong> Every change is diffed against the real <code>kotlinc</code>, and every build runs JetBrains' <code>codegen/box</code> suite.</li>
+        <li><strong>Low memory.</strong> On our multi-module benchmark, about a third of the peak memory of the GraalVM-native <code>kotlinc</code>.</li>
+        <li><strong>kotlinx.serialization and KSP.</strong></li>
         <li><strong>Bazel</strong> persistent worker support.</li>
         <li><strong>Editor support.</strong> <code>krusty-lsp</code> language server, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
+      </ul>
+
+      <h2>Status</h2>
+      <p>krusty compiles plain Kotlin/JVM code today. Not supported yet:</p>
+      <ul>
+        <li>Gradle and Maven integration (use the command line or Bazel)</li>
+        <li>Compose, kapt and compiler plugins other than kotlinx.serialization</li>
+        <li>Kotlin scripts (<code>.kts</code>)</li>
       </ul>
 
       <h2>Roadmap</h2>
       <ul>
         <li>100% JVM conformance with kotlinc</li>
+        <li>Gradle integration</li>
         <li>Kotlin/Native</li>
         <li>Kotlin/Wasm</li>
         <li>Compose</li>
@@ -82,7 +92,7 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
 
       <h2>Sponsor</h2>
       <p>
-        krusty needs far less memory than kotlinc, so your CI needs fewer and smaller runners. If that saves your organization money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
+        If krusty saves your team build time or CI money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
       </p>
     </main>
     <footer>
