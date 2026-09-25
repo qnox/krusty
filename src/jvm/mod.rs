@@ -28,6 +28,7 @@ mod generated_member_metadata;
 mod generic_erasure;
 pub mod inline;
 pub mod inline_class;
+pub(crate) mod inliner;
 mod inner_classes;
 pub mod ir_emit;
 pub mod java_stub;

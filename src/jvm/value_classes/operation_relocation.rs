@@ -34,6 +34,15 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);
     move_fact!(construction_declared_params);
+    // These facts identify the selected call operation. The source expression is now the
+    // representation wrapper, so leaving a copy there would both orphan the real call and let a
+    // later consumer mistake the wrapper for the operation that owns the provider decision.
+    move_fact!(ext_call_source_receiver);
+    move_fact!(semantic_call_roles);
+    move_fact!(call_declared_ret);
+    move_fact!(call_declared_params);
+    move_fact!(static_extension_receivers);
+    move_fact!(call_materialized_lambda_params);
 
     target
 }
@@ -58,5 +67,48 @@ mod tests {
         assert_eq!(ir.reified_call_subst.get(&target), Some(&substitutions));
         assert_eq!(ir.logical_types.get(&source), Some(&Ty::String));
         assert_eq!(ir.logical_types.get(&target), Some(&Ty::String));
+    }
+
+    #[test]
+    fn selected_call_facts_move_exclusively_to_the_cloned_operation() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::UnitInstance);
+        ir.ext_call_source_receiver.insert(source, Ty::String);
+        ir.semantic_call_roles.insert(
+            source,
+            crate::libraries::SemanticCallRole::KotlinAnyToString,
+        );
+        ir.call_declared_ret.insert(source, Ty::String);
+        ir.call_declared_params
+            .insert(source, vec![Ty::String].into_boxed_slice());
+        ir.static_extension_receivers.insert(source, 0);
+        ir.call_materialized_lambda_params
+            .insert(source, vec![false, true].into_boxed_slice());
+
+        let target = clone_below_representation_wrapper(&mut ir, source);
+
+        assert!(!ir.ext_call_source_receiver.contains_key(&source));
+        assert_eq!(ir.ext_call_source_receiver.get(&target), Some(&Ty::String));
+        assert!(!ir.semantic_call_roles.contains_key(&source));
+        assert_eq!(
+            ir.semantic_call_roles.get(&target),
+            Some(&crate::libraries::SemanticCallRole::KotlinAnyToString)
+        );
+        assert!(!ir.call_declared_ret.contains_key(&source));
+        assert_eq!(ir.call_declared_ret.get(&target), Some(&Ty::String));
+        assert!(!ir.call_declared_params.contains_key(&source));
+        assert_eq!(
+            ir.call_declared_params.get(&target).map(AsRef::as_ref),
+            Some([Ty::String].as_slice())
+        );
+        assert_eq!(ir.static_extension_receivers.remove(&target), Some(0));
+        assert!(!ir.static_extension_receivers.contains_key(&source));
+        assert_eq!(
+            ir.call_materialized_lambda_params
+                .get(&target)
+                .map(AsRef::as_ref),
+            Some([false, true].as_slice())
+        );
+        assert!(!ir.call_materialized_lambda_params.contains_key(&source));
     }
 }

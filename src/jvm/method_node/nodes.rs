@@ -8,6 +8,14 @@ use crate::kt_string::KtString;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LabelId(pub(super) u32);
 
+impl LabelId {
+    /// The label's position among its method's labels, `0..MethodNode::label_count()`: a key for
+    /// tables that follow a body's labels.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// One entry of the instruction list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
@@ -180,6 +188,11 @@ impl MethodNode {
         let label = LabelId(self.label_count);
         self.label_count += 1;
         label
+    }
+
+    /// How many labels this method has handed out; every [`LabelId::index`] is below it.
+    pub fn label_count(&self) -> usize {
+        self.label_count as usize
     }
 
     /// The instructions alone, in order.

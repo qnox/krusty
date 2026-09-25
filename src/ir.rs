@@ -2837,6 +2837,13 @@ pub struct IrFile {
     /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
     /// consumes this identity-backed fact instead of reinterpreting the descriptor.
     pub(crate) construction_declared_params: std::collections::HashMap<ExprId, Box<[Ty]>>,
+    /// Realized static call `ExprId` → the operand index its extension receiver was placed at. A
+    /// JVM inliner reads an extension receiver differently from the parameters after it.
+    pub static_extension_receivers: std::collections::HashMap<u32, u32>,
+    /// Realized inline-call `ExprId` → whether each ordinary call operand is a materialized
+    /// function parameter. Providers publish this declaration fact after inserting physical
+    /// receiver operands; JVM inlining consumes it instead of inferring `noinline` from types.
+    pub call_materialized_lambda_params: std::collections::HashMap<u32, Box<[bool]>>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether

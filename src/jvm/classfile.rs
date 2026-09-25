@@ -3375,6 +3375,10 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
+    /// The next line mark is written even if its line is the one already in effect: an inlined
+    /// call's own lines ended, so the caller's line must be stated again (see
+    /// [`CodeBuilder::forget_line`]).
+    line_forgotten: bool,
 }
 
 impl CodeBuilder {
@@ -3397,6 +3401,7 @@ impl CodeBuilder {
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
+            line_forgotten: false,
         }
     }
 
@@ -3482,41 +3487,6 @@ impl CodeBuilder {
 
     pub(crate) fn can_fall_through(&self) -> bool {
         !self.dead
-    }
-
-    /// Append a pool-relocated inline body whose arguments are already on the stack.
-    pub fn splice_inline(
-        &mut self,
-        bytes: &[u8],
-        external_branches: &[(usize, Label)],
-        body_stack: u16,
-        top_local: u16,
-        arg_words: i32,
-        ret_words: i32,
-        falls_through: bool,
-    ) {
-        let baseline = self.cur_stack - arg_words;
-        // A dead splice has unbound inner frames/handlers and no pushed arguments to consume;
-        // only its height bookkeeping survives for the enclosing emitter.
-        if self.dead {
-            self.cur_stack = baseline + ret_words;
-            return;
-        }
-        self.fixups.extend(external_branches.iter().copied());
-        if top_local > self.max_locals {
-            self.max_locals = top_local;
-        }
-        // Peak is the larger of the args-present prologue height and the body's internal peak.
-        let peak = (baseline + arg_words).max(baseline + body_stack as i32);
-        if peak > self.max_stack as i32 {
-            self.max_stack = peak as u16;
-        }
-        self.bytes.extend_from_slice(bytes);
-        self.cur_stack = baseline + ret_words;
-        if self.cur_stack > self.max_stack as i32 {
-            self.max_stack = self.cur_stack as u16;
-        }
-        self.dead |= !falls_through;
     }
 
     /// Force the current operand-stack height (e.g. an exception handler is entered with the caught

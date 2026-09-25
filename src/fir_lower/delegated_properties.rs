@@ -935,7 +935,7 @@ fn delegated_call(
                     ret: result.get(),
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
-                    extension_receiver_parameter: None,
+                    extension_receiver_parameter: *extension_receiver_parameter,
                 },
                 dispatch_receiver: Some(dispatch_receiver),
                 args: arguments,

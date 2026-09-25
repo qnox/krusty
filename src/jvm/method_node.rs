@@ -23,12 +23,16 @@ mod flow;
 mod nodes;
 mod pool;
 mod read;
+mod stack_shape;
 
-pub use assemble::{AssembleError, AssembledCode, AssembledLocal, ConstantSink};
+pub use assemble::{
+    encode_instruction, AssembleError, AssembledCode, AssembledLocal, ConstantSink,
+};
 pub use flow::LabelPositions;
 pub use nodes::{Constant, Handle, Insn, LabelId, LocalVariable, MethodNode, Node, TryCatchBlock};
 pub use pool::{ConstantPoolView, PoolEntry};
 pub use read::{CodeAttribute, MalformedCode};
+pub use stack_shape::{is_terminal, stack_shapes, word_delta, Category, ShapeError};
 
 #[cfg(test)]
 mod tests;
