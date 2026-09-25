@@ -2745,9 +2745,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     constructor_argument_types,
                 ));
             }
-            self.classifier_value_type(internal).map(|value| {
+            let value = self.classifier_value_type(internal);
+            let associated_invoke = !resolver
+                .classifier_associated_callables(internal, "invoke")
+                .is_empty();
+            (value.is_some() || associated_invoke).then(|| {
                 (
-                    SelectedTopLevelCall::ClassifierValue(value),
+                    SelectedTopLevelCall::ClassifierInvoke(internal, value),
                     argument_types.clone(),
                 )
             })
@@ -2849,7 +2853,24 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 };
                 self.select_invoke(scope, origin, callee, &arguments, demand)
             }
-            SelectedTopLevelCall::ClassifierValue(callee) => {
+            SelectedTopLevelCall::ClassifierInvoke(classifier, value) => {
+                if let super::classifier_associated::AssociatedSignatureCall::Selected(result) =
+                    self.select_qualified_associated_call(
+                        scope,
+                        classifier,
+                        "invoke",
+                        &super::classifier_associated::AssociatedSignatureArguments {
+                            arguments,
+                            type_arguments,
+                            trailing_lambda,
+                            expected,
+                        },
+                        demand,
+                    )?
+                {
+                    return Ok(result);
+                }
+                let callee = value.ok_or_else(Self::failure)?;
                 let callee = crate::fir::ResolvedTy::new(callee).map_err(|_| Self::failure())?;
                 self.select_invoke(scope, origin, callee, arguments, demand)
             }

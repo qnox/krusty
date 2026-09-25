@@ -175,6 +175,18 @@ fn property_reference_to_block_property_reads_its_class() {
 }
 
 #[test]
+fn bare_classifier_call_invokes_block_and_extension_operators() {
+    const SRC: &str = "class C(val s: String) {\n\
+        \x20   companion { operator fun invoke(i: Int) = \"O\" }\n\
+        \x20   companion object { operator fun invoke(c: Char) = \"FAIL\" }\n\
+        }\n\
+        class E\n\
+        companion operator fun E.invoke(s: String) = s\n\
+        fun box() = C(\"\").s + C(1) + E(\"K\")\n";
+    assert_eq!(run(SRC).expect("implicit companion invoke"), "OK");
+}
+
+#[test]
 fn kotlinc_resolves_block_members_from_krusty_metadata() {
     const LIB: &str = "class A {\n\
         \x20   companion {\n\
