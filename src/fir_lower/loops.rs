@@ -1,10 +1,11 @@
 use crate::fir::{
     ControlTargetId, FirBuiltinIterableKind, FirExprId, FirIteratorCall, FirIteratorReceiver,
-    FirLoopHeader, FirRangeCounterKind, FirRangeOperation, LocalValueId, OriginId, ResolvedTy,
+    FirLoopHeader, LocalValueId, OriginId, ResolvedTy,
 };
-use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic};
 use crate::types::Ty;
 
+use super::counted_loops::CountedLoop;
 use super::source_calls::SameFileExtensionReceiverMode;
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -22,7 +23,7 @@ struct IteratorLoopContract<'a> {
 }
 
 impl BodyLowering<'_> {
-    fn loop_variable_declaration(
+    pub(super) fn loop_variable_declaration(
         &mut self,
         variable: u32,
         ty: Ty,
@@ -58,15 +59,15 @@ impl BodyLowering<'_> {
                 operation,
                 start,
                 end,
-            } => self.range_loop(
+            } => self.range_loop(CountedLoop {
                 target,
-                variable.raw(),
-                *counter,
-                *operation,
-                *start,
-                *end,
+                variable: *variable,
+                counter: *counter,
+                operation: *operation,
+                start: *start,
+                end: *end,
                 body,
-            ),
+            }),
             FirLoopHeader::Iterable {
                 variable,
                 variable_ty,
@@ -113,133 +114,25 @@ impl BodyLowering<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn range_loop(
-        &mut self,
-        target: ControlTargetId,
-        variable: u32,
-        counter: FirRangeCounterKind,
-        operation: FirRangeOperation,
-        start: FirExprId,
-        end: FirExprId,
-        body: FirExprId,
-    ) -> Result<ExprId, FirLoweringFailure> {
-        let ty = counter.ty();
-        if matches!(ty, Ty::UInt | Ty::ULong) {
-            let start = self.expression(start)?;
-            let end = self.expression(end)?;
-            let body = self.expression(body)?;
-            return Ok(self.ir.add_expr(IrExpr::Checked(
-                crate::ir::IrCheckedOperation::RangeLoop {
-                    variable: self.value_slot(crate::fir::LocalValueId::from_raw(variable)),
-                    counter: ty,
-                    operation,
-                    start,
-                    end,
-                    body,
-                    label: self.control_label(0, target)?,
-                },
-            )));
+    fn range_loop(&mut self, lp: CountedLoop) -> Result<ExprId, FirLoweringFailure> {
+        let ty = lp.counter.ty();
+        if !matches!(ty, Ty::UInt | Ty::ULong) {
+            return self.counted_loop(lp);
         }
-        let start = self.expression(start)?;
-        let start = self.coerce(start, ty);
-        let (variable, variable_declaration) = self.loop_variable_declaration(variable, ty, start);
-        let end_value = self.expression(end)?;
-        let end_value = self.coerce(end_value, ty);
-        let constant_end = matches!(
-            self.ir.expr(end_value),
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } if matches!(self.ir.expr(*arg), IrExpr::Const(_))
-        );
-        let (end_declaration, end_read) = if constant_end {
-            (None, end_value)
-        } else {
-            let end_slot = self.allocate_temporary();
-            let declaration = self.ir.add_expr(IrExpr::Variable {
-                index: end_slot,
-                ty,
-                init: Some(end_value),
-                named: false,
-            });
-            let read = self.ir.add_expr(IrExpr::GetValue(end_slot));
-            (Some(declaration), read)
-        };
-        let counter_read = self.ir.add_expr(IrExpr::GetValue(variable));
-        let comparison = match operation {
-            FirRangeOperation::Through => IrBinOp::Le,
-            FirRangeOperation::OpenEnd | FirRangeOperation::Until => IrBinOp::Lt,
-            FirRangeOperation::DownTo => IrBinOp::Ge,
-        };
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: comparison,
-            lhs: counter_read,
-            rhs: end_read,
-        });
-        let body = self.expression(body)?;
-        let counter_read = self.ir.add_expr(IrExpr::GetValue(variable));
-        let step = self.ir.add_expr(IrExpr::Const(if ty == Ty::Long {
-            IrConst::Long(1)
-        } else {
-            IrConst::Int(1)
-        }));
-        let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: if operation == FirRangeOperation::DownTo {
-                IrBinOp::Sub
-            } else {
-                IrBinOp::Add
-            },
-            lhs: counter_read,
-            rhs: step,
-        });
-        let updated = if ty == Ty::Char {
-            self.coerce(updated, ty)
-        } else {
-            updated
-        };
-        let write = self.ir.add_expr(IrExpr::SetValue {
-            var: variable,
-            value: updated,
-        });
-        let update = if matches!(
-            operation,
-            FirRangeOperation::OpenEnd | FirRangeOperation::Until
-        ) {
-            write
-        } else {
-            let counter_read = self.ir.add_expr(IrExpr::GetValue(variable));
-            let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: counter_read,
-                rhs: end_read,
-            });
-            let break_expression = self.ir.add_expr(IrExpr::Break {
-                label: Some(self.control_label(0, target)?),
-            });
-            let guard = self.ir.add_expr(IrExpr::When {
-                branches: vec![(Some(at_end), break_expression)],
-            });
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![guard, write],
-                value: None,
-            })
-        };
-        let loop_expression = self.ir.add_expr(IrExpr::While {
-            cond: condition,
-            body,
-            update: Some(update),
-            post_test: false,
-            label: Some(self.control_label(0, target)?),
-        });
-        let mut statements = vec![variable_declaration];
-        statements.extend(end_declaration);
-        statements.push(loop_expression);
-        Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: None,
-        }))
+        let start = self.expression(lp.start)?;
+        let end = self.expression(lp.end)?;
+        let body = self.expression(lp.body)?;
+        Ok(self
+            .ir
+            .add_expr(IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop {
+                variable: self.value_slot(lp.variable),
+                counter: ty,
+                operation: lp.operation,
+                start,
+                end,
+                body,
+                label: self.control_label(0, lp.target)?,
+            })))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -513,13 +406,5 @@ impl BodyLowering<'_> {
                 )
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall),
         }
-    }
-
-    fn coerce(&mut self, expression: ExprId, target: Ty) -> ExprId {
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: expression,
-            type_operand: target,
-        })
     }
 }

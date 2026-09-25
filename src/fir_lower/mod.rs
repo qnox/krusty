@@ -19,6 +19,7 @@ mod checked_arguments;
 mod classifier_references;
 mod constant_folding;
 mod constructors;
+mod counted_loops;
 mod data_classes;
 mod delegated_properties;
 mod error;
