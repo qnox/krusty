@@ -83,7 +83,32 @@ pub use crate::names::property_getter_name;
 
 /// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
 /// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
+///
+/// The mapping reads only whether the name is interned, and an interned name stays interned, so the
+/// physical name of a name interned before it is mapped is remembered per thread.
 pub fn classfile_internal_name(internal: &str) -> String {
+    thread_local! {
+        static INTERNED: std::cell::RefCell<std::collections::HashMap<Box<str>, Box<str>>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(physical) =
+        INTERNED.with(|known| known.borrow().get(internal).map(|p| p.to_string()))
+    {
+        return physical;
+    }
+    let interned = crate::types::existing_type_name(internal).is_some();
+    let physical = physical_classfile_name(internal);
+    if interned {
+        INTERNED.with(|known| {
+            known
+                .borrow_mut()
+                .insert(internal.into(), physical.as_str().into())
+        });
+    }
+    physical
+}
+
+fn physical_classfile_name(internal: &str) -> String {
     if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_to_jvm(internal) {
         return intrinsic;
     }
@@ -386,6 +411,29 @@ mod tests {
         ] {
             assert_eq!(file_class_name(stem, None), facade, "{stem}");
         }
+    }
+
+    #[test]
+    fn remembered_physical_names_match_the_mapping_before_and_after_interning() {
+        let fresh = "sample/remembered/Outer.Inner";
+        assert!(crate::types::existing_type_name(fresh).is_none());
+        assert_eq!(
+            classfile_internal_name(fresh),
+            "sample/remembered/Outer$Inner"
+        );
+        crate::types::type_name(fresh);
+        crate::types::type_name("kotlin/Int.Companion");
+        for internal in [fresh, fresh, "kotlin/Int.Companion", "kotlin/Int.Companion"] {
+            assert_eq!(
+                classfile_internal_name(internal),
+                physical_classfile_name(internal),
+                "{internal}"
+            );
+        }
+        assert_eq!(
+            classfile_internal_name("kotlin/Int.Companion"),
+            "kotlin/jvm/internal/IntCompanionObject"
+        );
     }
 
     #[test]

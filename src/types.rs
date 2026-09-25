@@ -522,11 +522,18 @@ impl PartialEq<&TypeName> for &str {
 
 pub trait InternalName {
     fn internal_matches(&self, internal: &str) -> bool;
+
+    /// The name's final path segment (`IntArray` for `kotlin/IntArray`).
+    fn final_segment(&self) -> &str;
 }
 
 impl InternalName for TypeName {
     fn internal_matches(&self, internal: &str) -> bool {
         self.matches(internal)
+    }
+
+    fn final_segment(&self) -> &str {
+        self.segment_ref()
     }
 }
 
@@ -534,17 +541,29 @@ impl InternalName for &TypeName {
     fn internal_matches(&self, internal: &str) -> bool {
         self.matches(internal)
     }
+
+    fn final_segment(&self) -> &str {
+        self.segment_ref()
+    }
 }
 
 impl InternalName for &str {
     fn internal_matches(&self, internal: &str) -> bool {
         *self == internal
     }
+
+    fn final_segment(&self) -> &str {
+        self.rsplit('/').next().unwrap_or(self)
+    }
 }
 
 impl InternalName for &String {
     fn internal_matches(&self, internal: &str) -> bool {
         self.as_str() == internal
+    }
+
+    fn final_segment(&self) -> &str {
+        self.rsplit('/').next().unwrap_or(self)
     }
 }
 
@@ -566,6 +585,9 @@ pub mod wk {
         )* };
     }
     names! {
+        kotlin_package => "kotlin",
+        kotlin_coroutines_package => "kotlin/coroutines",
+        kotlin_reflect_package => "kotlin/reflect",
         continuation => "kotlin/coroutines/Continuation",
         any => "kotlin/Any",
         java_object => "java/lang/Object",
@@ -639,6 +661,10 @@ const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
 /// — [`Ty::array_elem`], the constructor, and the backend descriptor logic all route through this
 /// rather than each carrying their own copy.
 pub fn prim_array_element(internal: impl InternalName) -> Option<Ty> {
+    // Every name in the table ends in `Array`; most names asked about are not arrays at all.
+    if !internal.final_segment().ends_with("Array") {
+        return None;
+    }
     PRIM_ARRAY_CLASSES
         .iter()
         .find(|(name, _)| internal.internal_matches(name))
@@ -2646,6 +2672,25 @@ pub(crate) fn ty_subst_applied_arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primitive_array_elements_are_found_by_every_name_spelling() {
+        for (name, element) in PRIM_ARRAY_CLASSES {
+            assert_eq!(prim_array_element(name), Some(element), "{name}");
+            assert_eq!(prim_array_element(&name.to_string()), Some(element));
+            assert_eq!(prim_array_element(type_name(name)), Some(element));
+        }
+        for name in [
+            "kotlin/Array",
+            "kotlin/Int",
+            "sample/IntArray",
+            "IntArray",
+            "kotlin/String",
+        ] {
+            assert_eq!(prim_array_element(name), None, "{name}");
+            assert_eq!(prim_array_element(type_name(name)), None, "{name}");
+        }
+    }
 
     #[test]
     fn array_read_element_approximates_use_site_projections() {

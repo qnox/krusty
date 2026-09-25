@@ -11,7 +11,7 @@ use crate::libraries::{
     CallSig, Callables, ClassifierInheritance, FnKind, FunctionInfo, FunctionSet, LibraryCallable,
     LibraryMember, LibraryType, TypeKind,
 };
-use crate::types::{type_name, type_name_child, Ty, TypeName, TypeVariance};
+use crate::types::{type_name, type_name_child, wk, Ty, TypeName, TypeVariance};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FunctionClassKind {
@@ -60,17 +60,17 @@ impl FunctionClassifier {
 /// Recognize a declaration identity owned by Kotlin's function-class builtins provider.
 pub(crate) fn classifier(internal: TypeName) -> Option<FunctionClassifier> {
     let package = internal.parent()?;
-    let (kind, digits) = if package == type_name("kotlin") {
+    let (kind, digits) = if package == wk::kotlin_package() {
         (
             FunctionClassKind::Function,
             internal.segment_ref().strip_prefix("Function")?,
         )
-    } else if package == type_name("kotlin/coroutines") {
+    } else if package == wk::kotlin_coroutines_package() {
         (
             FunctionClassKind::SuspendFunction,
             internal.segment_ref().strip_prefix("SuspendFunction")?,
         )
-    } else if package == type_name("kotlin/reflect") {
+    } else if package == wk::kotlin_reflect_package() {
         if let Some(digits) = internal.segment_ref().strip_prefix("KSuspendFunction") {
             (FunctionClassKind::KSuspendFunction, digits)
         } else {
