@@ -172,7 +172,7 @@ fn eligible_points(
         });
     let suspend_set = route.suspend_set;
     // Checked in order, each only while every earlier one holds.
-    let declines: [(&dyn Fn() -> bool, &str); 10] = [
+    let declines: [(&dyn Fn() -> bool, &str); 9] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -185,14 +185,6 @@ fn eligible_points(
         (
             &|| !ir.fn_decl_lines.contains_key(&fid),
             "no declaration line",
-        ),
-        (
-            &|| {
-                ir.suspend_lambda_sm
-                    .iter()
-                    .any(|(lambda, _, _)| *lambda == fid)
-            },
-            "a suspend lambda",
         ),
         (
             &|| ir.jvm_suspend_interface_bodies.contains_key(&fid),

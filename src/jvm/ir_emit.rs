@@ -4049,7 +4049,6 @@ fn emit_all_with_class_meta_impl(
                     .functions
                     .get(fid as usize)
                     .is_some_and(|f| f.dispatch_receiver.is_none())
-                && !ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid)
         })
         .copied()
         .collect();
