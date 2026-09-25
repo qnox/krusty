@@ -380,9 +380,6 @@ fn materialize_delegation(
                         })
                     })
                     .transpose()?;
-                // Like a delegated function, a delegated property is an overridable override.
-                ir.open_methods
-                    .extend(std::iter::once(getter).chain(setter));
                 // The accessors' parameters, as a source accessor declares them: its context
                 // parameters, the extension receiver, then the setter's value.
                 let mut identities = context_params
@@ -735,6 +732,8 @@ fn add_forwarder(
         param_checks: vec![None; parameter_count],
     });
     ir.classes[class as usize].methods.push(function);
+    // A delegated member is an overridable override, whatever the delegating class's modality.
+    ir.open_methods.insert(function);
     function
 }
 

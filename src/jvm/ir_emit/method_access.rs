@@ -31,24 +31,14 @@ pub(super) fn declared_method_access(
             ACC_PUBLIC | ACC_STATIC
         }
     } else if instance {
-        // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
-        // instance method of a *final* class (nothing extends it) is also `final` and can never be
-        // overridden, so marking it is safe; in an open/extended class we conservatively leave it
-        // non-`final` (a method-level `open`/`override` model would refine this).
-        // kotlinc keeps an `Object`-override (a data class's toString/hashCode/equals) open even in a
-        // final class, so honor `open_methods`; otherwise a method of a final class is itself final.
-        let final_class = !ir.classes.iter().any(|o| o.superclass_matches(owner));
-        // An interface default method must NOT be `final` (the JVM rejects a final interface method).
-        let fin = final_class && !ir.open_methods.contains(&fid) && !owner_is_iface;
-        // A `private set` setter is `private final` (kotlinc); else `public` (+`final` per above).
+        // `ACC_FINAL` follows the member's own Kotlin modality, whatever the class's: an `open`,
+        // `abstract` or non-`final` `override` member stays overridable even in a final class, and
+        // any other member is final even in an open one. A private member is final too. An
+        // interface method is never final (the JVM rejects it: `illegal modifiers 0x12`).
+        let fin = (private || !ir.open_methods.contains(&fid)) && !owner_is_iface;
+        // A `private set` setter is `private final` (kotlinc); else `public`.
         let vis = if private { ACC_PRIVATE } else { ACC_PUBLIC };
-        // A private method is `final` on a CLASS, but a private INTERFACE method must NOT carry `ACC_FINAL`
-        // (`ClassFormatError: illegal modifiers 0x12`) — private already makes it non-virtual.
-        vis | if fin || (private && !owner_is_iface) {
-            ACC_FINAL
-        } else {
-            0
-        }
+        vis | if fin { ACC_FINAL } else { 0 }
     } else {
         // A `static` method is `<vis> static final` (kotlinc) — EXCEPT on an interface, where a `final`
         // static method is illegal (`ClassFormatError`), or a value class's `constructor-impl`/

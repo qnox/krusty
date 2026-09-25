@@ -149,7 +149,6 @@ defaultArguments/function/kt36188_2.kt
 defaultArguments/kt47073_nested.kt
 defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
-delegatedProperty/delegatedOverride.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/genericSetValueViaSyntheticAccessor.kt
 delegatedProperty/getDelegateWithoutReflection.kt
