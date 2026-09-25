@@ -1274,6 +1274,8 @@ mod one_armed_when_fallthrough_e2e;
 mod private_constructor_accessors_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
+#[path = "redundant_checkcasts_before_aastore_e2e.rs"]
+mod redundant_checkcasts_before_aastore_e2e;
 #[path = "redundant_null_check_e2e.rs"]
 mod redundant_null_check_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]

@@ -7086,6 +7086,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and is copied. The JS backend retains its own pre-tested loop shape instead of inheriting a JVM
   policy through common lowering. (`tests/counted_loop_shape_e2e.rs`.)
 
+- **A `checkcast` right before an `aastore` is removed, as kotlinc's
+  `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
+  before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
+  `RedundantCheckcastsBeforeAastore` of `pipeline::ORDER`). It looks only at the next node: the cast
+  goes when that node is an `aastore`, whatever the array's element type, so a cast followed by another
+  cast keeps the first (`x as String?` into a `vararg CharSequence?` keeps `checkcast String`). A cast
+  whose previous node is `Intrinsics.reifiedOperationMarker` goes with the marker and its two arguments,
+  so an inline reified function's `take(x as T)` stores `x` uncast in its own body (a call site
+  specializes the cast first, and loses the resulting `checkcast` to the same rule). This is observable: the array store checks only the array's element class, so `take(x as String?)` into a
+  `vararg Any?` no longer throws `ClassCastException` for a non-`String` `x`, exactly as with kotlinc.
+  A label is a node only when something refers to it (ASM creates no other), so an unreferenced label
+  separates nothing. Tests: the unit tests beside the pass, and
+  `tests/redundant_checkcasts_before_aastore_e2e.rs` (the three methods' instructions against kotlinc,
+  and the uncast store at run time).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

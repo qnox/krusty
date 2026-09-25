@@ -1,7 +1,7 @@
 //! What an instruction does to control flow, and where a method's labels stand: the facts every
 //! pass over a [`MethodNode`] walks the body by.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use super::nodes::{Insn, LabelId, MethodNode, Node};
 
@@ -61,5 +61,30 @@ impl LabelPositions {
     /// body, which no pass can recover from.
     pub fn at(&self, label: LabelId) -> usize {
         self.0[&label]
+    }
+}
+
+impl MethodNode {
+    /// Every label something in the method refers to: a jump or switch, a line number, a protected
+    /// range or a local variable's range. ASM only creates such labels, so a label outside this set
+    /// separates no two nodes in the list kotlinc's passes see.
+    pub fn referenced_labels(&self) -> BTreeSet<LabelId> {
+        let mut labels = BTreeSet::new();
+        for node in &self.nodes {
+            match node {
+                Node::Insn(insn) => labels.extend(insn.jump_targets()),
+                Node::Line { start, .. } => {
+                    labels.insert(*start);
+                }
+                Node::Label(_) => {}
+            }
+        }
+        for block in &self.try_catch_blocks {
+            labels.extend([block.start, block.end, block.handler]);
+        }
+        for local in &self.local_variables {
+            labels.extend([local.start, local.end]);
+        }
+        labels
     }
 }

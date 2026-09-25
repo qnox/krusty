@@ -22,7 +22,9 @@ pub(crate) trait StackTops {
     fn is_exactly(&self, index: usize, class: &str) -> bool;
 }
 
-fn is_reified_marker(insn: &Insn) -> bool {
+/// Whether `insn` is kotlinc's `Intrinsics.reifiedOperationMarker` call (`ReifiedTypeInliner`'s
+/// `isOperationReifiedMarker`).
+pub(super) fn is_reified_marker(insn: &Insn) -> bool {
     matches!(
         insn,
         Insn::Method { op: INVOKESTATIC, owner, name, .. }
