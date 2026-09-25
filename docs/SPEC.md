@@ -2758,6 +2758,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's; runtime pins for `do`/`while`, catch parameters, inline calls after a block and the
   parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
   pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
+- **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
+  enters it before visiting the initializer: every local and temporary the initializer declares
+  sits above the variable and is free again for the statements after it
+  (`val r = when (val s = f()) { … }; val k` puts `r` in 1 and both `s` and `k` in 2). Until the
+  initializing store the variable is in scope but unassigned, so a frame recorded inside a branchy
+  initializer reads its slot as `top`, and its `LocalVariableTable` range still opens after the
+  store. A coroutine restore's re-declaration of a spilled value keeps its existing slot. A value
+  lowering holds one call operand in (an inline expansion's argument, receiver or capture, or an
+  argument spilled to keep evaluation order; `IrFile::call_operand_bindings`) is the exception:
+  kotlinc has no variable for it, it keeps the operand on the stack or stores it once evaluated,
+  so the holder is entered after its value. A materialized inline body, whose operands are all on
+  the stack before it stores a parameter, is spliced from below its own holders only when every
+  holder already occupies that parameter's exact slot; reordered, duplicated, or shifted holders
+  keep the full caller frame, preventing the splice from overwriting a value the expansion still
+  uses. (`val k = Continuation(ctx) { }` puts `k` in 1 and the stored context in 2, where kotlinc
+  stores it.) Likewise
+  every `try` that is not `Unit` enters its result temporary once its body is emitted, a valued one
+  included (`val s = try { val x; … } catch (e) { … }` puts `s` in 1, `x` and the temporary in 2,
+  `e` in 3). `tests/block_slot_reuse_e2e.rs` (local-variable slots against kotlinc for a `when`
+  subject, a branch-local and a two-word branch-local in an initializer, and a valued `try` with a
+  value-producing and a throwing body; the slots of an inlined stdlib call's locals and of a
+  same-file inline argument in an initializer; a runtime pin for loops, handlers, `when` merges,
+  safe calls and a `finally` inside initializers), and `FrameMap`'s unit tests for the frame size
+  below parameter-aligned call-operand holders.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

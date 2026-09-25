@@ -50,7 +50,22 @@ impl Emitter<'_> {
         if physical.len() != args.len() {
             return None;
         }
-        let base = self.inline_splice_base();
+        // Every operand is on the stack before the body stores any parameter. A top run of holders
+        // can therefore supply the inline frame only when each holder is already at that
+        // parameter's exact slot; otherwise the stores could permute or overwrite a value that the
+        // expanded caller still reads later.
+        let parameters = args
+            .iter()
+            .zip(&physical)
+            .map(|(&argument, &ty)| {
+                let holder = match self.ir.expr(argument) {
+                    IrExpr::GetValue(value) => Some(*value),
+                    _ => None,
+                };
+                (holder, slot_words(ty))
+            })
+            .collect::<Vec<_>>();
+        let base = self.inline_splice_base(self.frame.aligned_call_operand_base(&parameters));
         let frame = crate::jvm::inline::spliced_frame(body, target.splice_desc, &[], base)?;
         let probe = crate::jvm::inline::splice_unified(
             body,
@@ -130,15 +145,15 @@ impl Emitter<'_> {
         Some(())
     }
 
-    /// Where an inlined body's frame starts: kotlinc's frame size at the call, above every live
-    /// local and temporary. Not the method's `max_locals`: a block that ended before the call has
-    /// handed its slots back, and the inlined body reuses them as kotlinc's does.
-    fn inline_splice_base(&self) -> u16 {
+    /// Where an inlined body's frame starts: kotlinc's frame size at the call (`frame_size`),
+    /// above every live temporary. Not the method's `max_locals`: a block that ended before the
+    /// call has handed its slots back, and the inlined body reuses them as kotlinc's does.
+    fn inline_splice_base(&self, frame_size: u16) -> u16 {
         self.temporaries
             .live()
             .into_iter()
             .map(|(slot, ty)| slot + slot_words(ty))
-            .fold(self.frame.size(), u16::max)
+            .fold(frame_size, u16::max)
     }
 
     /// Inline `target` through the ported inliner. `None` when this path does not cover a live call;
@@ -201,7 +216,7 @@ impl Emitter<'_> {
                 })
                 .collect(),
         };
-        let base = self.inline_splice_base();
+        let base = self.inline_splice_base(self.frame.size());
         let inlined = match inliner::inline(&callee, &parameters, target.inline_only, base, reified)
         {
             Ok(inlined) => inlined,

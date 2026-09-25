@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::frame_map::Mark;
+use super::frame_map::{FrameKey, Mark};
 use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
 
 impl Emitter<'_> {
@@ -73,6 +73,26 @@ impl Emitter<'_> {
                 i += 1;
             }
         }
+    }
+
+    /// Enter a declared value's slot, keyed as a call operand's holder when `holds_operand`. It is
+    /// in scope from here, but unassigned until its store: frames recorded before then read the
+    /// slot as `top`.
+    pub(super) fn enter_unassigned_value(
+        &mut self,
+        index: u32,
+        ty: Ty,
+        holds_operand: bool,
+    ) -> u16 {
+        let key = if holds_operand {
+            FrameKey::CallOperand(index)
+        } else {
+            FrameKey::Value(index)
+        };
+        let slot = self.frame.enter(key, ty);
+        self.slots.insert(index, (slot, ty));
+        self.unassigned_values.insert(index);
+        slot
     }
 
     /// Open a lexical slot scope: the value map to restore and the frame point to leave back to.

@@ -335,6 +335,9 @@ impl BodyLowering<'_> {
             }));
             formal_slots.push(slot);
         }
+        self.ir
+            .call_operand_bindings
+            .extend(capture_declarations.iter().copied());
         statements.splice(
             declaration_position..declaration_position,
             capture_declarations,
@@ -392,12 +395,14 @@ impl BodyLowering<'_> {
             crate::fir::FirInlineIterationTraversal::Array
             | crate::fir::FirInlineIterationTraversal::Counted { .. } => {
                 let receiver_slot = self.allocate_temporary();
-                statements.push(self.ir.add_expr(IrExpr::Variable {
+                let receiver_declaration = self.ir.add_expr(IrExpr::Variable {
                     index: receiver_slot,
                     ty: receiver_ty?.get(),
                     init: Some(iterable),
                     named: false,
-                }));
+                });
+                self.ir.call_operand_bindings.insert(receiver_declaration);
+                statements.push(receiver_declaration);
                 let receiver = self.ir.add_expr(IrExpr::GetValue(receiver_slot));
                 let size = match traversal {
                     crate::fir::FirInlineIterationTraversal::Array => {
@@ -769,6 +774,9 @@ impl BodyLowering<'_> {
             }));
             formal_slots.push(slot);
         }
+        self.ir
+            .call_operand_bindings
+            .extend(capture_declarations.iter().copied());
         statements.splice(
             declaration_position..declaration_position,
             capture_declarations,
@@ -778,12 +786,14 @@ impl BodyLowering<'_> {
                 IrExpr::GetValue(slot) => *slot,
                 _ => {
                     let slot = self.allocate_temporary();
-                    statements.push(self.ir.add_expr(IrExpr::Variable {
+                    let declaration = self.ir.add_expr(IrExpr::Variable {
                         index: slot,
                         ty,
                         init: Some(value),
                         named: false,
-                    }));
+                    });
+                    self.ir.call_operand_bindings.insert(declaration);
+                    statements.push(declaration);
                     slot
                 }
             };

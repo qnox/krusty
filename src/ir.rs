@@ -2508,6 +2508,11 @@ pub struct IrFile {
     /// provider realization and structural expansion, so backends need not reconstruct an inline
     /// call from the resulting block/loop shape.
     pub inline_regions: std::collections::HashSet<ExprId>,
+    /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
+    /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
+    /// for evaluation order. This is provenance, not a storage decision; a backend decides how
+    /// that role participates in its own frame or register allocation.
+    pub call_operand_bindings: std::collections::HashSet<ExprId>,
     /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
     /// `get`, …); the JVM method itself carries no such bit.
@@ -3554,19 +3559,6 @@ impl IrFile {
     /// routing that would evaluate or delegate to them outside the `$default` stub must decline.
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
-    }
-    pub(crate) fn set_debug_local_provenance(
-        &mut self,
-        declaration: ExprId,
-        provenance: IrDebugLocalProvenance,
-    ) {
-        self.debug_local_provenance.insert(declaration, provenance);
-    }
-    pub(crate) fn debug_local_provenance(
-        &self,
-        declaration: ExprId,
-    ) -> Option<IrDebugLocalProvenance> {
-        self.debug_local_provenance.get(&declaration).copied()
     }
     /// Is `expression` a declaration's initializer store that writes only what a freshly allocated
     /// object's storage already holds, and so must not be emitted?
