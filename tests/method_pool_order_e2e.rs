@@ -9,6 +9,22 @@
 //!   initializer references (a class, a constructor, a lambda) precedes the field's own entries,
 //!   and the constructor's `this` follows them.
 //!
+//! - A primary constructor's descriptor covers every argument, a plain (non-property) parameter
+//!   included, and its `$default` overload's body interns before the data-class members that follow.
+//!
+//! - An attribute name interns with the first method that uses it, `Code` included: an interface
+//!   whose first method is abstract interns that method's `Signature` and annotation names before
+//!   the `Code` of a later default body.
+//!
+//! - An inherited interface forwarder interns its header, nullability annotations included, before
+//!   its `invokespecial` body.
+//! - An anonymous object's constructor interns its `this` local before the members that follow it.
+//! - A sealed class's nested subclasses intern with its `InnerClasses` table, after `@Metadata`,
+//!   not ahead of its constructor.
+//!
+//! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
+//!   before `<clinit>`.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -98,4 +114,110 @@ fn a_data_class_generic_field_signature_follows_its_constructor() {
          data class Crate(val box: Box<String>)\n",
         &["Box", "Crate"],
     );
+}
+
+#[test]
+fn a_plain_constructor_parameter_is_in_the_constructor_header() {
+    assert_identical(
+        "PlainParameter",
+        "open class Base(p: Int)\n\
+         class Cell<T>(t: T) {\n\
+         \x20   var value = t\n\
+         }\n",
+        &["Base", "Cell"],
+    );
+}
+
+#[test]
+fn a_default_constructor_body_interns_before_data_members() {
+    assert_identical(
+        "DefaultBody",
+        "data class Pair2(val a: Int = 1, val b: String = \"$a\")\n",
+        &["Pair2"],
+    );
+}
+
+/// A plain parameter carries its `@NotNull` parameter annotation, interned with the constructor's
+/// header, and its null check runs before the super call.
+#[test]
+fn a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call() {
+    assert_identical(
+        "PlainParameterCheck",
+        "open class Base(val s: String)\n\
+         class Derived(label: String, n: Int) : Base(label + n)\n",
+        &["Base", "Derived"],
+    );
+}
+
+/// A plain non-null reference parameter interns its `@NotNull` with the constructor's header and
+/// its `checkNotNullParameter` name with the constructor's body, although it has no field.
+#[test]
+fn a_plain_reference_constructor_parameter_is_annotated_with_the_header() {
+    assert_identical("PlainReference", "class Label(text: String)\n", &["Label"]);
+}
+
+/// A parameter's annotations are placed by its constructor position, not by the position of the
+/// stored field that follows it.
+#[test]
+fn an_annotated_plain_parameter_beside_a_stored_field_keeps_its_position() {
+    assert_identical(
+        "AnnotatedBesideField",
+        "annotation class Mark\n\
+         class Tagged(@Mark text: String, val count: Int)\n\
+         class Counted(val count: Int, @Mark text: String)\n",
+        &["Mark", "Tagged", "Counted"],
+    );
+}
+
+#[test]
+fn an_abstract_first_method_interns_its_attribute_names_before_code() {
+    assert_identical(
+        "AbstractFirst",
+        "interface Source<T> {\n\
+         \x20   fun take(label: String): T\n\
+         \x20   fun first(label: String): T = take(label)\n\
+         }\n",
+        &["Source"],
+    );
+}
+
+#[test]
+fn an_inherited_forwarder_interns_its_annotations_before_its_body() {
+    assert_identical(
+        "InheritedForwarder",
+        "interface Greeter {\n\
+         \x20   fun greet(name: String): String = name\n\
+         }\n\
+         class Plain : Greeter\n",
+        &["Plain"],
+    );
+}
+
+#[test]
+fn a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes() {
+    assert_identical(
+        "SealedRows",
+        "sealed class Shape {\n\
+         \x20   class Round : Shape()\n\
+         \x20   class Square : Shape()\n\
+         }\n",
+        &["Shape"],
+    );
+}
+
+#[test]
+fn an_anonymous_object_constructor_interns_this_before_its_members() {
+    assert_identical(
+        "AnonymousThis",
+        "interface Greeter {\n\
+         \x20   fun greet(name: String): String = name\n\
+         }\n\
+         fun make(): Greeter = object : Greeter {}\n",
+        &["AnonymousThisKt$make$1"],
+    );
+}
+
+#[test]
+fn a_data_object_equals_interns_its_locals_with_its_body() {
+    assert_identical("DataObjectLocals", "data object Marker\n", &["Marker"]);
 }

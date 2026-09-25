@@ -38,6 +38,9 @@ impl IrFile {
                 .is_none(),
             "one compiler-generated data-class declaration owns each semantic role"
         );
+        // kotlinc gives a synthesized data-class member a `LocalVariableTable` (its receiver and
+        // parameters) but no line, and writes that table with the method.
+        self.fn_debug_locals.insert(function);
     }
 
     pub(crate) fn data_class_member(
