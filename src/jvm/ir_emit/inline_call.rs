@@ -12,6 +12,8 @@ pub(super) struct InlineStaticTarget<'a> {
     pub(super) splice_desc: &'a str,
     /// An `@InlineOnly` callee contributes no debug information to the caller.
     pub(super) inline_only: bool,
+    /// Whether the fetched body may belong to another class than `owner` (a bridge to it).
+    pub(super) allow_owner_bridge: bool,
 }
 
 pub(super) fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {

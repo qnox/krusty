@@ -4435,7 +4435,21 @@ shadow with no output change.
   what each cast sees, by instruction number. No class of the 2.4.20 box corpus changes except
   `JvmInlineKt` of `jvmInline`, whose temporary slots already vary from run to run before this
   stage.
-- ☐ 4–6. A `FrameMap`-style slot allocator, and kotlinc's transformer order.
+- ✅ 4a. Every local slot the emitter uses is entered in one owner, `jvm::ir_emit::frame_map`, a
+  port of kotlinc's `FrameMapBase` (`enter`/`leave`, `enter_temp`/`leave_temp`, `mark`/`drop_to`):
+  receivers and parameters, source locals, catch parameters, and the backend temporaries — operand
+  spills, `&&` operands, vararg arrays, `try` results, parked returns and exceptions, inline
+  arguments, lambda captures, coroutine machine locals and the `$i$f$` marker. Blocks, catches,
+  leases and inline calls leave them where kotlinc does. It runs in monotonic mode: a release keeps
+  the cursor, so no class of the 2.4.20 box corpus changes, and a release out of stack order is
+  reported under `KRUSTY_TRACE=slots` rather than rejected. The cursor movements kotlinc does not
+  make stay named operations until the stage that removes them: `rewind_to` (each spliced copy of
+  a lambda body starts from one base) and `reserve_through` (a spliced inline body's locals) go
+  with 4f, `give_back` (a vararg array's slot) with 4e.
+- ☐ 4b–4h. Slot reuse at block ends (4b) on lowering's scope facts (4c), variables entered before
+  their initializers (4d), backend temporaries on the stack (4e), inline-call frames (4f),
+  lowering's temporaries matching kotlinc's (4g) and coroutine locals at `max_locals` (4h).
+- ☐ 5–6. kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

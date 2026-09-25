@@ -19,7 +19,8 @@
 //! the single operation that does it — the previous arrangement had three frame builders, two of
 //! which silently omitted the temporaries and were right only by accident.
 
-use super::VerifType;
+use super::frame_map::TempSlot;
+use super::{Emitter, VerifType};
 use crate::types::Ty;
 
 /// Identity of a leased backend temporary slot. A newtype on purpose: it is not a value id and
@@ -27,12 +28,21 @@ use crate::types::Ty;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct TemporaryLease(u32);
 
+struct Held {
+    lease: TemporaryLease,
+    slot: u16,
+    ty: Ty,
+    /// The frame entry the slot was taken from, when the lease owns it: releasing the lease leaves
+    /// it.
+    entered: Option<TempSlot>,
+}
+
 /// The temporaries live right now, oldest first.
 #[derive(Default)]
 pub(super) struct BackendTemporaries {
     /// Insertion-ordered, so a later lease over the same slot wins — and so a frame's layout does
     /// not depend on hash iteration order.
-    held: Vec<(TemporaryLease, u16, Ty)>,
+    held: Vec<Held>,
     /// Monotonic for the whole emitter: a released lease's identity is never handed out again, so a
     /// stale release cannot free a live temporary.
     next: u32,
@@ -40,29 +50,61 @@ pub(super) struct BackendTemporaries {
 
 impl BackendTemporaries {
     /// Take a slot for as long as it is live. The returned lease is the only way to give it back.
-    pub(super) fn lease(&mut self, slot: u16, ty: Ty) -> TemporaryLease {
+    fn lease(&mut self, slot: u16, ty: Ty, entered: Option<TempSlot>) -> TemporaryLease {
         let lease = TemporaryLease(self.next);
         self.next += 1;
-        self.held.push((lease, slot, ty));
+        self.held.push(Held {
+            lease,
+            slot,
+            ty,
+            entered,
+        });
         lease
     }
 
-    /// Give a leased temporary back. Its slot stops appearing in frames recorded from here on;
-    /// the emitter's slot allocator stays monotonic, so the slot itself is not reused behind the
-    /// verifier's back.
-    pub(super) fn release(&mut self, lease: TemporaryLease) {
-        let before = self.held.len();
-        self.held.retain(|(current, _, _)| *current != lease);
-        debug_assert_eq!(
-            before - self.held.len(),
-            1,
+    /// Give a leased temporary back. Its slot stops appearing in frames recorded from here on.
+    /// Returns the frame entry the lease owned, for the caller to leave.
+    fn release(&mut self, lease: TemporaryLease) -> Option<TempSlot> {
+        let index = self.held.iter().position(|held| held.lease == lease);
+        debug_assert!(
+            index.is_some(),
             "released a backend temporary that was not leased"
         );
+        index.and_then(|index| self.held.remove(index).entered)
     }
 
     /// The live `(slot, type)` pairs, in lease order.
     pub(super) fn live(&self) -> Vec<(u16, Ty)> {
-        self.held.iter().map(|(_, slot, ty)| (*slot, *ty)).collect()
+        self.held.iter().map(|held| (held.slot, held.ty)).collect()
+    }
+}
+
+impl Emitter<'_> {
+    /// Type a slot the backend owns in every frame while it is live. The slot's frame entry, if it
+    /// has one, stays with whoever entered it.
+    pub(super) fn lease_temporary(&mut self, slot: u16, ty: Ty) -> TemporaryLease {
+        self.lease(slot, ty, None)
+    }
+
+    /// Type a temporary just entered in the frame while it is live; releasing the lease leaves it.
+    pub(super) fn lease_frame_temporary(&mut self, temp: TempSlot, ty: Ty) -> TemporaryLease {
+        self.lease(temp.slot(), ty, Some(temp))
+    }
+
+    pub(super) fn release_temporary(&mut self, lease: TemporaryLease) {
+        if let Some(temp) = self.temporaries.release(lease) {
+            self.frame.leave_temp(temp);
+        }
+    }
+
+    fn lease(&mut self, slot: u16, ty: Ty, entered: Option<TempSlot>) -> TemporaryLease {
+        debug_assert!(
+            !self.slots.values().any(|(held, _)| *held == slot),
+            "backend temporary at slot {slot} aliases a semantic local"
+        );
+        // A temporary released before the plan is read is invisible to it otherwise, and a spill
+        // set cannot skip a slot the frames still describe.
+        self.temporaries.lease(slot, ty, entered)
     }
 }
 

@@ -12,6 +12,7 @@
 use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
+use super::frame_map::{FrameKey, TempRole, TempSlot};
 use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// One `try`'s protected region while it is being emitted.
@@ -104,13 +105,8 @@ impl Emitter<'_> {
     ) {
         let rt = ir_ty_to_jvm(result);
         let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
-        let result_slot = if is_stmt {
-            None
-        } else {
-            let s = self.next_slot;
-            self.next_slot += slot_words(rt);
-            Some(s)
-        };
+        let result_temp = (!is_stmt).then(|| self.frame.enter_temp(TempRole::TryResult, rt));
+        let result_slot = result_temp.as_ref().map(TempSlot::slot);
         // A `try` with a `finally` reserves its two slots HERE, before anything inside it is
         // emitted, because that is where kotlinc reserves them: the return value a `return` out of
         // the `try` parks while the finalizer runs, then the exception the catch-all parks while
@@ -125,26 +121,21 @@ impl Emitter<'_> {
         // the enclosing slots are free for it. The parked-exception slot therefore stays in the
         // reuse pool while the body is emitted and is taken back out before the handler, where it
         // holds the exception across the whole inlined finalizer.
-        let return_words = slot_words(self.ret);
-        let return_spill = self
-            .pending_return_spills
-            .last()
-            .copied()
-            .flatten()
-            .or_else(|| {
-                (finally.is_some() && return_words > 0 && self.parks_a_returned_value(expression))
-                    .then(|| {
-                        let reserved = self.next_slot;
-                        self.next_slot += return_words;
-                        reserved
-                    })
-            });
+        let inherited_return_spill = self.pending_return_spills.last().copied().flatten();
+        let own_return_spill = (inherited_return_spill.is_none()
+            && finally.is_some()
+            && slot_words(self.ret) > 0
+            && self.parks_a_returned_value(expression))
+        .then(|| self.frame.enter_temp(TempRole::ReturnValue, self.ret));
+        let return_spill = inherited_return_spill.or(own_return_spill.as_ref().map(TempSlot::slot));
         self.pending_return_spills.push(return_spill);
+        let mut own_parked = None;
         let parked_slot = finally.is_some().then(|| {
             let reserved = self.free_exception_slots.pop().unwrap_or_else(|| {
-                let fresh = self.next_slot;
-                self.next_slot += 1;
-                fresh
+                let fresh = self
+                    .frame
+                    .enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
+                own_parked.insert(fresh).slot()
             });
             self.free_exception_slots.push(reserved);
             reserved
@@ -246,11 +237,8 @@ impl Emitter<'_> {
             // it — and the parked value is dead the moment the handler rethrows. Giving the
             // parameter a slot of its own instead pushed it above the reserved one and cost a wide
             // `astore` at every catch.
-            let cslot = parked_slot.unwrap_or_else(|| {
-                let fresh = self.next_slot;
-                self.next_slot += 1;
-                fresh
-            });
+            let cslot =
+                parked_slot.unwrap_or_else(|| self.frame.enter(FrameKey::Value(c.var), exc_ty));
             self.slots.insert(c.var, (cslot, exc_ty));
             // The `finally` guards this catch from its ENTRY, the store of the caught exception
             // included — kotlinc protects the handler's own entry the same way it protects the
@@ -282,6 +270,9 @@ impl Emitter<'_> {
                 self.return_finalizers.pop();
             }
             self.slots.remove(&c.var);
+            if parked_slot.is_none() {
+                self.frame.leave(FrameKey::Value(c.var));
+            }
             // The catch body is protected by the finally handler (a throw in a catch runs the finally),
             // but the catch's own inlined finally (below) is not.
             let cbody_end = code.new_label();
@@ -416,6 +407,13 @@ impl Emitter<'_> {
             self.bind(after, code);
         }
         self.pending_return_spills.pop();
+        // Newest first, as they were entered.
+        for temp in [own_parked, own_return_spill, result_temp]
+            .into_iter()
+            .flatten()
+        {
+            self.frame.leave_temp(temp);
+        }
     }
 
     /// Whether a `return` anywhere inside this `try` parks its value while a finalizer runs.

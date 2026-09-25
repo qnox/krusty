@@ -1,5 +1,6 @@
 //! JVM realization of a packed vararg/array-literal value.
 
+use super::frame_map::TempRole;
 use super::*;
 
 /// Emit one checked vararg value. Spread validation and both physical array-building strategies
@@ -200,9 +201,8 @@ fn emit_packed_array(
     }
 
     let array_type = ir_ty_to_jvm(array_type);
-    let slot = emitter.next_slot;
-    let words = slot_words(array_type);
-    emitter.next_slot += words;
+    let array = emitter.frame.enter_temp(TempRole::VarargArray, array_type);
+    let slot = array.slot();
     store(array_type, slot, code);
     let array_lease = emitter.lease_temporary(slot, array_type);
 
@@ -222,9 +222,7 @@ fn emit_packed_array(
 
     load(array_type, slot, code);
     emitter.release_temporary(array_lease);
-    if emitter.next_slot == slot + words {
-        emitter.next_slot = slot;
-    }
+    emitter.frame.give_back(array);
 }
 
 /// Build the same packed array with every element evaluated into a temp first. Used when any element
@@ -252,9 +250,10 @@ fn emit_packed_array_through_temps(
     }
 
     let jvm_array_type = ir_ty_to_jvm(array_type);
-    let slot = emitter.next_slot;
-    let words = slot_words(jvm_array_type);
-    emitter.next_slot += words;
+    let array = emitter
+        .frame
+        .enter_temp(TempRole::VarargArray, jvm_array_type);
+    let slot = array.slot();
     store(jvm_array_type, slot, code);
     let array_lease = emitter.lease_temporary(slot, jvm_array_type);
 
@@ -277,7 +276,5 @@ fn emit_packed_array_through_temps(
 
     load(jvm_array_type, slot, code);
     emitter.release_temporary(array_lease);
-    if emitter.next_slot == slot + words {
-        emitter.next_slot = slot;
-    }
+    emitter.frame.give_back(array);
 }
