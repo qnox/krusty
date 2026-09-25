@@ -6145,6 +6145,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
   `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
   `a_function_type_is_not_a_function_of_an_unrelated_result`).
+- **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
+  in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
+  `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered
+  ones leave order unspecified. `keys`, `values` and `entries` are snapshots rather than views, and
+  an entry is a copied pair; `keys`/`entries` copy without comparing, since the keys are distinct.
+  A collection that holds itself renders `(this Map)` / `(this Collection)` in its place, as
+  `AbstractMap`/`AbstractCollection` do. An element member that throws stops the operation there
+  and propagates: `put`/`add` insert nothing, `mapOf`/`setOf`, `toString` and `hashCode` ask no
+  later element. The pending slot, not the member's answer, says it threw: an `equals` that raises
+  and answers true is no match, so a lookup asks no later key and `put`/`remove`/`get` overwrite,
+  remove or answer nothing through it; entry, map and set equality stop at it (an entry compares no
+  values, and map equality looks each key up once, so a stateful comparison is not asked twice);
+  and an entry whose value's `toString` throws renders no text. `Any.toString` asks the object's
+  own `hashCode`, and one that throws propagates rather than being rendered.
+  `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate
+  that exception, not their own. Known divergences: iterating a map walks its entries snapshot, so
+  mutating the map inside the loop raises no `ConcurrentModificationException` (a set's iteration
+  does, as on the JVM); and `values` is a `List`, so it compares equal to a list of the same
+  elements where the JVM's `values` collection compares by identity.
+  Tests: `tests/native_runtime_e2e.rs` (`collection_to_string_self_reference`,
+  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`,
+  `default_to_string_stops_at_a_raise`).
 - **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
   records the exception and comes back, so each runtime raise returns at once and each walk checks
   for a pending exception after every `next`, every lambda it calls, and every element `equals`,

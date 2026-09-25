@@ -4523,3 +4523,1060 @@ static KRef kt_list_to_string(KRef self) {
 }
 
 
+/* ---- maps and sets --------------------------------------------------------------------------
+
+   A map is two growable lists side by side: its keys in insertion order, and the values beside
+   them at the same positions. A SET is the same object with no values, which is what Kotlin's own
+   `LinkedHashSet` is — a map whose values nothing reads.
+
+   Lookup is LINEAR, by `equals` over the keys. Kotlin's is by hash, and the difference is speed
+   and nothing else: a hash map answers the same question, and the maps a program writes in a box
+   test hold a handful of entries. What a hash map would NOT give is the order, and order is the
+   observable part: `mapOf` answers a `LinkedHashMap`, whose iteration, `toString` and `keys` are
+   in insertion order. Keeping the keys in a list rather than in buckets is what that promise asks
+   for. The unordered spellings — `hashMapOf`, `HashSet()` — answer this object too, because their
+   order is unspecified and insertion order is one of the orders left unspecified.
+
+   Both growable lists are reference fields the collector traces, and every element inside them is
+   traced through the array each list already holds. */
+typedef struct KMap {
+    KObjectHeader header;
+    KRef keys;
+    /* The values, at the same positions as the keys — or NULL for a set, which has none. */
+    KRef values;
+} KMap;
+
+static const uint32_t kt_map_offsets[] = {offsetof(KMap, keys), offsetof(KMap, values)};
+
+static kt_boolean kt_map_equals(KRef self, KRef other);
+static kt_int kt_map_hash_code(KRef self);
+static KRef kt_map_to_string(KRef self);
+static kt_boolean kt_set_equals(KRef self, KRef other);
+static kt_int kt_set_hash_code(KRef self);
+static KRef kt_set_to_string(KRef self);
+
+static const kt_fn kt_map_vtable[] = {(kt_fn)kt_map_equals, (kt_fn)kt_map_hash_code,
+                                      (kt_fn)kt_map_to_string};
+static const kt_fn kt_set_vtable[] = {(kt_fn)kt_set_equals, (kt_fn)kt_set_hash_code,
+                                      (kt_fn)kt_set_to_string};
+
+#define KT_MAP_TYPE(identifier, kotlin_name, table)                                                \
+    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1,                                \
+                              sizeof(KMap), 2,                                                     \
+                              0,           kt_map_offsets,                                         \
+                              &kt_type_any, table,                                                 \
+                              3,           0};
+
+KT_MAP_TYPE(kt_type_map, "kotlin.collections.LinkedHashMap", kt_map_vtable)
+KT_MAP_TYPE(kt_type_set, "kotlin.collections.LinkedHashSet", kt_set_vtable)
+
+/* One entry of a map, which `entries` hands out and a destructuring reads through
+   `component1`/`component2`. It is a VIEW of nothing: the pair is copied out, so writing to the
+   map afterwards leaves an entry already taken alone. Kotlin's own entry is a view and setting
+   through it writes back, which `MutableMap.MutableEntry.setValue` is for; nothing here answers
+   that member, so the copy is not observable. */
+typedef struct KMapEntry {
+    KObjectHeader header;
+    KRef key;
+    KRef value;
+} KMapEntry;
+
+static const uint32_t kt_map_entry_offsets[] = {offsetof(KMapEntry, key),
+                                                offsetof(KMapEntry, value)};
+
+static kt_boolean kt_map_entry_equals(KRef self, KRef other);
+static kt_int kt_map_entry_hash_code(KRef self);
+static KRef kt_map_entry_to_string(KRef self);
+
+static const kt_fn kt_map_entry_vtable[] = {(kt_fn)kt_map_entry_equals,
+                                            (kt_fn)kt_map_entry_hash_code,
+                                            (kt_fn)kt_map_entry_to_string};
+
+const KType kt_type_map_entry = {"kotlin.collections.Map.Entry",
+                                 sizeof("kotlin.collections.Map.Entry") - 1,
+                                 sizeof(KMapEntry),
+                                 2,
+                                 0,
+                                 kt_map_entry_offsets,
+                                 &kt_type_any,
+                                 kt_map_entry_vtable,
+                                 3,
+                                 0};
+
+kt_boolean kt_is_map(KRef value) { return value != NULL && value->header.type == &kt_type_map; }
+
+kt_boolean kt_is_set(KRef value) { return value != NULL && value->header.type == &kt_type_set; }
+
+/* The keys, which for a set ARE its elements — so one walk serves both and iterating a set is
+   iterating this list. */
+KRef kt_map_keys_list(KRef self) { return ((const KMap *)self)->keys; }
+
+static KRef kt_map_shaped(const KType *type, kt_boolean valued) {
+    KMap *map = (KMap *)kt_gc_allocate(type, sizeof(KMap));
+    /* Both fields are stored before either allocation, so a collection triggered by one never
+       traces an uninitialized field. */
+    map->keys = NULL;
+    map->values = NULL;
+    map->keys = kt_mutable_list_new();
+    if (valued) {
+        map->values = kt_mutable_list_new();
+    }
+    return (KRef)map;
+}
+
+KRef kt_map_new(void) { return kt_map_shaped(&kt_type_map, 1); }
+
+KRef kt_set_new(void) { return kt_map_shaped(&kt_type_set, 0); }
+
+kt_int kt_map_size(KRef self) { return kt_list_size(((const KMap *)self)->keys); }
+
+kt_boolean kt_map_is_empty(KRef self) { return kt_map_size(self) == 0; }
+
+/* Where `value` sits in one of a map's two lists, or -1. By `equals`, as Kotlin's own lookup is:
+   two strings with the same text are one key, and so are two boxes holding the same number.
+
+   A comparison that THREW ends the search with -1, whatever it answered. The pending slot is
+   checked after every one rather than only after a false answer, because a program's `equals` is
+   free to record an exception and return true: taken at its word, that answer would have `put`
+   overwrite, `remove` delete and `get` hand back the entry the failed comparison pointed at, and a
+   false one would have the search go on asking the elements after it. Kotlin's lookup does
+   neither; the throw leaves it. */
+static kt_int kt_map_search(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int length = kt_list_size(list);
+    for (kt_int at = 0; at < length; at++) {
+        kt_boolean same = kt_equals(kt_elements_of(elements)[at], value);
+        if (kt_pending_exception() != NULL) {
+            return -1;
+        }
+        if (same) {
+            return at;
+        }
+    }
+    return -1;
+}
+
+/* Where a key sits, or -1 -- which is also the answer when its search threw, so every caller that
+   acts on a found key acts only on one no exception stands behind. */
+static kt_int kt_map_index_of(KRef self, KRef key) {
+    return kt_map_search(((const KMap *)self)->keys, key);
+}
+
+kt_boolean kt_map_contains_key(KRef self, KRef key) { return kt_map_index_of(self, key) >= 0; }
+
+kt_boolean kt_map_contains_value(KRef self, KRef value) {
+    const KMap *map = (const KMap *)self;
+    return map->values != NULL && kt_map_search(map->values, value) >= 0;
+}
+
+/* `m[k]`. Kotlin answers NULL for an absent key, which is why `Map.get` is declared nullable and
+   why a map whose values are nullable cannot tell the two apart either. */
+KRef kt_map_get(KRef self, KRef key) {
+    kt_int at = kt_map_index_of(self, key);
+    if (at < 0) {
+        return NULL;
+    }
+    const KMap *map = (const KMap *)self;
+    return map->values == NULL ? kt_list_get(map->keys, at) : kt_list_get(map->values, at);
+}
+
+KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback) {
+    kt_int at = kt_map_index_of(self, key);
+    /* A search that threw found nothing, and it is no absent key either: the caller takes the
+       exception, not the fallback. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    return at < 0 ? fallback : kt_list_get(((const KMap *)self)->values, at);
+}
+
+/* `m.put(k, v)`, answering the value that was there. An existing key keeps its POSITION, which is
+   what a `LinkedHashMap` promises: re-putting a key does not move it to the end. */
+KRef kt_map_put(KRef self, KRef key, KRef value) {
+    KMap *map = (KMap *)self;
+    kt_int at = kt_map_index_of(self, key);
+    if (at >= 0) {
+        return kt_mutable_list_set(map->values, at, value);
+    }
+    /* A key's `equals` that THREW ended the search without an answer, and the put ends with it:
+       Kotlin's leaves the map as it was, and inserting here would add a key the program never saw
+       go in. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    kt_mutable_list_add(map->keys, key);
+    kt_mutable_list_add(map->values, value);
+    return NULL;
+}
+
+/* `m[k] = v`, which answers `Unit` rather than the previous value — so it is its own entry point
+   rather than a result the caller has to remember to drop. */
+void kt_map_set(KRef self, KRef key, KRef value) { (void)kt_map_put(self, key, value); }
+
+KRef kt_map_remove(KRef self, KRef key) {
+    KMap *map = (KMap *)self;
+    kt_int at = kt_map_index_of(self, key);
+    if (at < 0) {
+        return NULL;
+    }
+    (void)kt_mutable_list_remove_at(map->keys, at);
+    return kt_mutable_list_remove_at(map->values, at);
+}
+
+void kt_map_clear(KRef self) {
+    KMap *map = (KMap *)self;
+    kt_mutable_list_clear(map->keys);
+    if (map->values != NULL) {
+        kt_mutable_list_clear(map->values);
+    }
+}
+
+/* `s.add(x)` / `x in s` / `s.remove(x)`: a set keeps each element once, so adding one it already
+   holds changes nothing and says so. */
+kt_boolean kt_set_contains(KRef self, KRef value) { return kt_map_contains_key(self, value); }
+
+kt_boolean kt_set_add(KRef self, KRef value) {
+    /* A search that threw is no answer, so nothing is added, as `kt_map_put` explains. */
+    if (kt_map_contains_key(self, value) || kt_pending_exception() != NULL) {
+        return false;
+    }
+    kt_mutable_list_add(((KMap *)self)->keys, value);
+    return true;
+}
+
+kt_boolean kt_set_remove(KRef self, KRef value) {
+    kt_int at = kt_map_index_of(self, value);
+    if (at < 0) {
+        return false;
+    }
+    (void)kt_mutable_list_remove_at(((KMap *)self)->keys, at);
+    return true;
+}
+
+/* `mapOf(a to b, …)` and `setOf(a, …)`, from the array a vararg call already packed. The array
+   belongs to the CALLER, so its contents are copied in rather than shared: a map can be written
+   through, and writing to one must not reach back into the caller's array.
+
+   An element whose `equals` throws ends the build there, as the throw ends Kotlin's: the caller
+   takes the exception and never sees the collection, and the elements after it are not asked. */
+KRef kt_map_of(KRef pairs) {
+    KRef map = kt_map_new();
+    kt_int length = kt_length_of(pairs);
+    for (kt_int at = 0; at < length; at++) {
+        KRef pair = kt_elements_of(pairs)[at];
+        (void)kt_map_put(map, kt_pair_first(pair), kt_pair_second(pair));
+        if (kt_pending_exception() != NULL) {
+            return map;
+        }
+    }
+    return map;
+}
+
+/* `mapOf(a to b)`: the ONE-pair form Kotlin declares beside the vararg one. */
+KRef kt_map_of_pair(KRef pair) {
+    KRef map = kt_map_new();
+    (void)kt_map_put(map, kt_pair_first(pair), kt_pair_second(pair));
+    return map;
+}
+
+KRef kt_set_of(KRef elements) {
+    KRef set = kt_set_new();
+    kt_int length = kt_length_of(elements);
+    for (kt_int at = 0; at < length; at++) {
+        (void)kt_set_add(set, kt_elements_of(elements)[at]);
+        if (kt_pending_exception() != NULL) {
+            return set;
+        }
+    }
+    return set;
+}
+
+/* `m.keys`, `m.values` and `m.entries`. Kotlin's are VIEWS onto the map; these are snapshots, and
+   the difference shows only where a program keeps one across a write to the map. Answering a
+   snapshot is the same trade `toList()` on an array makes, and it is what lets each of them be an
+   object this runtime already has.
+
+   `keys` and `entries` APPEND rather than `add`: a map's keys are distinct already, and so are the
+   entries that carry them, so there is nothing for `add` to find. Its search compares against
+   everything inserted before, which made each view quadratic in the map's size -- and iterating a
+   map builds its entries afresh every time a loop starts. */
+KRef kt_map_keys(KRef self) {
+    KRef keys = kt_set_new();
+    KRef source = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(source);
+    for (kt_int at = 0; at < size; at++) {
+        kt_mutable_list_add(((KMap *)keys)->keys, kt_list_get(source, at));
+    }
+    return keys;
+}
+
+KRef kt_map_values(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef source = map->values == NULL ? map->keys : map->values;
+    kt_int size = kt_list_size(source);
+    KRef elements = kt_array_new(&kt_type_array, size);
+    KRef result = kt_list_of(elements);
+    for (kt_int at = 0; at < size; at++) {
+        kt_elements_of(elements)[at] = kt_list_get(source, at);
+    }
+    return result;
+}
+
+static KRef kt_map_entry_new(KRef key, KRef value) {
+    KMapEntry *entry = (KMapEntry *)kt_gc_allocate(&kt_type_map_entry, sizeof(KMapEntry));
+    entry->key = key;
+    entry->value = value;
+    return (KRef)entry;
+}
+
+KRef kt_map_entries(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef entries = kt_set_new();
+    kt_int size = kt_list_size(map->keys);
+    for (kt_int at = 0; at < size; at++) {
+        KRef key = kt_list_get(map->keys, at);
+        KRef value = map->values == NULL ? key : kt_list_get(map->values, at);
+        kt_mutable_list_add(((KMap *)entries)->keys, kt_map_entry_new(key, value));
+    }
+    return entries;
+}
+
+KRef kt_map_entry_key(KRef entry) { return ((const KMapEntry *)entry)->key; }
+
+KRef kt_map_entry_value(KRef entry) { return ((const KMapEntry *)entry)->value; }
+
+/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves.
+
+   A key comparison that THREW ends the call before the values are compared, whatever it answered:
+   `&&` alone stops only on false, and a program's `equals` may record an exception and return
+   true. */
+static kt_boolean kt_map_entry_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_map_entry) {
+        return false;
+    }
+    const KMapEntry *a = (const KMapEntry *)self;
+    const KMapEntry *b = (const KMapEntry *)other;
+    if (!kt_equals(a->key, b->key) || kt_pending_exception() != NULL) {
+        return false;
+    }
+    return kt_equals(a->value, b->value);
+}
+
+/* A half whose `hashCode` or `toString` throws ends the call there and the other half is not
+   asked, as Kotlin's `k.hashCode() xor v.hashCode()` never reaches its right side either. */
+static kt_int kt_map_entry_hash_code(KRef self) {
+    const KMapEntry *entry = (const KMapEntry *)self;
+    kt_int key = entry->key == NULL ? 0 : kt_hash_code(entry->key);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    kt_int value = entry->value == NULL ? 0 : kt_hash_code(entry->value);
+    return key ^ value;
+}
+
+/* Either half's `toString` that throws answers NULL with the exception pending, as the map's own
+   rendering does; the value's failed answer is never joined into a text. */
+static KRef kt_map_entry_to_string(KRef self) {
+    const KMapEntry *entry = (const KMapEntry *)self;
+    KRef key = kt_to_string(entry->key);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef value = kt_to_string(entry->value);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(key, kt_string_utf8("=", 1));
+    return kt_string_plus(text, value);
+}
+
+/* Two maps are equal when they hold the same entries, whatever ORDER they hold them in — Kotlin's
+   `Map.equals` says nothing about order and a `LinkedHashMap` equals a `HashMap` of the same
+   entries. The hash is the sum of the entry hashes, which is order-independent for the same
+   reason.
+
+   Each key is looked up in the other map ONCE, and the value compared against what that one search
+   found. Asking twice -- `containsKey`, then `get` -- ran a stateful key comparison a second time,
+   and a second answer that threw left `get`'s NULL to be compared as though it were the value. A
+   comparison that threw ends the walk whatever it answered, key or value: a true answer after a
+   throw is no match to go on from. */
+static kt_boolean kt_map_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_map) {
+        return false;
+    }
+    const KMap *a = (const KMap *)self;
+    const KMap *b = (const KMap *)other;
+    if (kt_map_size(self) != kt_map_size(other)) {
+        return false;
+    }
+    kt_int size = kt_list_size(a->keys);
+    for (kt_int at = 0; at < size; at++) {
+        /* -1 when the search threw, so a raise stops here before any value is asked. */
+        kt_int found = kt_map_index_of(other, kt_list_get(a->keys, at));
+        if (found < 0) {
+            return false;
+        }
+        kt_boolean same = kt_equals(kt_list_get(a->values, at), kt_list_get(b->values, found));
+        if (!same || kt_pending_exception() != NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static kt_int kt_map_hash_code(KRef self) {
+    const KMap *map = (const KMap *)self;
+    kt_int size = kt_list_size(map->keys);
+    uint32_t total = 0;
+    for (kt_int at = 0; at < size; at++) {
+        KRef key = kt_list_get(map->keys, at);
+        KRef value = kt_list_get(map->values, at);
+        /* A `hashCode` that threw ends the sum there: neither the other half nor the entries
+           after it are asked, as in `kt_map_entry_hash_code`. */
+        uint32_t left = key == NULL ? 0u : (uint32_t)kt_hash_code(key);
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
+        uint32_t right = value == NULL ? 0u : (uint32_t)kt_hash_code(value);
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
+        total += left ^ right;
+    }
+    return (kt_int)total;
+}
+
+/* One key, value or element of a collection as its `toString` shows it. A collection that holds
+   ITSELF shows Kotlin's marker in its place -- `(this Map)` or `(this Collection)`, as
+   `AbstractMap` and `AbstractCollection` write -- because rendering it through its own `toString`
+   would render the collection again, without end. Only the collection itself is replaced: another
+   collection inside it renders as it always does. A rendering that throws answers NULL with the
+   exception pending, which the caller stops at. */
+static KRef kt_collection_part_to_string(KRef self, KRef part, const char *marker,
+                                         kt_int marker_length) {
+    if (part == self) {
+        return kt_string_utf8(marker, marker_length);
+    }
+    KRef text = kt_to_string(part);
+    return kt_pending_exception() != NULL ? NULL : text;
+}
+
+#define KT_THIS_MAP "(this Map)", (kt_int)(sizeof("(this Map)") - 1)
+#define KT_THIS_COLLECTION "(this Collection)", (kt_int)(sizeof("(this Collection)") - 1)
+
+/* `{a=1, b=2}`, in insertion order, each half rendered through its own `toString`. A half whose
+   `toString` throws ends the rendering there; the entries after it are not asked. */
+static KRef kt_map_to_string(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef text = kt_string_utf8("{", 1);
+    kt_int size = kt_list_size(map->keys);
+    for (kt_int at = 0; at < size; at++) {
+        if (at != 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        KRef key = kt_collection_part_to_string(self, kt_list_get(map->keys, at), KT_THIS_MAP);
+        if (key == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, key);
+        text = kt_string_plus(text, kt_string_utf8("=", 1));
+        KRef value =
+            kt_collection_part_to_string(self, kt_list_get(map->values, at), KT_THIS_MAP);
+        if (value == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, value);
+    }
+    return kt_string_plus(text, kt_string_utf8("}", 1));
+}
+
+/* Two sets are equal when each holds what the other does, whatever order; the hash is the sum of
+   the element hashes, which says the same thing. */
+static kt_boolean kt_set_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_set) {
+        return false;
+    }
+    if (kt_map_size(self) != kt_map_size(other)) {
+        return false;
+    }
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    for (kt_int at = 0; at < size; at++) {
+        /* A search that threw answers false and leaves the exception pending; the elements after
+           it are not looked for. */
+        if (!kt_set_contains(other, kt_list_get(keys, at))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static kt_int kt_set_hash_code(KRef self) {
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    uint32_t total = 0;
+    for (kt_int at = 0; at < size; at++) {
+        KRef element = kt_list_get(keys, at);
+        total += element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        /* A `hashCode` that threw ends the sum there, as `kt_map_hash_code`'s does. */
+        if (kt_pending_exception() != NULL) {
+            return 0;
+        }
+    }
+    return (kt_int)total;
+}
+
+/* `[a, b]` — a set renders as a collection does, which is what Kotlin's own answers. It renders
+   its elements itself rather than handing its keys list to the list's `toString`, because the
+   marker for a set that holds itself compares each element with the SET, which the list never
+   sees. */
+static KRef kt_set_to_string(KRef self) {
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    KRef text = kt_string_utf8("[", 1);
+    for (kt_int at = 0; at < size; at++) {
+        if (at != 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        KRef element =
+            kt_collection_part_to_string(self, kt_list_get(keys, at), KT_THIS_COLLECTION);
+        if (element == NULL) {
+            return NULL;
+        }
+        text = kt_string_plus(text, element);
+    }
+    return kt_string_plus(text, kt_string_utf8("]", 1));
+}
+
+#undef KT_THIS_COLLECTION
+#undef KT_THIS_MAP
+
+/* The companion object of a BUILT-IN type.
+   
+   Each is declared in no file krusty compiles and carries no state: every member of one is a
+   constant the frontend folds. So the only thing a program can observe is its IDENTITY, which the
+   corpus does — `o === Int.Companion`, and `Int` written as a value is the same object as
+   `Int.Companion`. One static object per companion gives exactly that: static storage, so the
+   collector never sees it as an allocation and the address is stable for the program's life, the
+   same way `kt_unit()` is.
+   
+   A DESCRIPTOR of its own per companion, never one shared: `Int.Companion === Long.Companion` must
+   be false, and a shared type would also make `is` answer for the wrong one. `kotlin.Any`'s vtable,
+   because a companion overrides none of the three. */
+#define KT_COMPANION(suffix, kotlin_name)                                                          \
+    const KType kt_type_##suffix##_companion = {                                                   \
+        kotlin_name, sizeof(kotlin_name) - 1, sizeof(KObject), 0,                                  \
+        0,           NULL,                    &kt_type_any,    kt_any_vtable,                      \
+        3,           0};                                                                           \
+    KRef kt_##suffix##_companion(void) {                                                           \
+        static KObject object = {{&kt_type_##suffix##_companion}, {{NULL, NULL, 0}}};              \
+        return &object;                                                                            \
+    }
+
+KT_COMPANION(byte, "kotlin.Byte.Companion")
+KT_COMPANION(short, "kotlin.Short.Companion")
+KT_COMPANION(int, "kotlin.Int.Companion")
+KT_COMPANION(long, "kotlin.Long.Companion")
+KT_COMPANION(char, "kotlin.Char.Companion")
+KT_COMPANION(boolean, "kotlin.Boolean.Companion")
+KT_COMPANION(float, "kotlin.Float.Companion")
+KT_COMPANION(double, "kotlin.Double.Companion")
+KT_COMPANION(string, "kotlin.String.Companion")
+
+#undef KT_COMPANION
+
+/* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
+   to. */
+KRef kt_unit(void) {
+    static KObject unit = {{&kt_type_unit}, {{NULL, NULL, 0}}};
+    return &unit;
+}
+
+/* ---- classes ------------------------------------------------------------------------------- */
+
+kt_boolean kt_any_equals(KRef self, KRef other) { return self == other; }
+
+/* Derived from the address. The collector never moves an object (conservative roots forbid it;
+   see krusty_gc.c), so an object's address is stable for its whole life and is a legitimate
+   identity hash. The shifts fold the aligned low bits and the high bits into the 32 that count. */
+kt_int kt_any_hash_code(KRef self) {
+    uintptr_t address = (uintptr_t)self;
+    return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
+}
+
+/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. The hash is asked through the
+   object's own `hashCode`, as `Any.toString` asks it, so a class that overrides only `hashCode`
+   reaches its override here -- and one that throws ends the rendering with NULL and the exception
+   pending, before the text is built. */
+KRef kt_any_to_string(KRef self) {
+    const KType *type = self->header.type;
+    uint32_t hash = (uint32_t)kt_hash_code(self);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    char digits[8];
+    kt_int digit_count = 0;
+    do {
+        uint32_t nibble = hash & 0xFu;
+        digits[digit_count++] = (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
+        hash >>= 4;
+    } while (hash != 0);
+    kt_int length = (kt_int)type->name_length + 1 + digit_count;
+    KByteArray *buffer = kt_bytes_new(length);
+    char *out = kt_bytes_of(buffer);
+    memcpy(out, type->name, type->name_length);
+    out[type->name_length] = '@';
+    for (kt_int i = 0; i < digit_count; i++) {
+        out[type->name_length + 1 + i] = digits[digit_count - 1 - i];
+    }
+    return kt_string_of((KRef)buffer, out, length);
+}
+
+static KRef kt_object_to_string(KRef value) {
+    const KType *type = value->header.type;
+    /* A type with no vtable (a hand-written test type) still renders as kotlin.Any would. */
+    if (type->vtable == NULL || type->vtable_length <= KT_SLOT_TO_STRING) {
+        return kt_any_to_string(value);
+    }
+    return ((KRef(*)(KRef))type->vtable[KT_SLOT_TO_STRING])(value);
+}
+
+kt_boolean kt_equals(KRef a, KRef b) {
+    if (a == NULL) {
+        return b == NULL;
+    }
+    const KType *type = a->header.type;
+    if (type->vtable == NULL) {
+        return a == b;
+    }
+    return ((kt_boolean(*)(KRef, KRef))type->vtable[KT_SLOT_EQUALS])(a, b);
+}
+
+kt_int kt_hash_code(KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    const KType *type = value->header.type;
+    if (type->vtable == NULL) {
+        return kt_any_hash_code(value);
+    }
+    return ((kt_int(*)(KRef))type->vtable[KT_SLOT_HASH_CODE])(value);
+}
+
+/* The bits `equals` and `hashCode` read from a floating-point value: every NaN collapsed to ONE.
+
+   This is `java.lang.Double.doubleToLongBits`, and the difference from `doubleToRawLongBits` is
+   the whole point. `0.0 / 0.0` produces a NaN with the sign bit SET on x86 (`fff8…`) where the
+   `Double.NaN` constant does not (`7ff8…`), so comparing raw bits answers false for two values
+   Kotlin calls equal — and hashes them differently, which would break the contract between them.
+   Kotlin has ONE NaN as far as `equals` is concerned, and this is where that is decided. */
+static uint64_t kt_double_bits(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
+        (bits & 0x000FFFFFFFFFFFFFULL) != 0) {
+        return 0x7FF8000000000000ULL;
+    }
+    return bits;
+}
+
+static uint32_t kt_float_bits(kt_float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
+        return 0x7FC00000u;
+    }
+    return bits;
+}
+
+
+/* Built-in values compare by value, as Kotlin's `==` on boxed values does: two `Int?` holding 3
+   are equal, and two strings with the same text are equal. */
+static kt_boolean kt_builtin_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    if (other == NULL || self->header.type != other->header.type) {
+        return false;
+    }
+    const KType *type = self->header.type;
+    if (type == &kt_type_string) {
+        if (self->as.string.byte_length != other->as.string.byte_length) {
+            return false;
+        }
+        for (kt_int i = 0; i < self->as.string.byte_length; i++) {
+            if (self->as.string.bytes[i] != other->as.string.bytes[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == &kt_type_boolean) {
+        return self->as.boolean_value == other->as.boolean_value;
+    }
+    if (type == &kt_type_char) {
+        return self->as.char_value == other->as.char_value;
+    }
+    /* An unsigned value is stored in the signed field of its width, and the descriptors were
+       already required to match above — so equality is the same bit comparison, and reading the
+       bits as a value rather than as a sign cannot change its answer. */
+    if (type == &kt_type_byte || type == &kt_type_ubyte) {
+        return self->as.byte_value == other->as.byte_value;
+    }
+    if (type == &kt_type_short || type == &kt_type_ushort) {
+        return self->as.short_value == other->as.short_value;
+    }
+    if (type == &kt_type_int || type == &kt_type_uint) {
+        return self->as.int_value == other->as.int_value;
+    }
+    if (type == &kt_type_long || type == &kt_type_ulong) {
+        return self->as.long_value == other->as.long_value;
+    }
+    /* Boxed floating-point values compare by BITS, which is what `equals` means in Kotlin and not
+       what `==` on two `Double`s means: `Double.NaN.equals(Double.NaN)` is true where
+       `Double.NaN == Double.NaN` is false, and `0.0.equals(-0.0)` is false where `0.0 == -0.0` is
+       true. The scalar comparison the generator emits for `==` is the other rule, and neither is
+       this one. */
+    if (type == &kt_type_double) {
+        return kt_double_bits(self->as.double_value) == kt_double_bits(other->as.double_value);
+    }
+    if (type == &kt_type_float) {
+        return kt_float_bits(self->as.float_value) == kt_float_bits(other->as.float_value);
+    }
+    /* kotlin.Unit: one instance, already handled by identity above. */
+    return false;
+}
+
+/* Kotlin's `hashCode` for the built-in values. A string hashes over its UTF-16 code units, as
+   Kotlin specifies, which the UTF-8 text is decoded into on the way. */
+static kt_int kt_builtin_hash_code(KRef self) {
+    const KType *type = self->header.type;
+    if (type == &kt_type_string) {
+        uint32_t hash = 0;
+        const unsigned char *bytes = (const unsigned char *)self->as.string.bytes;
+        kt_int length = self->as.string.byte_length;
+        kt_int at = 0;
+        while (at < length) {
+            uint32_t lead = bytes[at];
+            uint32_t code_point;
+            kt_int width;
+            if (lead < 0x80) {
+                code_point = lead;
+                width = 1;
+            } else if (lead < 0xE0) {
+                code_point = lead & 0x1F;
+                width = 2;
+            } else if (lead < 0xF0) {
+                code_point = lead & 0x0F;
+                width = 3;
+            } else {
+                code_point = lead & 0x07;
+                width = 4;
+            }
+            for (kt_int i = 1; i < width && at + i < length; i++) {
+                code_point = (code_point << 6) | (bytes[at + i] & 0x3Fu);
+            }
+            at += width;
+            if (code_point >= 0x10000) {
+                uint32_t offset = code_point - 0x10000;
+                hash = 31u * hash + (0xD800u + (offset >> 10));
+                hash = 31u * hash + (0xDC00u + (offset & 0x3FFu));
+            } else {
+                hash = 31u * hash + code_point;
+            }
+        }
+        return (kt_int)hash;
+    }
+    if (type == &kt_type_boolean) {
+        return self->as.boolean_value ? 1231 : 1237;
+    }
+    if (type == &kt_type_char) {
+        return (kt_int)self->as.char_value;
+    }
+    /* Kotlin defines each unsigned `hashCode` as the wrapped signed value's, so the grouping is
+       the specification and not a shortcut: `(-1).hashCode()` and `4294967295u.hashCode()` are
+       the same number. */
+    if (type == &kt_type_byte || type == &kt_type_ubyte) {
+        return (kt_int)self->as.byte_value;
+    }
+    if (type == &kt_type_short || type == &kt_type_ushort) {
+        return (kt_int)self->as.short_value;
+    }
+    if (type == &kt_type_int || type == &kt_type_uint) {
+        return self->as.int_value;
+    }
+    if (type == &kt_type_long || type == &kt_type_ulong) {
+        uint64_t bits = (uint64_t)self->as.long_value;
+        return (kt_int)(uint32_t)(bits ^ (bits >> 32));
+    }
+    /* Kotlin's answers for these are fixed — a program can print a hash — and they are the bits,
+       folded for a `Double` the way a `Long`'s are. */
+    if (type == &kt_type_double) {
+        /* Through the same canonicalization `equals` uses: two values that compare equal must hash
+           equal, and two NaNs do compare equal. */
+        uint64_t bits = kt_double_bits(self->as.double_value);
+        return (kt_int)(uint32_t)(bits ^ (bits >> 32));
+    }
+    if (type == &kt_type_float) {
+        return (kt_int)kt_float_bits(self->as.float_value);
+    }
+    return kt_any_hash_code(self);
+}
+
+kt_boolean kt_is_instance(KRef object, const KType *type) {
+    if (object == NULL) {
+        return false;
+    }
+    for (const KType *at = object->header.type; at != NULL; at = at->super) {
+        if (at == type) {
+            return true;
+        }
+        /* An interface is not on the super chain, so each type carries the ones it implements.
+           The list is already transitive, so this is a scan and not a second walk. */
+        for (uint32_t i = 0; i < at->interface_count; i++) {
+            if (at->interfaces[i] == type) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* A failed cast is `ClassCastException`, and a program is entitled to catch it. The wording is
+   Kotlin/Native's — `class A cannot be cast to class B`, both sides qualified — which is what the
+   corpus's `nativeCCEMessage` cases read.
+
+   Every intermediate stays in a local across the allocations that follow it, so the collector sees
+   each as a root while the next piece is built. */
+static void kt_fail_cast(KRef object, const KType *type) {
+    KRef from = object == NULL
+                    ? kt_string_utf8("null", 4)
+                    : kt_string_utf8(object->header.type->name, object->header.type->name_length);
+    KRef message = kt_string_plus(kt_string_utf8("class ", 6), from);
+    message = kt_string_plus(message, kt_string_utf8(" cannot be cast to class ", 25));
+    message = kt_string_plus(message, kt_string_utf8(type->name, type->name_length));
+    kt_throw(kt_throwable_new(&kt_type_class_cast_exception, message));
+}
+
+/* `a.compareTo(b)` where the static type says only `Comparable`.
+
+   The DESCRIPTOR says what to compare, exactly as `kt_equals` and `kt_to_string` read it, and only
+   the orders the RUNTIME defines are here: a boxed primitive at its own width — with Kotlin's total
+   order for the floating ones, where -0.0 sits below 0.0 and every NaN above everything — a string
+   by UTF-16 unit, and the unsigned integers read unsigned. A program's own `Comparable` is not
+   among them: an object of the program's could stand behind that type too and no static type tells
+   the two apart, so a file that declares one declines at the CALL SITE, where the type it named is
+   still in sight.
+
+   Each side is unboxed at its OWN descriptor's field, not through one reader: the boxes share a
+   union, so reading a `Byte`'s payload as an `Int` reads bytes that were never written.
+
+   Two values of different types have no order between them, which is what `Comparable<Any>` runs
+   into. The JVM raises `ClassCastException` there and so does this; `kt_throw` records it and comes
+   back, so the raise is followed by a return. */
+kt_int kt_compare_any(KRef a, KRef b) {
+    if (a == NULL || b == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    const KType *type = a->header.type;
+    if (type != b->header.type) {
+        kt_fail_cast(b, type);
+        return 0;
+    }
+    if (type == &kt_type_string) {
+        return kt_string_compare_to(a, b);
+    }
+    if (type == &kt_type_byte) {
+        return kt_compare_byte(kt_unbox_byte(a), kt_unbox_byte(b));
+    }
+    if (type == &kt_type_short) {
+        return kt_compare_short(kt_unbox_short(a), kt_unbox_short(b));
+    }
+    if (type == &kt_type_int) {
+        return kt_compare_int(kt_unbox_int(a), kt_unbox_int(b));
+    }
+    if (type == &kt_type_long) {
+        return kt_compare_long(kt_unbox_long(a), kt_unbox_long(b));
+    }
+    if (type == &kt_type_char) {
+        return kt_compare_char(kt_unbox_char(a), kt_unbox_char(b));
+    }
+    if (type == &kt_type_boolean) {
+        return kt_compare_boolean(kt_unbox_boolean(a), kt_unbox_boolean(b));
+    }
+    if (type == &kt_type_float) {
+        return kt_compare_float(kt_unbox_float(a), kt_unbox_float(b));
+    }
+    if (type == &kt_type_double) {
+        return kt_compare_double(kt_unbox_double(a), kt_unbox_double(b));
+    }
+    /* The unsigned four. Each box holds the signed type's bits, so the comparison is the one the
+       widths share once both sides are read as unsigned. */
+    if (type == &kt_type_ubyte || type == &kt_type_ushort || type == &kt_type_uint) {
+        uint32_t left = type == &kt_type_ubyte    ? (uint8_t)kt_unbox_ubyte(a)
+                        : type == &kt_type_ushort ? (uint16_t)kt_unbox_ushort(a)
+                                                  : (uint32_t)kt_unbox_uint(a);
+        uint32_t right = type == &kt_type_ubyte    ? (uint8_t)kt_unbox_ubyte(b)
+                         : type == &kt_type_ushort ? (uint16_t)kt_unbox_ushort(b)
+                                                   : (uint32_t)kt_unbox_uint(b);
+        return left < right ? -1 : (left > right ? 1 : 0);
+    }
+    if (type == &kt_type_ulong) {
+        uint64_t left = (uint64_t)kt_unbox_ulong(a);
+        uint64_t right = (uint64_t)kt_unbox_ulong(b);
+        return left < right ? -1 : (left > right ? 1 : 0);
+    }
+    KT_FAIL("krusty: a comparison of a type the runtime has no order for\n");
+    return 0;
+}
+
+KRef kt_cast(KRef object, const KType *type) {
+    if (object != NULL && !kt_is_instance(object, type)) {
+        kt_fail_cast(object, type);
+    }
+    return object;
+}
+
+KRef kt_cast_non_null(KRef object, const KType *type) {
+    if (object == NULL) {
+        // `null as String` is a NullPointerException NAMING the target type, not a
+        // ClassCastException — `null` is not an instance of anything, so there is no class to
+        // report as the source. kotlinc's exact wording, and its exact type.
+        KRef message =
+            kt_string_plus(kt_string_utf8("null cannot be cast to non-null type ", 37),
+                           kt_string_utf8(type->name, type->name_length));
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, message));
+        return object;
+    }
+    if (!kt_is_instance(object, type)) {
+        kt_fail_cast(object, type);
+    }
+    return object;
+}
+
+KRef kt_safe_cast(KRef object, const KType *type) {
+    return kt_is_instance(object, type) ? object : NULL;
+}
+
+/* `x!!` on a null: Kotlin's `NullPointerException`, with NO message — which is what kotlinc emits
+   and is observably different from the null CAST below, whose message names the target type. */
+KRef kt_not_null(KRef value) {
+    if (value == NULL) {
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+    }
+    return value;
+}
+
+/* The stdlib functions that throw. Each builds the exception Kotlin specifies, with Kotlin's own
+   message, and hands it to `kt_throw` — the same path a `throw` the program wrote itself takes.
+   That matters beyond tidiness: `error(m)` and `throw IllegalStateException(m)` are the same
+   exception in Kotlin, so a `catch` must not be able to tell them apart, and the surest way to
+   keep that true is for there to be only one object and one report.
+
+   These report the exception rather than a `krusty:` line of their own, which they did while there
+   was no `Throwable` to report. */
+#define KT_THROW(type, message) kt_throw(kt_throwable_new(&(type), message))
+
+/* A literal Kotlin message. */
+#define KT_MESSAGE(text) kt_string_utf8(text, (kt_int)(sizeof(text) - 1))
+
+void kt_not_implemented(void) {
+    KT_THROW(kt_type_not_implemented_error, KT_MESSAGE("An operation is not implemented."));
+}
+
+/* A message whose `toString` THROWS raises that exception instead of the thrower's own, as
+   Kotlin's does: the message is built before the exception that carries it, so what the rendering
+   raised is what propagates. `kt_throw` would overwrite it, so the thrower returns first. */
+void kt_not_implemented_reason(KRef reason) {
+    KRef text = kt_to_string(reason);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KT_THROW(kt_type_not_implemented_error,
+             kt_string_plus(KT_MESSAGE("An operation is not implemented: "), text));
+}
+
+/* `error(message)` takes an `Any`, and the exception carries its `toString` -- or, when that
+   throws, the exception is the one it threw, as above. */
+void kt_illegal_state(KRef message) {
+    KRef text = kt_to_string(message);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KT_THROW(kt_type_illegal_state_exception, text);
+}
+
+void kt_require(kt_boolean value) {
+    if (!value) {
+        KT_THROW(kt_type_illegal_argument_exception, KT_MESSAGE("Failed requirement."));
+    }
+}
+
+/* The overflow guard `forEachIndexed` and its relatives carry, spliced into a caller by an inline
+   stdlib body. Kotlin's own wording. */
+void kt_throw_index_overflow(void) {
+    KT_THROW(kt_type_arithmetic_exception, KT_MESSAGE("Index overflow has happened."));
+}
+
+/* `Property x should be initialized before get.` — Kotlin's own text for a `notNull` delegate read
+   before it was written. */
+static void kt_raise_uninitialized_property(KRef name) {
+    KRef message = kt_string_plus(KT_MESSAGE("Property "), kt_to_string(name));
+    message = kt_string_plus(message, KT_MESSAGE(" should be initialized before get."));
+    KT_THROW(kt_type_illegal_state_exception, message);
+}
+
+/* Kotlin's `assert(value)` and `assert(value) { message }`, on the failing side. The generator
+   branches on the condition and reaches this only when it is false, which is what keeps the message
+   from being computed on the passing path — Kotlin's `lazyMessage` is lazy exactly there.
+
+   The message arrives as the FUNCTION rather than as text, and is invoked here through the one slot
+   every function value declares, as `kt_lazy_value` invokes an initializer. NULL is the form that
+   wrote no message, whose text Kotlin fixes as "Assertion failed". */
+void kt_assertion_failed(KRef lazy_message) {
+    if (lazy_message == NULL) {
+        KT_THROW(kt_type_assertion_error, KT_MESSAGE("Assertion failed"));
+        return;
+    }
+    if (lazy_message->header.type->vtable == NULL ||
+        lazy_message->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: an assertion message is not a function value\n");
+    }
+    /* A message lambda that THROWS -- `assert(false) { error("boom") }` -- propagates what it
+       threw, and so does a message whose `toString` throws: Kotlin computes the message before it
+       constructs the `AssertionError`, so it never gets that far. `kt_throw` overwrites the pending
+       slot, so each step returns rather than raising over it. */
+    KRef message =
+        ((KRef(*)(KRef))lazy_message->header.type->vtable[KT_SLOT_INVOKE])(lazy_message);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KRef text = kt_to_string(message);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    KT_THROW(kt_type_assertion_error, text);
+}
+
+void kt_check(kt_boolean value) {
+    if (!value) {
+        KT_THROW(kt_type_illegal_state_exception, KT_MESSAGE("Check failed."));
+    }
+}
+
+#undef KT_MESSAGE
+#undef KT_THROW
+
+void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
+
+void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }
+
+/* A callable whose Kotlin type is `Nothing` returned instead of diverging, and the path that reads
+   its value has no value to read. The JVM throws `KotlinNothingValueException` here. This one is
+   NOT raised as a `Throwable`, unlike the stdlib's own throwers: reaching it means a callee lied
+   about its type, which is a defect in what was emitted rather than something a program is entitled
+   to catch, so it stays the loud, uncatchable failure a failed cast is. */
+void kt_nothing_value_returned(void) {
+    KT_FAIL("krusty: a `Nothing`-typed callable returned a value\n");
+}
+
