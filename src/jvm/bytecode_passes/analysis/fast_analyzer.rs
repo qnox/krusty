@@ -267,10 +267,10 @@ fn entry_frame<I: Interpreter>(
     let return_type = descriptors::return_type(&method.desc).ok_or_else(malformed)?;
     let mut locals = Vec::with_capacity(usize::from(method.max_locals));
     if method.access & ACC_STATIC == 0 {
-        locals.push(interpreter.new_parameter_value(&descriptors::of_internal_name(owner)));
+        locals.push(interpreter.new_parameter_value(0, &descriptors::of_internal_name(owner)));
     }
     for argument in descriptors::argument_types(&method.desc).ok_or_else(malformed)? {
-        locals.push(interpreter.new_parameter_value(argument));
+        locals.push(interpreter.new_parameter_value(locals.len(), argument));
         if descriptors::size(argument) == 2 {
             locals.push(interpreter.new_empty_value());
         }

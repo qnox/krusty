@@ -18,11 +18,14 @@
 //! this route do not fall back to the legacy byte splicer.
 
 mod callee_shape;
+mod functional_arguments;
+mod lambda_expansion;
 mod local_sorter;
 mod parameters;
 mod preparation;
 mod reified;
 mod returns;
+mod try_blocks;
 
 #[cfg(test)]
 mod tests;
@@ -31,7 +34,9 @@ use crate::jvm::method_node::{Insn, MethodNode, Node, ShapeError};
 
 pub(crate) use callee_shape::{
     can_inline_arguments_in_place, requires_empty_stack_on_entry, unsupported_shape,
+    UnsupportedShape,
 };
+pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 
 /// Why a body could not be inlined.
@@ -49,6 +54,12 @@ pub(crate) enum InlineError {
     MalformedReifiedMarker,
     /// The selected call did not publish the substitution named by a reified marker.
     MissingReifiedArgument(String),
+    /// The body's data flow could not be followed (`markPlacesForInlineAndRemoveInlinable`).
+    Analysis(String),
+    /// The body reads an inline lambda parameter as a value rather than invoking it.
+    LambdaParameterAccess,
+    /// An `invoke` passes a lambda more or fewer arguments than it takes.
+    LambdaArity,
 }
 
 /// Rewrite `callee` into the code that replaces a call to it: kotlinc's `MethodInliner.doInline`
@@ -56,23 +67,31 @@ pub(crate) enum InlineError {
 ///
 /// The result starts with that `nop` and ends with the label every `return` now jumps to. Its
 /// locals are the caller's: parameters are where `parameters` binds them and the body's own locals
-/// sit above `frame_base` plus the temporaries. Line numbers are still the callee's own lines (the
-/// call site maps them into the caller's source map); an `@InlineOnly` body has none, and no local
-/// variables either.
+/// sit above `frame_base` plus the temporaries. Each `invoke` of one of `lambdas` is replaced by
+/// that lambda's body. The body's line numbers go through `lines`, the lambdas' stay as they are;
+/// an `@InlineOnly` body has no lines of its own, and no local variables either.
 pub(in crate::jvm) fn inline(
     callee: &MethodNode,
     parameters: &Parameters,
+    lambdas: &[Lambda],
     inline_only: bool,
     frame_base: u16,
     reified_arguments: &crate::jvm::inline::ReifiedArguments,
+    lines: &mut dyn SourceLines,
 ) -> Result<MethodNode, InlineError> {
     let mut node = callee.clone();
     reified::specialize(&mut node, reified_arguments)?;
-    let mut node = preparation::prepare(&node, inline_only);
+    let mut node = preparation::prepare(&node, inline_only, parameters);
+    try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    preparation::remove_dead_code(&mut node)?;
-    local_sorter::sort(&mut node, parameters.args_size());
+    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
+    let context = lambda_expansion::Context {
+        parameters,
+        lambdas,
+        inline_only,
+    };
+    let mut node = lambda_expansion::expand(&node, &context, invokes, lines)?;
     preparation::remove_closure_assertions(&mut node)?;
     let mut node = parameters.remap(&node, frame_base)?;
     let end = node.new_label();

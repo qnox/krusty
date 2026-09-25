@@ -74,7 +74,8 @@ pub(crate) trait Interpreter {
         self.new_value(None)
             .expect("an interpreter's uninitialized value exists")
     }
-    fn new_parameter_value(&mut self, ty: &str) -> Self::V {
+    /// ASM's `newParameterValue`: the value a parameter of type `ty` holds on entry, in `slot`.
+    fn new_parameter_value(&mut self, _slot: usize, ty: &str) -> Self::V {
         self.new_value(Some(ty))
             .expect("a parameter's type is not void")
     }

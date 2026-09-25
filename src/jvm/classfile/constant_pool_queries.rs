@@ -4,8 +4,10 @@
 //! operand would change classfile identity. Keeping the queries together also keeps the classfile
 //! facade focused on construction and serialization.
 
-use super::{Const, ConstPool, VerifType};
-use crate::jvm::method_node::{Constant, ConstantPoolView, ConstantSink, Handle, PoolEntry};
+use super::{ClassWriter, Const, ConstPool, VerifType};
+use crate::jvm::method_node::{
+    CodeAttribute, Constant, ConstantPoolView, ConstantSink, Handle, MethodNode, PoolEntry,
+};
 use crate::jvm::names::classfile_internal_name;
 
 impl ConstPool {
@@ -155,6 +157,21 @@ impl<'a> PoolLookup<'a> {
             _ => self.method(&handle.owner, &handle.name, &handle.desc, handle.interface),
         };
         self.find(Const::MethodHandle(handle.kind, member))
+    }
+}
+
+impl ClassWriter {
+    /// Code this writer's builder emitted, read into a node against the writer's pool, which holds
+    /// every constant it names. `None` when the code cannot be decoded.
+    pub(crate) fn read_emitted_code(
+        &self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        code: &CodeAttribute<'_>,
+    ) -> Option<MethodNode> {
+        let pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        MethodNode::read_code(access, name, desc, code, &pool).ok()
     }
 }
 

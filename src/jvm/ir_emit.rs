@@ -67,6 +67,7 @@ mod scalar_coercion;
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
+mod value_class_descriptors;
 mod value_class_signatures;
 use try_emission::FinallyRegion;
 mod secondary_constructor;
@@ -577,6 +578,9 @@ pub struct EmitOptions {
     /// Independent `-Xlambdas` / `-Xsam-conversions` strategies for this invocation.
     pub lambda_modes: LambdaModes,
     pub inner_class_resolver: Option<InnerClassResolver>,
+    /// The file's value classes, for the redundant-boxing pass; the emitter fills it per file.
+    pub(crate) value_classes:
+        std::rc::Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     pub java_parameters: bool,
 }
@@ -613,6 +617,7 @@ impl Default for EmitOptions {
             java_parameters: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
+            value_classes: std::rc::Rc::default(),
         }
     }
 }
@@ -3669,6 +3674,7 @@ fn new_writer_generic(
     cw.set_source_file(opts.source_file.clone());
     cw.set_param_assertions(opts.param_assertions);
     cw.set_inner_class_resolver(opts.inner_class_resolver.clone());
+    cw.set_value_classes(opts.value_classes.clone());
     cw
 }
 
@@ -3902,6 +3908,10 @@ fn emit_all_with_class_meta_impl(
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let opts = &EmitOptions {
+        value_classes: std::rc::Rc::new(value_class_descriptors::of(ir)),
+        ..opts.clone()
+    };
     // Pass 1 (discovery): emit everything, recording live closure implementations and the subset that
     // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
@@ -12884,6 +12894,14 @@ impl<'a> Emitter<'a> {
         // high-water mark, so the spliced temporaries can never collide with a caller local (live or
         // reserved-but-unstored).
         let base = self.frame.size().max(code.max_locals);
+        let inline_call = bytecode_inline_call::ClasspathInlineCall {
+            call_expression,
+            target: &target,
+            args,
+            leading_non_argument_operands,
+            body: &body,
+            reified,
+        };
         // Route (b): a literal lambda argument → splice its body at the host's `FunctionN.invoke` site
         // (the unified host+lambda splice handles both the branchy `require(c){m}` and the branchless
         // `let`/`also`/… shapes).
@@ -12926,6 +12944,24 @@ impl<'a> Emitter<'a> {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
                 });
             if body_invokes_lambda && substitutes_literal {
+                let materialized_roles = materialized_roles.clone();
+                let route = self.lambda_call_route(&inline_call, &materialized_roles, code);
+                let reason = match route {
+                    Ok(bytecode_inline_call::LambdaCallRoute::MethodInliner(callee)) => {
+                        if let Err(reason) =
+                            self.inline_classpath_lambda_call(&inline_call, &callee, code)
+                        {
+                            self.run.set_inline_bail(reason);
+                        }
+                        return true;
+                    }
+                    Ok(bytecode_inline_call::LambdaCallRoute::Splice(reason)) => reason,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        return true;
+                    }
+                };
+                crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
                 return self.try_inline_unified(
                     call_expression,
                     name,
@@ -12943,27 +12979,10 @@ impl<'a> Emitter<'a> {
             // before MethodNode can own it. Keep only that still-unmigrated shape on the byte
             // bridge; no-lambda calls never fall back to it.
             return self
-                .try_inline_materialized_lambda_body(
-                    call_expression,
-                    &target,
-                    args,
-                    leading_non_argument_operands,
-                    &body,
-                    reified,
-                    code,
-                )
+                .try_inline_materialized_lambda_body(&inline_call, code)
                 .is_some();
         }
-        self.try_inline_classpath_body(
-            call_expression,
-            &target,
-            args,
-            leading_non_argument_operands,
-            &body,
-            reified,
-            code,
-        )
-        .is_some()
+        self.try_inline_classpath_body(&inline_call, code).is_some()
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
