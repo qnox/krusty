@@ -2,8 +2,9 @@
 name = "krusty-lsp"
 version = "0.0.1"
 edition = "2021"
-description = "Language Server Protocol implementation backed by the krusty compiler"
+description = "Kotlin language server (LSP) backed by krusty, a Kotlin compiler written in Rust"
 license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
 
 [dependencies]
 krusty = { path = "../.." }

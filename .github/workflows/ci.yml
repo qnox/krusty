@@ -275,7 +275,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
-          name: krusty ${{ steps.v.outputs.ver }}
+          name: "krusty ${{ steps.v.outputs.ver }}: Kotlin compiler written in Rust"
           target_commitish: ${{ github.sha }}
           files: dist/**
           fail_on_unmatched_files: true
