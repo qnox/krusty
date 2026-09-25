@@ -1646,7 +1646,6 @@ impl ClassWriter {
     /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
     /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. Declared methods
     /// and property accessors then intern at their own exact emission sites.
-    #[allow(clippy::too_many_arguments)]
     pub fn seed_plain_class_pool(
         &mut self,
         this_internal: &str,
