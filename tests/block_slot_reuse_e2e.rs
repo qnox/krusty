@@ -1,5 +1,7 @@
-//! Local slots of a block's variables are free again once the block ends, as kotlinc's `FrameMap`
-//! makes them: a sibling branch, the next loop, and the statements after a block reuse them.
+//! Local slots as kotlinc's `FrameMap` hands them out. A block's variables are free again once the
+//! block ends, so a sibling branch, the next loop, and the statements after a block reuse them. A
+//! variable is entered before its initializer, so the initializer's own locals and temporaries sit
+//! above it, and a `try` that is not `Unit` enters its result temporary after its body.
 
 use super::common;
 
@@ -358,3 +360,137 @@ fun bounded(c: Boolean, n: Int, m: Long): Long {\n\
     val after = r\n\
     return after\n\
 }\n";
+
+/// `r` is entered before its initializer, so the `when` subject `s` declared inside it takes the
+/// next slot, and `k` reuses it once the initializer's block has ended.
+#[test]
+fn a_when_subject_in_an_initializer_sits_above_the_variable() {
+    same_local_slots(
+        "slotOrderWhenSubject",
+        "fun peek() = 1\n\
+fun whenSubject(n: Int): String {\n\
+    val r = when (val s = peek() + n) {\n\
+        1 -> \"one\"\n\
+        else -> \"other $s\"\n\
+    }\n\
+    val k = r + \"!\"\n\
+    return k\n\
+}\n",
+        "SlotOrderWhenSubjectKt",
+    );
+}
+
+/// A branch of the initializer declares `t`: it sits above `r`, at slot 3, and `k` takes it back.
+#[test]
+fn an_initializer_block_local_sits_above_the_variable() {
+    same_local_slots(
+        "slotOrderBlockInit",
+        "fun blockInit(c: Boolean, n: Int): Int {\n\
+    val r = if (c) {\n\
+        val t = n + 1\n\
+        t * 2\n\
+    } else 0\n\
+    val k = r + 1\n\
+    return k\n\
+}\n",
+        "SlotOrderBlockInitKt",
+    );
+}
+
+/// The same with two-word locals: `d` takes 1-2 before its initializer, so `x` is at 3.
+#[test]
+fn a_wide_initializer_local_sits_above_the_wide_variable() {
+    same_local_slots(
+        "slotOrderWideInit",
+        "fun wideInit(c: Boolean): Double {\n\
+    val d = if (c) {\n\
+        val x = 1.5\n\
+        x * 2\n\
+    } else 0.0\n\
+    val after = d + 1\n\
+    return after\n\
+}\n",
+        "SlotOrderWideInitKt",
+    );
+}
+
+/// `s` = 1, the body's `x` = 2, the result temporary entered after the body takes 2 again, and the
+/// catch parameter `e` = 3.
+#[test]
+fn a_valued_try_enters_its_result_temporary_after_its_body() {
+    same_local_slots(
+        "slotOrderValuedTry",
+        "fun valuedTry(n: Int): String {\n\
+    val s = try {\n\
+        val x = n + 1\n\
+        \"a$x\"\n\
+    } catch (e: RuntimeException) {\n\
+        \"e\"\n\
+    }\n\
+    return s\n\
+}\n",
+        "SlotOrderValuedTryKt",
+    );
+}
+
+/// A valued `try` whose body throws still enters its (`String`) result temporary after the body.
+#[test]
+fn a_valued_try_with_a_throwing_body_enters_its_result_temporary_after_it() {
+    same_local_slots(
+        "slotOrderThrowingTry",
+        "fun throwingTry(n: Int): String {\n\
+    val s = try {\n\
+        val x = n + 1\n\
+        throw IllegalStateException(\"m$x\")\n\
+    } catch (e: IllegalStateException) {\n\
+        \"e\"\n\
+    }\n\
+    return s\n\
+}\n",
+        "SlotOrderThrowingTryKt",
+    );
+}
+
+/// The variable's slot is entered before a branchy initializer but stored only at its end, so every
+/// frame recorded inside the initializer — a loop head, a handler, a `when` merge, a safe-call exit
+/// — must read it as unassigned, including a two-word one.
+#[test]
+fn branchy_initializers_verify_with_the_variable_entered_first() {
+    let src = "fun parse(s: String?): Int {\n\
+    val total: Long = run {\n\
+        var acc = 0L\n\
+        var i = 0\n\
+        while (i < 3) {\n\
+            acc += try { (s ?: \"x\").toInt().toLong() } catch (e: NumberFormatException) { -1L }\n\
+            i++\n\
+        }\n\
+        acc\n\
+    }\n\
+    val kind = when {\n\
+        total > 0 -> { val half = total / 2; \"pos$half\" }\n\
+        total < 0 -> s?.length?.let { \"neg$it\" } ?: \"neg\"\n\
+        else -> \"zero\"\n\
+    }\n\
+    val d = if (kind.length > 3) { val w = kind.length * 1.5; w } else 0.0\n\
+    return (total + kind.length + d.toLong()).toInt()\n\
+}\n\
+fun guarded(n: Int): String {\n\
+    val s = try {\n\
+        val x = 10 / n\n\
+        \"v$x\"\n\
+    } finally {\n\
+        val f = n + 1\n\
+        println(f)\n\
+    }\n\
+    val after = s + \"!\"\n\
+    return after\n\
+}\n\
+fun box(): String {\n\
+    val a = parse(\"4\")\n\
+    val b = parse(null)\n\
+    val c = guarded(5)\n\
+    val thrown = try { guarded(0) } catch (e: ArithmeticException) { \"thrown\" }\n\
+    return if (a == 22 && b == 0 && c == \"v2!\" && thrown == \"thrown\") \"OK\" else \"FAIL: $a $b $c $thrown\"\n\
+}\n";
+    assert_eq!(run(src), "OK");
+}

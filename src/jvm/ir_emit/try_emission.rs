@@ -105,8 +105,6 @@ impl Emitter<'_> {
     ) {
         let rt = ir_ty_to_jvm(result);
         let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
-        let result_temp = (!is_stmt).then(|| self.frame.enter_temp(TempRole::TryResult, rt));
-        let result_slot = result_temp.as_ref().map(TempSlot::slot);
         // A `try` with a `finally` reserves its two slots HERE, before anything inside it is
         // emitted, because that is where kotlinc reserves them: the return value a `return` out of
         // the `try` parks while the finalizer runs, then the exception the catch-all parks while
@@ -166,27 +164,36 @@ impl Emitter<'_> {
             });
             self.return_finalizers.push(finalizer);
         }
-        if is_stmt || body_diverges {
-            // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
-            self.emit(body, code);
-        } else {
+        let stores_body = !is_stmt && !body_diverges;
+        if stores_body {
             self.emit_value(body, code);
             // kotlinc materializes the body and every catch at the `try`'s own type before the
             // store (`StackValue.coerce`), so a subclass (`Right` in an `Either`-typed `try`) is
             // cast up to it. The written frames merge the stored classes at `Object`, which only
             // that cast keeps assignable to the result's type.
             self.adapt_physical_operand_for(body, self.value_ty(body), rt, code);
+        } else {
+            // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
+            self.emit(body, code);
+        }
+        // kotlinc's `visitTry` enters a result temporary for every `try` that is not `Unit` once
+        // the body is emitted, so it takes the slot the body's locals have just left and the catch
+        // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores.
+        let result_temp = (rt != Ty::Unit).then(|| {
+            let temp_ty = if is_stmt {
+                Ty::obj("java/lang/Void")
+            } else {
+                rt
+            };
+            self.frame.enter_temp(TempRole::TryResult, temp_ty)
+        });
+        let result_slot = result_temp
+            .as_ref()
+            .filter(|_| !is_stmt)
+            .map(TempSlot::slot);
+        if stores_body {
             store(rt, result_slot.unwrap(), code);
         }
-        // kotlinc enters a result temporary for every `try` that is not `Unit`, once the body is
-        // emitted. A `Nothing` one's is a `java/lang/Void` nothing stores, but it still takes the
-        // slot the body's locals have just left, so the catch parameters sit above it. A valued
-        // `try`'s temporary is still entered before its body (moved with 4d, when the variable it
-        // initializes is entered before it too).
-        let void_result = (rt == Ty::Nothing).then(|| {
-            self.frame
-                .enter_temp(TempRole::TryResult, Ty::obj("java/lang/Void"))
-        });
         if let Some(finalizer) = finally {
             self.return_finalizers.pop();
             // The normal-path copy of this finalizer is emitted next and must lie outside its own
@@ -428,10 +435,7 @@ impl Emitter<'_> {
             self.frame.keep_for_method(parked);
         }
         // Newest first, as they were entered.
-        for temp in [void_result, own_return_spill, result_temp]
-            .into_iter()
-            .flatten()
-        {
+        for temp in [result_temp, own_return_spill].into_iter().flatten() {
             self.frame.leave_temp(temp);
         }
     }
