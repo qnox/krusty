@@ -6179,6 +6179,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
   `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
+  range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
+  the range: the builtin one for strings and boxed primitives, and the class's `compareTo` for a
+  program's own `Comparable`. The runtime never rediscovers the order from the bounds' descriptors,
+  which know only the builtin types. `isEmpty` is `start > end`; `contains(v)` asks `v` against
+  `start` and then `end`, as Kotlin's class does. A `compareTo` that raises ends the member there:
+  `contains` makes no second comparison, and neither member answers `true` for a comparison that
+  raised. `equals`, `hashCode` and `toString` stop likewise at the first bound member that raises.
+  Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`).
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
@@ -6192,6 +6201,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
+  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
+  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
+  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
+  so its name is Java's.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`).
 
 ## 8. Success criteria for the PoC
 

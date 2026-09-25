@@ -1069,14 +1069,27 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
     return self->as.string.bytes;
 }
 
+/* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
+   one is not read as zero: Kotlin/JVM's builder allocates its storage as `new byte[capacity]`, so
+   `StringBuilder(-1)` throws that allocation's `NegativeArraySizeException`, whose message is the
+   capacity in decimal, and makes no builder. The same is raised here before the builder is
+   allocated, and the NULL returned is never read: the call site tests for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
+    if (capacity < 0) {
+        /* An `Int` is at most eleven bytes in decimal, the sign included: `-2147483648`. */
+        KByteArray *digits = kt_bytes_new(11);
+        kt_int length = kt_render_long(capacity, kt_bytes_of(digits));
+        KRef message = kt_string_of((KRef)digits, kt_bytes_of(digits), length);
+        kt_throw(kt_throwable_new(&kt_type_negative_array_size_exception, message));
+        return NULL;
+    }
     KStringBuilder *builder =
         (KStringBuilder *)kt_gc_allocate(&kt_type_string_builder, sizeof(KStringBuilder));
     builder->byte_length = 0;
     /* Stored before the array is allocated, so a collection triggered by that allocation never
        traces an uninitialized field. */
     builder->storage = NULL;
-    builder->storage = (KRef)kt_bytes_new(capacity > 0 ? capacity : 0);
+    builder->storage = (KRef)kt_bytes_new(capacity);
     return (KRef)builder;
 }
 
@@ -1234,6 +1247,11 @@ KRef kt_string_builder_append(KRef self, KRef value) {
    target: `StringBuilder.appendLine` is specified as `\n` and not as the platform separator. */
 KRef kt_string_builder_append_line(KRef self, KRef value) {
     self = kt_string_builder_append(self, value);
+    /* The append stopped on an exception the value's `toString` threw, leaving the builder as it
+       was; the newline stops there too, or the builder the caller catches it around has changed. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
     kt_string_builder_reserve(self, 1);
     KStringBuilder *builder = (KStringBuilder *)self;
     kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
@@ -2449,8 +2467,12 @@ static KRef kt_floating_range_to_string(KRef self) {
 
    `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
    machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
-   `ClosedRange<T>`; it holds the two bounds as OBJECTS and asks each one how it compares, which is
-   exactly what `kt_compare_any` does here.
+   `ClosedRange<T>`; it holds the two bounds as OBJECTS and orders them by `T`'s `compareTo`, which
+   the range carries: the generator picked it where the range was built (see the header).
+
+   A program's `compareTo`, `equals`, `hashCode` and `toString` are the program's code, and any of
+   them may raise. Each member stops at the first one that does and answers nothing further, as
+   Kotlin's own members do: the exception propagates out of them before anything else runs.
 
    No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
    there is nothing to step by. A pair of bounds and the question `value in it`. */
@@ -2458,6 +2480,7 @@ typedef struct KComparableRange {
     KObjectHeader header;
     KRef start;
     KRef end;
+    kt_compare_fn compare;
 } KComparableRange;
 
 static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
@@ -2482,25 +2505,33 @@ const KType kt_type_comparable_range = {
     .vtable_length = 3,
 };
 
-KRef kt_comparable_range(KRef start, KRef end) {
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {
     KComparableRange *range =
         (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
     range->start = start;
     range->end = end;
+    range->compare = compare;
     return (KRef)range;
 }
 
 /* `start > end`, which is Kotlin's own `isEmpty` for this class. */
 kt_boolean kt_comparable_range_is_empty(KRef range) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(self->start, self->end) > 0;
+    kt_int order = self->compare(self->start, self->end);
+    return kt_pending_exception() == NULL && order > 0;
 }
 
 /* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
-   asks the same way round, which matters for a `compareTo` that is not symmetric. */
+   asks the same way round, which matters for a `compareTo` that is not symmetric. A first
+   comparison that raises is the answer: the second never runs. */
 kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(value, self->start) >= 0 && kt_compare_any(value, self->end) <= 0;
+    kt_int from_start = self->compare(value, self->start);
+    if (kt_pending_exception() != NULL || from_start < 0) {
+        return false;
+    }
+    kt_int to_end = self->compare(value, self->end);
+    return kt_pending_exception() == NULL && to_end <= 0;
 }
 
 KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
@@ -2514,27 +2545,56 @@ static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_comparable_range) {
         return false;
     }
-    if (kt_comparable_range_is_empty(self) && kt_comparable_range_is_empty(other)) {
+    kt_boolean self_empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    kt_boolean other_empty = kt_comparable_range_is_empty(other);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    if (self_empty && other_empty) {
         return true;
     }
     const KComparableRange *a = (const KComparableRange *)self;
     const KComparableRange *b = (const KComparableRange *)other;
-    return kt_equals(a->start, b->start) && kt_equals(a->end, b->end);
+    kt_boolean starts = kt_equals(a->start, b->start);
+    if (kt_pending_exception() != NULL || !starts) {
+        return false;
+    }
+    kt_boolean ends = kt_equals(a->end, b->end);
+    return kt_pending_exception() == NULL && ends;
 }
 
 static kt_int kt_comparable_range_hash_code(KRef self) {
-    if (kt_comparable_range_is_empty(self)) {
+    kt_boolean empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    if (empty) {
         return -1;
     }
     const KComparableRange *range = (const KComparableRange *)self;
-    return (kt_int)(31u * (uint32_t)kt_hash_code(range->start) +
-                    (uint32_t)kt_hash_code(range->end));
+    kt_int start = kt_hash_code(range->start);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    kt_int end = kt_hash_code(range->end);
+    return (kt_int)(31u * (uint32_t)start + (uint32_t)end);
 }
 
 static KRef kt_comparable_range_to_string(KRef self) {
     const KComparableRange *range = (const KComparableRange *)self;
-    KRef text = kt_string_plus(kt_to_string(range->start), kt_string_utf8("..", 2));
-    return kt_string_plus(text, kt_to_string(range->end));
+    KRef start = kt_to_string(range->start);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(start, kt_string_utf8("..", 2));
+    KRef end = kt_to_string(range->end);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    return kt_string_plus(text, end);
 }
 
 

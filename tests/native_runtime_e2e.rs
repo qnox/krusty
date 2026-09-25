@@ -267,6 +267,16 @@ fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
 }
 
 #[test]
+fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_line_throwing_to_string");
+}
+
+#[test]
+fn a_negative_builder_capacity_throws_negative_array_size_exception() {
+    run_driver("builder_negative_capacity");
+}
+
+#[test]
 fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
     run_driver("builder_from_program_char_sequence");
 }
@@ -284,6 +294,11 @@ fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
 #[test]
 fn a_progression_renders_compares_and_hashes_with_its_step() {
     run_driver("range_progression_members");
+}
+
+#[test]
+fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
+    run_driver("comparable_range_program_type");
 }
 
 #[test]
