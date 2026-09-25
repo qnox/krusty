@@ -770,26 +770,17 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     // `isOperator` (bit 8) — only `@Metadata` carries it; without it a consumer rejects the
     // conventional call form (`recv(args)`, `a[i]`) with "expression is not callable", and
     // convention resolution (`getValue`/`provideDelegate`/`invoke`) cannot filter on it.
-    let operator: u64 = if ir.operator_fns.contains(&fid) {
-        1 << 8
-    } else {
-        0
-    };
+    let operator = u64::from(ir.operator_fns.contains(&fid)) << 8;
     // `isInfix` (bit 9) — same metadata-only channel as `isOperator`: without it a consumer
     // rejects the `a f b` call form.
-    let infix: u64 = if ir.infix_fns.contains(&fid) {
-        1 << 9
-    } else {
-        0
-    };
+    let infix = u64::from(ir.infix_fns.contains(&fid)) << 9;
     // `isInline` (bit 10) is a Kotlin declaration capability, not a bytecode access flag. It must
     // survive class metadata so downstream frontends can select and splice member inline bodies.
-    let inline: u64 = if ir.inline_fns.contains(&fid) {
-        1 << 10
-    } else {
-        0
-    };
-    (visibility << 1) | (modality << 4) | operator | infix | inline
+    let inline = u64::from(ir.inline_fns.contains(&fid)) << 10;
+    let return_value_status = ir.fn_return_value_statuses.get(&fid).map_or(0, |status| {
+        status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
+    });
+    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
@@ -1280,6 +1271,7 @@ fn build_class_metadata(
             (
                 property.source_order,
                 PropMeta {
+                    return_value_status: property.return_value_status,
                     spellings: ir
                         .prop_declared_spellings
                         .get(&(c.fq_name_id(), property.name.clone()))
@@ -1382,6 +1374,7 @@ fn build_class_metadata(
         declared_props.push((
             prop.source_order,
             PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: prop.name.clone(),
                 ty: prop.ty,
@@ -1432,6 +1425,7 @@ fn build_class_metadata(
         };
         let ext_delegate = ext.delegate_field.and_then(|i| c.fields.get(i as usize));
         props.push(PropMeta {
+            return_value_status: Default::default(),
             spellings: ir
                 .prop_declared_spellings
                 .get(&(c.fq_name_id(), ext.name.clone()))

@@ -285,6 +285,9 @@ pub struct LibraryMember {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Compiler-known strict-equality refinement for the `equals(Any?)` parameter.
     pub equality_bound: Option<Ty>,
+    /// The Kotlin declaration's recorded return-value status; `None` for a declaration without
+    /// Kotlin metadata (a Java member), which records none of its own.
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
     /// File-independent values for source defaults, parallel to [`Self::params`]. Presence and named
     /// argument mapping remain in [`Self::call_sig`]; this payload is consumed only after selection.
     pub default_values: Vec<Option<DefaultValue>>,
@@ -768,6 +771,7 @@ impl LibraryMember {
             annotations: Vec::new(),
             contract: None,
             equality_bound: None,
+            return_value_status: None,
             default_values: Vec::new(),
             default_realization: None,
             constructor_realization: None,
@@ -2179,6 +2183,7 @@ impl FunctionInfo {
         candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.is_final = member.is_final();
+        candidate.flags.return_value_status = member.return_value_status;
         candidate.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;
@@ -2231,6 +2236,7 @@ impl FunctionInfo {
         member.set_is_infix(self.flags.infix);
         member.set_is_abstract(self.flags.is_abstract);
         member.set_is_final(self.flags.is_final);
+        member.return_value_status = self.flags.return_value_status;
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
         // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
         // builtin's JVM owner has no class file on a JDK-less classpath). Round-tripping the member
@@ -2325,6 +2331,9 @@ pub struct FnFlags {
     /// The declaration cannot be overridden. This is source modality, independent of a target's
     /// physical access flags.
     pub is_final: bool,
+    /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:
+    /// its status is derived from its override edges after they are frozen.
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
 }
 
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
@@ -2486,6 +2495,8 @@ pub struct PropertyInfo {
     pub accessor_derived: bool,
     /// Semantic repeat-read stability, normalized by the declaration provider.
     pub read_stability: PropertyReadStability,
+    /// See [`LibraryMember::return_value_status`]; `None` for a Java or current-module property.
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
@@ -3063,6 +3074,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
         getter.compiler_intrinsic = Some(intrinsic);
         let property = PropertyInfo {
+            return_value_status: None,
             name: name.to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),

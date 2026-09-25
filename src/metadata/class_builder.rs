@@ -37,6 +37,8 @@ pub struct PropMeta {
     pub modifiers: crate::ir::IrPropertyModifiers,
     /// A `var` whose setter alone is `private`.
     pub setter_is_private: bool,
+    /// Kotlin return-value status, recorded in `Property.flags` bits 17-18.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Whether this declaration owns a backing field. A concrete computed property has accessor code
     /// but no field, just like an abstract property has no field, so modality cannot encode this fact.
     pub has_backing_field: bool,
@@ -295,6 +297,7 @@ fn property_flags(prop: &PropMeta) -> u64 {
         } else {
             0
         }
+        | prop.return_value_status.metadata_value() << property_flags::RETURN_VALUE_STATUS_SHIFT
 }
 
 /// kotlinc's name for a setter value parameter source did not name
@@ -1478,6 +1481,7 @@ mod tests {
     fn const_property_flags_preserve_visibility() {
         let flags = |visibility| {
             property_flags(&PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
@@ -1552,6 +1556,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
@@ -1618,6 +1623,7 @@ mod tests {
                 is_var: true,
                 has_constant: false,
                 is_const: false,
+                return_value_status: Default::default(),
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
                 setter_is_private: true,
@@ -1795,6 +1801,7 @@ mod tests {
         ];
         let props = vec![
             PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
@@ -1820,6 +1827,7 @@ mod tests {
                 moved_from_interface_companion: false,
             },
             PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "y".into(),
                 ty: Ty::String,
@@ -1894,6 +1902,7 @@ mod tests {
             &[("r".into(), list_string)],
             "(Ljava/util/List;)V",
             &[PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "r".into(),
                 ty: list_string,
@@ -2047,6 +2056,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
@@ -2108,6 +2118,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                return_value_status: Default::default(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
@@ -2177,6 +2188,7 @@ mod tests {
             "(ILjava/lang/String;)V",
             &[
                 PropMeta {
+                    return_value_status: Default::default(),
                     spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "x".into(),
                     ty: Ty::Int,
@@ -2202,6 +2214,7 @@ mod tests {
                     moved_from_interface_companion: false,
                 },
                 PropMeta {
+                    return_value_status: Default::default(),
                     spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "y".into(),
                     ty: Ty::String,

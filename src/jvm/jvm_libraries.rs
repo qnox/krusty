@@ -841,6 +841,7 @@ impl JvmLibraries {
                     infix: meta.is_infix,
                     is_abstract: false,
                     is_final: true,
+                    return_value_status: None,
                 },
                 annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
@@ -903,6 +904,7 @@ impl JvmLibraries {
                 infix: builtin.is_infix,
                 is_abstract: false,
                 is_final: true,
+                return_value_status: None,
             };
             function.annotations = Vec::new();
             function.callable.compiler_intrinsic =
@@ -1072,6 +1074,7 @@ impl JvmLibraries {
                     infix: function.is_infix(),
                     is_abstract: false,
                     is_final: function.is_final(),
+                    return_value_status: Some(function.return_value_status),
                 },
                 annotations: function.annotations.clone(),
                 ..FunctionInfo::plain(
@@ -1155,6 +1158,7 @@ impl JvmLibraries {
                 })
             });
             props.push(PropertyInfo {
+                return_value_status: Some(property.return_value_status),
                 name: property.name.clone(),
                 kind: PropKind::Extension,
                 receiver: property_gsig
@@ -1900,6 +1904,7 @@ impl JvmLibraries {
                     member.annotations = declaration.annotations.clone();
                     member.contract = declaration.contract.clone();
                     member.equality_bound = declaration.equality_bound;
+                    member.return_value_status = Some(declaration.return_value_status);
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
                     member.set_is_infix(declaration.is_infix());
@@ -3630,6 +3635,7 @@ impl JvmLibraries {
             setter
         });
         let mut property = PropertyInfo {
+            return_value_status: None,
             name: field.name,
             kind: PropKind::TopLevel,
             receiver: None,
@@ -3903,6 +3909,7 @@ impl JvmLibraries {
                         Some(callable)
                     });
                     overloads.push(PropertyInfo {
+                        return_value_status: Some(mp.return_value_status),
                         name: name.to_string(),
                         kind: PropKind::MemberExtension,
                         receiver: Some(receiver),
@@ -4042,6 +4049,7 @@ impl JvmLibraries {
                     Some(setter)
                 });
                 overloads.push(PropertyInfo {
+                    return_value_status: Some(mp.return_value_status),
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
@@ -4152,6 +4160,7 @@ impl JvmLibraries {
                 // of applicability, so an inaccessible declaration cannot hide an accessible bean
                 // property; when both apply, this later declaration wins the equal-priority tie.
                 overloads.push(PropertyInfo {
+                    return_value_status: None,
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
@@ -4208,6 +4217,7 @@ impl JvmLibraries {
                     .unwrap_or_else(|| function.ret.apply(getter.ret));
                 getter.ret = ty;
                 overloads.push(PropertyInfo {
+                    return_value_status: function.flags.return_value_status,
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(recv),
@@ -4286,6 +4296,7 @@ impl JvmLibraries {
                         .map_or(visibility, |setter| setter.visibility);
                     let setter = setter.map(|setter| setter.callable);
                     overloads.push(PropertyInfo {
+                        return_value_status: None,
                         name: name.to_string(),
                         kind: PropKind::Member,
                         receiver: Some(recv),
@@ -4756,6 +4767,7 @@ impl JvmLibraries {
                         infix: mf.is_infix(),
                         is_abstract: false,
                         is_final: mf.is_final(),
+                        return_value_status: Some(mf.return_value_status),
                     },
                     annotations: mf.annotations.clone(),
                     call_sig,
@@ -4926,6 +4938,7 @@ impl JvmLibraries {
                     Some(setter)
                 });
                 props.push(PropertyInfo {
+                    return_value_status: Some(mp.return_value_status),
                     name: name.to_string(),
                     kind: property_kind,
                     receiver,
@@ -5517,6 +5530,7 @@ impl JvmLibraries {
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
+                                return_value_status: m.return_value_status,
                             },
                             annotations: m.annotations.clone(),
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
@@ -6033,6 +6047,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     .map_or(function.visibility, |setter| setter.visibility);
                 let setter = setter.map(|setter| setter.callable);
                 overloads.push(crate::libraries::PropertyInfo {
+                    return_value_status: None,
                     name: property.to_owned(),
                     kind: crate::libraries::PropKind::Member,
                     receiver: Some(receiver),

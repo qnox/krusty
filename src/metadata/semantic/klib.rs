@@ -803,6 +803,7 @@ struct SemanticFunctionShape {
     is_abstract: bool,
     is_operator: bool,
     is_infix: bool,
+    return_value_status: crate::types::ReturnValueStatus,
 }
 
 /// Read the target-neutral declaration fields of a Kotlin `Function` message. JVM method
@@ -906,6 +907,11 @@ fn semantic_function_shape(
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_operator: flags & (1 << 8) != 0,
         is_infix: flags & (1 << 9) != 0,
+        return_value_status: modern_flags.map_or_else(Default::default, |flags| {
+            crate::types::ReturnValueStatus::from_metadata(
+                (flags >> crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
+            )
+        }),
     })
 }
 
@@ -1054,6 +1060,7 @@ fn semantic_function(
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.is_abstract,
+        return_value_status: function.return_value_status,
         formals: formals.clone(),
         ret_nullable,
         constant: None,
@@ -1199,6 +1206,11 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
+        return_value_status: modern_flags.map_or_else(Default::default, |flags| {
+            crate::types::ReturnValueStatus::from_metadata(
+                (flags >> crate::metadata::property_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
+            )
+        }),
         formals: formals.clone(),
         ret_nullable: ret.nullable(),
         constant: constant.clone(),

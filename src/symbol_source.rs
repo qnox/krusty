@@ -388,6 +388,7 @@ mod tests {
                             },
                             PropertySet {
                                 overloads: vec![PropertyInfo {
+                                    return_value_status: None,
                                     name: name.clone(),
                                     kind: PropKind::Member,
                                     receiver: None,
