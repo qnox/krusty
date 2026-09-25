@@ -50,7 +50,7 @@ impl Emitter<'_> {
         if physical.len() != args.len() {
             return None;
         }
-        let base = self.frame.size().max(code.max_locals);
+        let base = self.inline_splice_base();
         let frame = crate::jvm::inline::spliced_frame(body, target.splice_desc, &[], base)?;
         let probe = crate::jvm::inline::splice_unified(
             body,
@@ -130,6 +130,17 @@ impl Emitter<'_> {
         Some(())
     }
 
+    /// Where an inlined body's frame starts: kotlinc's frame size at the call, above every live
+    /// local and temporary. Not the method's `max_locals`: a block that ended before the call has
+    /// handed its slots back, and the inlined body reuses them as kotlinc's does.
+    fn inline_splice_base(&self) -> u16 {
+        self.temporaries
+            .live()
+            .into_iter()
+            .map(|(slot, ty)| slot + slot_words(ty))
+            .fold(self.frame.size(), u16::max)
+    }
+
     /// Inline `target` through the ported inliner. `None` when this path does not cover a live call;
     /// `Some(())` once the inlined code is written, or when the call is already unreachable and
     /// therefore needs no bytecode.
@@ -190,13 +201,7 @@ impl Emitter<'_> {
                 })
                 .collect(),
         };
-        // kotlinc's frame map: the inlined code starts above every live local and temporary.
-        let base = self
-            .temporaries
-            .live()
-            .into_iter()
-            .map(|(slot, ty)| slot + slot_words(ty))
-            .fold(self.frame.size(), u16::max);
+        let base = self.inline_splice_base();
         let inlined = match inliner::inline(&callee, &parameters, target.inline_only, base, reified)
         {
             Ok(inlined) => inlined,
