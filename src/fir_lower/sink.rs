@@ -1158,9 +1158,6 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
-            if let Some(bound) = index.callable_equality_bound(callable.id) {
-                self.ir.fn_equality_bounds.insert(function, bound.get());
-            }
             if callable.shape.extension_receiver.is_some() && !companion_associated {
                 self.ir.extension_receiver_fns.insert(function);
             }

@@ -142,8 +142,6 @@ pub struct FnMeta {
     pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
-    /// Semantic `ValueParameter.equality_bound_type` for `equals`' first ordinary value parameter.
-    pub equality_bound: Option<Ty>,
 }
 
 impl FnMeta {
@@ -170,7 +168,6 @@ impl FnMeta {
             annotations: Vec::new(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
-            equality_bound: None,
         }
     }
 }
@@ -534,8 +531,10 @@ pub struct ClassTail<'a> {
     pub ctor_param_annotations: &'a [Vec<crate::ir::AppliedAnnotation>],
     /// A `@JvmInline value class`'s sole underlying property `(name, type)` → `Class`
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
-    /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
-    pub inline_underlying: Option<(&'a str, Ty)>,
+    /// `inlineClassUnderlyingType` (f18, an inline `Type`). kotlinc records the type only when the
+    /// property is not public API, since a reader otherwise finds it on the property itself, so
+    /// the type is `None` for a public or protected property. `None` for an ordinary class.
+    pub inline_underlying: Option<(&'a str, Option<Ty>)>,
     /// `Class` JvmProtoBuf extension field 104 (`jvmClassFlags`) — kotlinc emits `3` for an interface.
     /// `None` for every other kind (field omitted).
     pub jvm_class_flags: Option<u64>,
@@ -1123,23 +1122,6 @@ pub fn build_class(
             // f7 AFTER the type and vararg element: kotlinc interns a parameter's annotation class
             // id following that parameter's own name and type.
             append_param_annotations(st, &mut vp, annotations);
-            if i == m.context_count {
-                if let Some(bound) = m.equality_bound {
-                    let bound = crate::metadata::type_encoder::encode_declared_type(
-                        st,
-                        bound,
-                        crate::spelling::Spelled::NONE,
-                        &function_type_parameters,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "invalid emitted equality bound for '{class_internal}.{}': {error}",
-                            m.name
-                        )
-                    });
-                    vp.field_message(9, &bound);
-                }
-            }
             if i < m.context_count {
                 // Leading context parameters → Function.context_parameter = 13 (filled implicitly
                 // by callers), NOT the positional value_parameter list.
@@ -1264,9 +1246,12 @@ pub fn build_class(
 
     // A `@JvmInline value class`'s underlying property name + type (`Class` f17/f18). Interned with the
     // members (before the companion/nested tail) so the d2 order matches kotlinc.
-    let inline_underlying: Option<(u32, Pb)> = tail
-        .inline_underlying
-        .map(|(name, ty)| (st.local(name), type_pb(&mut st, ty, &class_type_parameters)));
+    let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
+        (
+            st.local(name),
+            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+        )
+    });
 
     // Nested + companion class names intern LAST (kotlinc's d2 places them after all members) —
     // NESTED names first, then the companion's, even though the companionObjectName FIELD serializes
@@ -1341,7 +1326,9 @@ pub fn build_class(
     }
     if let Some((name_id, ty_pb)) = &inline_underlying {
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17
-        class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
+        if let Some(ty_pb) = ty_pb {
+            class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
+        }
     }
     for annotation in &annotation_msgs {
         class.repeated_message(25, annotation); // Class.annotation = 25
@@ -1549,7 +1536,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component1".into(),
-                equality_bound: None,
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
@@ -1571,7 +1557,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component2".into(),
-                equality_bound: None,
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
@@ -1593,7 +1578,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
-                equality_bound: None,
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
                 ret: Ty::obj("demo/Point"),
                 type_params: Vec::new(),
@@ -1615,7 +1599,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
-                equality_bound: None,
                 params: vec![("other".into(), any_q)],
                 ret: Ty::Boolean,
                 type_params: Vec::new(),
@@ -1637,7 +1620,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
-                equality_bound: None,
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
@@ -1659,7 +1641,6 @@ mod tests {
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
-                equality_bound: None,
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),

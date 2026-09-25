@@ -536,9 +536,6 @@ impl IrFile {
                     .iter()
                     .flat_map(|parameter| parameter.bounds.iter().copied()),
             )?;
-            if let Some(bound) = function.equality_bound {
-                reject("package-function equality bound", bound)?;
-            }
         }
         for property in &self.package_properties {
             reject("package-property type", property.ty)?;
@@ -636,7 +633,6 @@ impl IrFile {
                 validate_member_extension(property)?;
             }
         }
-        reject_all("equality bound", self.fn_equality_bounds.values().copied())?;
         reject_all(
             "default-stub boxed parameter",
             self.default_stub_boxed_params

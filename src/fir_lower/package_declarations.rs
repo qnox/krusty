@@ -151,9 +151,6 @@ pub(super) fn publish(
                     vararg_index,
                     visibility: header.visibility,
                     spellings: index.declaration_spellings_primary_bound_first(declaration),
-                    equality_bound: index
-                        .callable_equality_bound(callable.id)
-                        .map(crate::fir::ResolvedTy::get),
                     source_order,
                 });
             }

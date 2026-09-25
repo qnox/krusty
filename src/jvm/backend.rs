@@ -1165,7 +1165,6 @@ pub fn facade_package_metadata_from_ir(
                     .map(|annotations| annotations.applications().cloned().collect())
                     .collect(),
                 no_infer_params,
-                equality_bound: declaration.equality_bound,
             }
         })
         .collect::<Vec<_>>();
