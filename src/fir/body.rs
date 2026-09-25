@@ -341,9 +341,9 @@ pub enum FirCallTarget {
         /// holder, while a source declaration remains ordinary nonvirtual dispatch until its
         /// target backend chooses an output mode.
         realization: crate::libraries::MemberRealization,
-        /// Provider-supplied physical descriptor, when the provider has one. A SOURCE declaration
-        /// leaves it empty: its descriptor is a target ABI choice derived from `parameters` and
-        /// `physical_result` at realization, not a semantic fact FIR may pin.
+        /// Provider-supplied physical descriptor, if any. A SOURCE declaration leaves it empty, and
+        /// the target derives it at realization from the declaration's own, unsubstituted
+        /// `parameters` and from `physical_result`. It is not a semantic fact FIR may pin.
         descriptor: String,
         /// The declaration's physical result type, which differs from `result` when the selected
         /// declaration erases or boxes (a generic override, a value class).

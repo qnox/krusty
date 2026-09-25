@@ -193,8 +193,9 @@ pub enum Callee {
         interface: bool,
     },
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
-    /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
-    /// receiver's override). `owner` is the base class declaring the method.
+    /// Used for `super.method(…)`, which dispatches through the source-level super qualifier directly
+    /// (skipping the receiver's override). `owner` is that qualifier unless JVM realization must name
+    /// a class declaration reached through an interface qualifier.
     /// A `super`-qualified call before target realization: the checker fixed one supertype
     /// declaration and dispatch is non-virtual, but the physical descriptor and whether the body
     /// lives in a JVM-default holder are target choices. `jvm::module_calls` realizes this into

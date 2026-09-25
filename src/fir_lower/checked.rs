@@ -637,8 +637,9 @@ impl BodyLowering<'_> {
                 source_member,
             } => {
                 let _ = result;
-                let checked = self.external_arguments(&call.arguments, parameters)?;
-                let parameter_types = parameters
+                let checked = self.external_arguments(&call.arguments, &call.parameter_types)?;
+                let parameter_types = call
+                    .parameter_types
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
