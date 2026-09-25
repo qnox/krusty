@@ -1248,6 +1248,8 @@ mod spill_order_e2e;
 mod spliced_expression_null_check_e2e;
 #[path = "stack_peephole_e2e.rs"]
 mod stack_peephole_e2e;
+#[path = "synthetic_method_pool_order_e2e.rs"]
+mod synthetic_method_pool_order_e2e;
 #[path = "temporary_elimination_e2e.rs"]
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]

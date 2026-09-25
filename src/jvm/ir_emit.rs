@@ -10314,7 +10314,6 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
 /// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
 /// `super`-callers need. Its `LineNumberTable` is one entry at the invoke instruction, on the
 /// interface's declaration line — measured, not inferred.
-#[allow(clippy::too_many_arguments)]
 fn emit_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
@@ -10335,6 +10334,8 @@ fn emit_jd_access_bridge(
     with_receiver.extend_from_slice(param_tys);
     let bridge_desc = method_descriptor(&with_receiver, ret);
     let name = format!("access${member_name}$jd");
+    cw.reserve_method_name(&name);
+    cw.reserve_descriptor(&bridge_desc);
     let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
     let mut code = CodeBuilder::new(argument_words);
     code.aload(0);
@@ -10388,6 +10389,8 @@ fn emit_default_stub_forward(ir: &IrFile, fid: u32, owner: &str, cw: &mut ClassW
     let stub_params = default_stub_params(ir, fid, Ty::obj(owner));
     let desc = method_descriptor(&stub_params, ret);
     let name = format!("{}$default", f.name);
+    cw.reserve_method_name(&name);
+    cw.reserve_descriptor(&desc);
     let argument_words = stub_params.iter().map(|t| slot_words(*t)).sum::<u16>();
     let mut code = CodeBuilder::new(argument_words);
     let mut slot = 0u16;
@@ -12065,7 +12068,11 @@ fn emit_default_stub(
         .expect("an extension receiver is a leading physical parameter");
     let ret = jvm_declared_ty(&f.ret);
     let owner_ty = Ty::obj(owner);
-
+    // kotlinc interns a synthetic's name and descriptor at its method header, before its body.
+    let stub_name = format!("{method_name}$default");
+    let stub_desc = method_descriptor(&default_stub_params(ir, fid, owner_ty), ret);
+    cw.reserve_method_name(&stub_name);
+    cw.reserve_descriptor(&stub_desc);
     let mut e = Emitter::new(
         ir,
         cw,
@@ -12154,14 +12161,7 @@ fn emit_default_stub(
     code.ensure_locals(e.frame.max());
     code.link();
 
-    let stub_params = default_stub_params(ir, fid, owner_ty);
-    let desc = method_descriptor(&stub_params, ret);
-    e.cw.add_method(
-        default_stub_access(ir, fid),
-        &format!("{method_name}$default"),
-        &desc,
-        &code,
-    );
+    e.cw.add_method(default_stub_access(ir, fid), &stub_name, &stub_desc, &code);
     // kotlinc gives the synthetic a one-entry LineNumberTable at the function's DECLARATION line
     // (`fn_sig_lines`) — not the body-attributed `fn_decl_lines`, which points at an expression
     // body's own line when the signature wraps.
@@ -12170,7 +12170,7 @@ fn emit_default_stub(
         .get(&fid)
         .or_else(|| ir.fn_decl_lines.get(&fid))
     {
-        e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
+        e.cw.set_method_lines(&stub_name, &stub_desc, &[(0, line)]);
     }
 }
 
