@@ -1,0 +1,48 @@
+0: aload 0
+1: getfield AKt$f$1.L$0:Ljava/lang/Object;
+2: checkcast java/lang/String
+3: astore 2
+4: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+5: astore 3
+6: aload 0
+7: getfield AKt$f$1.label:I
+8: tableswitch 0..1 [@9, @28] default @34
+9: aload 1
+10: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+11: aload 2
+12: invokestatic AKt.use(Ljava/lang/String;)V
+13: aload 0
+14: checkcast kotlin/coroutines/Continuation
+15: aload 0
+16: aload 2
+17: invokestatic kotlin/coroutines/jvm/internal/SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;
+18: putfield AKt$f$1.L$0:Ljava/lang/Object;
+19: aload 0
+20: iconst_1
+21: putfield AKt$f$1.label:I
+22: invokestatic AKt.leaf(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+23: dup
+24: aload 3
+25: if_acmpne @31
+26: aload 3
+27: areturn
+28: aload 1
+29: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+30: aload 1
+31: pop
+32: getstatic kotlin/Unit.INSTANCE:Lkotlin/Unit;
+33: areturn
+34: new java/lang/IllegalStateException
+35: dup
+36: ldc "call to 'resume' before 'invoke' with coroutine"
+37: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+38: athrow
+line 3: 5
+line 4: 11
+line 5: 13
+line 3: 26
+line 6: 31
+line 3: 34
+local this LAKt$f$1; 0..39 slot 0
+local $result Ljava/lang/Object; 0..39 slot 1
+local s Ljava/lang/String; 5..39 slot 2

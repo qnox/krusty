@@ -1,0 +1,80 @@
+0: aload 0
+1: getfield AKt$h$1.I$0:I
+2: istore 2
+3: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+4: astore 5
+5: aload 0
+6: getfield AKt$h$1.label:I
+7: tableswitch 0..1 [@8, @42] default @61
+8: aload 1
+9: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+10: new java/lang/StringBuilder
+11: dup
+12: invokespecial java/lang/StringBuilder.<init>()V
+13: bipush 115
+14: invokevirtual java/lang/StringBuilder.append(C)Ljava/lang/StringBuilder;
+15: iload 2
+16: invokevirtual java/lang/StringBuilder.append(I)Ljava/lang/StringBuilder;
+17: invokevirtual java/lang/StringBuilder.toString()Ljava/lang/String;
+18: astore 3
+19: aload 3
+20: invokevirtual java/lang/String.length()I
+21: istore 4
+22: aload 0
+23: checkcast kotlin/coroutines/Continuation
+24: aload 0
+25: aload 3
+26: putfield AKt$h$1.L$0:Ljava/lang/Object;
+27: aload 0
+28: iload 2
+29: putfield AKt$h$1.I$0:I
+30: aload 0
+31: iload 4
+32: putfield AKt$h$1.I$1:I
+33: aload 0
+34: iconst_1
+35: putfield AKt$h$1.label:I
+36: invokestatic AKt.leaf(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+37: dup
+38: aload 5
+39: if_acmpne @52
+40: aload 5
+41: areturn
+42: aload 0
+43: getfield AKt$h$1.I$1:I
+44: istore 4
+45: aload 0
+46: getfield AKt$h$1.L$0:Ljava/lang/Object;
+47: checkcast java/lang/String
+48: astore 3
+49: aload 1
+50: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+51: aload 1
+52: pop
+53: iload 2
+54: iload 4
+55: iadd
+56: aload 3
+57: invokevirtual java/lang/String.length()I
+58: iadd
+59: invokestatic kotlin/coroutines/jvm/internal/Boxing.boxInt(I)Ljava/lang/Integer;
+60: areturn
+61: new java/lang/IllegalStateException
+62: dup
+63: ldc "call to 'resume' before 'invoke' with coroutine"
+64: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+65: athrow
+line 14: 4
+line 15: 10
+line 16: 19
+line 17: 22
+line 14: 40
+line 18: 52
+line 14: 61
+local s Ljava/lang/String; 19..42 slot 3
+local a I 22..42 slot 4
+local this LAKt$h$1; 0..66 slot 0
+local $result Ljava/lang/Object; 0..66 slot 1
+local s Ljava/lang/String; 49..61 slot 3
+local a I 45..61 slot 4
+local x I 4..66 slot 2
