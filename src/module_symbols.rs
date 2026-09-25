@@ -774,6 +774,7 @@ impl<'a> ModuleSymbols<'a> {
                 name: name.to_string(),
                 kind: PropKind::MemberExtension,
                 receiver: Some(declaration.receiver_ty()),
+                associated_classifier: None,
                 formals: declaration.type_params().to_vec(),
                 ty: declaration.ret(),
                 context_count: declaration.context_params().len(),
@@ -854,6 +855,27 @@ struct CallableOwner {
     is_interface: bool,
 }
 
+/// The receiver-less classifier-coordinate candidate of a companion-associated declaration of
+/// `classifier`: its declared receiver names the classifier and is not a value parameter.
+fn associated_fn_info(
+    sig: &Signature,
+    classifier: TypeName,
+    owner: CallableOwner,
+    name: &str,
+    origin: Origin,
+) -> FunctionInfo {
+    let mut function = fn_info(FnKind::TopLevel, sig, None, owner, name, 0, origin);
+    function.associated_classifier = Some(classifier);
+    function.callable.source_receiver = None;
+    if let Some(signature) = function.generic_sig.as_mut() {
+        signature.receiver = None;
+    }
+    if let Some(signature) = function.callable.generic_sig.as_mut() {
+        signature.receiver = None;
+    }
+    function
+}
+
 fn fn_info(
     kind: FnKind,
     sig: &Signature,
@@ -887,11 +909,7 @@ fn fn_info(
         inline_body_plan: None,
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
-        physical_params: if sig.is_companion_extension() {
-            sig.params.clone()
-        } else {
-            params.clone()
-        },
+        physical_params: params.clone(),
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
@@ -926,7 +944,6 @@ fn fn_info(
         declared_ret: None,
     };
     FunctionInfo {
-        companion_extension: sig.is_companion_extension(),
         receiver_rank: rank,
         generic_sig: sig.generic_sig.clone(),
         projected_return_hazard: sig.projected_return_hazard,
@@ -1076,6 +1093,7 @@ fn source_property(
         name: name.to_string(),
         kind: PropKind::Member,
         receiver: Some(Ty::obj_name(owner)),
+        associated_classifier: None,
         formals: Vec::new(),
         ty: property.ty,
         context_count: property.context_params.len(),
@@ -1191,9 +1209,23 @@ impl SymbolSource for ModuleSymbols<'_> {
                 )
             });
             for (recv, sig) in declared {
-                let imported_associated = associated_owner.is_some_and(|owner| {
-                    sig.is_companion_extension() && recv.non_null().obj_internal() == Some(owner)
-                });
+                let owner = CallableOwner {
+                    internal: crate::types::type_name(""),
+                    is_interface: false,
+                };
+                let origin = Origin::Module {
+                    facade: type_name(""),
+                };
+                // A companion-associated declaration belongs to its classifier's namespace only: it
+                // is never an extension of a value of that classifier.
+                if sig.is_companion_extension() {
+                    if let Some(classifier) = associated_owner
+                        .filter(|owner| recv.non_null().obj_internal() == Some(*owner))
+                    {
+                        overloads.push(associated_fn_info(sig, classifier, owner, &name, origin));
+                    }
+                    continue;
+                }
                 let rank = if recv.non_null().is_ty_param() || recv.non_null() == any {
                     1
                 } else {
@@ -1201,28 +1233,17 @@ impl SymbolSource for ModuleSymbols<'_> {
                 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
-                if !package.is_some_and(|package| package.matches(&sig.package))
-                    && !imported_associated
-                {
+                if !package.is_some_and(|package| package.matches(&sig.package)) {
                     continue;
                 }
                 overloads.push(fn_info(
-                    if imported_associated {
-                        FnKind::TopLevel
-                    } else {
-                        FnKind::Extension
-                    },
+                    FnKind::Extension,
                     sig,
-                    (!imported_associated).then_some(*recv),
-                    CallableOwner {
-                        internal: crate::types::type_name(""),
-                        is_interface: false,
-                    },
+                    Some(*recv),
+                    owner,
                     &name,
                     rank,
-                    Origin::Module {
-                        facade: type_name(""),
-                    },
+                    origin,
                 ));
             }
         }
@@ -1311,6 +1332,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 name: name.clone(),
                 kind: PropKind::TopLevel,
                 receiver: None,
+                associated_classifier: None,
                 formals: property.formals.clone(),
                 ty: read_ty,
                 context_count: property.context_params.len(),
@@ -1340,12 +1362,19 @@ impl SymbolSource for ModuleSymbols<'_> {
                 continue;
             }
             for property in signatures {
-                let imported_associated = associated_owner.is_some_and(|owner| {
-                    property.is_companion_extension
-                        && property.receiver.non_null().obj_internal() == Some(owner)
-                });
-                if (!package.is_some_and(|package| package.matches(&property.package))
-                    && !imported_associated)
+                // A companion-associated property belongs to its classifier's namespace only.
+                let associated_classifier = if property.is_companion_extension {
+                    let Some(classifier) = associated_owner.filter(|owner| {
+                        property.receiver.non_null().obj_internal() == Some(*owner)
+                    }) else {
+                        continue;
+                    };
+                    Some(classifier)
+                } else {
+                    None
+                };
+                if (associated_classifier.is_none()
+                    && !package.is_some_and(|package| package.matches(&property.package)))
                     || (property.visibility.is_private()
                         && self.source_file != Some(property.source.0))
                 {
@@ -1357,23 +1386,24 @@ impl SymbolSource for ModuleSymbols<'_> {
                     .get(&property.source)
                     .copied()
                     .unwrap_or_else(|| type_name(""));
-                let mut getter_params = vec![property.receiver];
+                // An associated property's accessors take no classifier parameter.
+                let receiver = associated_classifier.is_none().then_some(property.receiver);
+                let mut getter_params = receiver.into_iter().collect::<Vec<_>>();
                 getter_params.extend(property.context_params.iter().copied());
-                let getter = source_property_getter(
+                let mut getter = source_property_getter(
                     owner,
                     property.getter_name.clone(),
                     getter_params.clone(),
                     property.ty,
                     false,
                 );
-                let setter = property.setter_name.as_ref().map(|setter_name| {
+                let mut setter = property.setter_name.as_ref().map(|setter_name| {
                     let mut params = getter_params.clone();
                     params.push(stored_value_ty(property.ty));
                     source_callable(owner, setter_name.clone(), params, Ty::Unit, false)
                 });
-                let mut getter = getter;
-                let mut setter = setter;
-                if let Some(generic) = property.generic_signature() {
+                if let Some(mut generic) = property.generic_signature() {
+                    generic.receiver = receiver;
                     getter.generic_sig = Some(Box::new(generic.clone()));
                     if let Some(setter) = &mut setter {
                         let mut setter_generic = generic;
@@ -1382,35 +1412,16 @@ impl SymbolSource for ModuleSymbols<'_> {
                         setter.generic_sig = Some(Box::new(setter_generic));
                     }
                 }
-                if property.is_companion_extension {
-                    if !getter.physical_params.is_empty() {
-                        getter.physical_params.remove(0);
-                    }
-                    if let Some(setter) = &mut setter {
-                        if !setter.physical_params.is_empty() {
-                            setter.physical_params.remove(0);
-                        }
-                    }
-                }
-                if imported_associated {
-                    if !getter.params.is_empty() {
-                        getter.params.remove(0);
-                    }
-                    if let Some(setter) = &mut setter {
-                        if !setter.params.is_empty() {
-                            setter.params.remove(0);
-                        }
-                    }
-                }
                 properties.push(PropertyInfo {
                     return_value_status: None,
                     name: property_name.clone(),
-                    kind: if imported_associated {
+                    kind: if associated_classifier.is_some() {
                         PropKind::TopLevel
                     } else {
                         PropKind::Extension
                     },
-                    receiver: (!imported_associated).then_some(property.receiver),
+                    receiver,
+                    associated_classifier,
                     formals: property.formals.clone(),
                     ty: property.ty,
                     context_count: property.context_params.len(),

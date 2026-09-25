@@ -48,6 +48,7 @@ impl JvmLibraries {
             );
         }
         let mut property = properties.pop()?;
+        property.associated_classifier = Some(internal);
         self.register_external_property(&mut property);
         Some(property)
     }
@@ -221,6 +222,7 @@ impl JvmLibraries {
             name: field.name,
             kind: PropKind::TopLevel,
             receiver: None,
+            associated_classifier: None,
             formals: Vec::new(),
             ty: field.ty,
             context_count: 0,
@@ -464,6 +466,7 @@ impl JvmLibraries {
             name: name.to_string(),
             kind: property_kind,
             receiver,
+            associated_classifier: None,
             formals: property_gsig
                 .as_ref()
                 .map(|gsig| gsig.formals.clone())

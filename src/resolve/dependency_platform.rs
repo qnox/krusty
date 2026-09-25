@@ -190,7 +190,7 @@ fn merge_functions(
             // matching source candidate made ordinary calls work while language conventions (most
             // visibly delegated properties) disappeared.
             let existing = &mut primary.overloads[existing];
-            existing.companion_extension = candidate.companion_extension;
+            existing.associated_classifier = candidate.associated_classifier;
             existing.receiver = candidate.receiver.or(existing.receiver);
             existing.flags = candidate.flags;
             existing.visibility = candidate.visibility;
@@ -681,6 +681,7 @@ mod tests {
             name: "value".to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
+            associated_classifier: None,
             formals: Vec::new(),
             ty: Ty::Int,
             context_count: 0,

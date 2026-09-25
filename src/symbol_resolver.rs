@@ -17,6 +17,7 @@ use crate::types::{Ty, TypeName, Visibility};
 mod call_argument;
 mod callable_shapes;
 mod candidate_access;
+mod classifier_associated;
 mod classifier_scope;
 mod declaration_specificity;
 mod generic_inference;
@@ -3052,10 +3053,12 @@ impl<'a> SymbolResolver<'a> {
             }
             None => {
                 let classifier = self.src.classifier(internal)?;
+                // Associated declarations are an earlier rung of their own; see
+                // `classifier_associated_callables`.
                 let mut candidates = classifier
                     .classifier_callables(internal)
                     .into_iter()
-                    .filter(|member| member.name == name)
+                    .filter(|member| member.name == name && member.associated_classifier.is_none())
                     .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
                     .collect::<Vec<_>>();
                 if candidates.is_empty() && self.lib.inherits_classifier_callables(internal) {
@@ -4864,16 +4867,12 @@ pub struct ResolvedPropertyRef {
     /// Stable declaration identity for a property from the current compilation. Parser-arena
     /// source keys remain a transient resolver detail and must not cross into checked FIR.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// An associated `companion val/var C.name`. Its classifier receiver participates in lookup and
-    /// reflection ownership, but is not a callable-reference parameter or runtime accessor receiver.
-    pub companion_extension: bool,
     /// `None` for an instance property; `Some(None)` for a same-file extension property;
     /// `Some(Some(owner))` for an extension property emitted on another facade.
     pub extension_facade: Option<Option<TypeName>>,
 }
 
 fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
-    let companion_extension = property.is_companion_extension();
     let name = property.name;
     let source_key = property.source_key;
     let getter_visibility = property.visibility;
@@ -4909,7 +4908,6 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         prop_ty,
         source_key,
         stable_declaration: property.stable_declaration,
-        companion_extension,
     })
 }
 
@@ -4953,7 +4951,6 @@ fn build_property_reference_from_declaration(
         prop_ty,
         source_key: property.source_key,
         stable_declaration: property.stable_declaration,
-        companion_extension: false,
         extension_facade: None,
     })
 }

@@ -792,8 +792,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with storage is a `private static final` field of `C` initialized in `C`'s `<clinit>` (so reading
   it initializes `C`, not the file), with `public static` `getX`/`setX` placed at the property's
   source position. `C`'s `@Metadata` records them with function flag bit 18 and property flag
-  bit 19 (companion). Inside the block and inside `C`'s own members, block members and written
-  companion extensions are called unqualified with no receiver argument. A written
+  bit 19 (companion). Block members and written companion extensions are classifier-associated
+  declarations: providers publish them in `C`'s namespace as receiver-less candidates (no receiver,
+  no receiver parameter), never as members or extensions of a `C` value, so `C().f()` is kotlinc's
+  "unresolved reference 'f' on receiver of type 'C'.". `C.f()` names `C`'s own associated
+  declarations and precedes the members of `C`'s companion object; an inapplicable one is final.
+  Unqualified, they are found in `C`'s static scope, which a class body opens right after its own
+  instance receiver and a companion-associated declaration opens in place of a receiver (it has
+  no `this`). The static scope includes the supertypes' associated declarations ranked by supertype
+  distance: the nearest applicable classifier wins and an inapplicable nearer one falls through,
+  while an instance member still precedes every block member. Selection is the ordinary
+  receiver-less top-level selection in both the checker and compact signature solving. A written
   `companion fun C.f()` / `companion val C.p` stays on the facade with the receiver dropped from
   the JVM descriptor; its facade record carries the receiver type, the companion bit and an
   explicit JVM signature. When a companion-object property hoisted onto `C` has the same field
@@ -802,7 +811,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property carrying the companion bit and no receiver is the same classifier member: the provider
   offers its public static method, or its public static accessors (the field stays private), as a
   classifier callable/property and keeps it out of the class's instance scope. Tests:
-  `tests/companion_block_members_e2e.rs`.
+  `tests/companion_block_members_e2e.rs` (`static_scope_selects_nearest_applicable_associated_function`,
+  `associated_declarations_are_not_members_of_instances`).
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and
@@ -6542,10 +6552,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spells no receiver, so the selected member reached the backend with no dispatch receiver recorded
   and the call would be made with the arguments alone: one value short of the declaration it had
   selected. Selection now records the exact classifier-value receiver returned with the candidate
-  family, including when an inherited declaration has a non-object owner. A companion EXTENSION
-  keeps its own path — it already carries the receiver it
-  extends — and an implicit classifier callable (`values`/`valueOf`) has no instance at all and
-  keeps none.
+  family, including when an inherited declaration has a non-object owner. A classifier-associated
+  `of` (a `companion { … }` block member or a companion extension) is a receiver-less candidate of
+  the same family and is recorded as a receiver-less call, and an implicit classifier callable
+  (`values`/`valueOf`) has no instance at all and keeps none.
   Tests: `fir::body_check::collection_literal_tests::custom_collection_literal_keeps_the_selected_companion_operator`
   and `inherited_collection_literal_operator_keeps_the_companion_receiver`.
 - **An `is` check asks a scalar operand through its box.** Kotlin has no subtyping among the

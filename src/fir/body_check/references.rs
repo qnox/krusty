@@ -636,23 +636,15 @@ impl BodyFirChecker<'_> {
             CallableReferenceTarget::Extension {
                 callable,
                 stable_declaration,
-                companion_extension,
-                ..
             } => {
                 let adaptation = self.extension_reference_adaptation(
                     expression,
                     &binding,
-                    callable
-                        .params
-                        .len()
-                        .saturating_sub(usize::from(!companion_extension)),
+                    callable.params.len().saturating_sub(1),
                     adaptation,
                 )?;
-                let (binding, extension_receiver) = if companion_extension {
-                    (FirCallableReferenceBinding::Static, None)
-                } else {
-                    self.reference_receiver(expression, receiver, binding)?
-                };
+                let (binding, extension_receiver) =
+                    self.reference_receiver(expression, receiver, binding)?;
                 if let Some(declaration) = stable_declaration {
                     self.reference_to_declaration(
                         expression,
@@ -666,15 +658,11 @@ impl BodyFirChecker<'_> {
                     let declared_receiver = callable.params.first().copied().ok_or_else(|| {
                         self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                     })?;
-                    let (receiver_ty, extension_target, parameters) = if companion_extension {
-                        (None, false, callable.physical_params.as_slice())
-                    } else {
-                        (
-                            Some(declared_receiver),
-                            true,
-                            callable.params.get(1..).unwrap_or_default(),
-                        )
-                    };
+                    let (receiver_ty, extension_target, parameters) = (
+                        Some(declared_receiver),
+                        true,
+                        callable.params.get(1..).unwrap_or_default(),
+                    );
                     self.reference_to_external(
                         expression,
                         callable.external_identity,
@@ -775,24 +763,16 @@ impl BodyFirChecker<'_> {
                         self.index.declaration_header(declaration),
                     );
                 }
-                let (binding, receiver) = if property.companion_extension {
-                    (FirCallableReferenceBinding::Static, None)
-                } else {
-                    self.reference_receiver(expression, receiver, binding)?
-                };
-                let (dispatch_receiver, extension_receiver) = if property.companion_extension {
-                    (None, None)
-                } else if property.extension_facade.is_some() {
+                let (binding, receiver) = self.reference_receiver(expression, receiver, binding)?;
+                let (dispatch_receiver, extension_receiver) = if property.extension_facade.is_some()
+                {
                     (None, receiver)
                 } else {
                     (receiver, None)
                 };
                 if let Some(declaration) = property.stable_declaration {
-                    let target_is_extension =
-                        property.extension_facade.is_some() && !property.companion_extension;
-                    let receiver_type = if property.companion_extension {
-                        None
-                    } else if target_is_extension {
+                    let target_is_extension = property.extension_facade.is_some();
+                    let receiver_type = if target_is_extension {
                         property.getter.params.first().copied()
                     } else {
                         Some(property.reflection_owner)
@@ -817,8 +797,8 @@ impl BodyFirChecker<'_> {
                         binding,
                         dispatch_receiver,
                         extension_receiver,
-                        (!property.companion_extension).then_some(property.reflection_owner),
-                        property.extension_facade.is_some() && !property.companion_extension,
+                        Some(property.reflection_owner),
+                        property.extension_facade.is_some(),
                         &property.getter,
                         property.setter.as_ref(),
                         property.prop_ty,

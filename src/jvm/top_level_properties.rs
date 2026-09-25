@@ -62,6 +62,7 @@ pub(super) fn merge_metadata_const(
         name: source_name.to_string(),
         kind: crate::libraries::PropKind::TopLevel,
         receiver: None,
+        associated_classifier: None,
         formals: metadata
             .generic_sig
             .as_ref()
