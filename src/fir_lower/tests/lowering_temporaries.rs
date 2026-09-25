@@ -154,3 +154,110 @@ fn a_safe_cast_of_an_immutable_binding_needs_no_temporary() {
         1
     );
 }
+
+/// What each unnamed declaration of the one lowered `Array(size, init)` block holds, in order;
+/// the declarations of the loop body come last.
+fn array_constructor_temporaries(ir: &IrFile) -> Vec<&'static str> {
+    let block = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Block { stmts, .. }
+                if stmts
+                    .iter()
+                    .any(|statement| matches!(ir.expr(*statement), IrExpr::While { .. })) =>
+            {
+                Some(stmts.clone())
+            }
+            _ => None,
+        })
+        .expect("array constructor loop block");
+    let kind = |value: u32| match ir.expr(value) {
+        IrExpr::Const(IrConst::Int(0)) => "index",
+        IrExpr::NewArray { .. } => "array",
+        IrExpr::GetValue(_) => "read",
+        _ => "value",
+    };
+    let mut kinds = Vec::new();
+    for statement in &block {
+        match ir.expr(*statement) {
+            IrExpr::Variable {
+                init: Some(value),
+                named: false,
+                ..
+            } => kinds.push(kind(*value)),
+            IrExpr::While { body, .. } => {
+                let IrExpr::Block { stmts, .. } = ir.expr(*body) else {
+                    panic!("array constructor loop body is a block")
+                };
+                for statement in stmts {
+                    if let IrExpr::Variable {
+                        init: Some(value),
+                        named: false,
+                        ..
+                    } = ir.expr(*statement)
+                    {
+                        kinds.push(if kind(*value) == "read" {
+                            "element index"
+                        } else {
+                            "value"
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    kinds
+}
+
+/// `Array(size) { init }` in kotlinc's `ArrayConstructorLowering` order: the index first, the size
+/// only when it is not a constant or a stable read, the array, then the element index inside the
+/// loop, onto which the lambda's parameter is remapped (no local of its own) and whose captured
+/// stable values it reads in place.
+#[test]
+fn array_constructor_temporaries_follow_kotlinc_order() {
+    let ir = lower_single_source(
+        "fun f(n: Int, m: Int): IntArray = IntArray(n) { it * m }\n",
+        "ArrayConstructorStableSize",
+    );
+    assert_eq!(
+        array_constructor_temporaries(&ir),
+        vec!["index", "array", "element index"]
+    );
+    assert!(!ir.value_names.values().any(|name| name == "it"));
+
+    let ir = lower_single_source(
+        "fun f(n: Int): IntArray = IntArray(n + 1) { i -> i * 2 }\n",
+        "ArrayConstructorComputedSize",
+    );
+    assert_eq!(
+        array_constructor_temporaries(&ir),
+        vec!["index", "value", "array", "element index"]
+    );
+    assert!(!ir.value_names.values().any(|name| name == "i"));
+}
+
+/// A function value that is not a stable read is evaluated once, after the array is allocated, as
+/// kotlinc's `asInlinable` temporary is; a stable one is invoked in place.
+#[test]
+fn array_constructor_function_value_is_held_after_the_array() {
+    let ir = lower_single_source(
+        "fun make(): (Int) -> String = { \"x\" }\n\
+         fun f(n: Int): Array<String> = Array(n, make())\n",
+        "ArrayConstructorFunctionValue",
+    );
+    assert_eq!(
+        array_constructor_temporaries(&ir),
+        vec!["index", "array", "value", "element index"]
+    );
+
+    let ir = lower_single_source(
+        "fun f(n: Int, g: (Int) -> String): Array<String> = Array(n, g)\n",
+        "ArrayConstructorStableFunctionValue",
+    );
+    assert_eq!(
+        array_constructor_temporaries(&ir),
+        vec!["index", "array", "element index"]
+    );
+}

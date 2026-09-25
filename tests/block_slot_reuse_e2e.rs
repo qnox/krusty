@@ -934,6 +934,50 @@ fun local(y: Any): Int {\n\
     );
 }
 
+/// `IntArray(size) { init }` in kotlinc's `ArrayConstructorLowering` order: the index, the size
+/// only when it is neither a constant nor a stable read, the array, and the element index inside
+/// the loop, which the lambda's parameter is remapped onto; captured stable values are read in
+/// place. `arr`, `q` and the lambda's own `sq` keep kotlinc's slots and the whole class matches.
+#[test]
+fn array_constructor_temporaries_take_kotlinc_slots() {
+    byte_identical_with_stdlib(
+        "slotTempArrayConstructor",
+        "fun stable(n: Int): Int {\n\
+    val arr = IntArray(n) { it * 2 }\n\
+    val q = arr.size\n\
+    return q\n\
+}\n\
+fun computed(n: Int, m: Int): Int {\n\
+    val arr = IntArray(n + 1) { it * m }\n\
+    val q = arr.size\n\
+    return q\n\
+}\n\
+fun constant(): Int {\n\
+    val arr = LongArray(4) { i -> val sq = i.toLong() * i; sq + 1 }\n\
+    val q = arr.size\n\
+    return q\n\
+}\n",
+        "SlotTempArrayConstructorKt",
+    );
+}
+
+/// kotlinc evaluates the size, allocates the array and only then evaluates a function-value
+/// initializer; each is evaluated once and the elements see their own index.
+#[test]
+fn array_constructor_evaluates_its_function_value_after_the_array() {
+    let src = "var log = \"\"\n\
+fun size(): Int { log += \"n\"; return 2 }\n\
+fun init(): (Int) -> String { log += \"f\"; return { \"y$it\" } }\n\
+fun box(): String {\n\
+    val arr = Array(size(), init())\n\
+    var k = 1\n\
+    val sums = IntArray(3) { k += it; k }\n\
+    val r = arr.joinToString() + log + sums.joinToString() + k\n\
+    return if (r == \"y0, y1nf1, 2, 44\") \"OK\" else r\n\
+}\n";
+    assert_eq!(run(src), "OK");
+}
+
 /// An `::Array` reference adapter numbers its temporaries after its own parameters, so the index
 /// it declares first does not overwrite the size it was passed.
 #[test]
