@@ -8948,51 +8948,10 @@ fn emit_interface_class(
                 &desc,
                 method_signature(&signature_formatter, ir, fid, f).as_deref(),
             );
-            // An abstract method still carries kotlinc's nullability annotations: `@NotNull` /
-            // `@Nullable` on each reference parameter and on a reference return. Having no body is
-            // why it gets no debug tables — it is not a reason to drop its annotations.
-            let ann = |t: Ty| -> Option<&'static str> {
-                // A bare type parameter erases to its bound, and kotlinc annotates it only when
-                // that bound is NON-NULL. `<T>` carries the implicit `Any?` bound and can be
-                // instantiated with a nullable type, so neither `@NotNull` nor `@Nullable` is true
-                // of the position; `<T : Any>` is known non-null and gets `@NotNull`. The bound
-                // travels on the type itself, so this needs no signature lookup.
-                if let Ty::TyParam(_, bound) = t {
-                    if matches!(bound, Ty::Nullable(_)) {
-                        return None;
-                    }
-                }
-                let d = crate::jvm::names::type_descriptor(t);
-                if !(d.starts_with('L') || d.starts_with('[')) {
-                    return None;
-                }
-                Some(if matches!(t, Ty::Nullable(_)) {
-                    "Lorg/jetbrains/annotations/Nullable;"
-                } else {
-                    "Lorg/jetbrains/annotations/NotNull;"
-                })
-            };
-            // Declared parameter nullability lives in the side-table (kept off `f.params` for the
-            // mangle) — apply it so a nullable reference parameter reads `@Nullable`.
-            let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
-            let params: Vec<Option<&str>> = f
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, t)| {
-                    if declared_nullable
-                        .and_then(|v| v.get(i))
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        ann(Ty::nullable(*t))
-                    } else {
-                        ann(*t)
-                    }
-                })
-                .collect();
-            if ann(f.ret).is_some() || params.iter().any(Option::is_some) {
-                cw.set_method_nullability(&f.name, &desc, ann(f.ret), &params);
+            // An abstract method still carries kotlinc's nullability annotations.
+            let (result, params) = super::abstract_method_nullability::annotations(ir, fid, f);
+            if result.is_some() || params.iter().any(Option::is_some) {
+                cw.set_method_nullability(&f.name, &desc, result, &params);
             }
             // PUBLIC | ABSTRACT
         }
@@ -19116,6 +19075,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // JVM erasure of a type parameter: collapse `T` to its declared upper bound (which itself
         // erases to `java/lang/Object` for an `Any` bound). This is the ONE place `T` becomes a
         // concrete JVM type.
+        // A nullable occurrence keeps its `?` on the bound, as kotlinc's type mapper does: `T?` over
+        // `T : Int` is `Integer`, never `int`.
+        Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
     }

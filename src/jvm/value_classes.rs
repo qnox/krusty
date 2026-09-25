@@ -29,6 +29,7 @@ use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
+use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_impl_name};
 use operation_relocation::clone_below_representation_wrapper;
 use std::collections::{HashMap, HashSet};
@@ -201,7 +202,9 @@ pub(crate) fn lower_value_classes(
     // erasure. A generic underlying property uses its declared upper bound: `S<T : String>` carries
     // `String`, while `V<T : Int>` carries `int`. Keeping the unbound `TyParam` here would incorrectly
     // force an Object slot and later descriptor code would independently specialize the same bound,
-    // leaving boxing and null guards inconsistent with the emitted method descriptor.
+    // leaving boxing and null guards inconsistent with the emitted method descriptor. A nullable
+    // occurrence (`val x: T?`) keeps its `?` on that bound, as kotlinc's `getUnderlyingType` keeps a
+    // nullable type parameter: `X<T : Any>(val x: T?)` carries `Any?`, so `X?` is boxed.
     let under: Under = ir
         .classes
         .iter()
@@ -212,11 +215,17 @@ pub(crate) fn lower_value_classes(
                     .type_param
                     .as_ref()
                     .map(|name| {
-                        c.type_param_bounds
+                        let bound = c
+                            .type_param_bounds
                             .iter()
                             .find(|(candidate, _)| candidate == name)
                             .map(|(_, bound)| *bound)
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                        if f.ty.is_nullable() {
+                            Ty::nullable(bound)
+                        } else {
+                            bound
+                        }
                     })
                     .unwrap_or(f.ty)
                     .canonical_semantic();
@@ -898,6 +907,11 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
+    // The declaration behind each `mangle_map` key, when exactly one ordinary (non-suspend,
+    // non-value-class-member) function has it. Its erased signature is the call's descriptor: a
+    // descriptor string cannot say whether `LX;` stood for `X` or for `X?` (a `T : X?` result), and
+    // the two erase differently when `X?` stays boxed.
+    let mut mangled_declarations: HashMap<(TypeName, String, usize), Option<u32>> = HashMap::new();
     // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
     // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
     // owns their compatibility and the implementation getter keeps its ordinary spelling.
@@ -1013,10 +1027,13 @@ pub(crate) fn lower_value_classes(
             };
             if mangled != source_name {
                 if let Some(owner) = f.dispatch_receiver {
-                    mangle_map.insert(
-                        (owner, source_name.clone(), orig_params[fid].len()),
-                        mangled.clone(),
-                    );
+                    let key = (owner, source_name.clone(), orig_params[fid].len());
+                    let ordinary = !lower_value_member && !is_suspend;
+                    mangled_declarations
+                        .entry(key.clone())
+                        .and_modify(|declaration| *declaration = None)
+                        .or_insert(ordinary.then_some(fid as u32));
+                    mangle_map.insert(key, mangled.clone());
                 }
                 f.name = mangled;
             }
@@ -1284,6 +1301,14 @@ pub(crate) fn lower_value_classes(
     // 1b. Rewrite name-resolved calls to a mangled method (`super.f(vc)`, an interface method) — its
     //     name gets the `-<hash>` suffix and its descriptor's value-class types erase to the underlying.
     if !mangle_map.is_empty() {
+        let declaration_descriptors: HashMap<(TypeName, String, usize), String> =
+            mangled_declarations
+                .into_iter()
+                .filter_map(|(key, declaration)| {
+                    let function = &ir.functions[declaration? as usize];
+                    Some((key, ir_method_desc(&function.params, &function.ret)))
+                })
+                .collect();
         for e in &mut ir.exprs {
             if let IrExpr::Call {
                 callee:
@@ -1309,9 +1334,13 @@ pub(crate) fn lower_value_classes(
                 ..
             } = e
             {
-                if let Some(mangled) = mangle_map.get(&(*owner, name.clone(), args.len())) {
+                let key = (*owner, name.clone(), args.len());
+                if let Some(mangled) = mangle_map.get(&key) {
                     *name = mangled.clone();
-                    *descriptor = erase_descriptor(descriptor, &under);
+                    *descriptor = declaration_descriptors
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| erase_descriptor(descriptor, &under));
                 }
             }
             // A SAM conversion names the interface method at the `invokedynamic` call site. When that
@@ -5054,54 +5083,6 @@ fn operand_null_only(exprs: &[IrExpr], rets: &[Ty], slots: &HashMap<u32, Ty>, id
     }
 }
 
-/// The two per-expression type facts lowering hands the representation analysis. They always travel
-/// together, and neither alone can classify a value-class result: `logical` says WHICH value class a
-/// coerced read has after substitution, `declared` says whether the callee RETURNS one by declaration
-/// (so the physical result is its erased carrier) rather than merely producing one out of a generic
-/// slot (where it is a box). `List<TokenBox>.get` and `A.create(): A<String>` agree on the
-/// first and differ only on the second.
-#[derive(Clone, Copy)]
-struct CallTypes<'a> {
-    logical: &'a HashMap<u32, Ty>,
-    declared: &'a HashMap<u32, Ty>,
-    statics: &'a [crate::ir::IrStatic],
-}
-
-impl<'a> CallTypes<'a> {
-    fn of(ir: &'a IrFile) -> Self {
-        CallTypes {
-            logical: &ir.logical_types,
-            declared: &ir.call_declared_ret,
-            statics: &ir.statics,
-        }
-    }
-
-    /// The value class a static's storage was realized over, so `getstatic` yields the CARRIER and
-    /// not a box. `None` ⇒ this static keeps the boxed convention, or holds no value class at all.
-    fn erased_static_value_class(&self, index: u32) -> Option<TypeName> {
-        self.statics
-            .get(index as usize)?
-            .erased_declared_ty?
-            .non_null()
-            .obj_internal()
-    }
-
-    fn get(&self, id: &u32) -> Option<&Ty> {
-        self.logical.get(id)
-    }
-
-    /// The value class this call returns BY DECLARATION — so its physical result is already the erased
-    /// carrier and must not be unboxed again. `None` when the callee declares no class return, or
-    /// declares one that is not a value class here.
-    fn declared_value_class(&self, id: u32, under: &Under) -> Option<TypeName> {
-        self.declared
-            .get(&id)?
-            .non_null()
-            .obj_internal()
-            .filter(|fq| under.contains_key(fq))
-    }
-}
-
 /// Semantic element type of an array-valued expression before value-class erasure. Generated array
 /// fill loops normally pass the array through a local slot, while ordinary expressions may retain a
 /// logical type directly. Follow only representation-transparent wrappers; this never resolves a type.
@@ -5291,7 +5272,9 @@ fn repr(
         IrExpr::Call { .. } | IrExpr::MethodCall { .. }
             if types.declared_value_class(id, under).is_some() =>
         {
-            repr_of_ty(&types.declared[&id], under)
+            types
+                .declared_result(id, under)
+                .map_or(Repr::NotVc, |declared| repr_of_ty(&declared, under))
         }
         IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
             .get(
@@ -6278,7 +6261,11 @@ fn sam_declares_vc_return(
 }
 
 fn erase(t: &Ty, under: &Under) -> Ty {
-    crate::value_classes::project_underlying(*t, under, &JvmUnderlyingProjection)
+    crate::value_classes::project_underlying(
+        member_names::value_class_bound_occurrence(*t, under),
+        under,
+        &JvmUnderlyingProjection,
+    )
 }
 
 /// Select the physical result carried through a suspend function's erased `Object` boundary.

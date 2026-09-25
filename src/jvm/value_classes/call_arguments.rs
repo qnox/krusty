@@ -24,6 +24,8 @@ pub(super) fn record_boundaries(
     if let Some(parameters) = declared_parameters {
         for (&argument, &parameter) in arguments.iter().zip(parameters) {
             let (value, _) = context.through_erased_generic_coercion(argument);
+            // A type parameter bounded by a value class is passed as that class's own occurrence.
+            let parameter = super::member_names::value_class_bound_occurrence(parameter, under);
             record_value_boundary(operations, context.exprs, context, value, parameter, under);
         }
         return;

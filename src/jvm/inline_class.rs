@@ -60,10 +60,13 @@ pub fn mangling_signature(
     Some(sig)
 }
 
+/// Length of every mangle suffix: `-` plus the seven base64url characters of five digest bytes.
+pub const MANGLE_SUFFIX_LEN: usize = 8;
+
 /// The name suffix (`-<hash>`) for a mangling signature string: `"-"` + base64url(MD5(sig)[0..5]).
 pub fn mangle_suffix(signature: &str) -> String {
     let digest = md5(signature.as_bytes());
-    let mut out = String::with_capacity(8);
+    let mut out = String::with_capacity(MANGLE_SUFFIX_LEN);
     out.push('-');
     out.push_str(&base64_url_nopad(&digest[0..5]));
     out

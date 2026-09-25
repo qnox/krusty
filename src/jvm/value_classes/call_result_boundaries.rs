@@ -23,6 +23,8 @@ fn physical_boundary(
     target: Ty,
     underlying: &Under,
 ) -> Option<Option<Ty>> {
+    // A type parameter whose erased upper bound is a value class is declared as that value class.
+    let declared = super::member_names::value_class_bound_occurrence(declared, underlying);
     let declared_value_class = value_class(declared, underlying);
     let target_value_class = value_class(target, underlying);
     if !declared_value_class && !target_value_class {
