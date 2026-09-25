@@ -340,8 +340,24 @@ if [ -n "$gate" ]; then
       run_one \
         "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
   done
+  # The native box lane compiles, links and RUNS every case it accepts, so it is partitioned the
+  # same way instead of sharing pass 2's single deadline.
+  native_shards="$KRUSTY_NATIVE_CONFORMANCE_SHARDS"
+  libtest_require_positive_shard_count \
+    "$native_shards" "run-tests.sh: KRUSTY_NATIVE_CONFORMANCE_SHARDS"
+  for ((shard = 0; shard < native_shards; shard++)); do
+    label="native-box-shard-$((shard + 1))-of-$native_shards"
+    echo "run-tests.sh: conformance $label" >&2
+    KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX="$shard" \
+      KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT="$native_shards" \
+      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+      run_one \
+        "$logdir" \
+        "$gate::--exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance" \
+        "$label"
+  done
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
+    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`

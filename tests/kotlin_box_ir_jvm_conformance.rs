@@ -1320,7 +1320,10 @@ fn kotlin_codegen_box_conformance() {
                 // The Kotlin test runner expands the `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder to
                 // `@JvmInline` (single-field value classes). Mirror that so value-class tests reach the
                 // compiler instead of failing to parse on the bare placeholder identifier.
-                let src = krusty::conformance::prepare_test_source(&src);
+                let src = krusty::conformance::prepare_test_source(
+                    &src,
+                    krusty::conformance::TestTarget::Jvm,
+                );
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let applicable = if no_run {

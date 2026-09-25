@@ -4465,6 +4465,13 @@ each one lowering more and declining less:
   objects, ranges and progressions, iteration over each and over a class of the program that
   implements `Iterable`/`CharSequence`, `lazy`, `Pair`, and property delegates (`ReadOnlyProperty`,
   `ReadWriteProperty`, `Delegates.notNull`/`observable`).
+- **The conformance lane** (tier 5): `tests/kotlin_box_native_conformance.rs` compiles every
+  single-file `codegen/box` case natively, links and RUNS it. A decline is a skip, counted by
+  reason; a case that compiles and answers anything but `OK` fails the test unless it is listed,
+  with its reason, in `tests/native_box_expected_failures.txt` — and a listed case that passes fails
+  it too, so the list only shrinks. A corpus case is prepared for its target
+  (`conformance::prepare_test_source(src, TestTarget::Native)`): `OPTIONAL_JVM_INLINE_ANNOTATION`
+  expands to nothing off the JVM, as Kotlin's own runner does.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

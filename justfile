@@ -140,11 +140,14 @@ profile-box FILTER="":
 # `just conformance-one <ver>` — so local stays quick while CI covers the whole matrix. Keep the
 # memory-heavy Kotlin box corpus test isolated, then run every other conformance test in a fresh
 # process.
+# The native box lane compiles, links and runs every case it accepts, so it is partitioned the same
+# way (`scripts/native-conformance-run.sh`) rather than carried inside pass 2's single deadline.
 # Pass 2's tests are independent JVM-backed suites; thread them (capped at 4 — each thread can hold
 # a compiler-server/runner JVM) instead of serializing ~40 tests on one core.
 conformance-all-plain:
     just conformance
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
+    bash scripts/native-conformance-run.sh "$(just conformance-bin)"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
 # per-version rebuilds; the reference compiler and corpus are provisioned on demand.
@@ -163,8 +166,9 @@ conformance-one VERSION:
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box}"
     bin="$(just conformance-bin)"
     just conformance-run "$bin" "$v"
+    bash scripts/native-conformance-run.sh "$bin"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads="$conf_threads"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads="$conf_threads"
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
