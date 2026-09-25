@@ -1892,7 +1892,8 @@ static kt_boolean kt_pair_equals(KRef self, KRef other) {
     if (kt_pending_exception() != NULL || !first_equal) {
         return false;
     }
-    return kt_equals(a->second, b->second);
+    kt_boolean second_equal = kt_equals(a->second, b->second);
+    return kt_pending_exception() == NULL && second_equal;
 }
 
 /* Kotlin's generated data-class hash: `first.hashCode() * 31 + second.hashCode()`, a null
@@ -1904,6 +1905,9 @@ static kt_int kt_pair_hash_code(KRef self) {
         return 0;
     }
     uint32_t second = (uint32_t)kt_hash_code(pair->second);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
     return (kt_int)(31u * first + second);
 }
 
