@@ -131,7 +131,6 @@ coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
-defaultArguments/complexInheritance.kt
 defaultArguments/convention/incWithDefaultInGetter.kt
 defaultArguments/function/kt36188.kt
 defaultArguments/function/kt36188_2.kt
@@ -301,7 +300,6 @@ ir/kt25405.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-ir/serializationRegressions/anonFakeOverride.kt
 kclass/kclass1.kt
 lateinit/innerIsInitialized.kt
 lazyCodegen/when.kt
@@ -312,7 +310,6 @@ localClasses/localClassInParameterInitializer.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/basic/expectActualFakeOverrides.kt
 multiplatform/k2/basic/extensionPropertyWithAnonymousExtension.kt
-multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/defaultArguments/dispatchReceiverValue.kt
