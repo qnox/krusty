@@ -4,12 +4,14 @@ mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
+mod classifier_kind;
 mod compiler_intrinsic;
 mod core_builtins;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod platform_contract;
+pub use classifier_kind::TypeKind;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
@@ -2636,18 +2638,16 @@ pub struct LibraryType {
     /// substitutes an applied receiver into these templates before its single hierarchy BFS.
     pub supertype_templates: Vec<Ty>,
     pub constructors: Vec<LibraryMember>,
-    /// Names declared in the classifier's physical surface that block an inherited instance
-    /// property without themselves denoting a Kotlin instance property (for example a private or
-    /// static Java field). This is a semantic name-hiding fact; no storage shape crosses the provider
-    /// boundary.
+    /// Physical names that block an inherited Kotlin property without denoting one themselves,
+    /// such as a private or static Java field.
     pub hidden_member_properties: HashSet<String>,
+    /// Provider-recorded hidden-deprecated names. They remain rejection facts, never candidates.
+    pub hidden_deprecated_callables: HashSet<String>,
     /// Exact source-level callable/property declarations keyed by source name. Providers populate this
     /// once with the classifier signature; core applies receiver type arguments and walks inheritance.
     pub declared_callables: HashMap<String, Callables>,
-    /// Source declaration order of the keys in [`Self::declared_callables`]. A hash table answers
-    /// lookup; it cannot carry the ordering required when a language feature materializes the whole
-    /// declaration surface (interface delegation and metadata emission). Providers normalize this
-    /// once from source metadata or class declaration order.
+    /// Source order for [`Self::declared_callables`], used where interface delegation or metadata
+    /// emission materializes the full declaration surface.
     pub declared_callable_order: Vec<String>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
@@ -2666,6 +2666,9 @@ pub struct LibraryType {
     /// Complete set of directly declared function-supertype shapes. Most classifiers have zero or
     /// one; intersection classifiers may implement several arities simultaneously.
     pub callable_signatures: Vec<Ty>,
+    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), from a dependency's
+    /// `@Metadata`. `None` for a Java classifier and wherever the provider does not record it.
+    pub qualified_name: Option<Box<str>>,
     /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
     /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
@@ -2761,19 +2764,6 @@ impl LibraryType {
     }
 }
 
-/// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
-/// also carries `ACC_INTERFACE`, which `is_interface()` reflects.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TypeKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-    /// A Kotlin `object` (singleton) — has a `public static final INSTANCE` field of its own type, read
-    /// as `getstatic <Type>.INSTANCE` when the object is referenced as a value.
-    Object,
-}
-
 impl LibraryType {
     /// Whether this declaration is one of Kotlin's function-type classifier representations.
     ///
@@ -2808,6 +2798,7 @@ impl LibraryType {
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
@@ -2817,6 +2808,7 @@ impl LibraryType {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
@@ -3302,6 +3294,7 @@ mod tests {
             supertype_templates: Vec::new(),
             constructors: vec![],
             hidden_member_properties: HashSet::new(),
+            hidden_deprecated_callables: HashSet::new(),
             declared_callables: std::collections::HashMap::new(),
             declared_callable_order: Vec::new(),
             members: vec![],
@@ -3311,6 +3304,7 @@ mod tests {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

@@ -1,7 +1,7 @@
 //! Small boundary types and adapters shared by JVM inline-call emission paths.
 
 use super::parse_physical_method_desc;
-use crate::jvm::classfile::{CodeBuilder, VerifType};
+use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
 pub(super) struct InlineStaticTarget<'a> {
@@ -15,20 +15,6 @@ pub(super) struct InlineStaticTarget<'a> {
 
 pub(super) fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
     parse_physical_method_desc(desc).map(|(params, _)| params)
-}
-
-pub(super) fn vtype_to_verif(value: &crate::jvm::inline::VType) -> VerifType {
-    use crate::jvm::inline::VType;
-    match value {
-        VType::Top => VerifType::Top,
-        VType::Int => VerifType::Integer,
-        VType::Float => VerifType::Float,
-        VType::Long => VerifType::Long,
-        VType::Double => VerifType::Double,
-        VType::Null => VerifType::Null,
-        VType::Object(index) => VerifType::Object(*index),
-        VType::UninitThis | VType::Uninit(_) => VerifType::Top,
-    }
 }
 
 /// Attach already-relocated inline exception-table entries to their caller labels.

@@ -39,6 +39,8 @@ pub(super) struct InventedLocalNames {
     pub anonymous_enclosing_functions: HashMap<DeclId, AnonymousEnclosingFunction>,
     /// Suspend function → the ordinal its continuation takes in its own chain.
     pub continuations: HashMap<AnonymousEnclosingFunction, u32>,
+    /// Callable reference → its target-neutral lexical provenance.
+    pub references: HashMap<ExprId, LocalClassNameProvenance>,
 }
 
 /// One chain of enclosing names, and the source function it lies in.
@@ -94,10 +96,16 @@ enum Child {
     Stmt(StmtId),
 }
 
+/// How many nested expressions the walk descends between checks of the remaining stack. The walk
+/// visits every node the parser admitted, so it must survive the parser's full nesting bound on a
+/// small embedder thread like the checker and lowering do.
+const EXPRESSION_STACK_CHECK_INTERVAL: u32 = 64;
+
 struct Inventor<'a> {
     file: &'a File,
     counters: &'a mut HashMap<Vec<String>, u32>,
     names: InventedLocalNames,
+    expression_depth: u32,
 }
 
 /// Record the provenance of every local node `file` declares. `counters` carries the per-chain
@@ -107,6 +115,7 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
         file,
         counters,
         names: InventedLocalNames::default(),
+        expression_depth: 0,
     };
     let file_chain = Chain {
         owner: None,
@@ -327,6 +336,23 @@ impl Inventor<'_> {
     }
 
     fn expr(&mut self, expression: ExprId, chain: &Chain) {
+        self.expression_depth = self
+            .expression_depth
+            .checked_add(1)
+            .expect("expression nesting exceeds u32");
+        let check_stack = self.expression_depth == 1
+            || self
+                .expression_depth
+                .is_multiple_of(EXPRESSION_STACK_CHECK_INTERVAL);
+        if check_stack {
+            crate::wide_stack::on_wide_stack(|| self.expr_inner(expression, chain));
+        } else {
+            self.expr_inner(expression, chain);
+        }
+        self.expression_depth -= 1;
+    }
+
+    fn expr_inner(&mut self, expression: ExprId, chain: &Chain) {
         let file = self.file;
         match file.expr(expression) {
             Expr::Lambda { body, .. } => {
@@ -345,6 +371,14 @@ impl Inventor<'_> {
             // A bound receiver is walked inside the reference, like the lambda body it becomes.
             Expr::CallableRef { receiver, .. } => {
                 let own = self.next(chain);
+                let ordinal = own
+                    .segments
+                    .last()
+                    .and_then(|ordinal| ordinal.parse().ok())
+                    .expect("a callable-reference position is an ordinal");
+                self.names
+                    .references
+                    .insert(expression, chain.provenance(Some(ordinal)));
                 if let Some(receiver) = receiver {
                     self.expr(*receiver, &own);
                 }

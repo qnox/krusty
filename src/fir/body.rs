@@ -645,7 +645,10 @@ pub struct FirAnnotationConstruction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
-    Module(CallableId),
+    Module {
+        declaration: CallableId,
+        annotation: Option<Box<FirAnnotationConstruction>>,
+    },
     External {
         declaration: ExternalCallableId,
         classifier: TypeName,
@@ -657,7 +660,16 @@ pub enum FirConstructorTarget {
 impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module(_) => 0,
+            Self::Module { annotation, .. } => annotation.as_ref().map_or(0, |annotation| {
+                annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
+                    + annotation
+                        .members
+                        .iter()
+                        .map(|(name, _)| name.len())
+                        .sum::<usize>()
+                    + annotation.defaults.len()
+                        * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
+            }),
             Self::External {
                 parameters,
                 annotation,
@@ -1852,6 +1864,54 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
+/// Where a lambda or local function sits among the callables kotlinc lifts out of one declaration:
+/// the sequence (its lexical `owner` and outermost declaration name `container`, as the source
+/// spells them) and one step per enclosing local callable, down to this one. `lifted` is `false`
+/// for a callable kotlinc turns into a class of its own (a suspend lambda), which takes no place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirLiftingSite {
+    pub owner: Box<str>,
+    pub container: Box<str>,
+    pub path: Box<[FirLiftingStep]>,
+    pub lifted: bool,
+}
+
+/// One enclosing local callable of a [`FirLiftingSite`]: its source name (`None` for a lambda or a
+/// local delegated property's accessor) and its position in the sequence's source order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirLiftingStep {
+    pub name: Option<Box<str>>,
+    pub position: u32,
+}
+
+impl FirLiftingSite {
+    pub fn from_source(site: &crate::ast::LiftingSite, lifted: bool) -> Self {
+        Self {
+            owner: site.owner.as_str().into(),
+            container: site.container.as_str().into(),
+            path: site
+                .path
+                .iter()
+                .map(|step| FirLiftingStep {
+                    name: step.name.as_deref().map(Into::into),
+                    position: step.position,
+                })
+                .collect(),
+            lifted,
+        }
+    }
+}
+
+/// Exact lexical context a target needs to name the class it realizes for one expression: the
+/// stable source classifier that owns the executable context (`None` for the file), the source
+/// declaration names below it, and the shared generated-artifact ordinal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirGeneratedClassProvenance {
+    pub lexical_owner: Option<DeclarationId>,
+    pub segments: Box<[String]>,
+    pub ordinal: Option<u32>,
+}
+
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -1885,6 +1945,14 @@ pub struct FirBody {
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<FirStatementDebugLines>,
+    /// Naming provenance of each expression the reference compiler realizes as a class of its own
+    /// (a callable reference). A naming fact, not a lowering decision.
+    generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
+    /// This callable's own lifting site, for a lambda or local function body.
+    lifting_site: Option<FirLiftingSite>,
+    /// Lifted callables declared in this body that have no body of their own: the accessors of a
+    /// local delegated property.
+    bodiless_lifting_sites: Vec<FirLiftingSite>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     parameters: Vec<FirValueParameter>,
@@ -1935,6 +2003,9 @@ impl FirBody {
             source_line_count: 0,
             expression_debug_lines: Vec::new(),
             statement_debug_lines: Vec::new(),
+            generated_class_provenance: HashMap::new(),
+            lifting_site: None,
+            bodiless_lifting_sites: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
             parameters: Vec::new(),
@@ -2091,6 +2162,37 @@ impl FirBody {
 
     pub fn debug_name(&self) -> Option<&str> {
         self.debug_name.as_deref()
+    }
+
+    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
+        assert!(
+            self.lifting_site.replace(site).is_none(),
+            "a FIR body has one lifting site"
+        );
+    }
+
+    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
+        self.lifting_site.as_ref()
+    }
+
+    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
+        self.bodiless_lifting_sites.push(site);
+    }
+
+    /// Every lifting site this body and the callables nested in it declare, its own included.
+    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
+        out.extend(self.lifting_site.iter());
+        out.extend(self.bodiless_lifting_sites.iter());
+        for statement in &self.statements {
+            if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
+                body.collect_lifting_sites(out);
+            }
+        }
+        for expression in &self.expressions {
+            if let FirExprKind::Lambda { body, .. } = &expression.kind {
+                body.collect_lifting_sites(out);
+            }
+        }
     }
 
     pub fn mark_source_lambda(&mut self, binding_name: Option<impl Into<Box<str>>>) {
@@ -2533,6 +2635,22 @@ impl FirBody {
         id
     }
 
+    pub(crate) fn set_generated_class_provenance(
+        &mut self,
+        expression: FirExprId,
+        provenance: FirGeneratedClassProvenance,
+    ) {
+        self.generated_class_provenance
+            .insert(expression, provenance);
+    }
+
+    pub fn generated_class_provenance(
+        &self,
+        expression: FirExprId,
+    ) -> Option<&FirGeneratedClassProvenance> {
+        self.generated_class_provenance.get(&expression)
+    }
+
     pub fn expr(&self, id: FirExprId) -> Option<&FirExpr> {
         self.expressions.get(id.raw() as usize)
     }
@@ -2649,7 +2767,11 @@ impl FirBody {
                     }
                 }
                 FirExprKind::ConstructorCall(call) => {
-                    if let FirConstructorTarget::Module(callable) = call.target {
+                    if let FirConstructorTarget::Module {
+                        declaration: callable,
+                        ..
+                    } = call.target
+                    {
                         callables.insert(callable);
                     }
                 }
@@ -2842,7 +2964,7 @@ impl FirBody {
 /// resolved declaration header and rejects every ordinary body.
 #[derive(Debug, Default)]
 pub struct InlineBodyStore {
-    bodies: HashMap<CallableId, FirBody>,
+    bodies: std::collections::BTreeMap<CallableId, FirBody>,
 }
 
 /// Checked signature expressions retained from Pass 1 until their owning source is lowered. Unlike
@@ -2850,7 +2972,7 @@ pub struct InlineBodyStore {
 /// need it even when the declaration body is reparsed later.
 #[derive(Debug, Default)]
 pub struct DefaultArgumentStore {
-    bodies: HashMap<CallableId, FirBody>,
+    bodies: std::collections::BTreeMap<CallableId, FirBody>,
 }
 
 /// Callable facts published by signature finalization. Construction is crate-private so syntax

@@ -10,9 +10,8 @@
 //! its `areturn`, and `<clinit>`'s at the offset where the array construction begins. The offsets
 //! differ, so a rule that emitted one entry per member at a fixed pc would pass only one of them.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// `items` holds a collection of a `@Serializable` class, which is what gives `Holder` a cache.
 /// The blank line and the annotation above the class put the declaration line at 4 while the

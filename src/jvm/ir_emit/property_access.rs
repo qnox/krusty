@@ -80,8 +80,6 @@ impl Emitter<'_> {
                         "(Ljava/lang/String;)V",
                     );
                     code.invokestatic(m, 1, 0);
-                    let st = self.verif_stack(jt);
-                    self.frame(lbl, st, code);
                     self.bind(lbl, code);
                 }
                 jt
@@ -151,7 +149,12 @@ impl Emitter<'_> {
             // `ty` is the substituted semantic result and `logical` its JVM carrier. Choosing the
             // adapter from `logical` alone turns `UInt` into `Integer`; retain the semantic type until
             // after the `Object` boundary has been bridged.
-            unbox_prim(self.cw, code, semantic_scalar_adapter(*ty, logical));
+            unbox_prim_from(
+                self.cw,
+                code,
+                physical,
+                semantic_scalar_adapter(*ty, logical),
+            );
         } else if exact_field
             && physical.is_reference()
             && logical.is_reference()
@@ -169,7 +172,7 @@ impl Emitter<'_> {
         } else if !value_class {
             // A value class has no runtime type of its own — its values ARE the erased underlying — so
             // narrowing to one would `checkcast` to a class the value is not an instance of.
-            self.narrow_on_stack(physical, ty, code);
+            self.narrow_on_stack(physical, *ty, code);
         }
     }
 }

@@ -48,6 +48,7 @@ __attribute__((noinline)) static void scrub_stack(void) {
     for (unsigned i = 0; i < 4096; i++) {
         words[i] = 0;
     }
+    (void)words[0];
 }
 
 __attribute__((noinline)) static void check_kept_intact(void) {

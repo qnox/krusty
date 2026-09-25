@@ -3,18 +3,23 @@
 //! `java/lang ↔ kotlin` name normalization live here — resolution and checked FIR see
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
+mod builtin_classifier_shapes;
+mod classifier_facts;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
+use builtin_classifier_shapes::{
+    builtin_library_type, mapped_builtin_property, mapped_builtin_signature, BuiltinGenericShape,
+};
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_class_gsig, parse_field_gsig,
     suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
-use mapped_builtin_member_status::mapped_builtin_member_status;
+use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -2278,26 +2283,32 @@ impl JvmLibraries {
                     supertypes.push_name(k);
                 }
             }
-            // A companion object compiles to a `public static final C$Name` field on `C` (default name
-            // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
-            // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
-            let companion_object = ci
-                .fields
-                .iter()
-                .find_map(|f| {
-                    // A Kotlin companion-object instance field is always `public static final`, typed as the
-                    // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
-                    // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
-                    // (a nested-class-typed `public static final` field) vanishingly unlikely.
-                    let public_static_final =
-                        f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
-                    if !public_static_final {
-                        return None;
-                    }
-                    let nested = format!("{internal}${}", f.name);
-                    (f.descriptor == format!("L{nested};"))
-                        .then(|| (f.name.clone(), type_name(&nested)))
+            // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
+            // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
+            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+                let companion = crate::types::type_name_nested_child(internal_name, &field);
+                Some((field, companion))
+            });
+            let classfile_companion = (!ci.meta.is_present())
+                .then(|| {
+                    ci.fields.iter().find_map(|f| {
+                        // A Kotlin companion-object instance field is always `public static final`, typed as the
+                        // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
+                        // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
+                        // (a nested-class-typed `public static final` field) vanishingly unlikely.
+                        let public_static_final =
+                            f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
+                        if !public_static_final {
+                            return None;
+                        }
+                        let nested = format!("{internal}${}", f.name);
+                        (f.descriptor == format!("L{nested};"))
+                            .then(|| (f.name.clone(), type_name(&nested)))
+                    })
                 })
+                .flatten();
+            let companion_object = metadata_companion
+                .or(classfile_companion)
                 .or_else(|| self.cp.builtin_companion_object(internal_name));
             let kind = if let Some(kind) = ci.meta.class_kind {
                 kind
@@ -2611,6 +2622,18 @@ impl JvmLibraries {
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
+            let hidden_deprecated_callables = if kotlin_scope_is_authoritative {
+                members
+                    .iter()
+                    .filter(|member| {
+                        mapped_builtin_member_status(internal_name, ci.this_class, member)
+                            == MappedBuiltinMemberStatus::DeprecatedHidden
+                    })
+                    .map(|member| member.name.clone())
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
             if kotlin_scope_is_authoritative {
                 // Retain only physical members admitted to this mapped Kotlin declaration by the
                 // provider-owned, versioned JVM-builtins policy.
@@ -2704,6 +2727,7 @@ impl JvmLibraries {
                 supertype_templates,
                 constructors,
                 hidden_member_properties,
+                hidden_deprecated_callables,
                 declared_callables: std::collections::HashMap::new(),
                 declared_callable_order: Vec::new(),
                 members,
@@ -2722,6 +2746,7 @@ impl JvmLibraries {
                 callable_signature,
                 callable_signatures,
                 companion_object,
+                qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
                 value_underlying_property: value_class.and_then(|declaration| declaration.property),
                 alias_target: None,
@@ -3330,136 +3355,6 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             materialize_omitted_vararg: false,
         }),
     })
-}
-
-/// Minimal classifier signature for a mapped builtin whose physical JVM class is absent. This is
-/// provider construction data: core still receives an ordinary `LibraryType` record and performs the
-/// same member/hierarchy selection as for every other classifier.
-fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
-    // Each tuple: Kotlin member name, JVM descriptor, logical return type. The owner is left implicit
-    // (the receiver's Kotlin internal, e.g. `kotlin/String`); the constant-pool boundary maps it to the
-    // JVM name, exactly as for a classpath-resolved member, without exposing `java/lang/*` to core.
-    let members: &[(&str, &str, Ty)] = match internal {
-        "kotlin/String" => &[("length", "()I", Ty::Int), ("hashCode", "()I", Ty::Int)],
-        _ => return None,
-    };
-    let members = members
-        .iter()
-        .map(|(name, desc, ret)| {
-            LibraryMember::new((*name).to_string(), vec![], *ret, (*desc).to_string())
-        })
-        .collect();
-    Some(LibraryType {
-        // A mapped builtin is a KOTLIN declaration; its physical class is merely absent.
-        is_kotlin: true,
-        access: crate::libraries::ClassifierAccess::Public,
-        source_file: None,
-        stable_declaration: None,
-        is_nested: false,
-        outer_instance: None,
-        kind: crate::libraries::TypeKind::Class,
-        inheritance: Default::default(),
-        supertypes: TypeNameList::new(),
-        supertype_templates: Vec::new(),
-        constructors: Vec::new(),
-        hidden_member_properties: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members,
-        companion: Vec::new(),
-        constants: Default::default(),
-        sam_eligible: false,
-        callable_signature: None,
-        callable_signatures: Vec::new(),
-        companion_object: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        type_parameters: crate::types::TypeParameters::default(),
-        own_type_parameter_count: 0,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists: Vec::new(),
-        annotations: Vec::new(),
-        retention: None,
-        annotation_targets: None,
-    })
-}
-
-/// Property/function distinction from Kotlin's mapped built-in signature when no decoded
-/// `.kotlin_builtins` fragment is present. The JVM method alone cannot express that `String.length()`
-/// occupies Kotlin's property namespace. This fact is folded into `declared_callables` while the one
-/// classifier record is constructed; it is not a resolution-time special case.
-fn mapped_builtin_property(internal: TypeName, name: &str) -> bool {
-    internal.matches("kotlin/String") && name == "length"
-}
-
-struct BuiltinGenericShape {
-    type_params: Vec<String>,
-    type_param_variances: Vec<crate::types::TypeVariance>,
-    supertype_templates: Vec<Ty>,
-}
-
-/// The [`LibraryType`] of a classless Kotlin BUILTIN (`kotlin/Number`, `kotlin/collections/List`, …) whose
-/// JVM class is absent from the classpath (a no-JDK compile) — supertypes and members from the
-/// `.kotlin_builtins` data, kind from the metadata `is_interface` flag.
-fn builtin_library_type(
-    kind: crate::libraries::TypeKind,
-    access: crate::libraries::ClassifierAccess,
-    is_nested: bool,
-    supertypes: TypeNameList,
-    members: Vec<LibraryMember>,
-    constructors: Vec<LibraryMember>,
-    generic: BuiltinGenericShape,
-) -> LibraryType {
-    let callable_signatures = generic
-        .supertype_templates
-        .iter()
-        .copied()
-        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
-        .collect::<Vec<_>>();
-    let callable_signature = callable_signatures.first().copied();
-    LibraryType {
-        // Builtins are Kotlin declarations (`.kotlin_builtins` is compiled Kotlin metadata).
-        is_kotlin: true,
-        access,
-        source_file: None,
-        stable_declaration: None,
-        is_nested,
-        outer_instance: None,
-        kind,
-        inheritance: Default::default(),
-        supertypes,
-        supertype_templates: generic.supertype_templates,
-        constructors,
-        hidden_member_properties: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members,
-        companion: Vec::new(),
-        constants: Default::default(),
-        sam_eligible: false,
-        callable_signature,
-        callable_signatures,
-        companion_object: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        own_type_parameter_count: generic.type_params.len(),
-        type_parameters: crate::types::TypeParameters::new(
-            generic.type_params.clone(),
-            vec![Vec::new(); generic.type_params.len()],
-            generic.type_param_variances,
-        ),
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists: Vec::new(),
-        annotations: Vec::new(),
-        retention: None,
-        annotation_targets: None,
-    }
 }
 
 fn function_interface_signature(
@@ -5161,28 +5056,9 @@ impl SymbolSource for JvmLibraries {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         super::jvm_class_map::platform_flexible_upper_bound(lower)
     }
-}
 
-impl crate::types::ClassifierFactSource for JvmLibraries {
-    fn classifier_annotations(
-        &self,
-        classifier: TypeName,
-    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
-    }
-
-    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
-        SymbolSource::classifier(self, classifier)
-            .map(|shape| shape.kind == crate::libraries::TypeKind::Object)
-    }
-
-    fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
-        SymbolSource::classifier(self, classifier).and_then(|shape| shape.value_underlying)
-    }
-
-    fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
-        SymbolSource::classifier(self, classifier)
-            .and_then(|shape| shape.value_underlying_property.clone())
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        classifier_facts::generated_serializer_singleton(self, classifier)
     }
 }
 
@@ -5752,7 +5628,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     /// The token the reference compiler writes for this target, as in
-    /// `expected foo has no actual declaration in module <m> for JVM`.
+    /// `the 'expect' declaration 'foo' has no 'actual' declaration in module '<m> for JVM'.`
     fn diagnostic_target_name(&self) -> Option<&str> {
         Some("JVM")
     }

@@ -26,6 +26,16 @@ impl BodyFirChecker<'_> {
             ));
         };
         let (mutable, delegate) = (*mutable, *delegate);
+        for site in self
+            .file
+            .local_delegate_lifting_sites
+            .get(&statement)
+            .into_iter()
+            .flatten()
+        {
+            self.body
+                .add_bodiless_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
+        }
         let (name, explicit_type) = (name.as_str(), explicit_type.as_ref());
         let delegate_ty = self.expression_type(delegate)?;
         let property_ty = match explicit_type {

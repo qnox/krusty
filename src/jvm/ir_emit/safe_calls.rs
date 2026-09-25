@@ -28,23 +28,15 @@ impl Emitter<'_> {
                     let end = code.new_label();
                     let entry_height = code.stack_height().max(0) as u16;
                     let elvis = self.ir.elvis_safe_call_guards.contains(&expression);
-                    let result_ty = elvis
-                        .then(|| self.value_ty_of_when(branches))
-                        .unwrap_or(Ty::Unit);
-                    let result_stack = elvis
-                        .then(|| self.verif_stack(result_ty))
-                        .unwrap_or_default();
+                    let result_ty = if elvis {
+                        self.value_ty_of_when(branches)
+                    } else {
+                        Ty::Unit
+                    };
                     self.emit_safe_call_guard(
                         expression,
                         (*guard, *null_result, *selector),
-                        when::Emission::new(
-                            !elvis,
-                            result_ty,
-                            &result_stack,
-                            entry_height,
-                            end,
-                            None,
-                        ),
+                        when::Emission::new(!elvis, result_ty, entry_height, end, None),
                         code,
                     );
                     if elvis && !self.diverges(expression) {
@@ -61,7 +53,7 @@ impl Emitter<'_> {
         &mut self,
         expression: u32,
         branches: &[(Option<u32>, u32)],
-        emission: when::Emission<'_>,
+        emission: when::Emission,
         code: &mut CodeBuilder,
     ) -> bool {
         if !self.ir.null_guards.contains(&expression) {

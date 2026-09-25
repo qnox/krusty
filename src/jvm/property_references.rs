@@ -219,6 +219,7 @@ pub(super) fn realize(
             synthesize(
                 ir,
                 current_facade,
+                raw,
                 property,
                 realization,
                 receiver,
@@ -664,6 +665,7 @@ fn module_property(
 fn synthesize(
     ir: &mut IrFile,
     current_facade: &str,
+    expression: usize,
     mut property: PropRef,
     realization: PropertyReferenceRealization,
     receiver: Option<crate::ir::ExprId>,
@@ -679,10 +681,12 @@ fn synthesize(
         (1, true) => "kotlin/jvm/internal/MutablePropertyReference1Impl",
         _ => unreachable!("property references have at most one receiver"),
     };
-    let internal = type_name(&format!(
-        "{current_facade}$fir$property${}",
-        ir.classes.len()
-    ));
+    let internal = super::function_references::reference_class_name(
+        ir,
+        current_facade,
+        expression,
+        "property",
+    );
     let mut class = IrClass::synthetic(internal);
     class.superclass = type_name(superclass);
     class.prop_ref = Some(property);

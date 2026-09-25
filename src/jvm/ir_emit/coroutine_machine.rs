@@ -193,24 +193,10 @@ pub(super) fn discover(
         crate::trace_compiler!("suspend", "discover: liveness declined");
         return None;
     };
-    // The frames this body carries, by instruction index and slot: the splice relocated the
-    // dependency's own, and this emitter recorded one at every label it bound.
-    //
-    // MERGED by offset, because that is what the class file will carry: several labels can be bound
-    // at one offset — a loop's `end` and the following statement's `start` — and the verifier holds
-    // the merge of their frames there, not any one of them. Reading them per label handed this
-    // analysis whichever was registered last, which can name a local the merge drops; the spill
-    // planned from it then loads a slot the verifier has as `top`.
-    let Some(frames) = cw
-        .merged_frames(code)
-        .into_iter()
-        .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
-        .collect::<Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>>>()
-    else {
-        crate::trace_compiler!(
-            "suspend",
-            "discover: a frame is not at an instruction offset"
-        );
+    // The frames this body will carry, by instruction index and slot, computed over it as the
+    // class writer will compute them.
+    let Some(frames) = cw.builder_frames(&bytes, code, entry) else {
+        crate::trace_compiler!("suspend", "discover: the frames cannot be computed");
         return None;
     };
     let Some(types) = FrameTypes::analyze(&insns, &graph, entry, &frames, cw) else {
@@ -329,18 +315,6 @@ fn claimed_from(
         }
     }
     claimed
-}
-
-/// Verification types indexed by SLOT: a `long`/`double` is one entry in a frame and two slots.
-fn expand_slots(locals: &[VerifType]) -> Vec<VerifType> {
-    let mut slots = Vec::with_capacity(locals.len());
-    for v in locals {
-        slots.push(v.clone());
-        if matches!(v, VerifType::Long | VerifType::Double) {
-            slots.push(VerifType::Top);
-        }
-    }
-    slots
 }
 
 /// The continuation class a machine keeps its state in: `<facade>$<function>$1`, or the next

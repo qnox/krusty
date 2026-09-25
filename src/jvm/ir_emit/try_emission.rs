@@ -12,9 +12,7 @@
 use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
-use super::{
-    debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter, VerifType,
-};
+use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// One `try`'s protected region while it is being emitted.
 ///
@@ -205,7 +203,7 @@ impl Emitter<'_> {
         if !body_diverges {
             if let Some(f) = finally {
                 // The result has just been stored and is loaded again at `after`, so it is live
-                // across the finalizer inlined here. A finalizer that records frames of its own — a
+                // across the finalizer inlined here. A finalizer that introduces control flow — a
                 // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
                 // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
                 // with this copy: the handler copies below are reached on edges that never stored it.
@@ -241,7 +239,6 @@ impl Emitter<'_> {
             let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
-            self.frame(handler, vec![VerifType::Object(exc_ci)], code);
             let exc_ty = Ty::obj(&exc_internal);
             // A typed catch's parameter takes the slot the `finally` catch-all parks its own
             // exception in, which is what kotlinc emits: the two are never live at once — a catch
@@ -360,8 +357,6 @@ impl Emitter<'_> {
             // Exception edge — see the `catch` handler above; this one guards the body and every
             // catch body (`fin_ranges`), which are complete by now.
             code.bind_handler(fin_handler, &fin_ranges);
-            let thr_ci = self.cw.class_ref("java/lang/Throwable");
-            self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");
             let tslot = parked_slot.expect("a finalizer reserves its parked-exception slot");
             // Live again from here: it holds the caught exception across the whole inlined
@@ -408,7 +403,6 @@ impl Emitter<'_> {
             // live from the merge frame at `after` until the load without smuggling a reserved
             // numeric key into the semantic slot map.
             let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
-            self.frame(after, vec![], code);
             self.bind(after, code);
             if let Some(slot) = result_slot {
                 load(rt, slot, code);
@@ -501,7 +495,6 @@ impl Emitter<'_> {
         }
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {
-            self.frame(target, vec![], code);
             code.goto(target);
         }
         self.reopen_finally_segments(code);
@@ -517,7 +510,7 @@ impl Emitter<'_> {
 #[cfg(test)]
 mod tests {
     use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
-    use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
+    use crate::jvm::ir_emit::invariant_tests::emit_for_test;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
 

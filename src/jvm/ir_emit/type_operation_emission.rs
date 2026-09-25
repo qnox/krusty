@@ -4,41 +4,13 @@
 //! erasure, null-check call shape, reload-versus-dup selection, casts, and numeric representation.
 
 use crate::ir::{ExprId, IrBindingStability, IrExpr, IrTypeOp};
-use crate::jvm::classfile::{ClassWriter, CodeBuilder};
+use crate::jvm::classfile::CodeBuilder;
 use crate::types::{stored_value_ty, Ty};
 
 use super::{
-    box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm, jvm_is_erased_top,
-    semantic_scalar_adapter, slot_words, type_descriptor, unbox_prim, Emitter,
+    box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm,
+    semantic_scalar_adapter, type_descriptor, unbox_prim_from, Emitter,
 };
-
-/// Unbox an implicit scalar coercion whose source is an erased numeric reference. Kotlin's erased
-/// callable/type-parameter boundary carries numeric values as `Number`, not as the target's exact
-/// wrapper; concrete boxed scalars retain the ordinary wrapper-specific adapter.
-fn unbox_implicit_reference(cw: &mut ClassWriter, code: &mut CodeBuilder, source: Ty, target: Ty) {
-    let source = ir_ty_to_jvm(&source);
-    let numeric = match target {
-        Ty::Byte => Some(("byteValue", "()B")),
-        Ty::Short => Some(("shortValue", "()S")),
-        Ty::Int => Some(("intValue", "()I")),
-        Ty::Long => Some(("longValue", "()J")),
-        Ty::Float => Some(("floatValue", "()F")),
-        Ty::Double => Some(("doubleValue", "()D")),
-        _ => None,
-    };
-    let erased_numeric = jvm_is_erased_top(source)
-        || crate::jvm::names::instanceof_internal_name(source) == "java/lang/Number";
-    let Some((method, descriptor)) = numeric.filter(|_| erased_numeric) else {
-        unbox_prim(cw, code, target);
-        return;
-    };
-    if crate::jvm::names::instanceof_internal_name(source) != "java/lang/Number" {
-        let class = cw.class_ref("java/lang/Number");
-        code.checkcast(class);
-    }
-    let method = cw.methodref("java/lang/Number", method, descriptor);
-    code.invokevirtual(method, 0, slot_words(target) as i32);
-}
 
 impl Emitter<'_> {
     pub(super) fn emit_type_operation(
@@ -102,9 +74,10 @@ impl Emitter<'_> {
                 code.ixor();
             }
             IrTypeOp::Cast => {
-                // The emitter owns erasure: a `checkcast` to `java/lang/Object` (an unbounded
-                // `as T`) is a no-op, and so is one whose target descriptor already equals the
-                // value's physical descriptor.
+                // kotlinc writes a `checkcast` for every cast and then deletes the ones whose
+                // operand already has exactly the target's JVM type (an erasure-narrowing tag
+                // where the value is already that type, `List<T>` read tagged `List<Int>`). A cast
+                // to `java/lang/Object` from anything narrower stays.
                 if physical_arg.is_jvm_scalar() {
                     box_prim_free(
                         self.cw,
@@ -119,7 +92,7 @@ impl Emitter<'_> {
                 } else {
                     type_descriptor(physical_arg) == type_descriptor(jvm_ty)
                 };
-                if internal != "java/lang/Object" && !redundant {
+                if !redundant {
                     let class = self.cw.class_ref(&internal);
                     code.checkcast(class);
                 }
@@ -169,41 +142,142 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(semantic_arg, physical_arg),
             );
         }
-        let kotlin_name = match target_semantic {
-            Ty::Obj(fq_name, _) => fq_name.render().replace('/', "."),
-            Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
-            _ => "kotlin.Any".to_string(),
+        let physical_internal = if physical_arg.is_jvm_scalar() {
+            semantic_scalar_adapter(semantic_arg, physical_arg)
+                .boxed_ref()
+                .map(crate::jvm::names::instanceof_internal_name)
+        } else {
+            Some(crate::jvm::names::instanceof_internal_name(physical_arg))
         };
-        let reread = !physical_arg.is_jvm_scalar()
-            && self.ir.binding_read_stability.get(&arg) == Some(&IrBindingStability::Stable)
-            && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
-        if !reread {
-            code.dup();
+        // Checked IR facts suppress a guard before its message/method constants are interned.
+        // Facts that arise only in emitted control flow remain the responsibility of the finished
+        // classfile CFG pass.
+        if !physical_arg.is_jvm_scalar() && !self.semantic_non_null(arg) {
+            let reread = self.ir.binding_read_stability.get(&arg)
+                == Some(&IrBindingStability::Stable)
+                && matches!(self.ir.expr(arg), IrExpr::GetValue(_));
+            if !reread {
+                code.dup();
+            }
+            code.push_string(
+                &format!(
+                    "null cannot be cast to non-null type {}",
+                    self.rendered_cast_target(target_semantic)
+                ),
+                self.cw,
+            );
+            let check = self.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "checkNotNull",
+                "(Ljava/lang/Object;Ljava/lang/String;)V",
+            );
+            code.invokestatic(check, 2, 0);
+            if reread {
+                self.emit_type_op_operand(arg, code);
+            }
         }
-        code.push_string(
-            &format!("null cannot be cast to non-null type {kotlin_name}"),
-            self.cw,
-        );
-        let check = self.cw.methodref(
-            "kotlin/jvm/internal/Intrinsics",
-            "checkNotNull",
-            "(Ljava/lang/Object;Ljava/lang/String;)V",
-        );
-        code.invokestatic(check, 2, 0);
-        if reread {
-            self.emit_type_op_operand(arg, code);
-        }
-        if internal != "java/lang/Object" {
+        // kotlinc writes a `checkcast` for every cast and then deletes the ones whose operand
+        // already has exactly the target's JVM type; a cast to `java/lang/Object` from anything
+        // narrower stays.
+        if physical_internal.as_deref() != Some(internal) {
             let class = self.cw.class_ref(internal);
             code.checkcast(class);
         }
+        // A successful non-null cast to a Kotlin scalar produces its value representation.
         if jvm_ty.is_jvm_scalar() {
-            unbox_prim(
+            unbox_prim_from(
                 self.cw,
                 code,
+                Ty::obj(internal),
                 semantic_scalar_adapter(target_semantic, jvm_ty),
             );
         }
+    }
+
+    /// A cast target as kotlinc's IR renderer spells it in
+    /// `null cannot be cast to non-null type …`.
+    fn rendered_cast_target(&self, ty: Ty) -> String {
+        let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
+            let rendered: Vec<String> = arguments
+                .map(|argument| self.rendered_cast_target(argument))
+                .collect();
+            if rendered.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", rendered.join(", "))
+            }
+        };
+        match ty {
+            Ty::Unit => "kotlin.Unit".to_string(),
+            Ty::Nothing => "kotlin.Nothing".to_string(),
+            Ty::Null => "kotlin.Nothing?".to_string(),
+            Ty::Error => "<error>".to_string(),
+            Ty::Pending => "<pending>".to_string(),
+            Ty::Obj(name, types) => format!(
+                "{}{}",
+                name.render().replace(['/', '$'], "."),
+                arguments(&mut types.iter().copied())
+            ),
+            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_target(*inner)),
+            Ty::PlatformNullable(inner) => self.rendered_cast_target(*inner),
+            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_target(*inner)),
+            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_target(*inner)),
+            Ty::StarProjection(_) => "*".to_string(),
+            Ty::TyParam(name, _) => self.rendered_type_parameter(name),
+            Ty::Fun(signature) => format!(
+                "{}{}{}",
+                if signature.suspend {
+                    "kotlin.coroutines.SuspendFunction"
+                } else {
+                    "kotlin.Function"
+                },
+                signature.params.len(),
+                arguments(&mut signature.params.iter().copied().chain([signature.ret]))
+            ),
+        }
+    }
+
+    /// Render one declaration-owned type parameter through its recorded semantic identity. The
+    /// opaque identity is only compared; its coordinates are never parsed back into an owner.
+    fn rendered_type_parameter(&self, identity: &str) -> String {
+        let source = crate::types::type_parameter_source_name(identity);
+        if let Some((&function, _)) = self
+            .ir
+            .signatures
+            .iter()
+            .filter(|(_, signature)| {
+                signature
+                    .type_params
+                    .iter()
+                    .any(|parameter| parameter.semantic_name == identity)
+            })
+            .min_by_key(|(function, _)| *function)
+        {
+            let declaration = &self.ir.functions[function as usize];
+            let owner = declaration.dispatch_receiver.unwrap_or_else(|| {
+                self.ir
+                    .foreign_template_facade(function)
+                    .unwrap_or_else(|| crate::types::type_name(&self.facade))
+            });
+            let name = self
+                .ir
+                .vc_declared_sigs
+                .get(&function)
+                .map_or(declaration.name.as_str(), |(name, _, _)| name.as_str());
+            return format!(
+                "{source} of {}.{name}",
+                owner.render().replace(['/', '$'], ".")
+            );
+        }
+        if let Some((owner, _)) = self.ir.class_signatures().find(|(_, signature)| {
+            signature
+                .type_params
+                .iter()
+                .any(|parameter| parameter.semantic_name == identity)
+        }) {
+            return format!("{source} of {}", owner.render().replace(['/', '$'], "."));
+        }
+        source.to_string()
     }
 
     fn emit_implicit_coercion(
@@ -237,8 +311,15 @@ impl Emitter<'_> {
                 code,
                 semantic_scalar_adapter(semantic, physical_arg),
             );
+            // kotlinc materializes the box at its wrapper type and coerces that to the target, so a
+            // target between the wrapper and `Object` (`Number`, `Comparable`) is a `checkcast`.
+            if !semantic.is_unsigned() {
+                if let Some(wrapper) = semantic.non_null().boxed_ref() {
+                    self.coerce_reference_on_stack(wrapper, target, code);
+                }
+            }
         } else if physical_arg.is_reference() && target.is_jvm_scalar() {
-            unbox_implicit_reference(
+            unbox_prim_from(
                 self.cw,
                 code,
                 physical_arg,

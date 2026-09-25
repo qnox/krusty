@@ -702,6 +702,13 @@ impl IrFile {
             self.call_declared_params.values().flatten().copied(),
         )?;
         reject_all(
+            "declared construction parameter",
+            self.construction_declared_params
+                .values()
+                .flatten()
+                .copied(),
+        )?;
+        reject_all(
             "property declaration type",
             self.property_declaration_types.values().copied(),
         )?;

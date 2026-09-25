@@ -5,7 +5,7 @@
 //! `_init_$_anonymous_()`. An enum's body is its `EnumSerializer` factory; an object's is an
 //! `ObjectSerializer` over its own `INSTANCE`. Neither has a generated `$serializer` class.
 
-use super::{class_ty, kserializer_of};
+use super::class_ty;
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};

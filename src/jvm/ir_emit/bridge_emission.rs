@@ -8,7 +8,7 @@
 use super::{
     box_prim_free, discard, emit_num_conv, emit_return, finish_code, ir_ty_to_jvm, jvm_declared_ty,
     jvm_function_params, jvm_tys, load, local_variable_desc, method_descriptor, slot_words,
-    throw_assertion_error, type_descriptor, unbox_prim, verif_for_jvm_free, ClassWriter,
+    throw_assertion_error, type_descriptor, unbox_prim_from, verif_for_jvm_free, ClassWriter,
     CodeBuilder, EmitRun, VerifType,
 };
 use crate::ir::IrFile;
@@ -110,7 +110,6 @@ pub(super) fn emit_bridges(
             emit_bridge_barrier_outcome(barrier.outcome, cw, &mut code);
             let mut locals = vec![VerifType::ObjectName(c.fq_name())];
             locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
-            code.add_frame_if_new(dispatch, locals, vec![]);
             code.bind(dispatch);
         }
         if let Some(parameters) = &target_parameters {
@@ -154,7 +153,7 @@ pub(super) fn emit_bridges(
                     let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
                     code.checkcast(ci);
                 } else if et.is_reference() && ct.is_jvm_scalar() {
-                    unbox_prim(cw, &mut code, *ct);
+                    unbox_prim_from(cw, &mut code, *et, *ct);
                 } else if et.is_jvm_scalar() && ct.is_reference() {
                     // The erased slot is a PRIMITIVE but the concrete override takes the generic
                     // reference (`B.foo(int)` bridged onto `foo(t: T)="…"` erased to `Object`):
@@ -253,14 +252,8 @@ pub(super) fn emit_bridges(
                 code.dup();
                 // At the branch target the DUPLICATE is still on the stack — the boxed value class,
                 // not the carrier it would have unboxed to.
-                code.add_frame_if_new(
-                    null_case,
-                    locals.clone(),
-                    vec![VerifType::ObjectName(owner.clone())],
-                );
                 code.ifnull(null_case);
                 code.invokevirtual(unbox, 0, slot_words(er) as i32);
-                code.add_frame_if_new(done, locals, vec![verif_for_jvm_free(cw, er)]);
                 code.goto(done);
                 code.bind(null_case);
                 code.pop();
@@ -299,7 +292,7 @@ pub(super) fn emit_bridges(
                     ));
                     return;
                 }
-                unbox_bridge_return(cw, &mut code, cr, er);
+                unbox_prim_from(cw, &mut code, cr, er);
             } else if er.is_reference()
                 && cr.is_reference()
                 && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
@@ -368,43 +361,18 @@ fn attach_bridge_debug_tables(
         );
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
-        for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
+        let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
+            &bridge.parameter_identities,
+            &bridge.concrete_params,
+            &bridge.name,
+        );
+        for (parameter, spelling) in jvm_tys(&bridge.erased_params).iter().zip(parameter_names) {
             let descriptor = local_variable_desc(*parameter);
-            if let Some(spelling) = crate::jvm::parameter_names::resolved_local_variable(
-                &bridge.parameter_identities[index],
-                &bridge.name,
-            ) {
+            if let Some(spelling) = spelling {
                 locals.push((spelling, descriptor, slot));
             }
             slot += slot_words(*parameter);
         }
         cw.set_method_debug(&bridge.name, erased_desc, Some((0, line)), &locals);
     }
-}
-/// Unbox a reference a BRIDGE has on the stack into the primitive `target` it must return, in the
-/// shape measured from the reference compiler. It is not [`unbox_prim`]'s: a NUMERIC goes through
-/// `java/lang/Number` (`Number.intValue()`, `Number.longValue()`, …) rather than its own wrapper,
-/// while `Boolean` and `Char` go through `java/lang/Boolean`/`java/lang/Character`; and the
-/// `checkcast` is omitted when the delegated override's static return type already IS that owner
-/// (a `T : Number` base returns `()Ljava/lang/Number;`, and kotlinc casts nothing there).
-fn unbox_bridge_return(cw: &mut ClassWriter, code: &mut CodeBuilder, from: Ty, target: Ty) {
-    let (owner, method, descriptor) = match target {
-        Ty::Boolean => ("java/lang/Boolean", "booleanValue", "()Z"),
-        Ty::Char => ("java/lang/Character", "charValue", "()C"),
-        Ty::Byte => ("java/lang/Number", "byteValue", "()B"),
-        Ty::Short => ("java/lang/Number", "shortValue", "()S"),
-        Ty::Int => ("java/lang/Number", "intValue", "()I"),
-        Ty::Long => ("java/lang/Number", "longValue", "()J"),
-        Ty::Float => ("java/lang/Number", "floatValue", "()F"),
-        Ty::Double => ("java/lang/Number", "doubleValue", "()D"),
-        // An unsigned carrier is a value class, not a JVM wrapper: it comes out of `unbox-impl`,
-        // which `unbox_prim` already spells.
-        _ => return unbox_prim(cw, code, target),
-    };
-    if crate::jvm::names::instanceof_internal_name(from) != owner {
-        let ci = cw.class_ref(owner);
-        code.checkcast(ci);
-    }
-    let unbox = cw.methodref(owner, method, descriptor);
-    code.invokevirtual(unbox, 0, slot_words(target) as i32);
 }

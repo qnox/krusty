@@ -33,8 +33,17 @@ pub(super) fn local_variable(
                 Some(value_class_equals_operand(ordinal).to_string())
             }
             IrGeneratedParameterRole::AccessorValue { ordinal } => Some(format!("value{ordinal}")),
+            IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
+                Some(format!("p{ordinal}"))
+            }
         },
     }
+}
+
+/// A value parameter of the generic `invoke` bridge kotlinc writes for a callable-reference class.
+/// It numbers them from one, unlike the specialized `invoke` it bridges to.
+pub(super) fn reference_invoke_bridge_parameter(ordinal: u16) -> String {
+    format!("p{}", ordinal + 1)
 }
 
 pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
@@ -48,21 +57,53 @@ pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
 /// Local-variable spellings for one complete physical parameter identity list. An entry may be
 /// unnamed; that absence is preserved for class-file surfaces that support `name_index = 0` and
 /// omitted LVT rows.
-pub(super) fn function_locals(ir: &IrFile, function: u32) -> Option<Vec<Option<String>>> {
+pub(super) fn function_locals(
+    ir: &IrFile,
+    function: u32,
+    types: &[crate::types::Ty],
+) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let anonymous = if anonymous_context_parameters_are_locals() {
+        let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
+        disambiguated_anonymous_context_labels(identities, &semantic_types)
+    } else {
+        vec![None; identities.len()]
+    };
     Some(
-        ir.function_parameter_identities(function)?
+        identities
             .iter()
-            .map(|identity| function_local_variable(ir, function, identity))
+            .zip(anonymous)
+            .map(|(identity, anonymous)| {
+                anonymous.or_else(|| function_local_variable(ir, function, identity))
+            })
             .collect(),
     )
 }
 
-/// JVM local-table spelling for a parameter of one exact common-IR function.
+/// Kotlin 2.4.20 names an anonymous context parameter by its generated label in the IR itself, so
+/// the label is also its local-variable name; earlier releases left it unnamed there, publishing the
+/// label only to reflection and null assertions.
+fn anonymous_context_parameters_are_locals() -> bool {
+    crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
+}
+
+/// What separates a repeated anonymous context label from its ordinal: `$context-String$1` since
+/// Kotlin 2.4.20, `$context-String#1` before it.
+fn anonymous_context_ordinal_separator() -> char {
+    if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
+        '$'
+    } else {
+        '#'
+    }
+}
+
+/// JVM local-table spelling for a parameter of one exact common-IR function, apart from the
+/// anonymous context labels [`function_locals`] adds for the whole parameter list.
 ///
 /// A source extension declaration uses kotlinc's `$this$<function>` spelling. A receiver lambda's
 /// static implementation instead uses `<this>`; the typed lambda edge selects that ABI surface,
 /// without making common IR encode either JVM spelling.
-pub(super) fn function_local_variable(
+fn function_local_variable(
     ir: &IrFile,
     function: u32,
     identity: &IrParameterIdentity,
@@ -153,7 +194,10 @@ fn disambiguated_anonymous_context_labels(
             } else {
                 let ordinal = seen.entry(base).or_default();
                 *ordinal += 1;
-                Some(format!("{base}#{ordinal}"))
+                Some(format!(
+                    "{base}{}{ordinal}",
+                    anonymous_context_ordinal_separator()
+                ))
             }
         })
         .collect()
@@ -269,9 +313,16 @@ pub(super) fn constructor_method_parameters(
 pub(super) fn constructor_local_variables(
     arguments: &[crate::ir::IrCtorArg],
 ) -> Vec<Option<String>> {
-    constructor_identities(arguments)
+    let identities = constructor_identities(arguments);
+    let anonymous = if anonymous_context_parameters_are_locals() {
+        constructor_anonymous_labels(arguments, &identities)
+    } else {
+        vec![None; identities.len()]
+    };
+    identities
         .iter()
-        .map(|identity| local_variable(identity, "<init>"))
+        .zip(anonymous)
+        .map(|(identity, anonymous)| anonymous.or_else(|| local_variable(identity, "<init>")))
         .collect()
 }
 
@@ -360,6 +411,27 @@ pub(super) fn resolved_local_variable(
         crate::fir::ResolvedParameterIdentity::PropertySetterValue => Some("<set-?>".to_string()),
         crate::fir::ResolvedParameterIdentity::SuspendCompletion => Some("$completion".to_string()),
     }
+}
+
+/// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
+/// derived from the declaration's semantic types, never from erased bridge descriptors.
+pub(super) fn resolved_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    let anonymous = if anonymous_context_parameters_are_locals() {
+        resolved_anonymous_context_labels(identities, semantic_types)
+    } else {
+        vec![None; identities.len()]
+    };
+    identities
+        .iter()
+        .zip(anonymous)
+        .map(|(identity, anonymous)| {
+            anonymous.or_else(|| resolved_local_variable(identity, function_name))
+        })
+        .collect()
 }
 
 fn resolved_anonymous_context_labels(
@@ -467,7 +539,7 @@ mod tests {
         ir.lambda_own_params_from.insert(function, 0);
 
         assert_eq!(
-            function_locals(&ir, function),
+            function_locals(&ir, function, &[crate::types::Ty::String]),
             Some(vec![Some("<this>".to_string())])
         );
     }
@@ -491,7 +563,7 @@ mod tests {
         ir.fn_source_names.insert(function, "transform".to_string());
 
         assert_eq!(
-            function_locals(&ir, function),
+            function_locals(&ir, function, &[crate::types::Ty::String]),
             Some(vec![Some("$this$transform".to_string())])
         );
     }
@@ -514,7 +586,7 @@ mod tests {
             FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
         );
 
-        let _ = function_locals(&ir, function);
+        let _ = function_locals(&ir, function, &[crate::types::Ty::String]);
     }
 
     #[test]
@@ -556,6 +628,19 @@ mod tests {
             ),
             Some(vec![
                 Some("$context-Wrapped".to_string()),
+                Some("value".to_string()),
+            ])
+        );
+        assert_eq!(
+            function_locals(
+                &ir,
+                function,
+                &[crate::types::Ty::String, crate::types::Ty::String],
+            ),
+            Some(vec![
+                anonymous_context_parameters_are_locals()
+                    .then(|| Some("$context-Wrapped".to_string()))
+                    .flatten(),
                 Some("value".to_string()),
             ])
         );

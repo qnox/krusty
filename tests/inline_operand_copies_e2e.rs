@@ -6,9 +6,7 @@
 //! was stored twice. kotlinc stores it once at most: `maxOf(a, b)` is `iload_0; iload_1;
 //! invokestatic Math.max`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "fun larger(first: Int, second: Int): Int = maxOf(first, second)\n\
     fun smaller(first: Long, second: Long): Long = minOf(first, second)\n";
