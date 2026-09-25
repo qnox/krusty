@@ -18,7 +18,7 @@ use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
     reference_array_element, type_descriptor,
 };
-use crate::kt_string::{KtString, KtStringBuf};
+use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod access_bridges;
@@ -809,41 +809,6 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .collect()
 }
 
-/// `String` literals a class `init_body` assigns to a field, by field index. kotlinc interns each as
-/// an `ldc` constant just before that property's store.
-/// Field indices a class `init_body` actually stores into. A body property initialized to `null` is
-/// not among them — the JVM's zero-initialization already does the job, so kotlinc emits no store.
-fn init_body_stored_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
-    let mut out = std::collections::HashSet::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, .. } = ir.expr(s) {
-            out.insert(*index);
-        }
-    }
-    out
-}
-
-fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMap<u32, KtString> {
-    let mut out = std::collections::HashMap::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if let IrExpr::Const(crate::ir::IrConst::String(t)) = ir.expr(init_operand(ir, *value))
-            {
-                out.insert(*index, t.clone());
-            }
-        }
-    }
-    out
-}
-
 /// The value an initializer STORES, seeing through a value-class construction: the value-class pass
 /// rewrites `val k: K = K("OK")` to `K.constructor-impl("OK")`, whose stored value is still the constant
 /// the `ldc` pushes. Anything else is its own operand.
@@ -856,49 +821,6 @@ fn init_operand(ir: &IrFile, value: crate::ir::ExprId) -> crate::ir::ExprId {
         } if name == "constructor-impl" && args.len() == 1 => args[0],
         _ => value,
     }
-}
-
-/// Per field index, the `(value class, `constructor-impl` descriptor)` its initializer constructs FROM A
-/// CONSTANT. The constant-pool seeder needs it to intern the factory where kotlinc does: after the
-/// constant the initializer pushes and before the field the store writes.
-///
-/// Restricted to a constant operand on purpose. kotlinc interns in EVALUATION order, so an initializer
-/// that computes its argument (`K(compute())`) interns that call first and the factory after it —
-/// seeding the factory at the field's position would put it ahead of a call the seeder does not model.
-/// Leaving those to natural emission order keeps them where they were.
-fn init_body_value_class_ctors(
-    ir: &IrFile,
-    c: &IrClass,
-) -> std::collections::HashMap<u32, (String, String)> {
-    let mut out = std::collections::HashMap::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if let IrExpr::Call {
-                callee:
-                    crate::ir::Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    },
-                args,
-                ..
-            } = ir.expr(*value)
-            {
-                let from_constant = args
-                    .first()
-                    .is_some_and(|&a| matches!(ir.expr(a), IrExpr::Const(_)));
-                if name == "constructor-impl" && from_constant {
-                    out.insert(*index, (owner.render(), descriptor.clone()));
-                }
-            }
-        }
-    }
-    out
 }
 
 /// The TYPE PARAMETER a field is declared as (`class Pair<A, B>(val a: A)` → `a` is `A`), or `None` when
@@ -2663,26 +2585,18 @@ struct PlainClassPoolSeed<'a, 'symbols> {
 
 fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
-        formatter,
         ir,
-        bodies,
         class: c,
         fq_name,
         superclass,
         ctor_signature,
+        ..
     } = seed;
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
     // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
     let ann_kind = |name: &str, t: Ty| -> u8 { field_nullability_kind(ir, fq_name, name, t) };
     let ctor_desc = format!("({})V", ctor_field_descs(c));
-    let body_consts = init_body_string_consts(ir, c);
-    let body_value_class_ctors = init_body_value_class_ctors(ir, c);
-    let stored = init_body_stored_fields(ir, c);
-    // A static-storage object's `<init>` stores nothing (initializers run in `<clinit>`, emitted
-    // last) — its fields first appear at their GETTERS, which the seeder already orders correctly
-    // for never-stored fields.
-    let statics_storage = static_storage(ir, c);
     let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
         .iter()
@@ -2692,39 +2606,11 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
             desc: desc(f.ty),
             ann_kind: ann_kind(&f.name, f.ty),
             is_ctor_param: i < c.ctor_param_count as usize,
-            stores_in_ctor: !statics_storage
-                && (i < c.ctor_param_count as usize || stored.contains(&(i as u32))),
-            string_const: body_consts
-                .get(&(i as u32))
-                .filter(|_| !statics_storage)
-                .cloned(),
-            value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
             visible_ann_types: ctor_param_ann_types(c, i, true),
             invisible_ann_types: ctor_param_ann_types(c, i, false),
         })
         .collect();
-    // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
-    // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
-    // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
-    // add_method_sig) dedupes to kotlinc's interning positions.
-    // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
-    // concrete type (`List<String>`). Disjoint — a field is one or the other.
-    let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
-        let type_parameter = ir
-            .field_signatures(fq_name)
-            .and_then(|fs| {
-                fs.iter()
-                    .find(|(name, _)| name == &f.name)
-                    .map(|(_, parameter)| parameter.as_str())
-            })
-            .or(f.type_param.as_deref());
-        property_jvm_signatures(formatter, &f.ty, type_parameter).field
-    };
     let ctor_sig = ctor_signature;
-    let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
-    // A data class's accessor signatures join its accessor window below, while its backing-field
-    // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
-    // at the exact accessor/field visits.
     let (mut super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass);
     if let Some(defaults) = ir
         .super_constructor_default_arguments
@@ -2743,32 +2629,6 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
         .get(&c.fq_name_id())
         .and_then(|target| target.descriptor.clone())
         .unwrap_or_else(|| crate::jvm::names::method_descriptor(&super_param_tys, Ty::Unit));
-    // The primary ctor's `$default` overload interning window (marker desc, default STRING
-    // constants, delegating `<init>` ref) — kotlinc writes the synthetic right after the primary.
-    let ctor_default_seed = ir
-        .class_ctor_defaults(fq_name)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-        .map(|defaults| {
-            let source_parameter_count = defaults
-                .len()
-                .checked_sub(c.constructor_prefix_count as usize)
-                .expect("constructor default prefix exceeds its parameters");
-            let masks = "I".repeat(default_mask_count(source_parameter_count));
-            crate::jvm::classfile::SeedCtorDefaults {
-                marker_desc: format!(
-                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                    ctor_field_descs(c)
-                ),
-                string_consts: defaults
-                    .iter()
-                    .flatten()
-                    .filter_map(|&d| match ir.expr(d) {
-                        IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-            }
-        });
     cw.seed_plain_class_pool(
         fq_name,
         superclass,
@@ -2777,7 +2637,6 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
         &crate::jvm::classfile::MemberSignatures {
             ctor: ctor_sig,
         },
-        ctor_default_seed.as_ref(),
         &{
             use crate::jvm::classfile::SeedSuperArg;
             fn collect(ir: &IrFile, expr: crate::ir::ExprId, entries: &mut Vec<SeedSuperArg>) {
@@ -2830,6 +2689,69 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
         },
         &primary_ctor_annotations(c),
     );
+}
+
+/// Seed what kotlinc interns once the primary constructor's body is done: its local-variable
+/// strings and `$default` overload, then a data class's synthesized members.
+fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
+    let PlainClassPoolSeed {
+        formatter,
+        ir,
+        bodies,
+        class: c,
+        fq_name,
+        ctor_signature,
+        ..
+    } = seed;
+    let ctor_desc = format!("({})V", ctor_field_descs(c));
+    // The primary ctor's `$default` overload interning window (marker desc, default STRING
+    // constants, delegating `<init>` ref) — kotlinc writes the synthetic right after the primary.
+    let ctor_default_seed = ir
+        .class_ctor_defaults(fq_name)
+        .filter(|defaults| defaults.iter().any(Option::is_some))
+        .map(|defaults| {
+            let source_parameter_count = defaults
+                .len()
+                .checked_sub(c.constructor_prefix_count as usize)
+                .expect("constructor default prefix exceeds its parameters");
+            let masks = "I".repeat(default_mask_count(source_parameter_count));
+            crate::jvm::classfile::SeedCtorDefaults {
+                marker_desc: format!(
+                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                    ctor_field_descs(c)
+                ),
+                string_consts: defaults
+                    .iter()
+                    .flatten()
+                    .filter_map(|&d| match ir.expr(d) {
+                        IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+        });
+    cw.seed_plain_constructor_tail(fq_name, &ctor_desc, ctor_default_seed.as_ref());
+    // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
+    // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
+    // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
+    // add_method_sig) dedupes to kotlinc's interning positions.
+    // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
+    // concrete type (`List<String>`). Disjoint — a field is one or the other.
+    let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
+        let type_parameter = ir
+            .field_signatures(fq_name)
+            .and_then(|fs| {
+                fs.iter()
+                    .find(|(name, _)| name == &f.name)
+                    .map(|(_, parameter)| parameter.as_str())
+            })
+            .or(f.type_param.as_deref());
+        property_jvm_signatures(formatter, &f.ty, type_parameter).field
+    };
+    let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
+    // A data class's accessor signatures join its accessor window below, while its backing-field
+    // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
+    // at the exact accessor/field visits.
     // A companion OUTER's `access$…$cp` bridges, `<clinit>`, and hoisted-initializer constants are
     // NOT seeded here: kotlinc interns them at their natural emission position — after the declared
     // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
@@ -2841,7 +2763,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
                 class: c,
                 bodies,
                 fq_name,
-                ctor_signature: ctor_sig,
+                ctor_signature,
                 ctor_desc: &ctor_desc,
                 field_sigs: &field_sigs,
                 field_sig_of: &field_sig_of,
@@ -5846,19 +5768,17 @@ fn emit_class(
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && build_class_metadata(ir, c, opts).is_some();
+    let pool_seed = || PlainClassPoolSeed {
+        formatter: &signature_formatter,
+        ir,
+        bodies: env.bodies,
+        class: c,
+        fq_name: &fq_name,
+        superclass: &superclass,
+        ctor_signature: ctor_signature.as_deref(),
+    };
     if byte_parity {
-        seed_plain_class_pool(
-            PlainClassPoolSeed {
-                formatter: &signature_formatter,
-                ir,
-                bodies: env.bodies,
-                class: c,
-                fq_name: &fq_name,
-                superclass: &superclass,
-                ctor_signature: ctor_signature.as_deref(),
-            },
-            &mut cw,
-        );
+        seed_plain_class_pool(pool_seed(), &mut cw);
     }
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
     // method is `ACC_ABSTRACT`. An inline-splice implementation is deliberately body-less after its
@@ -5969,11 +5889,11 @@ fn emit_class(
         let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
         let physical_name = instance_field_jvm_name(ir, c, field);
         let field_desc = ir_type_desc(ty);
-        // Data-class field headers are part of the synthesized-member seed order, while coroutine
-        // continuation fields are compiler-generated storage rather than Kotlin properties. Both are
-        // therefore visited eagerly and neither receives property nullability annotations here.
-        // Ordinary declared properties use the later field-table visit: their methods establish the
-        // preceding pool window and their backing fields carry Kotlin's nullability annotation.
+        // Coroutine continuation fields are compiler-generated storage rather than Kotlin
+        // properties, so they are visited eagerly and receive no nullability annotation. Declared
+        // properties, a data class's included, use the later field-table visit: their methods
+        // establish the preceding pool window and their backing fields carry Kotlin's nullability
+        // annotation.
         if is_continuation && matches!(name.as_str(), "result" | "this$0" | "label") {
             // kotlinc interns a continuation's SPILL field names with the field visit, but `result`,
             // `this$0` and `label` first appear where they are USED — `this$0` in the constructor's
@@ -5987,7 +5907,7 @@ fn emit_class(
                 None,
                 None,
             );
-        } else if c.is_data || is_continuation {
+        } else if is_continuation {
             cw.add_field_sig(acc, &physical_name, &field_desc, field_sig.as_deref());
         } else {
             // Through the SHARED classification, so this field's annotation cannot disagree with the
@@ -6438,6 +6358,9 @@ fn emit_class(
             ctor_signature.as_deref(),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+        if byte_parity {
+            seed_plain_constructor_tail(pool_seed(), &mut cw);
+        }
         // A continuation's constructor table is attached HERE, not in the trailing debug pass:
         // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
         // the next one, so batching every table at the end reordered the pool from `<init>` onward.
