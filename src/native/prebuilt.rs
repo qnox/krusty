@@ -84,6 +84,20 @@ mod tests {
             AVAILABLE || std::env::var_os("CI").is_none(),
             "CI must build the native runtime, but krusty was built without a C compiler for it"
         );
+        // Some runtime being there is not enough: a target whose objects failed to build is left out
+        // of the table with only a build warning. CI has the compiler for every target, so there
+        // the table is every supported target, in the supported order.
+        if std::env::var_os("CI").is_some() {
+            let built: Vec<Arch> = PREBUILT.iter().map(|(arch, _)| *arch).collect();
+            let supported: Vec<Arch> = crate::native::NativeTarget::ALL
+                .iter()
+                .map(|target| target.arch)
+                .collect();
+            assert_eq!(
+                built, supported,
+                "CI must prebuild the runtime for every supported target"
+            );
+        }
         for (arch, objects) in PREBUILT {
             let names: Vec<&str> = objects.iter().map(|(name, _)| *name).collect();
             let expected: Vec<String> = SOURCES
