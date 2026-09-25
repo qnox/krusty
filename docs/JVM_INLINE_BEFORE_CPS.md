@@ -109,8 +109,8 @@ Known gaps, both byte differences in the function's own method (the continuation
 
 ### Step 3 as landing
 
-* A final instance member (not open, not an interface body, not a value-class `-impl` static)
-  takes the same route. Its continuation nests under the class (`Box$work$1`), captures the
+* An instance member of a final class (not open, not an interface body, not a value-class
+  `-impl` static) takes the same route. Its continuation nests under the class (`Box$work$1`), captures the
   receiver as `this$0` (the transformer's `needDispatchReceiver`), and re-enters the member through
   it; a class's methods are transformed when the class is written, as the facade's are.
 * An open member is next: kotlinc moves its body to a static `<name>$suspendImpl(receiver, …)`
