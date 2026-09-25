@@ -330,3 +330,71 @@ fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
 fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
     run_driver("array_copy_into_bounds");
 }
+
+#[test]
+fn mapping_the_full_long_range_is_too_long_to_collect() {
+    run_driver_expecting_failure(
+        "range_map_full_span",
+        "krusty: a range too long to collect\n",
+    );
+}
+
+#[test]
+fn a_list_write_out_of_bounds_raises_and_leaves_the_list_alone() {
+    run_driver("mutable_list_bounds");
+}
+
+#[test]
+fn a_list_read_out_of_bounds_raises_and_answers_nothing() {
+    run_driver("list_read_bounds");
+}
+
+#[test]
+fn a_list_added_to_itself_doubles() {
+    run_driver("list_add_all_self");
+}
+
+#[test]
+fn a_list_modified_during_for_each_ends_the_walk() {
+    run_driver("walk_modified_during_for_each");
+}
+
+#[test]
+fn a_throwing_lambda_ends_the_walk_that_called_it() {
+    run_driver("walk_stops_on_throw");
+}
+
+#[test]
+fn an_exhausted_array_or_string_iterator_raises_no_such_element() {
+    run_driver("iterator_exhausted");
+}
+
+#[test]
+fn an_indexed_value_hash_code_wraps() {
+    run_driver("indexed_value_hash_overflow");
+}
+
+#[test]
+fn an_array_list_of_negative_capacity_raises() {
+    run_driver("array_list_negative_capacity");
+}
+
+#[test]
+fn walking_a_string_is_linear_and_yields_its_utf16_units() {
+    run_driver("string_iterator_linear");
+}
+
+#[test]
+fn a_programs_own_text_is_asked_its_length_once_per_step() {
+    run_driver("program_text_walk_asks_length_once_per_step");
+}
+
+#[test]
+fn a_list_grown_past_the_largest_capacity_is_out_of_memory() {
+    run_driver_expecting_failure("mutable_list_growth_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn an_element_member_that_throws_ends_the_walk_that_called_it() {
+    run_driver("list_stops_on_throwing_element");
+}
