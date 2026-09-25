@@ -61,6 +61,20 @@ impl BodyFirChecker<'_> {
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
         }
         let context_count = info.sig.context_count.min(info.sig.params.len());
+        if let Some(vararg) = info.sig.vararg_index {
+            body.set_vararg_parameter(crate::fir::FirVarargParameter {
+                index: vararg
+                    .checked_sub(context_count)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or_else(|| {
+                        self.failure(
+                            Some(function.span),
+                            BodyCheckFailureKind::UnsupportedCallShape,
+                        )
+                    })?,
+                is_last: vararg + 1 == info.sig.params.len(),
+            });
+        }
         body.set_context_receiver_types(
             info.sig.params[..context_count]
                 .iter()
