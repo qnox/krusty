@@ -594,7 +594,11 @@ fn module_property(
     Ok((
         PropRef {
             owner_internal: Some(owner),
-            call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
+            call_owner_internal: Some(
+                enclosing
+                    .or(property.companion_block_owner())
+                    .unwrap_or(declaration_facade),
+            ),
             prop_name: name.to_string(),
             getter_name: if access_bridge {
                 format!("access${declared_getter_name}$p")

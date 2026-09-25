@@ -66,6 +66,11 @@ fn publish_callable(
         })
         .transpose()?;
     let owner = owner.map(|classifier| classifier.classifier);
+    let companion_block_owner = flags
+        .has(DeclarationFlags::COMPANION_BLOCK_MEMBER)
+        .then_some(callable.shape.extension_receiver)
+        .flatten()
+        .and_then(|receiver| receiver.get().non_null().obj_internal());
     let signature =
         index
             .signature(callable.declaration)
@@ -117,6 +122,7 @@ fn publish_callable(
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            companion_block_owner,
         },
     );
     Ok(())

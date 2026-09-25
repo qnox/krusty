@@ -2326,6 +2326,7 @@ impl<'a> Parser<'a> {
             ty,
             is_var,
             is_companion_extension: false,
+            is_companion_block_member: false,
             is_override: false,
             is_lateinit,
             is_external: accessor_external,
@@ -2708,6 +2709,7 @@ impl<'a> Parser<'a> {
                 TokenKind::KwFun => {
                     let mut function = self.parse_fun(&member_modifiers);
                     function.receiver = Some(receiver());
+                    function.flags = function.flags.with_is_companion_block_member(true);
                     let declaration = self.file.add_decl(Decl::Fun(function));
                     self.file.decls.push(declaration);
                 }
@@ -2738,6 +2740,7 @@ impl<'a> Parser<'a> {
                     property.is_actual =
                         member_modifiers.iter().any(|modifier| modifier == "actual");
                     property.is_companion_extension = true;
+                    property.is_companion_block_member = true;
                     let declaration = self.file.add_decl(Decl::Property(property));
                     self.file.decls.push(declaration);
                 }
@@ -3452,6 +3455,23 @@ impl<'a> Parser<'a> {
     fn reprefix_hoisted(&mut self, outer: &str, start: usize) {
         for k in start..self.file.decls.len() {
             let did = self.file.decls[k];
+            // A companion-block member is hoisted as a companion extension of the class whose
+            // block declared it; its receiver names that class by the same lexical path.
+            match self.file.decl_mut(did) {
+                crate::ast::Decl::Fun(function) if function.is_companion_extension() => {
+                    if let Some(receiver) = function.receiver.as_mut() {
+                        receiver.name = format!("{outer}.{}", receiver.name);
+                    }
+                    continue;
+                }
+                crate::ast::Decl::Property(property) if property.is_companion_extension => {
+                    if let Some(receiver) = property.receiver.as_mut() {
+                        receiver.name = format!("{outer}.{}", receiver.name);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             if let crate::ast::Decl::Class(nc) = self.file.decl_mut(did) {
                 let previous_root = nc.name.split('.').next().unwrap_or_default().to_string();
                 nc.name = format!("{outer}.{}", nc.name);

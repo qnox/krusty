@@ -371,6 +371,7 @@ pub(super) fn realize_default_calls(
                     .to_owned();
                 let owner = provider
                     .owner
+                    .or(provider.companion_block_owner)
                     .or_else(|| facade_for(provider.source, stems))
                     .ok_or(failure)?;
                 let (mut params, mut args, mut plan) = realize_default_arguments(
@@ -646,7 +647,11 @@ pub(super) fn realize(
                 if callable.owner.is_some() {
                     return Err(failure);
                 }
-                let owner = facade_for(callable.source, stems).ok_or(failure)?;
+                // A `companion { … }` member is a static method of its classifier.
+                let owner = callable
+                    .companion_block_owner
+                    .or_else(|| facade_for(callable.source, stems))
+                    .ok_or(failure)?;
                 Some(IrExpr::Call {
                     callee: Callee::CrossFile {
                         facade: owner,
@@ -918,7 +923,10 @@ fn realize_property(
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
-        let facade = facade_for(property.source, stems).ok_or(failure)?;
+        let facade = property
+            .companion_block_owner()
+            .or_else(|| facade_for(property.source, stems))
+            .ok_or(failure)?;
         Ok((
             IrExpr::Call {
                 callee: Callee::CrossFile {

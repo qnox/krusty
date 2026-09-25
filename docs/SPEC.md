@@ -786,6 +786,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   byte-divergent), and the file is written UNCONDITIONALLY: kotlinc emits it with an empty parts
   list for a class-only module, so omitting it diverged the artifact set. Byte-identical against
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
+- **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
+  member is a static member of the classifier that declares the block, not of the file facade,
+  measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property
+  with storage is a `private static final` field of `C` initialized in `C`'s `<clinit>` (so reading
+  it initializes `C`, not the file), with `public static` `getX`/`setX` placed at the property's
+  source position. `C`'s `@Metadata` records them with function flag bit 18 and property flag
+  bit 19 (companion). Inside the block and inside `C`'s own members, block members and written
+  companion extensions are called unqualified with no receiver argument. A written
+  `companion fun C.f()` / `companion val C.p` stays on the facade with the receiver dropped from
+  the JVM descriptor; its facade record carries the receiver type, the companion bit and an
+  explicit JVM signature. When a companion-object property hoisted onto `C` has the same field
+  name and descriptor as a block property, the hoisted field takes `name$1` (its `access$…$cp`
+  bridges keep the source name). Tests: `tests/companion_block_members_e2e.rs`.
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and

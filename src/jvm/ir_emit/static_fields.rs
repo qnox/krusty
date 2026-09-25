@@ -260,22 +260,22 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     }
 }
 
-/// The public `getX`/`setX` of one plain facade property, emitted at the property's place among the
-/// facade's declared functions: kotlinc's JvmPropertiesLowering replaces each property with its
-/// accessors in place, and the facade's methods follow that declaration order. A `const val`, a
-/// `@JvmField`, a custom-accessor property (its accessors are ordinary facade functions) and a private
-/// property (reached only through `access$…$p` bridges) publish none here.
+/// The public `getX`/`setX` of one plain static property stored on `owner`, emitted at the
+/// property's place among its owner's declared members: kotlinc's JvmPropertiesLowering replaces each
+/// property with its accessors in place. The owner is the file facade for a top-level property and
+/// the declaring class for a `companion { … }` block property. A `const val`, a `@JvmField`, a
+/// custom-accessor property (its accessors are ordinary functions) and a private property (reached
+/// only through `access$…$p` bridges or its field) publish none here.
 pub(super) fn emit_static_accessors(
     ir: &IrFile,
-    facade: &str,
+    owner: &str,
     cw: &mut ClassWriter,
     env: &EmitEnv,
     param_assertions: bool,
     static_index: u32,
 ) {
     let s = &ir.statics[static_index as usize];
-    if !s.is_facade_owned()
-        || s.is_const
+    if s.is_const
         || s.custom_accessor
         || ir.is_jvm_field_static(static_index)
         || s.visibility.is_private()
@@ -293,7 +293,7 @@ pub(super) fn emit_static_accessors(
     // it there published a non-null `String` setter for a `var x: Label?` and refused the null
     // the property accepts, so the declaration's own recorded type answers instead.
     let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
-    let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
+    let nullability = field_nullability_kind(ir, owner, &s.name, accessor_ty);
     let acc_ann = match nullability {
         1 => Some("Lorg/jetbrains/annotations/NotNull;"),
         2 => Some("Lorg/jetbrains/annotations/Nullable;"),
@@ -318,7 +318,7 @@ pub(super) fn emit_static_accessors(
     if s.line != 0 {
         g.mark_line(s.line);
     }
-    let fref = cw.fieldref(facade, &s.name, &desc);
+    let fref = cw.fieldref(owner, &s.name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
     emit_return(jt, &mut g);
     finish_code_sig::<0x0019>(
@@ -361,7 +361,7 @@ pub(super) fn emit_static_accessors(
             st.mark_line(s.line);
         }
         load(jt, 0, &mut st);
-        let fref = cw.fieldref(facade, &s.name, &desc);
+        let fref = cw.fieldref(owner, &s.name, &desc);
         st.putstatic(fref, slot_words(jt) as i32);
         st.ret_void();
         finish_code_sig::<0x0019>(

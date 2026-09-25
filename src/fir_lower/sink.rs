@@ -206,6 +206,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_interface_delegations(index, self.ir)?;
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
+        super::companion_blocks::realize_companion_block_calls(self.ir);
         self.ir
             .validate_determined_types()
             .map_err(FirFileLoweringFailure::UndeterminedType)
@@ -1125,6 +1126,22 @@ impl<'a> CommonIrBodySink<'a> {
             let entry_class = anchor
                 .owner
                 .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
+            // A `companion { … }` member is a static member of the classifier whose block declared
+            // it. Its receiver is that classifier's name-resolution coordinate, never a value.
+            let companion_block_owner = if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPANION_BLOCK_MEMBER)
+            {
+                let owner = callable
+                    .shape
+                    .extension_receiver
+                    .and_then(|receiver| receiver.get().obj_internal())
+                    .and_then(|owner| self.ir.class_id_by_name(owner))
+                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                Some(owner)
+            } else {
+                None
+            };
             let class = entry_class
                 .map(Ok)
                 .or_else(|| {
@@ -1156,6 +1173,10 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            if let Some(owner) = companion_block_owner {
+                self.ir.classes[owner as usize].methods.push(function);
+                self.ir.companion_block_functions.insert(function, owner);
+            }
             self.ir.fn_source_names.insert(function, source_name);
             self.ir.fn_source_order.insert(
                 function,

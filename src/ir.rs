@@ -2379,6 +2379,9 @@ pub struct IrFile {
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// JVM field name of a static whose source name its owner already uses for another static
+    /// field (a hoisted companion property beside a same-named `companion { … }` property).
+    jvm_static_field_names: std::collections::HashMap<u32, String>,
     /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by JVM property
     /// storage passes. Common lowering never populates this physical realization table.
     jvm_field_statics: std::collections::HashSet<u32>,
@@ -2517,6 +2520,17 @@ pub struct IrFile {
     /// `fn_context_counts`: Kotlin signs a context extension `(contexts…, receiver, values…)`, so the
     /// receiver is `params[0]` only when the function declares no `context(…)` clause.
     pub extension_receiver_fns: std::collections::HashSet<u32>,
+    /// Function id → the class whose `companion { … }` block declared it. Such a function is a
+    /// static member of that class (listed in its `methods`); a same-file call to it names the class
+    /// as its static owner rather than the file facade.
+    pub companion_block_functions: std::collections::HashMap<FunId, ClassId>,
+    /// Static storage of a `companion { … }` block property. Its `IrStatic::owner` is the declaring
+    /// class; like a top-level property's, the field is private behind public static accessors.
+    pub companion_block_statics: std::collections::HashSet<u32>,
+    /// Every `companion { … }` block property of this file, for its class's `@Metadata`.
+    pub companion_block_properties: Vec<IrCompanionBlockProperty>,
+    /// Companion-block properties whose initializer is a metadata constant (`HAS_CONSTANT`).
+    pub companion_block_constant_initializers: std::collections::HashSet<crate::fir::PropertyId>,
     /// Function id → how many of its LEADING physical parameters are context parameters. Class
     /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
     /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without
@@ -3009,6 +3023,23 @@ pub struct IrPackageTypeParameter {
     pub reified: bool,
 }
 
+/// A `companion { … }` block property: a static member of `class`, realized by `storage` (a static
+/// owned by that class) and/or accessor functions placed among the class's static methods.
+#[derive(Clone, Debug)]
+pub struct IrCompanionBlockProperty {
+    pub class: TypeName,
+    pub name: String,
+    pub ty: Ty,
+    pub is_var: bool,
+    pub is_const: bool,
+    pub has_constant: bool,
+    pub visibility: crate::types::Visibility,
+    pub storage: Option<u32>,
+    pub getter: Option<FunId>,
+    pub setter: Option<FunId>,
+    pub source_order: u32,
+}
+
 /// Backend-neutral package-function declaration metadata. `function` is the exact common-IR
 /// realization; all remaining fields describe the Kotlin declaration before target erasure.
 #[derive(Clone, Debug, PartialEq)]
@@ -3023,6 +3054,8 @@ pub struct IrPackageFunction {
     pub inline: bool,
     pub operator: bool,
     pub infix: bool,
+    /// `companion fun C.name`: the receiver is a lookup coordinate, absent from the JVM method.
+    pub companion: bool,
     pub contract: Option<crate::contracts::ResolvedContract>,
     pub type_params: Vec<IrPackageTypeParameter>,
     pub context_count: usize,
@@ -3091,6 +3124,8 @@ pub struct IrModuleCallable {
     /// Resolved declaration annotations with only the compact constant-string payload needed by
     /// target realization. No source spelling, expression, or parser coordinate survives here.
     pub annotations: Box<[IrHeaderAnnotation]>,
+    /// The classifier whose `companion { … }` block declared this function: its static owner.
+    pub companion_block_owner: Option<TypeName>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3121,6 +3156,26 @@ pub struct IrModuleProperty {
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
     pub flags: crate::fir::DeclarationFlags,
+}
+
+impl IrPackageProperty {
+    /// Whether this is a written `companion val C.p`: its receiver selects the companion scope and is
+    /// not a JVM accessor parameter.
+    pub fn is_companion_extension(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::COMPANION)
+    }
+}
+
+impl IrModuleProperty {
+    /// The classifier whose `companion { … }` block declared this property: its static owner, named
+    /// by the associated receiver.
+    pub fn companion_block_owner(&self) -> Option<TypeName> {
+        self.flags
+            .has(crate::fir::DeclarationFlags::COMPANION_BLOCK_MEMBER)
+            .then_some(self.extension_receiver)
+            .flatten()
+            .and_then(|receiver| receiver.non_null().obj_internal())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3463,6 +3518,18 @@ impl IrFile {
         self.jvm_companion_property_statics
             .get(&(companion, property))
             .copied()
+    }
+
+    pub(crate) fn set_jvm_static_field_name(&mut self, index: u32, name: String) {
+        self.jvm_static_field_names.insert(index, name);
+    }
+
+    /// The physical JVM field name of static `index`: its source name unless the JVM realization
+    /// had to disambiguate it from another static field of the same owner.
+    pub(crate) fn static_field_jvm_name(&self, index: u32) -> &str {
+        self.jvm_static_field_names
+            .get(&index)
+            .map_or(self.statics[index as usize].name.as_str(), String::as_str)
     }
 
     pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {

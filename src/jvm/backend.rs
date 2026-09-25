@@ -1055,9 +1055,12 @@ pub fn facade_package_metadata_from_ir(
                 .chain(declaration.params.iter().map(|(_, parameter)| *parameter))
                 .chain(std::iter::once(declaration.ret))
                 .any(crate::metadata::descriptor_needs_recording);
+            // A companion extension's receiver is recorded but has no JVM parameter, so its
+            // descriptor is never derivable from the record.
             let jvm_desc = (declaration.suspend
                 || mentions_type_parameter
                 || records_an_array
+                || declaration.companion
                 || declaration.context_count > 0)
                 .then(|| {
                     let mut physical = declaration
@@ -1065,7 +1068,8 @@ pub fn facade_package_metadata_from_ir(
                         .iter()
                         .map(|(_, parameter)| *parameter)
                         .collect::<Vec<_>>();
-                    if let Some(receiver) = declaration.receiver {
+                    if let Some(receiver) = declaration.receiver.filter(|_| !declaration.companion)
+                    {
                         physical.insert(declaration.context_count.min(physical.len()), receiver);
                     }
                     let mut descriptor = physical
@@ -1137,6 +1141,7 @@ pub fn facade_package_metadata_from_ir(
                 inline: declaration.inline,
                 operator: declaration.operator,
                 infix: declaration.infix,
+                companion: declaration.companion,
                 contract: declaration
                     .contract
                     .as_ref()
@@ -1185,11 +1190,12 @@ pub fn facade_package_metadata_from_ir(
                 )
                 | None => None,
             };
+            let companion = declaration.is_companion_extension();
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
                 .copied()
-                .chain(declaration.receiver)
+                .chain(declaration.receiver.filter(|_| !companion))
                 .collect::<Vec<_>>();
             let descriptor_parameters = accessor_parameters
                 .iter()
@@ -1249,6 +1255,7 @@ pub fn facade_package_metadata_from_ir(
                 spellings: declaration.spellings.clone(),
                 has_backing_field: declaration.has_backing_field,
                 has_declared_getter: declaration.has_declared_getter,
+                companion,
             }
         })
         .collect::<Vec<_>>();

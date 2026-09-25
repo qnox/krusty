@@ -1191,6 +1191,10 @@ fn extract_file_stub_inventory(
                 .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
+                )
+                .with(
+                    DeclarationFlags::COMPANION_BLOCK_MEMBER,
+                    function.is_companion_block_member(),
                 ),
         }
     }
@@ -1336,7 +1340,11 @@ fn extract_file_stub_inventory(
                         .is_some_and(|setter| setter.body.is_some()),
                 )
                 .with(DeclarationFlags::HAS_INITIALIZER, property.init.is_some())
-                .with(DeclarationFlags::COMPANION, property.is_companion_extension),
+                .with(DeclarationFlags::COMPANION, property.is_companion_extension)
+                .with(
+                    DeclarationFlags::COMPANION_BLOCK_MEMBER,
+                    property.is_companion_block_member,
+                ),
         });
 
         if property.getter_declared {
