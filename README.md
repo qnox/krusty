@@ -13,9 +13,9 @@
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
-krusty is built to be a drop-in replacement for `kotlinc` on the JVM: it takes the same command-line
-flags and aims to emit `.class` files byte-for-byte identical to `kotlinc`'s, from a single native
-binary. The conformance badge shows how much of Kotlin's own test suite it passes today.
+krusty is built to be a drop-in replacement for `kotlinc` on the JVM. For the Kotlin subset it
+supports, it accepts `kotlinc`'s command-line flags and aims to emit `.class` files byte-for-byte
+identical to `kotlinc`'s, from a single native binary. The conformance badge shows how much of Kotlin's own test suite it passes today.
 
 [Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
 
@@ -37,12 +37,12 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -help                                 # all options
 ```
 
-Output matches the newest supported Kotlin release; pick another with
-`-Xkotlin-reference-version=<version>`.
+The reference `kotlinc` version krusty targets defaults to the newest supported release; select
+another with `-Xkotlin-reference-version=<version>`.
 
 ## Features
 
-- **kotlinc's command line.** Same flags, output to a class directory or a jar.
+- **kotlinc-compatible command line** for the supported subset, output to a class directory or a jar.
 - **Byte-level fidelity.** Every change is diffed against the real `kotlinc`, and every build runs
   JetBrains' `codegen/box` suite.
 - **Low memory.** On our multi-module benchmark, about a third of the peak memory of the
