@@ -109,6 +109,8 @@ fn a_cast_of_a_non_null_property_read_before_initialization_throws() {
     );
 }
 
+/// Native renders the same message with one difference: it has no file facades, so a top-level
+/// function's type parameter is qualified by its package (the root one here) instead of `NullCastKt`.
 #[test]
 fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
     let source = r#"
@@ -129,9 +131,16 @@ fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
                 }
         }
     "#;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert_eq!(
-        common::compile_and_run_with_stdlib(source, "NullCast").as_deref(),
-        Some("OK")
+        common::expect_box_run(source, "NullCast", &[stdlib], Some(jdk.as_path())),
+        "OK"
+    );
+    common::expect_native_box(
+        source,
+        "NullCast",
+        "null cannot be cast to non-null type T of generic",
     );
 }
 

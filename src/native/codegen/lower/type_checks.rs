@@ -338,8 +338,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // because `T` may be instantiated with a nullable type. Reading the target
                     // instead made eight programs throw that Kotlin accepts.
                     //
-                    // The exception carries no message where a cast to a NAMED type gives one:
-                    // there is no name left to put in it. That is what erasure costs.
+                    // The type is erased, but its NAME is not: it is rendered here, as kotlinc's
+                    // IR renderer spells it, for the message `kt_cast_non_null_erased` raises.
                     let coerced = self.coerce(arg, type_operand)?;
                     if self.terminated {
                         return Ok(None);
@@ -353,7 +353,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     {
                         return Ok(Some(value));
                     }
-                    return self.runtime_call("kt_not_null", &[any()], any(), &[value]);
+                    return self.erased_non_null_cast(value, type_operand);
                 };
                 let helper = if op == IrTypeOp::Cast || type_operand.is_nullable() {
                     "kt_cast"
@@ -388,6 +388,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.coerce(arg, type_operand)
             }
         }
+    }
+
+    /// `value as T` for an erased `T`: `null` raises the NullPointerException naming `T`, and
+    /// anything else passes unchanged.
+    ///
+    /// The name is rendered the way the JVM backend renders it, with one difference: this target
+    /// has no file facades, so a top-level function's type parameter is qualified by its package.
+    /// `T of generic`, where the JVM says `T of NullCastKt.generic`.
+    fn erased_non_null_cast(
+        &mut self,
+        value: Value,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let package = self
+            .file
+            .ir
+            .package
+            .as_deref()
+            .filter(|package| !package.is_empty())
+            .map(|package| crate::types::type_name(&package.replace('.', "/")));
+        let rendered = self.file.ir.rendered_cast_target(target, &|_| package);
+        let data = self.file.string_data(rendered.as_bytes())?;
+        let global = self
+            .file
+            .module
+            .declare_data_in_func(data, self.builder.func);
+        let pointer = self.builder.ins().symbol_value(types::I64, global);
+        let length = self.builder.ins().iconst(types::I32, rendered.len() as i64);
+        self.runtime_call(
+            "kt_cast_non_null_erased",
+            &[any(), Ty::obj("kotlin/Any"), Ty::Int],
+            any(),
+            &[value, pointer, length],
+        )
     }
 
     /// The erased reference beneath `Object -> P -> P?`, when that is what `arg` is.
