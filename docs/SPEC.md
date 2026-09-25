@@ -812,7 +812,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   offers its public static method, or its public static accessors (the field stays private), as a
   classifier callable/property and keeps it out of the class's instance scope. Tests:
   `tests/companion_block_members_e2e.rs` (`static_scope_selects_nearest_applicable_associated_function`,
-  `associated_declarations_are_not_members_of_instances`).
+  `associated_declarations_are_not_members_of_instances`). A bare `C(args)` whose constructors do
+  not apply reaches `C`'s associated `operator fun invoke` before the companion object's `invoke`,
+  the same rung order as `C.f(args)`; an applicable constructor still wins, and an inapplicable
+  associated `invoke` joins the reported candidates
+  (`bare_classifier_call_invokes_block_and_extension_operators`).
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and

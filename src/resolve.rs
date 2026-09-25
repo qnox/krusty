@@ -24138,8 +24138,21 @@ impl<'a> Checker<'a> {
                 // a class with a companion denotes that companion. The common classifier-value
                 // operation records the exact singleton storage handle; invoke selection then uses
                 // the same operator path as every other value. A plain class/enum contributes no
-                // value here and continues to constructor/SAM selection below.
+                // value here and continues to constructor/SAM selection below. The classifier's
+                // associated `operator fun invoke` precedes that value, as `C.f(args)` does for
+                // other names; an inapplicable one joins the reported candidates.
                 let mut inapplicable_classifier_invoke = Vec::new();
+                if let Some(classifier) = bare_classifier {
+                    if let Some(ret) = self.classifier_invoke_call(
+                        scope,
+                        associated_site,
+                        classifier,
+                        &mut inapplicable_classifier_invoke,
+                    ) {
+                        self.set(callee, Ty::obj_name(classifier));
+                        return ret;
+                    }
+                }
                 let imported_classifier_value = unshadowed_name
                     .then(|| self.function_import_scope.explicit_target(&fname))
                     .flatten()
@@ -24181,7 +24194,7 @@ impl<'a> Checker<'a> {
                             return Ty::Error;
                         }
                         InvokeResolution::Inapplicable(candidates) => {
-                            inapplicable_classifier_invoke = candidates;
+                            inapplicable_classifier_invoke.extend(candidates);
                         }
                         InvokeResolution::Absent => {}
                     }
