@@ -2531,7 +2531,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target, receiver, ..
+                target,
+                receiver,
+                result,
+                ..
             }) => {
                 // `cs.length` is an `Int`, and `::foo.name` a `String`: both are the language's
                 // own types, stated here for the same reason `kotlin.Enum`'s two are.
@@ -2582,7 +2585,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             let name = self
                                 .map_getter(*target, *receiver)
                                 .expect("checked by the guard");
-                            maps::map_getter_ty(&name)
+                            let answer = maps::map_getter_ty(&name);
+                            // The runtime's answer is only the carrier; the checked result names
+                            // the collection the read IS (`m.keys` is a `Set`). A walk over the
+                            // read itself, `for (k in m.keys)`, finds its iteration role there.
+                            if self.carrier(*result) == self.carrier(answer) {
+                                *result
+                            } else {
+                                answer
+                            }
                         }
                         Some(receiver) => self.range_getter(*target, *receiver)?.2,
                         None => return None,

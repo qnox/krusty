@@ -479,8 +479,39 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )?;
                 self.checked_object(checked, Ty::nullable(type_operand))
             }
-            IrTypeOp::ImplicitCoercion => self.coerce(arg, type_operand),
+            IrTypeOp::ImplicitCoercion => {
+                let arg = self
+                    .erased_nullable_carrier(arg, type_operand)
+                    .unwrap_or(arg);
+                self.coerce(arg, type_operand)
+            }
         }
+    }
+
+    /// The erased reference beneath `Object -> P -> P?`, when that is what `arg` is.
+    ///
+    /// A generic declaration returns through an erased reference, and lowering records reading it
+    /// as a specialized primitive `P` and then widening that to `P?` as two coercions: `fun <T>
+    /// f(): T = null as T` stored into an `Int?`. Realized one after the other they unbox a
+    /// reference that may be `null` only to box it again, and a `null` fails the unbox. The pair
+    /// is one reference conversion, so the widening takes the reference directly. This is the
+    /// same fold the JVM backend makes at its result boundary.
+    fn erased_nullable_carrier(&self, arg: u32, target: Ty) -> Option<u32> {
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: inner,
+            type_operand,
+        } = self.file.ir.expr(arg)
+        else {
+            return None;
+        };
+        let primitive = target.nullable_primitive()?;
+        (*type_operand == primitive
+            && self.carrier(primitive) != Carrier::Ref
+            && self
+                .type_of(*inner)
+                .is_some_and(|ty| self.carrier(ty) == Carrier::Ref))
+        .then_some(*inner)
     }
 
     /// Construction of a type the RUNTIME owns: declared in no file, and allocated and filled by
