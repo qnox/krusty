@@ -275,17 +275,19 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        // The entry prints what `box()` returned, as the LAST line. Anything before it is the
+        // The entry prints what `box()` returned after a frame marker, and nothing after it: the
+        // answer is every byte past the marker's LAST occurrence. What comes before is the
         // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
         // `OK` — which the JVM path never sees, because there the answer is a return value rather
-        // than a stream. Comparing whole stdout would fail every test whose program prints.
-        Ok(output) => NativeBox::Answered(
-            String::from_utf8_lossy(&output.stdout)
-                .trim_end_matches('\n')
-                .rsplit('\n')
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
-        ),
+        // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            match stdout.rsplit_once(krusty::native::BOX_RESULT_FRAME) {
+                Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
+                None => NativeBox::Failed(format!(
+                    "the program ended without framing an answer; stdout {stdout:?}"
+                )),
+            }
+        }
     }
 }

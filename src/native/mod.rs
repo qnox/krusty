@@ -27,7 +27,7 @@ mod symbols;
 mod target;
 mod target_contract;
 
-pub use codegen::{CraneliftBackend, Entry};
+pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
 pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};
