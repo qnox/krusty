@@ -12,7 +12,7 @@ use crate::diag::DiagSink;
 
 use super::{
     check_file_at_impl_mode_with_index, AnonymousObjectCapture, CallableReferenceTarget,
-    ExprLowering, ResolvedCall, SourceFragmentMode, SymbolTable, TypeInfo,
+    CaptureDiscovery, ExprLowering, ResolvedCall, SourceFragmentMode, SymbolTable, TypeInfo,
 };
 
 impl ResolvedCall {
@@ -153,14 +153,13 @@ pub(crate) fn check_preinferred_file_in_source_set_with_index(
             syms,
             Some(index),
             diags,
-            false,
+            anonymous_captures.map_or(CaptureDiscovery::Published, CaptureDiscovery::Seeded),
             None,
             None,
             Some(&active),
             None,
             None,
             SourceFragmentMode::Complete,
-            anonymous_captures,
             None,
         );
         checked.inspection_source_declarations = source_declarations;

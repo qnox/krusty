@@ -19033,7 +19033,16 @@ impl<'a> Checker<'a> {
             return self.check_collection_literal(scope, call, args, span, expected);
         }
         if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
-            if self.discover_anonymous_captures {
+            if self.discover_anonymous_captures || self.discovers_captures_at_construction {
+                // A revisit keeps the receivers an earlier complete visit found.
+                let finalized = if self.finalized_anonymous_captures.contains(&declaration) {
+                    self.discovered_anonymous_captures
+                        .get(&declaration)
+                        .cloned()
+                        .expect("finalized anonymous captures were recorded")
+                } else {
+                    Vec::new()
+                };
                 let narrows = scope.local_narrowings();
                 let mut candidates = Vec::new();
                 scope.visit_bindings(Ns::Value, |name, binding| {
@@ -19204,10 +19213,19 @@ impl<'a> Checker<'a> {
                     {
                         self.checked_local_class_declarations.insert(declaration);
                     }
+                    // An authoritative check reads the body as scratch here: its diagnostics
+                    // belong to the check with the final captures below.
+                    let scratch = !self.discover_anonymous_captures;
+                    let diagnostics = self.diags.diags.len();
+                    self.discover_anonymous_captures = true;
                     let saved = self.take_body_state();
                     self.set_anonymous_lexical_class_context(declaration);
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
+                    if scratch {
+                        self.discover_anonymous_captures = false;
+                        self.diags.diags.truncate(diagnostics);
+                    }
                 }
                 let mut selected_receiver_candidates = Vec::new();
                 for (candidate, receiver_identity, before, extension_use) in
@@ -19218,7 +19236,11 @@ impl<'a> Checker<'a> {
                             || extension_use.is_some_and(|(declaration, before)| {
                                 self.extension_receiver_use_count(declaration) > before
                             });
-                    if semantically_used {
+                    if semantically_used
+                        || finalized.iter().any(|capture| {
+                            capture.name == candidate.name && capture.source == candidate.source
+                        })
+                    {
                         selected_receiver_candidates.push(candidate);
                     }
                 }
@@ -19227,18 +19249,22 @@ impl<'a> Checker<'a> {
                 // Finalize away receiver rungs the scratch body did not select. Pending inference
                 // remains provisional so an incomplete revisit cannot discard an established
                 // field.
+                let provisional = self.postponed_argument_depth != 0
+                    || candidates.iter().any(|candidate| {
+                        candidate.ty.mentions_pending()
+                            || candidate
+                                .delegate_storage
+                                .is_some_and(|storage| storage.mentions_pending())
+                    });
+                if !provisional {
+                    self.finalized_anonymous_captures.insert(declaration);
+                }
                 let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &candidates,
-                    self.postponed_argument_depth != 0
-                        || candidates.iter().any(|candidate| {
-                            candidate.ty.mentions_pending()
-                                || candidate
-                                    .delegate_storage
-                                    .is_some_and(|storage| storage.mentions_pending())
-                        }),
+                    provisional,
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19270,7 +19296,9 @@ impl<'a> Checker<'a> {
                     self.discovered_anonymous_captures
                         .insert(declaration, captures);
                 }
-                return self.anonymous_object_type(scope, declaration);
+                if self.discover_anonymous_captures {
+                    return self.anonymous_object_type(scope, declaration);
+                }
             }
             let captures = self
                 .discovered_anonymous_captures
@@ -37705,6 +37733,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_argument_depth: 0,
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
+        discovers_captures_at_construction: false,
+        finalized_anonymous_captures: std::collections::HashSet::new(),
         discovered_anonymous_captures: HashMap::new(),
         discovered_local_class_captures: HashMap::new(),
         discovered_local_class_capture_bindings: HashMap::new(),
@@ -38734,15 +38764,12 @@ fn declaration_lexical_class_names(
     classes
 }
 
-fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
+fn discover_anonymous_object_captures_at(
     file: &File,
     file_index: u32,
-    syms: &mut S,
+    syms: &mut SymbolTable,
     selected_declarations: Option<&std::collections::HashSet<Span>>,
     selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
-    active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
-    selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
 ) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
     let declarations = file
         .anonymous_object_classes
@@ -38752,15 +38779,13 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
     if declarations.is_empty() {
         return HashMap::new();
     }
-    if resolved_index.is_none()
-        && syms.pass_one_symbols().is_some_and(|symbols| {
-            declarations.iter().all(|declaration| {
-                symbols
-                    .anonymous_object_capture_discovered
-                    .contains(&(file_index, *declaration))
-            })
+    if syms.pass_one_symbols().is_some_and(|symbols| {
+        declarations.iter().all(|declaration| {
+            symbols
+                .anonymous_object_capture_discovered
+                .contains(&(file_index, *declaration))
         })
-    {
+    }) {
         let symbols = syms
             .pass_one_symbols()
             .expect("legacy capture discovery requires Pass-1 symbols");
@@ -38782,16 +38807,15 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
         file_index,
         None,
         syms,
-        resolved_index,
+        None,
         &mut scratch,
-        true,
+        CaptureDiscovery::Scratch,
         selected_declarations,
         selected_body_declarations,
-        active_declarations,
         None,
-        selected_stable_bodies,
+        None,
+        None,
         SourceFragmentMode::Complete,
-        None,
         None,
     );
     let mut discovered = info.anonymous_object_captures_by_class;
@@ -38828,9 +38852,6 @@ pub fn discover_anonymous_object_captures(
                 syms,
                 None,
                 None,
-                None,
-                None,
-                None,
             ));
         }
         discovered
@@ -38864,37 +38885,10 @@ pub(crate) fn discover_inline_anonymous_object_captures(
                 syms,
                 Some(declarations),
                 Some(bodies),
-                None,
-                None,
-                None,
             );
         }
     });
     syms.finish_module_mutation();
-}
-
-pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
-    file: &File,
-    file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
-    active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
-    symbols: &mut PassTwoSymbols,
-    index: &crate::fir::ResolvedModuleIndex,
-) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
-    crate::wide_stack::on_wide_stack(|| {
-        discover_anonymous_object_captures_at(
-            file,
-            file_index,
-            symbols,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
-            Some(index),
-            Some(active_declarations),
-            Some(selected_stable_bodies),
-        )
-    })
 }
 
 /// The exact function shape whose return the WALK cannot determine: no declared return type and an
@@ -39014,33 +39008,17 @@ fn publish_checked_primary_constructor_types(
     }
 }
 
-fn check_file_at_impl_mode(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-    capture_discovery: bool,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-) -> TypeInfo {
-    check_file_at_impl_mode_with_index(
-        file,
-        file_index,
-        source_files,
-        syms,
-        None,
-        diags,
-        capture_discovery,
-        selected_declarations,
-        selected_body_declarations,
-        None,
-        None,
-        None,
-        SourceFragmentMode::Complete,
-        None,
-        None,
-    )
+/// Where a file check gets its anonymous objects' captures.
+#[derive(Clone, Copy)]
+enum CaptureDiscovery<'a> {
+    /// Pass 1 published them.
+    Published,
+    /// An earlier discovery check found them.
+    Seeded(&'a HashMap<DeclId, Vec<AnonymousObjectCapture>>),
+    /// This check only discovers them; everything else it produces is discarded.
+    Scratch,
+    /// This check finds each object's captures where it constructs the object.
+    AtConstruction,
 }
 
 fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
@@ -39050,16 +39028,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     syms: &mut S,
     resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
     diags: &mut DiagSink,
-    capture_discovery: bool,
+    captures: CaptureDiscovery<'_>,
     selected_declarations: Option<&std::collections::HashSet<Span>>,
     selected_body_declarations: Option<&std::collections::HashSet<Span>>,
     active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
     selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     fragment: SourceFragmentMode,
-    seeded_anonymous_captures: Option<&HashMap<DeclId, Vec<AnonymousObjectCapture>>>,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
+    let capture_discovery = matches!(captures, CaptureDiscovery::Scratch);
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     let mut c = make_checker_with_index(
         file,
@@ -39073,8 +39051,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     );
     c.selected_body_declarations = selected_body_declarations.cloned();
     c.selected_stable_body_declarations = selected_stable_bodies.cloned();
-    if let Some(captures) = seeded_anonymous_captures {
-        c.discovered_anonymous_captures = captures.clone();
+    match captures {
+        CaptureDiscovery::Seeded(seeded) => c.discovered_anonymous_captures = seeded.clone(),
+        CaptureDiscovery::AtConstruction => c.discovers_captures_at_construction = true,
+        CaptureDiscovery::Published | CaptureDiscovery::Scratch => {}
     }
     c.fragment = fragment;
     c.signature_defaults_only = fragment.is_signature_defaults();
@@ -39649,25 +39629,24 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         .flatten()
         .map(|span| (span.lo, span.hi))
         .collect();
-    let anonymous_object_captures_by_class =
-        if capture_discovery || seeded_anonymous_captures.is_some() {
-            discovered_anonymous_captures
-        } else {
-            let pass_one = syms
-                .pass_one_symbols()
-                .expect("legacy checking requires Pass-1 anonymous-object bindings");
-            file.anonymous_object_classes
-                .values()
-                .copied()
-                .filter_map(|declaration| {
-                    pass_one
-                        .anonymous_object_captures
-                        .get(&(file_index, declaration))
-                        .cloned()
-                        .map(|captures| (declaration, captures))
-                })
-                .collect::<HashMap<_, _>>()
-        };
+    let anonymous_object_captures_by_class = if let CaptureDiscovery::Published = captures {
+        let pass_one = syms
+            .pass_one_symbols()
+            .expect("legacy checking requires Pass-1 anonymous-object bindings");
+        file.anonymous_object_classes
+            .values()
+            .copied()
+            .filter_map(|declaration| {
+                pass_one
+                    .anonymous_object_captures
+                    .get(&(file_index, declaration))
+                    .cloned()
+                    .map(|captures| (declaration, captures))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        discovered_anonymous_captures
+    };
     let anonymous_object_captures_by_construction = file
         .anonymous_object_classes
         .iter()
@@ -39790,25 +39769,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     info
 }
 
-fn check_file_at_impl(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    check_file_at_impl_mode(
-        file,
-        file_index,
-        source_files,
-        syms,
-        diags,
-        false,
-        None,
-        None,
-    )
-}
-
 pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
     check_file_at(file, diags.current_file(), syms, diags)
 }
@@ -39855,14 +39815,13 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             syms,
             Some(resolved_index),
             diags,
-            false,
+            CaptureDiscovery::Published,
             Some(selected_declarations),
             Some(selected_body_declarations),
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
             SourceFragmentMode::InlinePreparation,
-            None,
             None,
         )
     })
@@ -39878,7 +39837,6 @@ pub(crate) fn check_selected_declarations_in_pass_two(
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
     streamed_cache: &crate::fir::StreamedModuleProjectionCache,
-    anonymous_captures: &HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
@@ -39889,14 +39847,13 @@ pub(crate) fn check_selected_declarations_in_pass_two(
             symbols,
             Some(index),
             diags,
-            false,
+            CaptureDiscovery::AtConstruction,
             Some(selected_declarations),
             Some(selected_body_declarations),
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
             SourceFragmentMode::Complete,
-            Some(anonymous_captures),
             Some(streamed_cache),
         )
     })
@@ -39923,14 +39880,13 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             syms,
             Some(index),
             diags,
-            false,
+            CaptureDiscovery::Published,
             None,
             None,
             Some(active_declarations),
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
             SourceFragmentMode::SignatureDefaults,
-            None,
             None,
         )
     })
@@ -39949,14 +39905,45 @@ fn check_file_on_checker_stack(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        if !file.anonymous_object_classes.is_empty() {
+        let published = syms.pass_one_symbols().is_some_and(|symbols| {
+            file.anonymous_object_classes.values().all(|declaration| {
+                symbols
+                    .anonymous_object_capture_discovered
+                    .contains(&(file_index, *declaration))
+            })
+        });
+        let info = check_file_at_impl_mode_with_index(
+            file,
+            file_index,
+            source_files,
+            syms,
+            None,
+            diags,
+            if published {
+                CaptureDiscovery::Published
+            } else {
+                CaptureDiscovery::AtConstruction
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            SourceFragmentMode::Complete,
+            None,
+        );
+        if !published {
+            // Every object constructed in the file was reached, so one without captures captures
+            // nothing.
+            let mut discovered = info.anonymous_object_captures_by_class.clone();
+            for declaration in file.anonymous_object_classes.values() {
+                discovered.entry(*declaration).or_default();
+            }
             syms.begin_module_mutation();
-            discover_anonymous_object_captures_at(
-                file, file_index, syms, None, None, None, None, None,
-            );
+            install_anonymous_object_captures(syms, file_index, discovered);
             syms.finish_module_mutation();
         }
-        check_file_at_impl(file, file_index, source_files, syms, diags)
+        info
     })
 }
 
@@ -40726,7 +40713,16 @@ struct Checker<'a> {
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
     /// create a `VAL_REASSIGNMENT` diagnostic.
     unreachable_statement_depth: usize,
+    /// This check exists only to discover anonymous-object captures: its diagnostics and results
+    /// are discarded. It is also set while an object's body is checked for its captures.
     discover_anonymous_captures: bool,
+    /// This authoritative check finds each anonymous object's captures where the object is
+    /// constructed: its body is checked once for the captures, then again with them.
+    discovers_captures_at_construction: bool,
+    /// Anonymous objects whose captures were decided without pending inference. A revisit of the
+    /// construction keeps their receiver captures: the object's local methods are checked once, so
+    /// a revisit cannot see those methods select a receiver again.
+    finalized_anonymous_captures: std::collections::HashSet<DeclId>,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// Resolver-only binding identities parallel to each local classifier's capture vector.
