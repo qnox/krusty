@@ -9,6 +9,9 @@
 //!   initializer references (a class, a constructor, a lambda) precedes the field's own entries,
 //!   and the constructor's `this` follows them.
 //!
+//! - A primary constructor's descriptor covers every argument, a plain (non-property) parameter
+//!   included, and its `$default` overload's body interns before the data-class members that follow.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -97,5 +100,58 @@ fn a_data_class_generic_field_signature_follows_its_constructor() {
         "class Box<T>(val item: T)\n\
          data class Crate(val box: Box<String>)\n",
         &["Box", "Crate"],
+    );
+}
+
+#[test]
+fn a_plain_constructor_parameter_is_in_the_constructor_header() {
+    assert_identical(
+        "PlainParameter",
+        "open class Base(p: Int)\n\
+         class Cell<T>(t: T) {\n\
+         \x20   var value = t\n\
+         }\n",
+        &["Base", "Cell"],
+    );
+}
+
+#[test]
+fn a_default_constructor_body_interns_before_data_members() {
+    assert_identical(
+        "DefaultBody",
+        "data class Pair2(val a: Int = 1, val b: String = \"$a\")\n",
+        &["Pair2"],
+    );
+}
+
+/// A plain parameter carries its `@NotNull` parameter annotation, interned with the constructor's
+/// header, and its null check runs before the super call.
+#[test]
+fn a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call() {
+    assert_identical(
+        "PlainParameterCheck",
+        "open class Base(val s: String)\n\
+         class Derived(label: String, n: Int) : Base(label + n)\n",
+        &["Base", "Derived"],
+    );
+}
+
+/// A plain non-null reference parameter interns its `@NotNull` with the constructor's header and
+/// its `checkNotNullParameter` name with the constructor's body, although it has no field.
+#[test]
+fn a_plain_reference_constructor_parameter_is_annotated_with_the_header() {
+    assert_identical("PlainReference", "class Label(text: String)\n", &["Label"]);
+}
+
+/// A parameter's annotations are placed by its constructor position, not by the position of the
+/// stored field that follows it.
+#[test]
+fn an_annotated_plain_parameter_beside_a_stored_field_keeps_its_position() {
+    assert_identical(
+        "AnnotatedBesideField",
+        "annotation class Mark\n\
+         class Tagged(@Mark text: String, val count: Int)\n\
+         class Counted(val count: Int, @Mark text: String)\n",
+        &["Mark", "Tagged", "Counted"],
     );
 }

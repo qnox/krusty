@@ -4512,6 +4512,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   visit as any other declared property, so a generic field's `Signature` lands after `this`. Tests:
   `tests/method_pool_order_e2e.rs::a_property_initializer_interns_its_value_before_its_field` and
   `::a_data_class_generic_field_signature_follows_its_constructor`.
+- **The primary constructor's descriptor covers every argument, plain parameters included.** The
+  pool seeder derived the constructor's descriptor from its property-backed parameters only, so
+  `open class Base(p: Int)` seeded `()V` where kotlinc writes `(I)V`, and a `$default` overload's
+  marker descriptor dropped the plain parameters the same way. Both now come from the constructor's
+  arguments (`primary_ctor_descriptor`), as the emitted `<init>` does. The seeded LocalVariableTable
+  after `this` lists every named parameter, plain ones included. The `$default` overload is written
+  right after the primary, so its body (`String.valueOf` for `val b: String = "$a"`, the delegating
+  `<init>`) interns there; only its header descriptor is seeded, and a data class's synthesized
+  members are seeded after it rather than before. Tests:
+  `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_in_the_constructor_header` and
+  `::a_default_constructor_body_interns_before_data_members`.
+- **A plain constructor parameter is annotated like a property-backed one.** kotlinc writes
+  `@NotNull`/`@Nullable` (and the parameter's own annotations) on every source parameter of the
+  primary constructor, `class Derived(label: String)` included; the compiler's prefix (outer
+  instance, captures) takes no slot. krusty sized the table from the property-backed parameters and
+  keyed it by a descriptor that left the plain ones out, so the annotations were lost. It now builds
+  one list per source parameter (`primary_ctor_source_parameters`) for the annotation pass and the
+  pool seeder alike. Like kotlinc, it writes no nullability annotation on a private constructor
+  (declared `private`, a value class's primary, or one hidden behind a marker accessor). The seeder
+  interns only the constructor's header (name, descriptor, `Signature`, annotations); the body is
+  the first code krusty emits, so it interns its null checks, super call and stores in order by
+  itself. The all-defaults no-argument `<init>()` interns its header before its body, as ASM visits
+  it. Test: `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the

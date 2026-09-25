@@ -58,34 +58,12 @@ pub enum VerifType {
     ObjectName(String),
 }
 
-/// One pool entry a `super(…)` argument's evaluation interns before the super `<init>` Methodref,
-/// in code order: a construction's Class ref, a string constant's CONSTANT_String, or a
-/// constructor Methodref (`class Basic : Engine(Cfg(false), "basic")`).
-pub enum SeedSuperArg {
-    Class(String),
-    Str(KtString),
-    Ctor { owner: String, desc: String },
-}
-
-/// A primary constructor with defaulted parameters: kotlinc emits the `$default` `<init>` overload
-/// right after the primary one, interning its marker descriptor, the default STRING constants and
-/// the delegating own-`<init>` Methodref BEFORE the accessors — the seeder mirrors that window.
-pub struct SeedCtorDefaults {
-    pub marker_desc: String,
-    pub string_consts: Vec<KtString>,
-}
-
-/// One backing field, as the plain-class pool seeder sees it.
-pub struct SeedField {
-    pub name: String,
-    pub desc: String,
-    /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull` + a `checkNotNullParameter`
-    /// guard), 2 = nullable reference (`@Nullable`, no guard).
+/// One property-backed primary-constructor parameter, as the plain-class pool seeder sees it: the
+/// annotations the constructor's header visit interns for it.
+pub struct SeedCtorParameter {
+    /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull`), 2 = nullable reference
+    /// (`@Nullable`).
     pub ann_kind: u8,
-    /// `true` for a primary-constructor PARAMETER the constructor stores. Only a parameter carries a
-    /// ctor parameter annotation or a null-check guard — a body property is initialized in
-    /// `init_body`, whose stores intern naturally in evaluation order.
-    pub is_ctor_param: bool,
     /// USER annotation type descriptors on this constructor parameter (`class C(@Mark val x: Int)`),
     /// split by the attribute each retention selects. kotlinc writes the whole
     /// `RuntimeVisibleParameterAnnotations` before `RuntimeInvisible…`, so every parameter's `visible`
@@ -1511,28 +1489,21 @@ impl ClassWriter {
         self.cp.fieldref(class, name, desc)
     }
 
-    /// Pre-intern a plain property class's constant-pool entries in kotlinc/ASM's first-use order, so
-    /// the natural emission that follows reuses these indices (interning dedups). kotlinc visits each
-    /// method [name, descriptor, body refs, LVT strings] before the next, and interns backing-field
-    /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
-    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. Declared methods
-    /// and property accessors then intern at their own exact emission sites.
+    /// Pre-intern the primary constructor's HEADER in kotlinc/ASM's visit order: name, descriptor,
+    /// generic `Signature`, its own annotations, then its parameter annotations. ASM interns a
+    /// method's header before its body, while krusty builds the body first; the body itself then
+    /// interns naturally, since the constructor is the first method krusty emits. Call BEFORE any
+    /// `add_field`/`add_method` for the class.
     pub fn seed_plain_class_pool(
         &mut self,
-        this_internal: &str,
-        super_internal: &str,
-        ctor_descs: (&str, &str),
-        fields: &[SeedField],
+        ctor_desc: &str,
+        parameters: &[SeedCtorParameter],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
-        // Entries the `super(…)` call's arguments intern in code order, BEFORE the super `<init>`
-        // Methodref (`class Basic : Engine(Cfg(false), "basic")`).
-        super_arg_entries: &[SeedSuperArg],
         // The primary constructor's DECLARED annotations (`class C @Mark constructor(…)`), visible
         // then invisible — interned at the constructor's own annotation visit.
         ctor_annotations: &[crate::ir::AppliedAnnotation],
     ) {
-        let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
         self.cp.utf8("<init>");
         self.cp.utf8(ctor_desc);
@@ -1546,13 +1517,10 @@ impl ClassWriter {
         for annotation in ctor_annotations {
             let _ = self.encode_annotation(annotation);
         }
-        // The `@NotNull`/`@Nullable` annotation type(s), interned at the constructor's PARAMETER
-        // annotations (kotlinc visits these before the body) in first-use order over the reference
-        // parameters. Reused by every getter return / setter parameter annotation and guard.
         // The constructor's PARAMETER annotations, which kotlinc visits before the body. The whole
         // `RuntimeVisibleParameterAnnotations` attribute is written first, so every parameter's
         // RUNTIME-retained USER annotation type interns ahead of anything invisible.
-        for f in fields.iter().filter(|f| f.is_ctor_param) {
+        for f in parameters {
             for ty in &f.visible_ann_types {
                 self.cp.utf8(ty);
             }
@@ -1562,7 +1530,7 @@ impl ClassWriter {
         // reused by every getter return / setter parameter annotation and guard.
         let mut seeded_notnull = false;
         let mut seeded_nullable = false;
-        for f in fields.iter().filter(|f| f.is_ctor_param) {
+        for f in parameters {
             for ty in &f.invisible_ann_types {
                 self.cp.utf8(ty);
             }
@@ -1579,64 +1547,26 @@ impl ClassWriter {
                 seeded_nullable = true;
             }
         }
-        // Constructor body — a `checkNotNullParameter(param, "name")` guard per non-null reference param
-        // (its name + a String constant), then, at the FIRST guard, the shared `Intrinsics` machinery.
-        let mut seeded_intrinsics = false;
-        for f in fields.iter().filter(|f| f.is_ctor_param) {
-            if f.ann_kind == 1 && self.param_assertions {
-                let name = &f.name;
-                self.cp.utf8(name);
-                self.cp.string(name);
-                if !seeded_intrinsics {
-                    self.cp.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNullParameter",
-                        "(Ljava/lang/Object;Ljava/lang/String;)V",
-                    );
-                    seeded_intrinsics = true;
-                }
-            }
-        }
-        for entry in super_arg_entries {
-            match entry {
-                SeedSuperArg::Class(internal) => {
-                    self.cp.class(internal);
-                }
-                SeedSuperArg::Str(s) => {
-                    self.cp.string_kt(s);
-                }
-                SeedSuperArg::Ctor { owner, desc } => {
-                    self.cp.methodref(owner, "<init>", desc);
-                }
-            }
-        }
-        self.cp.methodref(super_internal, "<init>", super_ctor_desc);
-        // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
-        for f in fields.iter().filter(|f| f.is_ctor_param) {
-            self.cp.utf8(&f.name);
-            self.cp.utf8(&f.desc);
-            self.cp.fieldref(this_internal, &f.name, &f.desc);
-        }
     }
 
-    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this` and
-    /// its type; the parameters reuse the field entries), then the `$default` overload kotlinc
-    /// writes right after it — its marker descriptor, the default STRING constants its body `ldc`s
-    /// (in parameter order), then the delegating `invokespecial` to the real `<init>`.
+    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this`
+    /// and its type, then each named parameter), then the header descriptor of the `$default`
+    /// overload kotlinc writes right after it. The overload's body interns its own entries when it
+    /// is emitted, which is right after the primary.
     pub fn seed_plain_constructor_tail(
         &mut self,
         this_internal: &str,
-        ctor_desc: &str,
-        ctor_defaults: Option<&SeedCtorDefaults>,
+        parameter_locals: &[(String, String)],
+        default_marker_desc: Option<&str>,
     ) {
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
-        if let Some(d) = ctor_defaults {
-            self.cp.utf8(&d.marker_desc);
-            for s in &d.string_consts {
-                self.cp.string_kt(s);
-            }
-            self.cp.methodref(this_internal, "<init>", ctor_desc);
+        for (name, desc) in parameter_locals {
+            self.cp.utf8(name);
+            self.cp.utf8(desc);
+        }
+        if let Some(desc) = default_marker_desc {
+            self.cp.utf8(desc);
         }
     }
 
