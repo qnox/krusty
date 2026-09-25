@@ -491,6 +491,8 @@ fn materialize_member_extension_property(
             ty: property.ty,
             is_var: mutable,
             is_abstract,
+            modifiers: member_property_modifiers(property.flags, interface),
+            delegate_field: None,
             getter,
             setter,
             visibility: property.visibility,
@@ -1070,6 +1072,11 @@ fn materialize_member_property(
         backing_field,
         is_var: property.flags.has(DeclarationFlags::MUTABLE),
         is_open: property.flags.has(DeclarationFlags::OPEN),
+        modifiers: member_property_modifiers(
+            property.flags,
+            class_flags.has(DeclarationFlags::INTERFACE),
+        ),
+        delegate_field: None,
         is_private: property.visibility.is_private(),
         setter_is_private: setter_is_private(index, property.declaration),
         getter,
@@ -1220,6 +1227,31 @@ fn add_abstract_accessor_function(
         ),
     );
     function
+}
+
+/// What Kotlin metadata records about how a member property is declared.
+pub(super) fn member_property_modifiers(
+    flags: crate::fir::DeclarationFlags,
+    in_interface: bool,
+) -> crate::ir::IrPropertyModifiers {
+    use crate::ir::IrPropertyModality;
+    let delegated = flags.has(DeclarationFlags::DELEGATED);
+    let declared_getter = flags.has(DeclarationFlags::CUSTOM_GETTER) || delegated;
+    let modality = if flags.has(DeclarationFlags::ABSTRACT) || (in_interface && !declared_getter) {
+        IrPropertyModality::Abstract
+    } else if flags.has(DeclarationFlags::OPEN) || in_interface {
+        IrPropertyModality::Open
+    } else {
+        IrPropertyModality::Final
+    };
+    crate::ir::IrPropertyModifiers {
+        modality,
+        declared_getter,
+        declared_setter: flags.has(DeclarationFlags::SETTER_HAS_BODY)
+            || (delegated && flags.has(DeclarationFlags::MUTABLE)),
+        delegated,
+        lateinit: flags.has(DeclarationFlags::LATEINIT),
+    }
 }
 
 pub(super) fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {

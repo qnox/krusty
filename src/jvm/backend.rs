@@ -1237,7 +1237,7 @@ pub fn facade_package_metadata_from_ir(
                     .collect(),
                 getter,
                 setter,
-                setter_parameter_name: crate::jvm::ir_emit::explicit_setter_parameter_name(
+                setter_parameter_name: crate::jvm::parameter_names::explicit_setter(
                     ir,
                     setter_function,
                 ),

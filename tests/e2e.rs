@@ -1076,6 +1076,8 @@ mod metadata_field_presence_e2e;
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
+#[path = "metadata_property_flags_e2e.rs"]
+mod metadata_property_flags_e2e;
 #[path = "metadata_reader_e2e.rs"]
 mod metadata_reader_e2e;
 #[path = "metadata_return_types.rs"]

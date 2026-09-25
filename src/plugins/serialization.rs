@@ -1540,6 +1540,8 @@ impl IrPlugin for SerializationPlugin {
                 backing_field: Some(descriptor_field),
                 is_var: false,
                 is_open: false,
+                modifiers: Default::default(),
+                delegate_field: None,
                 is_private: false,
                 setter_is_private: false,
                 getter: Some(descriptor),

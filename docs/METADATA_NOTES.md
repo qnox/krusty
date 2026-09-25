@@ -111,6 +111,23 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Property.flags` (8710 → 8711) — and because kotlinc derives an accessor's DEFAULT flags word from
   the property's (that bit included), an annotated property with plain accessors also writes
   `getter_flags`/`setter_flags` = 6 explicitly.
+- A member property's modality (bits 4-5) follows its declaration, not its class (kotlinc 2.4.20):
+  `open`, and an `override` not marked `final`, are OPEN even in a final class; `abstract`, and an
+  interface property without a getter, are ABSTRACT; an interface property with a getter is OPEN.
+  `lateinit` is bit 12 and a delegated property sets bit 15. The accessor words share the property's
+  visibility and modality. A getter source declares, a setter body, a `private set`, and a delegated
+  property's accessors set `isNotDefault` (bit 6); a bodiless `set`, annotated or not, stays the
+  default. `private set` also narrows the setter's visibility (`setter_flags` = 66). A word is
+  written only when it differs from the default one derived from the property:
+  `override val p get() = 2` records `getter_flags` = 86 and `flags` = 534.
+- A non-default setter records `Property.setter_value_parameter` (f6), and kotlinc serializes it
+  before the property's name, so its name and type strings come first in `d2`. An unnamed parameter
+  is `value` on a bodiless `private set` and `<set-?>` on a delegated `var` (with or without
+  `private set`). A delegated property's `JvmPropertySignature.field` names its `x$delegate` field
+  (desc `Lapp/D;`); reflection (`KProperty.get`) reads it, and a `var` whose setter word says
+  not-default but has no setter parameter fails with `No type in ProtoBuf.ValueParameter`.
+  Tests: `tests/metadata_property_flags_e2e.rs`, `class_builder` unit test
+  `private_setter_records_value_parameter_before_the_property_name`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

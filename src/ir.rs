@@ -1397,6 +1397,9 @@ pub struct MemberExtProp {
     pub is_var: bool,
     /// Whether this declaration has no accessor implementation and must be realized abstractly.
     pub is_abstract: bool,
+    pub modifiers: IrPropertyModifiers,
+    /// See [`IrProperty::delegate_field`].
+    pub delegate_field: Option<u32>,
     /// Getter function id. Abstract properties point at a bodyless common-IR function.
     pub getter: u32,
     /// Setter function id, for a `var`.
@@ -1405,6 +1408,30 @@ pub struct MemberExtProp {
     /// Declaration-owned generic parameters. Source names are metadata payload; semantic names are
     /// the stable identities used by `receiver` and `ty`.
     pub type_params: Vec<IrTypeParameter>,
+}
+
+/// How a member property is declared, as Kotlin metadata records it; no JVM shape encodes these.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IrPropertyModifiers {
+    pub modality: IrPropertyModality,
+    /// Source declares the getter, or the property is delegated; an accessor the compiler
+    /// supplies on its own is the default one.
+    pub declared_getter: bool,
+    /// Source wrote the setter's body, or the property is a delegated `var`. A bodiless `set`
+    /// keeps the default implementation; whether it narrows visibility is recorded separately.
+    pub declared_setter: bool,
+    pub delegated: bool,
+    pub lateinit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IrPropertyModality {
+    #[default]
+    Final,
+    /// `open`, an `override` not marked `final`, or an interface member with a getter.
+    Open,
+    /// `abstract`, or an interface member without a getter.
+    Abstract,
 }
 
 #[derive(Clone, Debug)]
@@ -1442,6 +1469,10 @@ pub struct IrProperty {
     pub is_var: bool,
     /// Non-final: the accessor a backend emits for it must be overridable.
     pub is_open: bool,
+    pub modifiers: IrPropertyModifiers,
+    /// Index into [`IrClass::fields`] of a delegated property's `x$delegate` field, which Kotlin
+    /// metadata names as the property's JVM field.
+    pub delegate_field: Option<u32>,
     /// A `private` property. kotlinc emits NO accessor for one — in-class reads go straight to the
     /// backing field — so a use from outside the declaring class has nothing to call, and whichever
     /// path is lowering it does not own the access.
