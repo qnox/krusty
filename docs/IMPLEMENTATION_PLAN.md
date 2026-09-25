@@ -4538,7 +4538,20 @@ shadow with no output change.
   bytecode rewrite keeps a method as emitted when a debug local's range empties (kotlinc drops the
   local, e.g. a catch parameter whose body was a discarded constant), and a `try` operand's stack
   is spilled below the `try` rather than at `maxLocals`.
-- ☐ 5–6. kotlinc's transformer order.
+- ✅ 5a. One ordered optimizer driver (`bytecode_passes/pipeline.rs`): `ORDER` names every step of
+  kotlinc 2.4.20's `OptimizationMethodVisitor.performTransformations`, and the ones krusty does not
+  have yet (ConstantCondition, PopBackwardPropagation, the mid-pipeline DeadCode,
+  RedundantCheckcastsBeforeAastore) are named steps that change nothing. The redundant-null-check
+  and redundant-cast passes still judge the method as emitted, so they run before CapturedVars
+  (5f moves them). The `nop` cleanup is its own step (`redundant_nops`), split out of
+  `redundant_gotos`. `method_rewrite::optimized` keeps only the class-file boundary (entry state,
+  the verifier's view of the emitted bytes, pool, LVT re-keying, frame proof), and the coroutine
+  transformer's call is unchanged. In the 2.4.20 box corpus 0 of 26,135 classes change against
+  4g (only `JvmInlineKt`, which varies run to run, differs).
+- ☐ 5b–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
+  PopBackwardPropagation and the mid-pipeline DeadCode, the complete RedundantNullCheck,
+  RedundantCheckcastsBeforeAastore), the first three passes in kotlinc's order, no all-or-nothing
+  rewrite, and the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
