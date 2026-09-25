@@ -36,25 +36,7 @@ __attribute__((weak)) kt_boolean kt_is_map(KRef value) {
     return 0;
 }
 
-/* The real one: zero for null, otherwise the `hashCode` slot. */
-__attribute__((weak)) kt_int kt_hash_code(KRef value) {
-    if (value == NULL) {
-        return 0;
-    }
-    return ((kt_int(*)(KRef))type_of(value)->vtable[KT_SLOT_HASH_CODE])(value);
-}
-
-/* The real one: null equals only null, an object without a vtable compares by identity, and every
-   other asks the left operand's `equals` slot. */
-__attribute__((weak)) kt_boolean kt_equals(KRef a, KRef b) {
-    if (a == NULL) {
-        return b == NULL;
-    }
-    if (type_of(a)->vtable == NULL) {
-        return a == b;
-    }
-    return ((kt_boolean(*)(KRef, KRef))type_of(a)->vtable[KT_SLOT_EQUALS])(a, b);
-}
+/* `kt_equals` and `kt_hash_code` come from `later_tiers.h`, which this header includes. */
 
 /* Take the exception in flight off the slot and say whether it has the expected type. NULL, when
    nothing is in flight, has none. */
