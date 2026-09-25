@@ -1,45 +1,34 @@
 //! Bytecode rewrites applied to a finished method when its class is written.
 //!
 //! kotlinc does not write its temporaries onto the operand stack while generating code; it writes
-//! them as locals and lets a bytecode pass fold them (see [`super::temporaries`]). This is the
-//! place krusty does the same. It runs when the class is written, because only then is every table
-//! final: several line and local-variable tables are attached after a method is added, and which
-//! values are temporaries depends on them. The method's instructions are decoded, rewritten and
-//! re-assembled, and every table keyed by a byte offset — labels (and so frames and exception
-//! ranges), line numbers, local ranges, the implicit return — moves with the instruction it
-//! described.
+//! them as locals and lets a bytecode pass fold them (see `bytecode_passes::temporaries`). This is
+//! the place krusty does the same. It runs when the class is written, because only then is every
+//! table final: several line and local-variable tables are attached after a method is added, and
+//! which values are temporaries depends on them. The method is read back into a
+//! [`MethodNode`](crate::jvm::method_node::MethodNode) (see [`finished_node`]), kotlinc's passes run over it, and it is laid out again: every table
+//! keyed by a byte offset — exception ranges, line numbers, local ranges, the implicit return —
+//! hangs off a label and moves with it.
 //!
 //! A rewrite adds no instruction operand, and edits no frame: the class carries the frames the
 //! rewritten body implies, computed when the class is written (see [`super::stack_maps`]). The
 //! rewritten body is only kept if those frames can be computed; otherwise the method is written
 //! exactly as emitted.
 
-mod node_bridge;
+mod finished_node;
 
 use std::collections::BTreeSet;
 
-use super::bytecode_analysis::{ControlGraph, FrameTypes};
+use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::constant_pool_queries::PoolLookup;
-use super::redundant_checkcasts;
 use super::stack_maps;
-use super::temporaries::{self, Body, Placement};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
+use crate::jvm::bytecode_passes::redundant_checkcasts::{self, StackTops};
 use crate::jvm::bytecode_passes::{
-    dead_code, local_slots, negated_jumps, redundant_gotos, stack_peephole,
+    dead_code, local_slots, negated_jumps, redundant_gotos, redundant_null_checks, stack_peephole,
+    temporaries,
 };
-use crate::jvm::classreader::{ExcEntry, MethodLocal};
-use crate::jvm::inline::{assemble, insn_offsets_at, BranchTarget, Insn};
-use crate::jvm::method_node::{CodeAttribute, MethodNode};
-use node_bridge::IndexedBody;
-
-fn is_expression_null_check(owner: &str, name: &str, descriptor: &str) -> bool {
-    owner == "kotlin/jvm/internal/Intrinsics"
-        && descriptor == "(Ljava/lang/Object;Ljava/lang/String;)V"
-        && matches!(
-            name,
-            "checkNotNullExpressionValue" | "checkExpressionValueIsNotNull"
-        )
-}
+use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
+use finished_node::FinishedNode;
 
 /// What a method keeps so it can be rewritten when its class is written: its builder, for the
 /// labels its branches name.
@@ -131,61 +120,14 @@ impl ClassWriter {
             return None;
         }
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let node = self.finished_node(method, bytes, &pool)?;
-        let indexed = IndexedBody::new(&node, &mut pool).ok()?;
-        let insns = &indexed.insns;
-        // The builder's labels and branch fixups name offsets of the emitted bytes, so the indexed
-        // body must lay out exactly as emitted.
-        if pool.missed() || assemble(insns) != *bytes {
+        let FinishedNode {
+            mut node,
+            implicit_return,
+        } = self.finished_node(method, source, bytes, &pool)?;
+        // The builder's labels and branch fixups name offsets of the emitted bytes, so the node must
+        // lay out exactly as emitted.
+        if pool.missed() || node.assemble(&mut pool).ok()?.code != *bytes {
             return None;
-        }
-        let offsets = insn_offsets_at(insns, 0);
-        let index_of = |pc: usize| offsets.binary_search(&pc).ok();
-        let n = insns.len();
-        let handlers = &indexed.handlers;
-        let mut arrivals = vec![false; n + 1];
-        for insn in insns {
-            match insn {
-                Insn::Branch {
-                    target: BranchTarget::Internal(to),
-                    ..
-                }
-                | Insn::BranchW {
-                    target: BranchTarget::Internal(to),
-                    ..
-                } => arrivals[*to] = true,
-                Insn::TableSwitch {
-                    default, targets, ..
-                } => {
-                    for &to in std::iter::once(default).chain(targets) {
-                        arrivals[to] = true;
-                    }
-                }
-                Insn::LookupSwitch { default, pairs } => {
-                    for &to in std::iter::once(default).chain(pairs.iter().map(|(_, to)| to)) {
-                        arrivals[to] = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        for handler in handlers {
-            arrivals[handler.start] = true;
-            arrivals[handler.end] = true;
-            arrivals[handler.handler] = true;
-        }
-        let mut marks = vec![false; n + 1];
-        for &(at, _) in &indexed.lines {
-            marks[at] = true;
-        }
-        let mut named = Vec::new();
-        for (range, local) in indexed.locals.iter().zip(&node.local_variables) {
-            let Some((start, end)) = *range else {
-                continue;
-            };
-            marks[start] = true;
-            marks[end] = true;
-            named.push((start, end, local.slot));
         }
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
@@ -200,15 +142,30 @@ impl ClassWriter {
             return None;
         }
         let entry = expand_slots(&entry);
-        let original_graph = ControlGraph::build(insns, handlers)?;
-        // The verifier's types before each original instruction, computed at most once. Seed the
-        // walk with the frames the original bytecode itself implies: in particular, a typed catch
-        // handler enters with its declared exception class, not the generic `Throwable` used by an
-        // untyped exceptional edge. These are computed frames, never emitter-recorded semantic
-        // guesses; the rewritten body is computed and validated independently below.
-        let original_frames_cell = std::cell::OnceCell::new();
-        let original_frames = || {
-            original_frames_cell
+        // The verifier's view of the method as emitted, by instruction number: what the
+        // redundant-cast pass asks about the value each cast sees.
+        let insns = disassemble(bytes)?;
+        let offsets = insn_offsets_at(&insns, 0);
+        let index_of = |pc: u16| offsets.binary_search(&usize::from(pc)).ok();
+        let handlers = method
+            .exceptions
+            .iter()
+            .map(|&(start, end, handler, _)| {
+                Some(Handler {
+                    start: index_of(start)?,
+                    end: index_of(end)?,
+                    handler: index_of(handler)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let graph = ControlGraph::build(&insns, &handlers)?;
+        // Seed the walk with the frames the emitted bytecode itself implies: in particular, a typed
+        // catch handler enters with its declared exception class, not the generic `Throwable` used
+        // by an untyped exceptional edge. These are computed frames, never emitter-recorded
+        // semantic guesses; the rewritten body is computed and validated independently below.
+        let flow_types_cell = std::cell::OnceCell::new();
+        let flow_types = || {
+            flow_types_cell
                 .get_or_init(|| {
                     let body = stack_maps::Body {
                         access: source.access,
@@ -218,137 +175,43 @@ impl ClassWriter {
                         exceptions: &method.exceptions,
                         labels: stack_maps::table_labels(&method.lnt, &method.lvt, bytes.len()),
                     };
-                    self.compute_frames(&body)
+                    let frames = self
+                        .compute_frames(&body)
                         .ok()
-                        .map(|computed| stack_maps::verif_frames(computed.frames()))
-                })
-                .as_deref()
-        };
-        let flow_types_cell = std::cell::OnceCell::new();
-        let flow_types = || {
-            flow_types_cell
-                .get_or_init(|| {
-                    FrameTypes::analyze(insns, &original_graph, &entry, original_frames()?, self)
+                        .map(|computed| stack_maps::verif_frames(computed.frames()))?;
+                    FrameTypes::analyze(&insns, &graph, &entry, &frames, self)
                 })
                 .as_ref()
         };
-        let redundant_casts = redundant_checkcasts::select(self, insns, flow_types);
-        // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
-        // nullability analysis proves non-null goes (see `null_checks`).
-        let redundant_null_checks = self.redundant_null_checks(
-            insns,
-            &original_graph,
-            &arrivals,
-            usize::from(method.max_locals),
-        );
-        // Which label each branch jumps to, and the labels bound at each index in the order they
-        // stand: kotlinc's rules see labels, and several can share one offset.
-        let mut branch_labels: Vec<Option<u32>> = vec![None; n];
-        for &(operand, label) in &source.builder.fixups {
-            if label.builder != source.builder.id {
-                continue;
-            }
-            if let Some(at) = operand.checked_sub(1).and_then(index_of) {
-                branch_labels[at] = Some(label.index);
-            }
-        }
-        let mut labels_at: Vec<Vec<u32>> = vec![Vec::new(); n + 1];
-        {
-            let mut bound: Vec<(u32, usize, u32)> = Vec::new();
-            for (label, &pc) in source.builder.labels.iter().enumerate() {
-                let label = label as u32;
-                if pc == usize::MAX || source.builder.is_dead_bound(label) {
-                    continue;
-                }
-                if let Some(at) = index_of(pc) {
-                    bound.push((source.builder.bind_sequence(label as usize), at, label));
-                }
-            }
-            bound.sort_unstable();
-            for (_, at, label) in bound {
-                labels_at[at].push(label);
-            }
-        }
-        let body = Body {
-            insns,
-            handlers,
-            arrivals: &arrivals,
-            marks: &marks,
-            named: &named,
-            redundant_casts: &redundant_casts,
-            redundant_null_checks: &redundant_null_checks,
-            branch_labels: &branch_labels,
-            labels_at: &labels_at,
-            one_word_static: &|field| {
-                self.fieldref_descriptor_at(field)
-                    .is_some_and(|descriptor| !matches!(descriptor, "J" | "D"))
-            },
-            string_constant: &|index| {
-                self.loadable_constant_type_at(index)
-                    == Some(VerifType::ObjectName("java/lang/String".to_string()))
-            },
-            expression_null_check: &|method| {
-                self.methodref_parts(method)
-                    .is_some_and(|(owner, name, descriptor)| {
-                        is_expression_null_check(owner, name, descriptor)
-                    })
-            },
-        };
-        let folded = temporaries::eliminate(&body);
-        let folded_any = folded.is_some();
-        let rewrite = folded.unwrap_or_else(|| temporaries::Rewrite {
-            nodes: insns
-                .iter()
-                .enumerate()
-                .map(|(index, insn)| (insn.clone(), Placement::Original(index)))
-                .collect(),
-            stack_at_target: Vec::new(),
-            late_labels: BTreeSet::new(),
-        });
-        let stack_targets: Vec<usize> = rewrite
-            .stack_at_target
-            .iter()
-            .map(|(target, _)| *target)
+        // kotlinc's `RedundantNullCheckMethodTransformer` and `RedundantCheckCastEliminationMethodTransformer`
+        // both judge the method as emitted; what they select goes before the temporaries pass.
+        let removed: BTreeSet<usize> = redundant_checkcasts::select(&node, flow_types)
+            .into_iter()
+            .chain(redundant_null_checks::select(&node))
             .collect();
-
-        // Back to a node: each original index's labels stand where its instructions landed, so
-        // every table moves with them when the node is laid out again.
-        let late_label = |label: u32| rewrite.late_labels.contains(&label);
-        let mut relabelled = node_bridge::relabel(
-            &node,
-            &indexed,
-            &node_bridge::PassOutcome {
-                nodes: &rewrite.nodes,
-                late_branch: &|placement| match placement {
-                    Placement::Original(index) => branch_labels
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .is_some_and(late_label),
-                    Placement::Before(_) | Placement::After(_) => false,
-                },
-                stack_targets: &stack_targets,
-                implicit_return: method
-                    .implicit_void_return_pc
-                    .map(|pc| offsets.partition_point(|&at| at < usize::from(pc)).min(n)),
-            },
-            &pool,
-        )?;
+        let mut position = 0;
+        node.nodes.retain(|_| {
+            position += 1;
+            !removed.contains(&(position - 1))
+        });
+        let temporaries = temporaries::eliminate(&mut node);
+        let folded_any = !removed.is_empty() || temporaries.is_some();
+        let pinned = temporaries.map(|done| done.pinned).unwrap_or_default();
         // kotlinc's stack peephole runs after the temporaries pass, then its `goto` cleanup and
         // its `NegatedJumpsMethodTransformer`, the last of its rewrites (see `stack_peephole`,
         // `redundant_gotos`, `negated_jumps`).
-        let peephole_changed = stack_peephole::optimize(&mut relabelled.node);
-        let gotos_changed = redundant_gotos::remove(&mut relabelled.node, &relabelled.pinned);
-        let jumps_negated = negated_jumps::negate(&mut relabelled.node, &relabelled.pinned);
+        let peephole_changed = stack_peephole::optimize(&mut node);
+        let gotos_changed = redundant_gotos::remove(&mut node, &pinned);
+        let jumps_negated = negated_jumps::negate(&mut node, &pinned);
         // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
         // above left unreachable goes, with its line numbers, empty protected ranges and emptied
         // local variables, and the slots left unused close up (see `dead_code`, `local_slots`).
-        let dead = dead_code::eliminate(&mut relabelled.node);
+        let dead = dead_code::eliminate(&mut node);
         let removed_locals = dead
             .as_ref()
             .map_or(&[][..], |dead| &dead.removed_locals[..]);
         let parameter_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
-        let renumbered = local_slots::compact(&mut relabelled.node, &parameter_slots);
+        let renumbered = local_slots::compact(&mut node, &parameter_slots);
         if !folded_any
             && !peephole_changed
             && !gotos_changed
@@ -360,7 +223,7 @@ impl ClassWriter {
         }
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
-        let assembled = relabelled.node.assemble(&mut pool).ok()?;
+        let assembled = node.assemble(&mut pool).ok()?;
         if pool.missed()
             || assembled
                 .exception_table
@@ -391,7 +254,7 @@ impl ClassWriter {
             // does not own debug-local deletion, so preserve the original method instead.
             return None;
         }
-        let implicit_void_return_pc = match relabelled.implicit_return {
+        let implicit_void_return_pc = match implicit_return {
             Some(label) => Some(assembled.offset_of(label)?),
             None => None,
         };
@@ -415,77 +278,16 @@ impl ClassWriter {
             implicit_void_return_pc,
         })
     }
-
-    /// The finished `method` read into a node against the writer's own pool. A local-variable
-    /// entry without a start covers the method from its first instruction, one without a length
-    /// runs to its end; a range reaching past the code is cut at its end.
-    pub(super) fn finished_node(
-        &self,
-        method: &MethodInfo,
-        bytes: &[u8],
-        pool: &PoolLookup<'_>,
-    ) -> Option<MethodNode> {
-        let code_len = bytes.len();
-        let handlers: Vec<ExcEntry> = method
-            .exceptions
-            .iter()
-            .map(|&(start_pc, end_pc, handler_pc, catch_type)| ExcEntry {
-                start_pc,
-                end_pc,
-                handler_pc,
-                catch_type,
-            })
-            .collect();
-        let locals: Vec<MethodLocal> = method
-            .lvt
-            .iter()
-            .map(|&(name, desc, slot, start, len)| {
-                let start = usize::from(start.unwrap_or(0));
-                let end = len.map_or(code_len, |len| start + usize::from(len));
-                let (start, end) = (start.min(code_len), end.min(code_len));
-                Some(MethodLocal {
-                    start_pc: start as u16,
-                    length: end.checked_sub(start)? as u16,
-                    slot,
-                    name: self.cp.utf8_at(name)?.to_string(),
-                    descriptor: self.cp.utf8_at(desc)?.to_string(),
-                })
-            })
-            .collect::<Option<_>>()?;
-        let code = CodeAttribute {
-            max_stack: method.max_stack,
-            max_locals: method.max_locals,
-            code: bytes,
-            handlers: &handlers,
-            lines: &method.lnt,
-            locals: &locals,
-        };
-        let name = self.cp.utf8_at(method.name)?;
-        let desc = self.cp.utf8_at(method.desc)?;
-        MethodNode::read_code(method.access, name, desc, &code, pool).ok()
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_expression_null_check;
-
-    #[test]
-    fn expression_null_check_identity_includes_its_descriptor() {
-        assert!(is_expression_null_check(
-            "kotlin/jvm/internal/Intrinsics",
-            "checkNotNullExpressionValue",
-            "(Ljava/lang/Object;Ljava/lang/String;)V",
-        ));
-        assert!(!is_expression_null_check(
-            "kotlin/jvm/internal/Intrinsics",
-            "checkNotNullExpressionValue",
-            "(Ljava/lang/Object;)V",
-        ));
-        assert!(!is_expression_null_check(
-            "fixture/Intrinsics",
-            "checkNotNullExpressionValue",
-            "(Ljava/lang/Object;Ljava/lang/String;)V",
-        ));
+/// The class-file analysis answers the redundant-cast pass: `null`, or exactly the cast's class,
+/// on top of the verifier's stack.
+impl StackTops for FrameTypes {
+    fn is_exactly(&self, index: usize, class: &str) -> bool {
+        match self.before(index).and_then(|state| state.stack.last()) {
+            Some(VerificationType::Null) => true,
+            Some(VerificationType::Reference(name)) => **name == *class,
+            _ => false,
+        }
     }
 }

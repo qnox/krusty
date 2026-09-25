@@ -70,6 +70,13 @@ impl InsnList {
         &self.entry(id).node
     }
 
+    /// Whether `id` is still in the list.
+    pub(crate) fn contains(&self, id: NodeId) -> bool {
+        self.entries
+            .get(id.0 as usize)
+            .is_some_and(|entry| entry.is_some())
+    }
+
     /// Replaces the node `id` stands for, keeping its identity (ASM's `set`, whose callers keep
     /// no reference to the old node).
     pub(crate) fn set(&mut self, id: NodeId, node: Node) {

@@ -4424,8 +4424,18 @@ shadow with no output change.
   over its labels, line numbers and ranges; no class of the 2.4.20 box corpus changes. The bridge
   no longer carries removed-table masks or a slot renumbering; it pins the labels standing after a
   null-check fold's inserted instruction, which the `goto` and jump passes leave alone.
-- ☐ 3c–6. The temporaries, redundant-cast and null-check passes ported onto `MethodNode`
-  (retiring the bridge), a `FrameMap`-style slot allocator, and kotlinc's transformer order.
+- ✅ 3c. The redundant-null-check, redundant-cast and temporaries passes (the null-check folds,
+  swaps, the expression-null-check `dup`, the `nop` cleanup) run on the `MethodNode` too
+  (`jvm::bytecode_passes`), and the bridge is gone: a finished method is read back with the labels
+  its builder bound (each linked jump names its own label, in bind order at its offset) and every
+  pass matches against labels, line numbers, ranges and try/catch blocks rather than instruction
+  indices. A null-check fold stands the labels after the folded jumps' own, and the target's line
+  numbers and local bounds, after the `pop` it inserts, and pins them for the `goto` and jump
+  passes. The redundant-cast pass still asks the class-file frame analysis of the emitted bytes
+  what each cast sees, by instruction number. No class of the 2.4.20 box corpus changes except
+  `JvmInlineKt` of `jvmInline`, whose temporary slots already vary from run to run before this
+  stage.
+- ☐ 4–6. A `FrameMap`-style slot allocator, and kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

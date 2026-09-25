@@ -102,10 +102,15 @@ impl ClassWriter {
             .ok_or("the method to transform was never added")?;
         let method = &self.methods[index];
         let bytes = method.code.as_deref().ok_or("the method has no body")?;
+        let source = method
+            .rewrite_source
+            .as_ref()
+            .ok_or("the method was added without its builder")?;
         let pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let node = self
-            .finished_node(method, bytes, &pool)
-            .ok_or("the finished body cannot be read")?;
+            .finished_node(method, source, bytes, &pool)
+            .ok_or("the finished body cannot be read")?
+            .node;
         let source_file = self.source_file.clone().unwrap_or_default();
         let owner = self.internal_name.clone();
         let function = NamedFunction {

@@ -18,10 +18,7 @@ mod descriptor_mentions;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
-mod null_checks;
-mod redundant_checkcasts;
 mod stack_maps;
-mod temporaries;
 
 use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
 
