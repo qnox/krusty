@@ -14,13 +14,25 @@ fn run(src: &str) -> Option<String> {
 /// `classes` to carry exactly kotlinc's fields and methods, in class-file order with their access
 /// flags, descriptors and generic signatures, and exactly kotlinc's `@Metadata`.
 fn assert_members_and_metadata_match_kotlinc(stem: &str, src: &str, classes: &[&str]) {
+    assert_members_and_metadata_match_kotlinc_on(stem, src, classes, &[common::stdlib_jar()]);
+}
+
+/// [`assert_members_and_metadata_match_kotlinc`] over `classpath`, also requiring each field's
+/// `ConstantValue`. Returns the comparisons for further checks.
+fn assert_members_and_metadata_match_kotlinc_on(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    classpath: &[std::path::PathBuf],
+) -> Vec<common::ReferenceComparison> {
     let source = format!("{LANGUAGE}{src}");
+    let mut comparisons = Vec::new();
     for class in classes {
         let comparison = common::compare_with_kotlinc_plugin(
             stem,
             &source,
             class,
-            &[common::stdlib_jar()],
+            classpath,
             "17",
             &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
         )
@@ -32,8 +44,12 @@ fn assert_members_and_metadata_match_kotlinc(stem: &str, src: &str, classes: &[&
                 .iter()
                 .map(|field| {
                     format!(
-                        "field {:#06x} {} {} {:?}",
-                        field.access, field.name, field.descriptor, field.signature
+                        "field {:#06x} {} {} {:?} {:?}",
+                        field.access,
+                        field.name,
+                        field.descriptor,
+                        field.signature,
+                        field.const_value
                     )
                 })
                 .collect::<Vec<_>>();
@@ -55,7 +71,9 @@ fn assert_members_and_metadata_match_kotlinc(stem: &str, src: &str, classes: &[&
             common::raw_kotlin_metadata(&comparison.reference_bytes),
             "{class}: kotlinc's @Metadata"
         );
+        comparisons.push(comparison);
     }
+    comparisons
 }
 
 #[test]
@@ -222,4 +240,50 @@ fn library_block_members_are_statics_of_their_class() {
     )
     .expect("reference kotlinc is provisioned");
     assert_eq!(result, "OK");
+}
+
+/// A library block's `const val` is a compile-time constant where it is used: kotlinc folds `A.N`
+/// into another `const val`'s `ConstantValue`, into an annotation argument and into an ordinary
+/// expression, and none of them reads a field of `A`.
+#[test]
+fn library_block_const_is_a_compile_time_constant() {
+    const LIB: &str = "class A {\n\
+        \x20   companion {\n\
+        \x20       const val N = 7\n\
+        \x20   }\n\
+        }\n\
+        annotation class Tag(val n: Int)\n";
+    const MAIN: &str = "const val M = A.N + 1\n\
+        @Tag(A.N) fun tagged() {}\n\
+        fun read(): Int = A.N\n\
+        fun box(): String = if (M == 8 && read() == 7) \"OK\" else \"M is \" + M\n";
+    let library = common::kotlinc_library(&format!("{LANGUAGE}{LIB}"))
+        .expect("reference kotlinc is provisioned");
+    let comparisons = assert_members_and_metadata_match_kotlinc_on(
+        "LibraryConst",
+        MAIN,
+        &["LibraryConstKt"],
+        &[library, common::stdlib_jar()],
+    );
+    let comparison = &comparisons[0];
+    for method in ["read()", "tagged()"] {
+        assert_eq!(
+            common::method_instructions(&comparison.krusty, method),
+            common::method_instructions(&comparison.reference, method),
+            "LibraryConstKt.{method}: kotlinc's instructions"
+        );
+    }
+    let annotations = |javap: &str| {
+        javap
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("Tag("))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        annotations(&comparison.krusty),
+        annotations(&comparison.reference),
+        "tagged's annotation argument"
+    );
 }

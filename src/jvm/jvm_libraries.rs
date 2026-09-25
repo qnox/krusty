@@ -446,6 +446,24 @@ pub(super) struct JvmStaticField {
     pub(super) is_final: bool,
 }
 
+/// A metadata property's declared Kotlin type: its generic signature's return, else its return
+/// class with metadata nullability, else the `physical` JVM type when metadata names no class.
+fn metadata_property_ty(declaration: &super::metadata::MetaProp, physical: Ty) -> Ty {
+    declaration.generic_sig.as_ref().map_or_else(
+        || {
+            let ty = declaration
+                .ret_class
+                .map_or(physical, kotlin_type_name_to_ty);
+            if declaration.ret_nullable {
+                Ty::nullable(ty)
+            } else {
+                ty
+            }
+        },
+        |signature| signature.ret,
+    )
+}
+
 /// Kotlin operator capability of a Java instance method. Java declarations cannot encode
 /// Kotlin's `operator` modifier, so the interoperability rule is defined entirely by the declared
 /// method name and value-parameter arity.
@@ -3616,32 +3634,7 @@ impl JvmLibraries {
     }
 
     fn associated_property_for_static_field(&self, field: JvmStaticField) -> Option<PropertyInfo> {
-        let descriptor = field.descriptor.clone();
-        let mut getter = LibraryCallable::library(
-            field.owner,
-            field.name.clone(),
-            Vec::new(),
-            field.ty,
-            field.ty.platform_lower_bound(),
-            descriptor.clone(),
-        );
-        getter.external_identity = field.external_identity;
-        let setter = (!field.is_final).then(|| {
-            let mut setter = LibraryCallable::library(
-                field.owner,
-                field.name.clone(),
-                vec![field.ty.platform_lower_bound()],
-                Ty::Unit,
-                Ty::Unit,
-                descriptor,
-            );
-            setter.params = vec![field.ty];
-            setter.external_identity = Some(self.cp.intern_external_callable(
-                &setter,
-                super::classpath::ExternalCallableKind::StaticFieldWrite,
-            ));
-            setter
-        });
+        let (getter, setter) = self.static_field_accessors(&field);
         let mut property = PropertyInfo {
             return_value_status: None,
             name: field.name,
@@ -3674,6 +3667,41 @@ impl JvmLibraries {
         Some(property)
     }
 
+    /// The field read, and for a non-final field the field write, that realize a static field as a
+    /// property's accessors.
+    fn static_field_accessors(
+        &self,
+        field: &JvmStaticField,
+    ) -> (LibraryCallable, Option<LibraryCallable>) {
+        let descriptor = field.descriptor.clone();
+        let mut getter = LibraryCallable::library(
+            field.owner,
+            field.name.clone(),
+            Vec::new(),
+            field.ty,
+            field.ty.platform_lower_bound(),
+            descriptor.clone(),
+        );
+        getter.external_identity = field.external_identity;
+        let setter = (!field.is_final).then(|| {
+            let mut setter = LibraryCallable::library(
+                field.owner,
+                field.name.clone(),
+                vec![field.ty.platform_lower_bound()],
+                Ty::Unit,
+                Ty::Unit,
+                descriptor,
+            );
+            setter.params = vec![field.ty];
+            setter.external_identity = Some(self.cp.intern_external_callable(
+                &setter,
+                super::classpath::ExternalCallableKind::StaticFieldWrite,
+            ));
+            setter
+        });
+        (getter, setter)
+    }
+
     /// A `companion { … }` block property of `internal`, declared by its class `@Metadata`: a static
     /// member of the class realized by public static accessors on the class itself (its backing
     /// field is private), read and written with no receiver.
@@ -3682,6 +3710,9 @@ impl JvmLibraries {
         let declaration = super::metadata::class_properties(&class)
             .iter()
             .find(|property| property.is_companion_block_member && property.name == name)?;
+        if declaration.is_const {
+            return self.companion_block_constant(internal, &class, declaration);
+        }
         let static_accessor = |signature: &super::metadata::MetaJvmMethodSig| {
             class.methods.iter().any(|method| {
                 method.is_static()
@@ -3698,20 +3729,7 @@ impl JvmLibraries {
         if !getter_params.is_empty() {
             return None;
         }
-        let generic = declaration.generic_sig.as_ref();
-        let ty = generic.map_or_else(
-            || {
-                let ty = declaration
-                    .ret_class
-                    .map_or(physical_ret, kotlin_type_name_to_ty);
-                if declaration.ret_nullable {
-                    Ty::nullable(ty)
-                } else {
-                    ty
-                }
-            },
-            |signature| signature.ret,
-        );
+        let ty = metadata_property_ty(declaration, physical_ret);
         let getter = LibraryCallable::library(
             internal,
             getter_signature.name,
@@ -3756,6 +3774,70 @@ impl JvmLibraries {
             is_const: declaration.is_const,
             implicit_integer_coercion: false,
             compile_time_constant: None,
+            visibility: declaration.visibility,
+            owner: internal,
+            receiver_rank: 0,
+            source_key: None,
+            stable_declaration: None,
+            getter_declaration: None,
+            setter_declaration: None,
+            source_member: None,
+            accessor_derived: false,
+            read_stability: crate::libraries::PropertyReadStability::Unstable,
+            return_value_status: Some(declaration.return_value_status),
+        };
+        self.register_external_property(&mut property);
+        Some(property)
+    }
+
+    /// A `companion { … }` block `const val` of `internal`: its metadata declaration joined with the
+    /// exact public static field its `JvmPropertySignature` names, whose `ConstantValue` is the
+    /// declaration's compile-time constant. It has no accessors; a read is the field itself.
+    fn companion_block_constant(
+        &self,
+        internal: TypeName,
+        class: &super::classreader::ClassInfo,
+        declaration: &super::metadata::MetaProp,
+    ) -> Option<PropertyInfo> {
+        let signature = declaration.field.as_ref()?;
+        let field = class.fields.iter().find(|field| {
+            field.name == signature.name
+                && field.descriptor == signature.desc
+                && field.access & 0x0019 == 0x0019 // PUBLIC | STATIC | FINAL
+        })?;
+        let ty = metadata_property_ty(declaration, declared_desc_to_ty(&field.descriptor));
+        let constant = field.const_value.as_ref().map(|value| LibraryConst {
+            ty,
+            value: Self::library_const(value),
+        });
+        let mut field = JvmStaticField {
+            external_identity: None,
+            owner: internal,
+            name: field.name.clone(),
+            descriptor: field.descriptor.clone(),
+            ty,
+            constant,
+            visibility: declaration.visibility,
+            is_final: true,
+        };
+        self.register_external_static_field(&mut field);
+        let (getter, _) = self.static_field_accessors(&field);
+        let mut property = PropertyInfo {
+            name: declaration.name.clone(),
+            kind: PropKind::TopLevel,
+            receiver: None,
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
+            getter,
+            setter: None,
+            setter_visibility: declaration.visibility,
+            setter_parameter_name: None,
+            is_const: true,
+            implicit_integer_coercion: false,
+            compile_time_constant: field.constant,
             visibility: declaration.visibility,
             owner: internal,
             receiver_rank: 0,

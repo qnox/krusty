@@ -6,7 +6,9 @@ pub(super) mod builtin_bridge;
 mod class_identity;
 mod property_identity;
 
-use property_identity::{inline_underlying_property_name_id, parse_jvm_property_signature};
+use property_identity::{
+    inline_underlying_property_name_id, parse_jvm_property_signature, ParsedJvmPropertySignature,
+};
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -1941,6 +1943,13 @@ pub struct MetaJvmMethodSig {
     pub desc: String,
 }
 
+/// A property's JVM backing-field signature carried by Kotlin metadata: field name + descriptor.
+#[derive(Clone, Debug)]
+pub struct MetaJvmFieldSig {
+    pub name: String,
+    pub desc: String,
+}
+
 /// One constructor declaration from Kotlin class metadata. `params` is the complete source shape;
 /// `jvm_name` + `jvm_desc` are only the exact key of its platform realization. Ordinary classes use
 /// `<init>` while value classes use the static `constructor-impl`; consumers must not recover that
@@ -1979,6 +1988,9 @@ pub struct MetaProp {
     pub getter: Option<MetaJvmMethodSig>,
     /// The JVM setter (present iff the property is a `var` with an emitted setter).
     pub setter: Option<MetaJvmMethodSig>,
+    /// The backing field's JVM name + descriptor, from the `JvmPropertySignature` or Kotlin's default
+    /// mapping. The classfile decides whether such a field exists.
+    pub field: Option<MetaJvmFieldSig>,
     /// Explicit custom setter value-parameter name. An absent protobuf field denotes the implicit
     /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
     pub setter_parameter_name: Option<String>,
@@ -3558,7 +3570,7 @@ fn decode_properties(
         let mut ret_body = None;
         let mut legacy_flags = None;
         let mut modern_flags = None;
-        let mut sig = (None, None);
+        let mut sig = ParsedJvmPropertySignature::default();
         let mut receiver_class = None;
         let mut receiver_body = None;
         let mut receiver_nullable = false;
@@ -3668,7 +3680,11 @@ fn decode_properties(
         let Some(name) = resolve_string(records, d2, name_id as usize) else {
             continue;
         };
-        let (getter_signature, setter_signature) = sig;
+        let ParsedJvmPropertySignature {
+            field: field_signature,
+            getter: getter_signature,
+            setter: setter_signature,
+        } = sig;
         let setter_parameter_name = setter_value_parameter
             .and_then(|parameter| resolve_string(records, d2, parameter.name_id as usize));
         let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
@@ -3809,6 +3825,23 @@ fn decode_properties(
                 )
             })
             .flatten();
+        // The backing field, named and typed by default unless the signature says otherwise. Only
+        // a `const val` consumer reads it: its `ConstantValue` is the declaration's constant.
+        let field = {
+            let name = field_signature
+                .and_then(|signature| signature.name_id)
+                .and_then(|id| resolve_string(records, d2, id as usize))
+                .unwrap_or_else(|| name.clone());
+            field_signature
+                .and_then(|signature| signature.desc_id)
+                .and_then(|id| resolve_string(records, d2, id as usize))
+                .or_else(|| {
+                    accessor_types
+                        .as_ref()
+                        .map(|(_, ty)| super::names::type_descriptor(*ty))
+                })
+                .map(|desc| MetaJvmFieldSig { name, desc })
+        };
         out.push(MetaProp {
             name,
             ret_class: ret,
@@ -3818,6 +3851,7 @@ fn decode_properties(
             context_parameter_kinds,
             getter,
             setter,
+            field,
             setter_parameter_name,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             return_value_status: modern_flags.map_or_else(Default::default, |flags| {
