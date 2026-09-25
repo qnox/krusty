@@ -5,34 +5,9 @@
 //! non-negotiable. Making the target an explicit value rather than "whatever this machine is" is
 //! what keeps the host from leaking into the build by default.
 
-/// A supported instruction set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Arch {
-    X86_64,
-    Aarch64,
-    Riscv64,
-}
+pub use super::target_contract::{Arch, Os};
 
 impl Arch {
-    /// The spelling in an LLVM target triple.
-    pub fn triple_name(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::Aarch64 => "aarch64",
-            Self::Riscv64 => "riscv64",
-        }
-    }
-
-    /// The `EM_*` machine number an ELF header carries, so a produced binary can be checked
-    /// against the target it was asked for rather than assumed correct.
-    pub fn elf_machine(self) -> u16 {
-        match self {
-            Self::X86_64 => 62,
-            Self::Aarch64 => 183,
-            Self::Riscv64 => 243,
-        }
-    }
-
     /// The architecture this process is running on, when it is one krusty targets.
     pub fn host() -> Option<Self> {
         Some(match std::env::consts::ARCH {
@@ -44,19 +19,7 @@ impl Arch {
     }
 }
 
-/// A supported operating system.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Os {
-    Linux,
-}
-
 impl Os {
-    pub fn triple_name(self) -> &'static str {
-        match self {
-            Self::Linux => "linux",
-        }
-    }
-
     pub fn host() -> Option<Self> {
         match std::env::consts::OS {
             "linux" => Some(Self::Linux),
@@ -76,12 +39,19 @@ impl NativeTarget {
         Self { arch, os }
     }
 
-    /// Every target the runtime has a syscall and entry-point implementation for.
-    pub const ALL: &'static [Self] = &[
-        Self::new(Arch::X86_64, Os::Linux),
-        Self::new(Arch::Aarch64, Os::Linux),
-        Self::new(Arch::Riscv64, Os::Linux),
-    ];
+    /// Every target the runtime has a syscall and entry-point implementation for: the build
+    /// script's list, which is the one it prebuilds the runtime for.
+    pub const ALL: &'static [Self] = &{
+        let supported = super::target_contract::SUPPORTED;
+        let mut all =
+            [Self::new(supported[0].0, supported[0].1); super::target_contract::SUPPORTED.len()];
+        let mut index = 0;
+        while index < supported.len() {
+            all[index] = Self::new(supported[index].0, supported[index].1);
+            index += 1;
+        }
+        all
+    };
 
     /// The host, when krusty targets it. `None` is not a failure — it means this machine is not
     /// itself a supported target, which does not stop it from building for ones that are.
@@ -92,11 +62,7 @@ impl NativeTarget {
     /// The triple passed to the C compiler. The `gnu` component names the ABI, not a libc: the
     /// emitted program is freestanding and links against no C library.
     pub fn triple(self) -> String {
-        format!(
-            "{}-unknown-{}-gnu",
-            self.arch.triple_name(),
-            self.os.triple_name()
-        )
+        super::target_contract::triple(self.arch, self.os)
     }
 
     /// The conventional short name, as a user would write it.
@@ -148,8 +114,11 @@ mod tests {
     #[test]
     fn an_unknown_target_lists_the_supported_ones() {
         let error = "linux-s390x".parse::<NativeTarget>().expect_err("unknown");
-        assert!(error.contains("linux-x86_64"), "{error}");
-        assert!(error.contains("linux-riscv64"), "{error}");
+        assert_eq!(
+            error,
+            "unknown native target `linux-s390x`; supported: linux-x86_64, linux-aarch64, \
+             linux-riscv64"
+        );
     }
 
     #[test]

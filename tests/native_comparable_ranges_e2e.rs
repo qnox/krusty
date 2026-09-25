@@ -1,8 +1,9 @@
 //! `"a".."c"` — a range whose bounds are ordered by `Comparable`, not by a machine comparison.
 //!
 //! Kotlin declares `rangeTo` on `Comparable<T>` and answers a `ComparableRange<T>`, seen through
-//! `ClosedRange<T>`. It keeps the two bounds as OBJECTS and asks each one how it compares, so the
-//! runtime object here does the same through the receiver's descriptor. It is no progression:
+//! `ClosedRange<T>`. It keeps the two bounds as OBJECTS and orders them by the element's
+//! `compareTo`, so the runtime object here carries that function, chosen where the range is built.
+//! It is no progression:
 //! `Comparable` names no successor, so there is no step and no walk — a pair of bounds and the
 //! question `value in it`.
 //!
@@ -93,23 +94,41 @@ fn a_file_that_declares_its_own_closed_range_declines() {
     );
 }
 
-/// A file that declares its OWN `Comparable` does not reach the runtime's range. The order the
-/// runtime would read is the DESCRIPTOR's, and a class of the program's has no entry there — the
-/// position `Comparable.compareTo` already takes. So the construction is handed back to the
-/// general `rangeTo` path and declines by name, rather than being ordered by a table that cannot
-/// order it. (`reference_range_expression_e2e::user_comparable_range_binds_and_contains` pins the
-/// other half: where that general path IS answered, the program runs.)
+/// A range over the file's OWN `Comparable` is ordered by that class's `compareTo`, which the
+/// range carries: the runtime has no order of its own for a program's class, and is never asked
+/// for one. Membership, emptiness and both bounds, as kotlinc answers them.
 #[test]
-fn a_range_over_the_files_own_comparable_does_not_reach_the_runtimes() {
+fn a_range_over_the_files_own_comparable_orders_by_its_compare_to() {
+    let source = "class V(val n: Int) : Comparable<V> {\n\
+         \x20   override fun compareTo(other: V): Int = n.compareTo(other.n)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val range = V(1)..V(3)\n\
+         \x20   if (V(2) !in range) return \"fail in\"\n\
+         \x20   if (V(1) !in range || V(3) !in range) return \"fail bounds\"\n\
+         \x20   if (V(0) in range || V(4) in range) return \"fail outside\"\n\
+         \x20   if (range.isEmpty()) return \"fail isEmpty\"\n\
+         \x20   if (!(V(3)..V(1)).isEmpty()) return \"fail empty\"\n\
+         \x20   if (range.start.n != 1 || range.endInclusive.n != 3) return \"fail start/end\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "OwnComparableRange");
+    expect_native_box(source, "OwnComparableRange", "OK");
+}
+
+/// An OPEN class's `compareTo` may be overridden by the object behind a bound, so no one function
+/// orders its range: the construction declines by name rather than pass the declared one.
+#[test]
+fn a_range_over_an_open_comparable_declines() {
     expect_native_decline(
-        "class V(val n: Int) : Comparable<V> {\n\
+        "open class V(val n: Int) : Comparable<V> {\n\
          \x20   override fun compareTo(other: V): Int = n.compareTo(other.n)\n\
          }\n\
          fun box(): String {\n\
          \x20   val range = V(1)..V(3)\n\
          \x20   return if (V(2) in range) \"OK\" else \"fail\"\n\
          }\n",
-        "OwnComparableRange",
-        "rangeTo",
+        "OpenComparableRange",
+        "not a final class declaring its own `compareTo`",
     );
 }

@@ -164,10 +164,9 @@ fn closed_range_element(ty: Ty) -> Option<Ty> {
 /// — `Ty::Obj` excludes it — because the object behind a `ClosedRange<T>` in a generic body may be
 /// any of the three shapes, and only a concrete element rules the other two out.
 ///
-/// Whether the runtime may ANSWER for such a range is a second question, asked by
-/// [`FileLowering::declares_its_own_comparable`] at each site: the order is read from the value's
-/// descriptor, so it is the runtime's own, and a class of the program's standing behind the
-/// element has none there. That is the position `Comparable.compareTo` already takes.
+/// The range carries the `compareTo` it orders by, chosen where it is built
+/// ([`FunctionLowering::range_compare_function`]), so its members need nothing from the element's
+/// descriptor and answer for any element the construction could order.
 fn comparable_range_element(ty: Ty) -> Option<Ty> {
     let Ty::Obj(internal, arguments) = ty.non_null() else {
         return None;
@@ -328,8 +327,8 @@ impl BodyLowering<'_, '_, '_> {
             // `"a".."c"`: the same shape one level up, with the bounds kept as OBJECTS. Kotlin
             // declares this `rangeTo` on `Comparable<T>`, so the receiver is whatever the program
             // is ordering and the type it RETURNS is what says the element is a reference.
-            if comparable_range_element(ret).is_some() && !self.file.declares_its_own_comparable {
-                return Some(self.comparable_range_of(receiver, args[0], ret));
+            if let Some(element) = comparable_range_element(ret) {
+                return Some(self.comparable_range_of(element, receiver, args[0], ret));
             }
         }
         // A member of one. The RECEIVER is what says so, never the owner: `contains` is declared
@@ -340,10 +339,9 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, answer) = floating_range_symbol(name, args.len())?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, args, ret));
         }
-        // A member of a COMPARABLE range, keyed on the receiver for the same reason.
-        if comparable_range_element(self.type_of(receiver)?).is_some()
-            && !self.file.declares_its_own_comparable
-        {
+        // A member of a COMPARABLE range, keyed on the receiver for the same reason. The range
+        // carries its own order, so any element the construction accepted can be asked about.
+        if comparable_range_element(self.type_of(receiver)?).is_some() {
             let (symbol, answer) = comparable_range_symbol(name, args.len())?;
             return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
         }
@@ -427,13 +425,16 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
     }
 
-    /// `a..b` on a receiver ordered by `Comparable`: the range object, its bounds kept as objects.
+    /// `a..b` on a receiver ordered by `Comparable`: the range object, its bounds kept as objects
+    /// and the `compareTo` that orders them carried beside them.
     fn comparable_range_of(
         &mut self,
+        element: Ty,
         start: u32,
         end: u32,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let compare = self.range_compare_function(element)?;
         let first = self.reference(start)?;
         if self.terminated {
             return Ok(None);
@@ -442,11 +443,83 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        self.runtime_call("kt_comparable_range", &[any(), any()], ret, &[first, last])
+        self.runtime_call(
+            "kt_comparable_range",
+            &[any(), any(), any()],
+            ret,
+            &[first, last, compare],
+        )
+    }
+
+    /// The address of the `compareTo` a range of `element` orders by: what the runtime's
+    /// `kt_compare_fn` calls with two bounds, or a bound and a value.
+    ///
+    /// The element type decides, here, where it is known; the runtime is never left to rediscover
+    /// the order from a bound's descriptor.
+    ///
+    /// - A final class of this file that declares `compareTo(other: Self): Int` passes that
+    ///   function. It takes the receiver and the other object and answers an `Int`, which is the
+    ///   runtime's `kt_compare_fn` exactly, and no subclass can override it.
+    /// - A `String`, or any element in a file that declares no `Comparable` of its own, passes
+    ///   `kt_compare_any`: every object such an element can hold is a builtin comparable, and the
+    ///   builtin order is the runtime's.
+    /// - Anything else declines. An open class could be overridden by the object behind the bound,
+    ///   and an element that could hold both a builtin and a program object has no single function
+    ///   to pass.
+    fn range_compare_function(&mut self, element: Ty) -> Result<Value, Unsupported> {
+        let Ty::Obj(name, _) = element.non_null() else {
+            return Err(format!(
+                "a range of `{}`",
+                super::type_checks::type_name_of(element)
+            ));
+        };
+        let ir = self.file.ir;
+        let Some(class) = ir.class_id_by_name(name) else {
+            if name.matches("kotlin/String") || !self.file.declares_its_own_comparable {
+                let id = self
+                    .file
+                    .import("kt_compare_any", &[any(), any()], Ty::Int)?;
+                let func_ref = self.func_ref(id);
+                return Ok(self.builder.ins().func_addr(types::I64, func_ref));
+            }
+            return Err(format!(
+                "a range of `{}` in a file that declares its own `Comparable`",
+                name.render().replace('/', ".")
+            ));
+        };
+        let declared = &ir.classes[class as usize];
+        let is_final = !declared.is_open
+            && !declared.is_abstract
+            && !declared.is_interface
+            && !declared.is_sealed
+            && !declared.is_value
+            && declared.enum_entries.is_empty()
+            && declared.enum_entry_of.is_none();
+        let own = declared.methods.iter().copied().find(|&function| {
+            let function = &ir.functions[function as usize];
+            function.name == "compareTo"
+                && function.dispatch_receiver.is_some()
+                && function.ret == Ty::Int
+                && matches!(function.params.as_slice(), [Ty::Obj(other, _)] if *other == name)
+        });
+        let (true, Some(function)) = (is_final, own) else {
+            return Err(format!(
+                "a range of `{}`, which is not a final class declaring its own `compareTo`",
+                name.render().replace('/', ".")
+            ));
+        };
+        let Some(id) = self.file.functions[function as usize] else {
+            return Err(format!(
+                "a range of `{}`, whose `compareTo` has no body",
+                name.render().replace('/', ".")
+            ));
+        };
+        let func_ref = self.func_ref(id);
+        Ok(self.builder.ins().func_addr(types::I64, func_ref))
     }
 
     /// One member of a comparable range. Every operand crosses as a REFERENCE, which is what the
-    /// bounds are: the comparison is the value's own `compareTo`, read from its descriptor.
+    /// bounds are: the comparison is the `compareTo` the range carries.
     fn comparable_range_call(
         &mut self,
         symbol: &str,
@@ -940,9 +1013,7 @@ impl BodyLowering<'_, '_, '_> {
             let ty = self.type_of(receiver)?;
             if floating_range(ty).is_some() {
                 floating_range_symbol(&property.name, 0)?;
-            } else if comparable_range_element(ty).is_some()
-                && !self.file.declares_its_own_comparable
-            {
+            } else if comparable_range_element(ty).is_some() {
                 comparable_range_symbol(&property.name, 0)?;
             } else if closed_range_element(ty).is_some() {
                 range_symbol(&property.name, 0)?;
