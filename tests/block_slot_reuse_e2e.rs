@@ -11,6 +11,60 @@ fn byte_identical(name: &str, src: &str, class: &str) {
     }
 }
 
+/// Every method's `LocalVariableTable` rows as `slot name descriptor`, in table order, from
+/// `javap -l`. Start and length are left out: they follow instruction offsets, which differ for
+/// reasons other than slot choice.
+fn local_variable_rows(class_file: &std::path::Path) -> Vec<String> {
+    let text = common::javap(&["-c", "-l", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.len() == 5 && fields[..3].iter().all(|f| f.parse::<u32>().is_ok()))
+                .then(|| format!("{} {} {}", fields[2], fields[3], fields[4]))
+        })
+        .collect()
+}
+
+/// Compile `src` with kotlinc and krusty and require the same local-variable slots.
+fn same_local_slots(name: &str, src: &str, class: &str) {
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skip ({name}: no scratch directory)");
+        return;
+    };
+    let reference = dir.join("ref");
+    std::fs::create_dir_all(&reference).unwrap();
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).unwrap();
+    let args = [
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skip ({name}: reference toolchain unavailable)");
+        return;
+    };
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(src, name, &[stdlib], Some(jdk.as_path()))
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, bytes) = classes
+        .iter()
+        .find(|(emitted, _)| emitted == class)
+        .unwrap_or_else(|| panic!("{class} was not emitted"));
+    let emitted = dir.join(format!("{class}.class"));
+    std::fs::write(&emitted, bytes).unwrap();
+    let expected = local_variable_rows(&reference.join(format!("{class}.class")));
+    assert!(
+        !expected.is_empty(),
+        "{name}: kotlinc's class has no local variables"
+    );
+    assert_eq!(local_variable_rows(&emitted), expected, "{name}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn run(src: &str) -> String {
     common::compile_and_run_with_stdlib(src, "Main").expect("box() ran")
 }
@@ -124,4 +178,38 @@ fun box(): String {\n\
     return if (thrown == \"thrown\" && value == 8) \"OK\" else \"FAIL: $thrown $value\"\n\
 }\n";
     assert_eq!(run(src), "OK");
+}
+
+/// A `try` that is not `Unit` enters its result temporary after the body, in kotlinc a `Void`
+/// one for a `Nothing` `try`: it takes the slot `x` has just left, so `e` is slot 2, not 1.
+#[test]
+fn a_catch_parameter_after_a_returning_try_body_sits_above_the_result_temporary() {
+    same_local_slots(
+        "slotReuseTryReturn",
+        "fun tryReturn(n: Int): String {\n\
+    try {\n\
+        val x = n + 1\n\
+        return \"r$x\"\n\
+    } catch (e: RuntimeException) {\n\
+        return \"e\"\n\
+    }\n\
+}\n",
+        "SlotReuseTryReturnKt",
+    );
+}
+
+#[test]
+fn a_catch_parameter_after_a_throwing_try_body_sits_above_the_result_temporary() {
+    same_local_slots(
+        "slotReuseTryThrow",
+        "fun tryThrow(n: Int): Int {\n\
+    try {\n\
+        val x = n + 1\n\
+        throw IllegalStateException(\"m$x\")\n\
+    } catch (e: IllegalStateException) {\n\
+        return 0\n\
+    }\n\
+}\n",
+        "SlotReuseTryThrowKt",
+    );
 }

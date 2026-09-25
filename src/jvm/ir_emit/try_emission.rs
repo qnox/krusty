@@ -178,6 +178,15 @@ impl Emitter<'_> {
             self.adapt_physical_operand_for(body, self.value_ty(body), rt, code);
             store(rt, result_slot.unwrap(), code);
         }
+        // kotlinc enters a result temporary for every `try` that is not `Unit`, once the body is
+        // emitted. A `Nothing` one's is a `java/lang/Void` nothing stores, but it still takes the
+        // slot the body's locals have just left, so the catch parameters sit above it. A valued
+        // `try`'s temporary is still entered before its body (moved with 4d, when the variable it
+        // initializes is entered before it too).
+        let void_result = (rt == Ty::Nothing).then(|| {
+            self.frame
+                .enter_temp(TempRole::TryResult, Ty::obj("java/lang/Void"))
+        });
         if let Some(finalizer) = finally {
             self.return_finalizers.pop();
             // The normal-path copy of this finalizer is emitted next and must lie outside its own
@@ -419,7 +428,10 @@ impl Emitter<'_> {
             self.frame.keep_for_method(parked);
         }
         // Newest first, as they were entered.
-        for temp in [own_return_spill, result_temp].into_iter().flatten() {
+        for temp in [void_result, own_return_spill, result_temp]
+            .into_iter()
+            .flatten()
+        {
             self.frame.leave_temp(temp);
         }
     }

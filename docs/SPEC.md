@@ -2743,8 +2743,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter is left when its catch ends. Backend temporaries do not hand slots back yet: a released
   temporary keeps the cursor, a variable left below one that is still live keeps it too, and a
   `finally`'s parked-exception slot stays taken for the rest of the method because a later `try`
-  takes it from the reuse pool again. `tests/block_slot_reuse_e2e.rs` (full-byte against kotlinc
-  for sibling branches and a loop body; runtime pins for `do`/`while`, catch parameters and the
+  takes it from the reuse pool again. A `Nothing`-typed `try` (a body and catches that all
+  `return` or `throw`) still enters a one-slot result temporary once its body is emitted, as
+  kotlinc's `visitTry` enters one for every `try` that is not `Unit` (a `java/lang/Void` nothing
+  stores): it takes the slot the body's first local left, so the catch parameter sits above it
+  (`try { val x; return } catch (e) { return }` puts `x` in 1 and `e` in 2).
+  `tests/block_slot_reuse_e2e.rs` (full-byte against kotlinc
+  for sibling branches and a loop body; local-variable slots against kotlinc for a returning and a
+  throwing `try` body; runtime pins for `do`/`while`, catch parameters and the
   parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
   pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
