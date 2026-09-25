@@ -186,6 +186,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   covered: the public visibility and bit 7 kotlinc writes for such a class regenerated from an
   inline function (`xi = 0x3b0`/`0x5b0`), and the pre-release bit (2) under experimental language
   features. Test: `tests/metadata_synthetic_classes_e2e.rs`.
+- Member visit order (kotlinc 2.4.20): constructors first, then the class's declarations in source
+  order, the primary-constructor properties first and enum entries at their declaration position
+  (so after those properties and before the body's other members), then the members the compiler
+  generates: `componentN`, `copy`, `equals`, `hashCode`, `toString` for a data class and `equals`,
+  `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
+  order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
+  in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

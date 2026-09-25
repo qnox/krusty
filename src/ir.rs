@@ -1231,6 +1231,9 @@ pub struct IrEnumEntry {
     /// itself.
     /// 1-based source line of the entry's declaration, for the `<clinit>` `LineNumberTable`.
     pub decl_line: u32,
+    /// The entry declaration's stable source position, in the key space of the class's other
+    /// members, so metadata can visit it in declaration order.
+    pub source_order: u32,
     pub subclass: Option<TypeName>,
 }
 

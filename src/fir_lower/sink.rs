@@ -836,6 +836,9 @@ impl<'a> CommonIrBodySink<'a> {
                         .is_some_and(|child_anchor| child_anchor.owner == Some(entry))
                 });
                 let subclass = has_body.then(|| header.classifier.nested_child(&name));
+                let source_order = index
+                    .source_order(entry)
+                    .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
                 self.ir.classes[class as usize]
                     .enum_entries
                     .push(crate::ir::IrEnumEntry {
@@ -845,6 +848,7 @@ impl<'a> CommonIrBodySink<'a> {
                         constructor_parameter_types: Vec::new(),
                         default_parameters: Vec::new(),
                         decl_line: 0,
+                        source_order,
                         subclass,
                     });
                 if let Some(subclass) = subclass {

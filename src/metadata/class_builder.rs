@@ -541,6 +541,7 @@ pub enum ClassMemberOrder {
     Property(usize),
     Function(usize),
     TypeAlias(usize),
+    EnumEntry(usize),
 }
 
 pub struct ClassTail<'a> {
@@ -677,6 +678,20 @@ impl Default for ClassTail<'_> {
 pub struct EnumEntryMeta<'a> {
     pub name: &'a str,
     pub annotations: Option<&'a crate::ir::DeclarationAnnotations>,
+}
+
+/// f13 = an enum entry (`EnumEntry { name = f1, annotation = f2 }`). The entry's NAME interns
+/// before its annotations, and each annotation's own strings follow it, kotlinc's `d2` order.
+fn enum_entry_pb(st: &mut StringTable, entry: &EnumEntryMeta<'_>) -> Pb {
+    let mut ee = Pb::new();
+    ee.field_varint(1, st.local(entry.name) as u64);
+    if let Some(annotations) = entry.annotations {
+        for annotation in annotations.applications() {
+            let encoded = crate::metadata::builder::annotation_pb(st, annotation);
+            ee.repeated_message(2, &encoded);
+        }
+    }
+    ee
 }
 
 pub fn build_class(
@@ -1289,6 +1304,7 @@ pub fn build_class(
     let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
     let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
     let mut alias_msgs: Vec<Option<Pb>> = (0..tail.type_aliases.len()).map(|_| None).collect();
+    let mut enum_msgs: Vec<Option<Pb>> = (0..enum_entries.len()).map(|_| None).collect();
     for member in tail.member_order {
         match *member {
             ClassMemberOrder::Property(index)
@@ -1308,6 +1324,11 @@ pub fn build_class(
                     &mut st,
                     &tail.type_aliases[index],
                 ));
+            }
+            ClassMemberOrder::EnumEntry(index)
+                if index < enum_entries.len() && enum_msgs[index].is_none() =>
+            {
+                enum_msgs[index] = Some(enum_entry_pb(&mut st, &enum_entries[index]));
             }
             _ => {}
         }
@@ -1342,21 +1363,11 @@ pub fn build_class(
         .map(|message| message.expect("every type-alias metadata record is built"))
         .collect();
 
-    // f13 = enum entries (`EnumEntry { name = f1, annotation = f2 }`). The entry's NAME interns
-    // before its annotations, and each annotation's own strings follow it — kotlinc's `d2` order.
-    let enum_msgs: Vec<Pb> = enum_entries
-        .iter()
-        .map(|entry| {
-            let mut ee = Pb::new();
-            ee.field_varint(1, st.local(entry.name) as u64);
-            if let Some(annotations) = entry.annotations {
-                for annotation in annotations.applications() {
-                    let encoded = crate::metadata::builder::annotation_pb(&mut st, annotation);
-                    ee.repeated_message(2, &encoded);
-                }
-            }
-            ee
-        })
+    // Entries the caller did not schedule among the members intern after them, in entry order.
+    let enum_msgs: Vec<Pb> = enum_msgs
+        .into_iter()
+        .zip(enum_entries)
+        .map(|(message, entry)| message.unwrap_or_else(|| enum_entry_pb(&mut st, entry)))
         .collect();
 
     // A `@JvmInline value class`'s underlying property name + type (`Class` f17/f18). Interned with the

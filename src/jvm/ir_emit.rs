@@ -55,6 +55,7 @@ mod inline_call;
 mod interface_compatibility;
 mod local_updates;
 mod member_schedule;
+mod metadata_member_order;
 mod metadata_policy;
 mod non_null_operands;
 mod object_static_initialization;
@@ -867,9 +868,8 @@ fn build_class_metadata(
     opts: &EmitOptions,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
-        build_class, ClassMemberOrder, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS,
-        EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
-        SEALED_CTOR_FLAGS,
+        build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
+        FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
     };
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
@@ -1766,6 +1766,8 @@ fn build_class_metadata(
             .collect::<Vec<_>>()
     };
     let class_ty = Ty::obj(&c.fq_name());
+    let declared_method_list = declared_methods();
+    let declared_method_count = declared_method_list.len();
     let inferred_methods: Vec<FnMeta> = if c.is_data {
         let mut m = Vec::new();
         for (i, property) in data_component_properties.iter().enumerate() {
@@ -1921,13 +1923,15 @@ fn build_class_metadata(
                 no_infer_params: Vec::new(),
             });
         }
-        m.extend(declared_methods());
-        m
+        // kotlinc visits the source declarations first, then the members the compiler generates.
+        let mut methods = declared_method_list;
+        methods.extend(m);
+        methods
     } else if c.is_value {
         // A value class's Kotlin-visible overrides. Each dispatches to a differently-named static
         // `-impl` taking the erased underlying, so each records a `JvmMethodSignature` (name + desc).
         let u = desc(c.fields[0].ty);
-        let mut methods = vec![
+        let methods = vec![
             FnMeta {
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
@@ -1995,10 +1999,11 @@ fn build_class_metadata(
                 no_infer_params: Vec::new(),
             },
         ];
-        methods.extend(declared_methods());
-        methods
+        let mut declared = declared_method_list;
+        declared.extend(methods);
+        declared
     } else {
-        declared_methods()
+        declared_method_list
     };
     let mut methods = match generated_publication.map(|publication| publication.metadata_scope) {
         Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive) => Vec::new(),
@@ -2022,76 +2027,15 @@ fn build_class_metadata(
             decl_order: alias.source_order as usize,
         })
         .collect::<Vec<_>>();
-    let member_order = if c.is_data || c.is_value {
-        Vec::new()
-    } else {
-        let mut ordered = Vec::with_capacity(props.len() + methods.len() + type_aliases.len());
-        ordered.extend(
-            prop_source_orders
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
-        );
-        if !matches!(
-            generated_publication.map(|publication| publication.metadata_scope),
-            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
-        ) {
-            ordered.extend(
-                declared_fids
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(index, fid)| {
-                        (
-                            ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                            ClassMemberOrder::Function(index),
-                        )
-                    }),
-            );
-        }
-        let generated_order_base = if matches!(
-            generated_publication.map(|publication| publication.metadata_scope),
-            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
-        ) {
-            0
-        } else {
-            ordered
-                .iter()
-                .map(|(order, _)| *order)
-                .chain(
-                    type_aliases
-                        .iter()
-                        .map(|alias| u32::try_from(alias.decl_order).unwrap_or(u32::MAX)),
-                )
-                .filter(|order| *order != u32::MAX)
-                .max()
-                .map_or(0, |order| order.saturating_add(1))
-        };
-        if let Some(publication) = generated_publication {
-            ordered.extend(
-                publication
-                    .functions
-                    .iter()
-                    .filter(|member| member.metadata.is_some())
-                    .enumerate()
-                    .map(|(index, _)| {
-                        (
-                            generated_order_base.saturating_add(index as u32),
-                            ClassMemberOrder::Function(inferred_method_count + index),
-                        )
-                    }),
-            );
-        }
-        ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
-            (
-                u32::try_from(alias.decl_order).unwrap_or(u32::MAX),
-                ClassMemberOrder::TypeAlias(index),
-            )
-        }));
-        ordered.sort_by_key(|(order, _)| *order);
-        ordered.into_iter().map(|(_, member)| member).collect()
-    };
+    let member_order = metadata_member_order::member_order(
+        ir,
+        c,
+        &prop_source_orders,
+        &declared_fids,
+        declared_method_count..inferred_method_count,
+        generated_publication,
+        &type_aliases,
+    );
     // A value class's primary constructor is realized as the static `constructor-impl` returning the
     // erased underlying, not `<init>`; its `@Metadata` signature records that.
     let vc_ctor_desc = c
