@@ -22,6 +22,9 @@
 //! - A sealed class's nested subclasses intern with its `InnerClasses` table, after `@Metadata`,
 //!   not ahead of its constructor.
 //!
+//! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
+//!   before `<clinit>`.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -211,5 +214,14 @@ fn an_anonymous_object_constructor_interns_this_before_its_members() {
          }\n\
          fun make(): Greeter = object : Greeter {}\n",
         &["AnonymousThisKt$make$1"],
+    );
+}
+
+#[test]
+fn a_data_object_equals_interns_its_locals_with_its_body() {
+    assert_identical(
+        "DataObjectLocals",
+        "data object Marker\n",
+        &["Marker"],
     );
 }
