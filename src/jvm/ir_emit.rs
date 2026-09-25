@@ -28,6 +28,7 @@ mod bottom_values;
 mod bridge_emission;
 mod bytecode_inline_call;
 mod call_operands;
+mod captured_storage;
 mod checked_facts;
 mod condition_emission;
 mod constructor_defaults;
@@ -5936,11 +5937,7 @@ fn emit_class(
                 "this$0" => 0x1010,
                 _ => 0x0000,
             }
-        } else if c.is_inner_class && name == "this$0" {
-            // The enclosing-instance capture is shared across the nest: a deeper inner class
-            // follows its checked enclosing path by reading this field from its immediate parent.
-            // kotlinc realizes that storage as package-visible FINAL|SYNTHETIC, not as a private
-            // Kotlin backing field.
+        } else if captured_storage::stores_constructor_prefix(c, field_index) {
             0x1010
         } else {
             jvm_field_visibility.unwrap_or(if private { 0x0002 } else { 0x0001 })
