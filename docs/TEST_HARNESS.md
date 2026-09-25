@@ -91,6 +91,20 @@ processes, logged as `native-box-shard-1-of-4` and so on, each under the conform
 excluded from the "everything else" pass. `scripts/native-conformance-run.sh` runs the same partition
 for the `just` recipes and CI.
 
+The native lane's verdict is held by two ledgers under `tests/`:
+- `native_box_expected_declines.txt` lists every case the backend declines or the frontend rejects,
+  and which of the two. It is the coverage ratchet. A case that newly declines fails the lane, and
+  so does a listed case that now passes. Regenerate it from a full run with
+  `KRUSTY_NATIVE_BOX_WRITE_LEDGER=<file>` per shard, which also suspends its checks for that run.
+- `native_box_expected_failures.txt` lists known defects elsewhere in the compiler that make an
+  accepted case answer wrong or make the compiler panic.
+
+Every entry must name a case the corpus has and must produce its recorded outcome. Any compiler panic
+the second ledger does not list fails the lane. A `box()` answer is read from behind the entry's
+`BOX_RESULT_FRAME` marker, whole, and never from the last line of output. A scheduled shard requires
+the prebuilt runtime and the provisioned corpus; only a plain local run may skip or fall back to the
+vendored cases.
+
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
 `conformance-<hash>@kotlin_codegen_box_conformance.log` and
