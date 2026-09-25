@@ -89,6 +89,7 @@ pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) argument_parameter_types: &'a [Ty],
     pub(super) declaration_parameter_types: &'a [Ty],
     pub(super) primary_in_current_file: bool,
+    pub(super) target: crate::ir::IrConstructorTarget,
     pub(super) context_parameter_count: u32,
     pub(super) outer_receiver: Option<ExprId>,
     pub(super) external_capture_arguments: Option<&'a [(ExprId, Ty)]>,
@@ -1251,6 +1252,7 @@ impl BodyLowering<'_> {
             argument_parameter_types,
             declaration_parameter_types,
             primary_in_current_file,
+            target,
             context_parameter_count,
             outer_receiver,
             external_capture_arguments,
@@ -1315,6 +1317,7 @@ impl BodyLowering<'_> {
         self.ir
             .construction_declared_params
             .insert(construction, declared_parameters);
+        self.ir.construction_targets.insert(construction, target);
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }

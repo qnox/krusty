@@ -287,10 +287,17 @@ impl BodyLowering<'_> {
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
-                let declaration_parameter_types = self
+                let declaration = self
                     .index
                     .callable(*target)
-                    .and_then(|callable| self.index.signature(callable.declaration))
+                    .ok_or(FirLoweringFailure::MissingCallable(*target))?
+                    .declaration;
+                let constructor_target =
+                    super::constructors::module_constructor_target(self.index, declaration)
+                        .ok_or(FirLoweringFailure::MissingCallable(*target))?;
+                let declaration_parameter_types = self
+                    .index
+                    .signature(declaration)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?
                     .parameters
                     .iter()
@@ -301,6 +308,7 @@ impl BodyLowering<'_> {
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,
+                    target: constructor_target,
                     context_parameter_count: 0,
                     outer_receiver,
                     external_capture_arguments: None,

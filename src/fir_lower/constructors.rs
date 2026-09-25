@@ -315,10 +315,7 @@ pub(super) fn finalize_constructors(
                 let classifier = index
                     .enclosing_classifier(callable.declaration)
                     .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
-                let primary = index
-                    .declaration_anchor(callable.declaration)
-                    .is_some_and(|anchor| anchor.sibling == 0);
-                let access = module_constructor_access(index, callable.declaration, classifier)
+                let target = module_constructor_target(index, callable.declaration)
                     .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
                 (
                     classifier.classifier,
@@ -327,7 +324,7 @@ pub(super) fn finalize_constructors(
                         .iter()
                         .map(|parameter| parameter.get())
                         .collect::<Vec<_>>(),
-                    IrConstructorTarget { primary, access },
+                    target,
                     None,
                 )
             }
@@ -952,25 +949,31 @@ pub(super) fn accept_constructor_body(
     Ok(())
 }
 
-/// Who may call a module constructor, from its class's modality and its declared visibility.
-/// Every source constructor of a sealed class is restricted, whatever its modifier says: Kotlin
-/// makes an unmodified one `protected` and rejects a public one. `None` when either header is
-/// missing, which a checked selection never leaves.
-fn module_constructor_access(
+/// The declaration facts of a selected module constructor: whether it is its class's primary, and
+/// who may call it, from its class's modality and its declared visibility. Every source constructor
+/// of a sealed class is restricted, whatever its modifier says: Kotlin makes an unmodified one
+/// `protected` and rejects a public one. `None` when a header is missing, which a checked selection
+/// never leaves.
+pub(super) fn module_constructor_target(
     index: &ResolvedModuleIndex,
     constructor: DeclarationId,
-    classifier: &crate::fir::ResolvedClassifierHeader,
-) -> Option<IrConstructorAccess> {
+) -> Option<IrConstructorTarget> {
+    let ordinal = index.declaration_anchor(constructor)?.sibling;
+    let classifier = index.enclosing_classifier(constructor)?;
     let visibility = index.declaration_header(constructor)?.visibility;
     let sealed = index
         .declaration_header(classifier.declaration)?
         .flags
         .has(crate::fir::DeclarationFlags::SEALED);
-    Some(if sealed {
+    let access = if sealed {
         IrConstructorAccess::SealedClass
     } else if visibility == crate::types::Visibility::Private {
-        IrConstructorAccess::Private
+        IrConstructorAccess::Private { ordinal }
     } else {
         IrConstructorAccess::Unrestricted
+    };
+    Some(IrConstructorTarget {
+        primary: ordinal == 0,
+        access,
     })
 }

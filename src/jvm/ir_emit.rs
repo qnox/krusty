@@ -32,6 +32,7 @@ mod call_operands;
 mod captured_storage;
 mod checked_facts;
 mod condition_emission;
+mod constructor_accessors;
 mod constructor_defaults;
 mod coroutine_machine;
 mod data_class_pool_seed;
@@ -68,7 +69,6 @@ mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 mod value_class_signatures;
 use try_emission::FinallyRegion;
-mod sealed_constructors;
 mod secondary_constructor;
 mod static_fields;
 mod type_operation_emission;
@@ -184,7 +184,7 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
 }
 
 /// Whether the primary's marker accessor follows the members as a companion's or a hidden
-/// value-class primary's does. A sealed class's accessors are `sealed_constructors`' to emit.
+/// value-class primary's does. A sealed class's accessors are `constructor_accessors`' to emit.
 fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
     class.is_companion || (!class.is_sealed && ir.has_value_param_ctor(&class.fq_name()))
 }
@@ -5583,77 +5583,6 @@ fn class_public_bit(ir: &IrFile, c: &crate::ir::IrClass) -> u16 {
     }
 }
 
-/// Whether any code OUTSIDE `fq` constructs it — a companion factory, a nested class, another class
-/// in the file, a top-level property initializer, a default argument evaluated elsewhere.
-///
-/// kotlinc keeps a private constructor reachable from such a site through a synthetic
-/// `DefaultConstructorMarker` bridge. krusty does not emit that bridge yet, so a class constructed
-/// from outside must keep its constructor JVM-public: `ACC_PRIVATE` would turn the cross-class `new`
-/// into an `IllegalAccessError`. A class nobody constructs from outside takes kotlinc's shape.
-///
-/// The question is answered by INVERSION: collect the expressions reachable from the class's OWN
-/// declarations, then scan the whole arena for a construction of `fq` that is not among them. A root
-/// this function fails to enumerate therefore makes a construction look EXTERNAL — which keeps the
-/// constructor public, the conservative answer — instead of hiding a real cross-class site.
-///
-/// The scan runs only for a class that actually declares a private constructor, which is rare.
-fn constructed_outside(ir: &IrFile, fq: &str) -> bool {
-    // A SUBCLASS reaches the constructor without ever constructing the type: its own `<init>` calls
-    // `invokespecial <super>.<init>`, which is the same private access from a different JVM class. A
-    // private constructor is extensible only from inside the class (Kotlin rejects it elsewhere), so
-    // this is the nested-subclass shape — `class Base private constructor() { class Sub : Base() }`.
-    if ir
-        .classes
-        .iter()
-        .any(|c| !c.fq_name_matches(fq) && c.superclass_matches(fq))
-    {
-        return true;
-    }
-    // Every construction of this class in the file. None at all — a class nobody instantiates —
-    // answers `false`: kotlinc emits such a constructor private with no bridge.
-    let constructions: Vec<crate::ir::ExprId> = ir
-        .exprs
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| matches!(e, IrExpr::New { internal, .. } if internal.matches(fq)))
-        .map(|(id, _)| id as crate::ir::ExprId)
-        .collect();
-    if constructions.is_empty() {
-        return false;
-    }
-    let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-    for c in ir.classes.iter().filter(|c| c.fq_name_matches(fq)) {
-        for &fid in &c.methods {
-            roots.extend(ir.functions.get(fid as usize).and_then(|f| f.body));
-            if let Some(defaults) = ir.fn_params.get(&fid).and_then(|p| p.defaults.as_ref()) {
-                roots.extend(defaults.iter().flatten().copied());
-            }
-        }
-        roots.extend(c.init_body);
-        roots.extend(c.super_arg_prelude.iter().copied());
-        roots.extend(c.super_args.iter().copied());
-        for ctor in &c.secondary_ctors {
-            roots.extend(ctor.body);
-            roots.extend(ctor.delegate_prelude.iter().copied());
-            roots.extend(ctor.delegate_args.iter().copied());
-            roots.extend(ctor.defaults.iter().flatten().copied());
-        }
-        for entry in &c.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
-        roots.extend(c.properties.iter().filter_map(|p| p.initializer));
-    }
-    let mut inside: std::collections::HashSet<crate::ir::ExprId> = std::collections::HashSet::new();
-    let mut stack = roots;
-    while let Some(cur) = stack.pop() {
-        if !inside.insert(cur) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, cur, &mut |child| stack.push(child));
-    }
-    constructions.iter().any(|id| !inside.contains(id))
-}
-
 /// Every method this class emits must carry a DETERMINED signature.
 ///
 /// `Ty::Error` and `Ty::Pending` are answers about resolution, not types, and neither survives the
@@ -6356,15 +6285,11 @@ fn emit_class(
             0x0002
         } else {
             // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
-            // protected). A declared PRIVATE one is ACC_PRIVATE like kotlinc's, EXCEPT when another
-            // class constructs it: kotlinc routes that through a `DefaultConstructorMarker` bridge
-            // krusty does not emit yet, and without the bridge the cross-class `new` would be an
-            // IllegalAccessError. `@Metadata` records the declared privacy either way.
+            // protected), and a declared PRIVATE one is ACC_PRIVATE: another class calls it
+            // through its `constructor_accessors` accessor.
             match ir.ctor_visibilities.get(&c.fq_name_id()) {
                 Some(crate::types::Visibility::Protected) => 0x0004,
-                Some(crate::types::Visibility::Private) if !constructed_outside(ir, &fq_name) => {
-                    0x0002
-                }
+                Some(crate::types::Visibility::Private) => 0x0002,
                 _ => 0x0001,
             }
         };
@@ -6447,7 +6372,17 @@ fn emit_class(
                 None,
                 value_param_ctor || c.is_sealed,
                 c.primary_ctor_annotations.deprecated(),
-                0x1001,
+                // A declared private primary's overload is package-private, the way kotlinc gives
+                // any private constructor's; a sealed class's is its public way in.
+                if ir.ctor_visibilities.get(&c.fq_name_id())
+                    == Some(&crate::types::Visibility::Private)
+                    && !c.is_sealed
+                    && !value_param_ctor
+                {
+                    0x1000
+                } else {
+                    0x1001
+                },
                 &mut cw,
                 env,
             );
@@ -6499,6 +6434,7 @@ fn emit_class(
         } else {
             match ir.ctor_visibilities.get(&c.fq_name_id()) {
                 Some(crate::types::Visibility::Protected) => 0x0004,
+                Some(crate::types::Visibility::Private) => 0x0002,
                 _ => 0x0001,
             }
         };
@@ -6577,7 +6513,7 @@ fn emit_class(
         );
     }
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
-    sealed_constructors::emit_accessors(ir, c, &fq_name, &mut cw);
+    constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     // HOISTED companion properties: the private static field lives on THIS class, so the companion's
     // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
     // bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
@@ -14480,11 +14416,19 @@ impl<'a> Emitter<'a> {
                         // (`copy`, a member building a sibling instance): kotlinc leaves only the
                         // accessor calling the private primary. A selected secondary constructor uses
                         // the declaration fact recorded on this exact expression before erasure.
+                        // Another class constructing through a private constructor does the same.
                         // A call supplying defaults targets the public `$default` overload instead,
                         // which reaches the accessor itself.
                         let use_accessor = default_parameters.is_empty()
                             && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
-                                || self.ir.has_value_class_parameter_construction(e));
+                                || self.ir.has_value_class_parameter_construction(e)
+                                || self.ir.construction_targets.get(&e).is_some_and(|target| {
+                                    constructor_accessors::reached_through_accessor(
+                                        *target,
+                                        self.ir.expression_owners.get(&e).copied(),
+                                        *internal,
+                                    )
+                                }));
                         let base_parameter_count = field_tys.len();
                         let source_parameter_count = base_parameter_count
                             .checked_sub(*default_prefix_count as usize)
@@ -18416,7 +18360,11 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
     let mut params = jvm_tys(&c.super_ctor_params);
     let uses_accessor = (c.super_ctor.primary && ir.has_value_param_ctor(superclass))
-        || sealed_constructors::reached_through_accessor(c.super_ctor);
+        || constructor_accessors::reached_through_accessor(
+            c.super_ctor,
+            Some(c.fq_name_id()),
+            c.superclass,
+        );
     if uses_accessor {
         params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
     }

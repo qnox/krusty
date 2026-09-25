@@ -32,8 +32,10 @@ pub enum IrConstructorAccess {
     /// Any caller that selected it: a public, protected or internal constructor of a class that is
     /// not sealed, or a compiler-generated public one.
     Unrestricted,
-    /// A `private` constructor of a class that is not sealed: only its own class.
-    Private,
+    /// A `private` constructor of a class that is not sealed: only its own class, and the classes
+    /// nested in it. `ordinal` is the constructor's place in its class: 0 for the primary, `n` for
+    /// the `n`th secondary constructor.
+    Private { ordinal: u32 },
     /// A declared constructor of a `sealed` class, which is always `protected` or `private`: only
     /// the class and its subclasses.
     SealedClass,

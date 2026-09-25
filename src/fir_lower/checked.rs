@@ -845,11 +845,17 @@ impl BodyLowering<'_> {
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 let primary_in_current_file = anchor.sibling == 0
                     && self.ir.class_id_by_name(classifier.classifier).is_some();
+                let constructor_target = super::constructors::module_constructor_target(
+                    self.index,
+                    callable.declaration,
+                )
+                .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 self.module_constructor_call(ModuleConstructorRequest {
                     classifier: classifier.classifier,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,
+                    target: constructor_target,
                     context_parameter_count: call.context_parameter_count,
                     outer_receiver,
                     external_capture_arguments: external_capture_arguments.as_deref(),
