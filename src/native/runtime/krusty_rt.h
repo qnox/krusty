@@ -475,7 +475,8 @@ kt_boolean kt_lazy_is_initialized(KRef lazy);
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`: two references, with the three `kotlin.Any` members answering componentwise the way
-   Kotlin's data class does. `Triple` is not one of these and is not realized. */
+   Kotlin's data class does. A member whose first component's call throws returns with that
+   exception pending and never asks the second. `Triple` is not one of these and is not realized. */
 extern const KType kt_type_pair;
 
 KRef kt_pair_of(KRef first, KRef second);
@@ -758,7 +759,8 @@ extern const KType kt_type_string_builder;
 KRef kt_string_builder_new(void);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
-/* `StringBuilder(text)`: a builder holding a COPY of it. */
+/* `StringBuilder(text)`: a builder holding a COPY of it. When `text` is the program's own
+   `CharSequence` and its `length` or `get` throws, no builder is made: NULL, exception pending. */
 KRef kt_string_builder_with_text(KRef text);
 
 /* `sb.append(value)`, answering the RECEIVER so a chain of them reads as one expression. The value
@@ -887,6 +889,8 @@ kt_boolean kt_result_is_success(KRef value);
 KRef kt_result_get_or_null(KRef value);
 KRef kt_result_exception_or_null(KRef value);
 KRef kt_result_get_or_throw(KRef value);
+/* `Success(value)` or `Failure(exception)`; NULL, with the exception pending, when rendering the
+   value or the exception through its `toString` throws. */
 KRef kt_result_to_string(KRef value);
 
 /* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class
