@@ -51,16 +51,41 @@ pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
     }
 }
 
-/// kotlinc's inline-class mangling info for an IR type, against the value classes in `under`.
+/// The value classes a signature is mangled against: the value-class pass's underlying map, or,
+/// once it has run, the file's unified value-class lookup.
+pub(super) trait ValueClassNames {
+    fn names_value_class(&self, classifier: TypeName) -> bool;
+}
+
+impl ValueClassNames for Under {
+    fn names_value_class(&self, classifier: TypeName) -> bool {
+        self.contains_key(&classifier)
+    }
+}
+
+impl ValueClassNames for crate::ir::IrFile {
+    fn names_value_class(&self, classifier: TypeName) -> bool {
+        self.is_value_class_name(classifier)
+    }
+}
+
+/// kotlinc's inline-class mangling info for an IR type, against `value_classes`.
 ///
 /// kotlinc (`InlineClassAbi.asInfoForMangling`) reads a type through its erased upper bound, so
 /// `T : IC?` contributes `LIC?;` exactly as `IC?` does. A type parameter is nullable when it is
 /// marked so or any bound along its chain is (`IrType.isNullable`).
-fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMangling {
+fn mangling_info(
+    t: &Ty,
+    value_classes: &(impl ValueClassNames + ?Sized),
+) -> crate::jvm::inline_class::InfoForMangling {
     let is_nullable =
         t.is_nullable() || matches!(t, Ty::TyParam(..)) && t.upper_bound_admits_null();
     let (fq_name, is_value, is_nullable) = match erased_upper_bound(t) {
-        Some(fq_name) => (fq_name.render(), under.contains_key(&fq_name), is_nullable),
+        Some(fq_name) => (
+            fq_name.render(),
+            value_classes.names_value_class(fq_name),
+            is_nullable,
+        ),
         None => (String::new(), false, false),
     };
     crate::jvm::inline_class::InfoForMangling {
@@ -138,7 +163,7 @@ pub(super) fn vc_mangle(
     base: &str,
     params: &[Ty],
     ret: &Ty,
-    under: &Under,
+    under: &(impl ValueClassNames + ?Sized),
     is_file_class: bool,
     is_suspend: bool,
 ) -> String {
