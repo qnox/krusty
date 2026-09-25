@@ -38,6 +38,10 @@ pub(super) enum FrameKey {
     Parameter(u16),
     /// A semantic value: a declared parameter, a source local or a catch parameter.
     Value(u32),
+    /// A value lowering holds one call operand in (`IrFile::call_operand_bindings`). kotlinc has
+    /// no local for it: the operand is on the stack until its call, or in the call's own
+    /// argument temporary.
+    CallOperand(u32),
 }
 
 /// What an unkeyed temporary holds. It only labels trace reports: a temporary's identity is its
@@ -184,6 +188,24 @@ impl FrameMap {
         }
     }
 
+    /// The frame size below the call operands held on top of it for one call, as kotlinc's frame
+    /// is at that call: `operands` are the values the call reads, and only a run of their holders
+    /// entered last is looked through.
+    pub(super) fn size_below_call_operands(&self, operands: &[u32]) -> u16 {
+        let mut size = self.size;
+        for entry in self.entries.iter().rev() {
+            match entry.occupant {
+                Occupant::Key(FrameKey::CallOperand(value))
+                    if operands.contains(&value) && entry.slot < size =>
+                {
+                    size = entry.slot;
+                }
+                _ => break,
+            }
+        }
+        size
+    }
+
     pub(super) fn mark(&self) -> Mark {
         Mark {
             id: self.next_id,
@@ -322,6 +344,19 @@ mod tests {
         frame.leave_block(else_branch);
         assert_eq!(frame.enter(FrameKey::Value(3), Ty::Int), 1);
         assert_eq!((frame.size(), frame.max()), (2, 3));
+    }
+
+    #[test]
+    fn the_size_at_a_call_looks_through_only_its_own_operand_holders_on_top() {
+        let mut frame = FrameMap::default();
+        frame.enter(FrameKey::Value(0), Ty::Int);
+        frame.enter(FrameKey::CallOperand(1), Ty::Long);
+        assert_eq!(frame.enter(FrameKey::CallOperand(2), Ty::obj("A")), 3);
+        assert_eq!(frame.size_below_call_operands(&[1, 2]), 1);
+        assert_eq!(frame.size_below_call_operands(&[1]), 4);
+        assert_eq!(frame.size_below_call_operands(&[2]), 3);
+        frame.enter(FrameKey::Value(3), Ty::Int);
+        assert_eq!(frame.size_below_call_operands(&[1, 2]), 5);
     }
 
     #[test]

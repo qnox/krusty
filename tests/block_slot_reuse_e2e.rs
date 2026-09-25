@@ -29,7 +29,29 @@ fn local_variable_rows(class_file: &std::path::Path) -> Vec<String> {
 }
 
 /// Compile `src` with kotlinc and krusty and require the same local-variable slots.
-fn same_local_slots(name: &str, src: &str, class: &str, extra_classpath: &[std::path::PathBuf]) {
+fn same_local_slots(
+    name: &str,
+    src: &str,
+    class: &str,
+    extra_classpath: &[std::path::PathBuf],
+) {
+    same_local_slots_of(name, src, class, extra_classpath, |_| true);
+}
+
+/// As [`same_local_slots`], for the rows of the locals `compared` selects by name.
+fn same_local_slots_of(
+    name: &str,
+    src: &str,
+    class: &str,
+    extra_classpath: &[std::path::PathBuf],
+    compared: impl Fn(&str) -> bool,
+) {
+    let rows = |class_file: &std::path::Path| -> Vec<String> {
+        local_variable_rows(class_file)
+            .into_iter()
+            .filter(|row| row.split(' ').nth(1).is_some_and(&compared))
+            .collect()
+    };
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skip ({name}: no scratch directory)");
         return;
@@ -66,12 +88,12 @@ fn same_local_slots(name: &str, src: &str, class: &str, extra_classpath: &[std::
         .unwrap_or_else(|| panic!("{class} was not emitted"));
     let emitted = dir.join(format!("{class}.class"));
     std::fs::write(&emitted, bytes).unwrap();
-    let expected = local_variable_rows(&reference.join(format!("{class}.class")));
+    let expected = rows(&reference.join(format!("{class}.class")));
     assert!(
         !expected.is_empty(),
         "{name}: kotlinc's class has no local variables"
     );
-    assert_eq!(local_variable_rows(&emitted), expected, "{name}");
+    assert_eq!(rows(&emitted), expected, "{name}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -377,6 +399,7 @@ fun whenSubject(n: Int): String {\n\
     return k\n\
 }\n",
         "SlotOrderWhenSubjectKt",
+        &[],
     );
 }
 
@@ -394,6 +417,7 @@ fn an_initializer_block_local_sits_above_the_variable() {
     return k\n\
 }\n",
         "SlotOrderBlockInitKt",
+        &[],
     );
 }
 
@@ -411,6 +435,7 @@ fn a_wide_initializer_local_sits_above_the_wide_variable() {
     return after\n\
 }\n",
         "SlotOrderWideInitKt",
+        &[],
     );
 }
 
@@ -430,6 +455,7 @@ fn a_valued_try_enters_its_result_temporary_after_its_body() {
     return s\n\
 }\n",
         "SlotOrderValuedTryKt",
+        &[],
     );
 }
 
@@ -448,6 +474,7 @@ fn a_valued_try_with_a_throwing_body_enters_its_result_temporary_after_it() {
     return s\n\
 }\n",
         "SlotOrderThrowingTryKt",
+        &[],
     );
 }
 
@@ -493,4 +520,44 @@ fun box(): String {\n\
     return if (a == 22 && b == 0 && c == \"v2!\" && thrown == \"thrown\") \"OK\" else \"FAIL: $a $b $c $thrown\"\n\
 }\n";
     assert_eq!(run(src), "OK");
+}
+
+/// An inline call in an initializer is spliced from the frame size at the call, which already
+/// holds the variable: `r` takes slot 2 and `map`'s inlined locals start at 3 above it. Only the
+/// inlined `$iv` locals and `r` are compared; `k` still sits above the released argument
+/// temporaries, and the lambda's `$i$a$` marker is named differently.
+#[test]
+fn an_inline_call_in_an_initializer_is_spliced_above_the_variable() {
+    same_local_slots_of(
+        "slotOrderInlineInit",
+        "fun collectionInit(n: Int): Int {\n\
+    val xs = listOf(1, 2, n)\n\
+    val r = xs.map { it * 2 }.sum()\n\
+    val k = r + 1\n\
+    return k\n\
+}\n",
+        "SlotOrderInlineInitKt",
+        &[],
+        |local| local == "r" || local.ends_with("$iv"),
+    );
+}
+
+/// A same-file inline function's argument is held once it is evaluated, as kotlinc's inliner
+/// stores it: `r` takes slots 2-3 before its initializer, the argument's own `y` takes 4, and the
+/// argument's holder `x$iv` takes the slot `y` has left. (`it` is not compared: kotlinc's `$i$f$`
+/// marker sits below it.)
+#[test]
+fn a_same_file_inline_argument_is_held_after_its_value_in_an_initializer() {
+    same_local_slots_of(
+        "slotOrderSameFileInline",
+        "inline fun twice(x: Long, f: (Long) -> Long): Long = f(x) + f(x)\n\
+fun sameFile(c: Boolean, n: Int): Long {\n\
+    val r = twice(if (c) { val y = n * 3L; y + 1 } else 0L) { it + n }\n\
+    val k = r + 1\n\
+    return k\n\
+}\n",
+        "SlotOrderSameFileInlineKt",
+        &[],
+        |local| ["r", "y", "x$iv", "k"].contains(&local),
+    );
 }

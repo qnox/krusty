@@ -13738,16 +13738,13 @@ impl<'a> Emitter<'a> {
                     .filter(|(_, ejt)| *ejt == jt || (is_ref(*ejt) && is_ref(jt)))
                     .map(|(s, _)| s);
                 // The slot is entered BEFORE the initializer, as kotlinc's `visitVariable` does, so
-                // the initializer's own locals and temporaries sit above it. Until the initializing
-                // store the value is in scope but unassigned: frames recorded inside a branchy
-                // initializer read its slot as `top`.
-                let slot = reuse.unwrap_or_else(|| {
-                    let slot = self.frame.enter(FrameKey::Value(index), jt);
-                    self.slots.insert(index, (slot, jt));
-                    self.unassigned_values.insert(index);
-                    slot
+                // the initializer's own locals and temporaries sit above it. A call operand's holder
+                // is entered after its value, which kotlinc keeps on the stack or stores then.
+                let holds_operand = self.ir.call_operand_bindings.contains(&e);
+                let entered = reuse.or_else(|| {
+                    (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
-                if let Some(i) = init {
+                let slot = if let Some(i) = init {
                     self.emit_value(i, code);
                     let source = self.value_ty(i);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
@@ -13756,11 +13753,15 @@ impl<'a> Emitter<'a> {
                     // declaration's, before the store (after an inlined call, both are written).
                     debug_lines::mark_expression_start(self.ir, i, code);
                     debug_lines::mark_statement(self.ir, e, code);
+                    let slot = entered
+                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
                     self.unassigned_values.remove(&index);
                     store(jt, slot, code);
+                    slot
                 } else {
                     self.unassigned_values.insert(index);
-                }
+                    entered.unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand))
+                };
                 // A re-declared value takes its type from this declaration once it is initialized.
                 self.slots.insert(index, (slot, jt));
                 // A source local becomes visible after its initializing store. An uninitialized
