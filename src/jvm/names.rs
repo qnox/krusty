@@ -1,6 +1,6 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
-use crate::types::{InternalName, Ty};
+use crate::types::{InternalName, Ty, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
 pub(crate) const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
@@ -88,21 +88,23 @@ pub use crate::names::property_getter_name;
 /// physical name of a name interned before it is mapped is remembered per thread.
 pub fn classfile_internal_name(internal: &str) -> String {
     thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<Box<str>, Box<str>>> =
+        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
             std::cell::RefCell::default();
     }
-    if let Some(physical) =
-        INTERNED.with(|known| known.borrow().get(internal).map(|p| p.to_string()))
-    {
-        return physical;
+    let identity = crate::types::existing_type_name(internal);
+    if let Some(identity) = identity {
+        if let Some(physical) =
+            INTERNED.with(|known| known.borrow().get(&identity).map(|name| name.to_string()))
+        {
+            return physical;
+        }
     }
-    let interned = crate::types::existing_type_name(internal).is_some();
     let physical = physical_classfile_name(internal);
-    if interned {
+    if let Some(identity) = identity {
         INTERNED.with(|known| {
             known
                 .borrow_mut()
-                .insert(internal.into(), physical.as_str().into())
+                .insert(identity, physical.as_str().into())
         });
     }
     physical
@@ -421,9 +423,19 @@ mod tests {
             classfile_internal_name(fresh),
             "sample/remembered/Outer$Inner"
         );
-        crate::types::type_name(fresh);
+        let identity = crate::types::type_name(fresh);
+        assert_eq!(
+            crate::types::existing_type_name("sample/remembered/Outer$Inner"),
+            Some(identity)
+        );
         crate::types::type_name("kotlin/Int.Companion");
-        for internal in [fresh, fresh, "kotlin/Int.Companion", "kotlin/Int.Companion"] {
+        for internal in [
+            fresh,
+            "sample/remembered/Outer$Inner",
+            fresh,
+            "kotlin/Int.Companion",
+            "kotlin/Int.Companion",
+        ] {
             assert_eq!(
                 classfile_internal_name(internal),
                 physical_classfile_name(internal),
