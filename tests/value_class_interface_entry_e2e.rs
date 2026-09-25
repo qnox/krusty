@@ -23,13 +23,14 @@ const SOURCE: &str = "@JvmInline value class S(val x: String)\n\
                       \x20   override fun S.memberExtFun(s: String): String = v + x + s\n\
                       }\n\
                       fun <X> generic(s: S, x: X): String = s.x + x\n\
+                      fun IFoo<S>.callMemberExt(value: S, suffix: String): String = value.memberExtFun(suffix)\n\
                       class Test : IFoo<S> by FooImpl(\"1\")\n\
                       fun box(): String {\n\
                       \x20   val test = Test()\n\
                       \x20   if (test.memberFun(S(\"O\"), \"K\") != \"1OK\") return \"memberFun\"\n\
                       \x20   if (test.memberFunT(S(\"O\"), \"K\") != \"1OK\") return \"memberFunT\"\n\
                       \x20   if (test.genericMemberFun(S(\"O\"), \"K\") != \"1OK\") return \"generic\"\n\
-                      \x20   if (with(test) { S(\"O\").memberExtFun(\"K\") } != \"1OK\") return \"ext\"\n\
+                      \x20   if (test.callMemberExt(S(\"O\"), \"K\") != \"1OK\") return \"ext\"\n\
                       \x20   val foo: IFoo<S> = FooImpl(\"2\")\n\
                       \x20   if (foo.memberFunT(S(\"O\"), \"K\") != \"2OK\") return \"bridge\"\n\
                       \x20   return generic(S(\"O\"), \"K\")\n\
