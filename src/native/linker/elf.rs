@@ -50,10 +50,10 @@ const IMAGE_LIMIT: u64 = 1 << 32;
 /// Reading the answer out of the runtime objects keeps it true as the runtime grows, which a list
 /// written down beside them would not. A runtime object that cannot be read is an error rather
 /// than a shorter list.
-pub fn runtime_symbols(arch: Arch) -> Result<HashSet<String>, ProgramLinkError> {
+pub fn runtime_symbols(target: NativeTarget) -> Result<HashSet<String>, ProgramLinkError> {
     let mut names = HashSet::new();
-    for (name, bytes) in prebuilt::runtime_objects(arch).unwrap_or_default() {
-        let file = parse(&format!("runtime object `{name}`"), bytes, arch)?;
+    for (name, bytes) in prebuilt::runtime_objects(target).unwrap_or_default() {
+        let file = parse(&format!("runtime object `{name}`"), bytes, target.arch)?;
         for symbol in file.symbols() {
             if !symbol.is_local() && !symbol.is_undefined() {
                 names.insert(symbol_name(&symbol)?.to_string());
