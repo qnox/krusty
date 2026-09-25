@@ -7042,6 +7042,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   beyond its descriptor. Tests: `tests/value_class_nothing_override_bridges_e2e.rs` (both classes'
   members in full against kotlinc; the calls through the interface at run time). Corpus:
   `inlineClasses/overrideReturnNothing`.
+- **A parameter bounded by a value class is bridged under the supertype's mangled name.** `fun
+  foo(i: T?)` with `T : Inlined` erases its parameter to the value class, so its JVM name carries
+  the value-class hash (`foo-<hash>(LInlined;)V`) while its generic `Signature` keeps `(TT;)V`:
+  only a position spelled as the value class itself is replaced by its physical slot. An override
+  in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
+  like the supertype's member that casts the argument and calls the override. Tests:
+  `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
+  is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
+  not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
+  `LInv<Ljava/util/List;>;`. `Nothing` for an `in` parameter is written `*`. A class whose
+  `Signature` would name no type argument or parameter carries none. Tests:
+  `tests/nothing_type_argument_signature_e2e.rs`.
+- **An inherited interface default keeps its value-class hash and carriers.** A class's or
+  sub-interface's forwarder to an inherited default whose signature mentions a value class
+  (`rep(n: Count)`) is named `rep-<hash>` and calls the member under that name, whether the member
+  is known from this file or another file of the module. A member of this module is forwarded in
+  its lowered shape: a value-class parameter or result is its carrier in the descriptor, the debug
+  tables, the null guards and the nullability annotations. Which classes are value classes comes
+  from checked declarations, never from a class name. A stdlib unsigned type (`kotlin/UInt`, as in
+  `inlineClasses/kt51157`) is hashed from its metadata declaration, which the IR records like any
+  other value class. Its JVM carrier is a native scalar, so the backend's representation predicate
+  (`jvm::value_classes::is_boxed_value_class`) excludes it: its slots stay unboxed and it boxes
+  through its wrapper, not through the value-class `box-impl` rewrite. Its `DefaultImpls` forwarder has no line number, as
+  kotlinc's has none for any inherited member. Tests:
+  `tests/value_class_inherited_default_names_e2e.rs`, the `declaration_inventory` unit tests.
 
 - **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
   publishes one target-neutral `RangeLoop`; the named backend-boundary pass in

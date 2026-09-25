@@ -31,11 +31,7 @@ impl Emitter<'_> {
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.
     pub(super) fn is_value_class_ty(&self, ty: &Ty) -> bool {
         ty.non_null().obj_internal().is_some_and(|fq_name| {
-            self.ir
-                .classes
-                .iter()
-                .any(|class| class.is_value && class.fq_name == fq_name)
-                || self.ir.has_external_value_class_name(fq_name)
+            crate::jvm::value_classes::is_boxed_value_class(self.ir, fq_name)
         })
     }
 
@@ -82,8 +78,7 @@ impl Emitter<'_> {
                 && self.is_value_class_ty(&semantic)
         });
         let value_class_carrier = boxed_value_class.and_then(|classifier| {
-            self.ir
-                .value_class_underlying_name(classifier)
+            crate::jvm::value_classes::boxed_value_class_underlying(self.ir, classifier)
                 .map(|underlying| jvm_declared_ty(&underlying))
         });
         if let (Some(classifier), Some(carrier)) = (boxed_value_class, value_class_carrier) {

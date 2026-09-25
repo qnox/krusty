@@ -154,21 +154,19 @@ pub(super) fn emit_inherited_default_surface(
                 // (the declaring classifier's formals are not this interface's); a generic
                 // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
                 None,
-                c.decl_line,
+                // kotlinc gives an inherited member's holder forwarder no line: it has no source
+                // in this interface.
+                0,
                 opts.java_parameters,
                 target,
             );
         };
         for member in &shape.surface {
-            let physical_params = if member.physical_params.len() == member.params.len() {
-                member.physical_params.clone()
-            } else {
-                member.params.clone()
-            };
-            let name = backend_member_jvm_name(member);
-            let mut param_tys = jvm_tys(&physical_params);
-            let mut physical_ret = jvm_declared_ty(&member.physical_ret);
-            let mut semantic_params = member.params.to_vec();
+            let types = crate::jvm::value_classes::forwarded_member_types(ir, member, shape.source);
+            let name = backend_member_jvm_name(ir, member);
+            let mut param_tys = jvm_tys(&types.physical_params);
+            let mut physical_ret = jvm_declared_ty(&types.physical_ret);
+            let mut semantic_params = types.semantic_params;
             let mut local_variable_names = crate::jvm::parameter_names::resolved_local_variables(
                 &member.parameter_identities,
                 &semantic_params,
@@ -185,7 +183,7 @@ pub(super) fn emit_inherited_default_surface(
                 &semantic_params,
                 &name,
             );
-            let mut semantic_ret = member.ret;
+            let mut semantic_ret = types.semantic_ret;
             assert_eq!(
                 local_variable_names.len(),
                 semantic_params.len(),

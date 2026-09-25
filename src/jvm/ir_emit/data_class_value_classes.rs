@@ -74,9 +74,8 @@ impl Emitter<'_> {
         value: ExprId,
     ) -> Option<(TypeName, Ty, bool)> {
         let owner = declared.non_null().obj_internal()?;
-        let underlying = self
-            .ir
-            .terminal_value_class_underlying(Ty::obj_name(owner))?;
+        let underlying =
+            crate::jvm::value_classes::boxed_value_class_terminal_underlying(self.ir, owner)?;
         let boxed = self.value_ty(value).non_null().obj_internal() == Some(owner);
         Some((owner, underlying, boxed))
     }

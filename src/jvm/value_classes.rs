@@ -13,6 +13,7 @@
 //! genuinely operate on the boxed object, so they are NOT
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
 
+mod bridge_names;
 mod bridge_returns;
 mod call_arguments;
 mod call_result_boundaries;
@@ -22,8 +23,10 @@ mod default_calls;
 mod descriptor_parameters;
 mod interface_entries;
 mod member_names;
+mod module_members;
 mod operation_relocation;
 mod property_references;
+mod representation;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
@@ -32,7 +35,12 @@ use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
+pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operation_relocation::clone_below_representation_wrapper;
+pub(crate) use representation::{
+    boxed_value_class_names, boxed_value_class_terminal_underlying, boxed_value_class_underlying,
+    is_boxed_value_class,
+};
 use std::collections::{HashMap, HashSet};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
@@ -51,13 +59,6 @@ impl crate::value_classes::RepresentationPolicy for JvmUnderlyingProjection {
     ) -> bool {
         !nullable_is_boxed(classifier, declarations)
     }
-}
-
-fn is_native_unsigned(fq: TypeName) -> bool {
-    fq.matches("kotlin/UByte")
-        || fq.matches("kotlin/UShort")
-        || fq.matches("kotlin/UInt")
-        || fq.matches("kotlin/ULong")
 }
 
 /// JVM reference form of a value-class classifier. Native unsigned classifiers are also semantic
@@ -1741,6 +1742,11 @@ pub(crate) fn lower_value_classes(
             let owner_is_value = c.is_value;
             let owner_fq = c.fq_name();
             let owner_fq_id = c.fq_name_id();
+            let naming = bridge_names::BridgeNaming {
+                owner: c.fq_name,
+                under: &callable_under,
+                suspend: &suspend_sig,
+            };
             for (bridge_index, b) in c.bridges.iter_mut().enumerate() {
                 let bridge_index = bridge_index as u32;
                 let lowered_member_target = b
@@ -1835,18 +1841,7 @@ pub(crate) fn lower_value_classes(
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
                     if bridge_mentions_vc {
-                        b.name = vc_mangle(
-                            &b.name,
-                            &b.concrete_params,
-                            &b.erased_ret,
-                            &callable_under,
-                            false,
-                            suspend_sig.contains(&(
-                                Some(c.fq_name),
-                                b.name.clone(),
-                                b.concrete_params.len(),
-                            )),
-                        );
+                        naming.mangle_by_override(b);
                     }
                     // A value-class PARAM erases to its underlying in both the bridge descriptor and the
                     // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
@@ -1897,18 +1892,7 @@ pub(crate) fn lower_value_classes(
                     if b.target_name.is_none() {
                         b.target_name = Some(b.name.clone());
                     }
-                    b.name = vc_mangle(
-                        &b.name,
-                        &b.concrete_params,
-                        &b.erased_ret,
-                        &callable_under,
-                        false,
-                        suspend_sig.contains(&(
-                            Some(c.fq_name),
-                            b.name.clone(),
-                            b.concrete_params.len(),
-                        )),
-                    );
+                    naming.mangle_by_override(b);
                     for p in b.erased_params.iter_mut() {
                         *p = erase(p, &callable_under);
                     }
@@ -1945,6 +1929,7 @@ pub(crate) fn lower_value_classes(
                         }
                         b.unbox_params = vc_params;
                     }
+                    naming.answer_to_value_class_parameters(b, &target);
                 }
                 if let Some((target_name, target_params, target_ret)) = lowered_member_target {
                     let physical_params = target_params
