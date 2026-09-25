@@ -76,15 +76,66 @@ pub(crate) fn forwarded_member_types(
             semantic_ret: ret,
         };
     }
+    // A dependency's physical shape is its JVM realization: a `suspend` member's ends with the
+    // continuation, which the forwarder appends itself.
+    let declared = member.params.len();
     assert_eq!(
         member.physical_params.len(),
-        member.params.len(),
-        "a normalized dependency member publishes one physical type per semantic parameter"
+        declared + usize::from(member.suspend),
+        "a normalized dependency member publishes one physical type per semantic parameter, \
+         plus the continuation of a suspend member"
     );
     ForwardedMemberTypes {
-        physical_params: member.physical_params.to_vec(),
+        physical_params: member.physical_params[..declared].to_vec(),
         physical_ret: member.physical_ret,
         semantic_params: member.params.to_vec(),
         semantic_ret: member.ret,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{BackendMemberFact, BackendMemberName};
+
+    fn dependency_member(
+        physical_params: &[Ty],
+        params: &[Ty],
+        suspend: bool,
+    ) -> BackendMemberFact {
+        BackendMemberFact {
+            name: BackendMemberName::Declared("run".into()),
+            physical_name: None,
+            owner: Some(crate::types::type_name("fixture/Api")),
+            physical_params: physical_params.into(),
+            params: params.into(),
+            ret: Ty::Unit,
+            physical_ret: Ty::Unit,
+            descriptor: "".into(),
+            realization: crate::libraries::MemberRealization::Dispatch,
+            suspend,
+            abstract_member: false,
+            visibility: crate::types::Visibility::Public,
+            parameter_identities: Box::new([]),
+        }
+    }
+
+    #[test]
+    fn a_suspend_dependency_member_forwards_its_parameters_without_the_continuation() {
+        let continuation = Ty::obj("fixture/Continuation");
+        let member = dependency_member(&[Ty::Int, continuation], &[Ty::Int], true);
+
+        let types = forwarded_member_types(&IrFile::default(), &member, false);
+
+        assert_eq!(types.physical_params, vec![Ty::Int]);
+        assert_eq!(types.semantic_params, vec![Ty::Int]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a normalized dependency member publishes one physical type")]
+    fn a_dependency_member_without_a_complete_physical_shape_is_rejected() {
+        let member = dependency_member(&[], &[Ty::Int], false);
+
+        forwarded_member_types(&IrFile::default(), &member, false);
     }
 }
