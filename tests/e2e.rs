@@ -1110,6 +1110,8 @@ mod mpp_requires_the_feature_e2e;
 mod nothing_type_argument_signature_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
+#[path = "value_class_equality_e2e.rs"]
+mod value_class_equality_e2e;
 #[path = "value_class_inherited_default_names_e2e.rs"]
 mod value_class_inherited_default_names_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]

@@ -7068,6 +7068,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through its wrapper, not through the value-class `box-impl` rewrite. Its `DefaultImpls` forwarder has no line number, as
   kotlinc's has none for any inherited member. Tests:
   `tests/value_class_inherited_default_names_e2e.rs`, the `declaration_inventory` unit tests.
+- **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
+  value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
+  `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
+  and `equals-impl(a, b)` otherwise, and the call's result is the comparison. A nullable `a` is
+  null-checked first (`b == null` when it is null) and unboxed when `V?` is boxed; a nullable
+  unboxed `b` is null-checked next (`false`). An operand that is not a variable read is held in a
+  temporary, in source order. `!=` negates the same expression. Two boxed operands, or the class
+  only on the right, compare with `areEqual`. The calls publish their declared parameters (`V`,
+  and `V` or `Any?`), so a value class over `Any?` passes its operands unconverted. Tests:
+  `tests/value_class_equality_e2e.rs`. Corpus: `inlineClasses/equalityChecks*`.
 
 - **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
   publishes one target-neutral `RangeLoop`; the named backend-boundary pass in
