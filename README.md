@@ -16,7 +16,7 @@
 krusty is a drop-in replacement for `kotlinc` on the JVM. It takes the same command-line flags and
 emits `.class` files byte-for-byte identical to `kotlinc`'s, from a single native binary.
 
-[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest)
+[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
 
 ## Install
 
@@ -69,6 +69,12 @@ with a [Zed extension](editors/zed/README.md).
   reading Kotlin/Native's own standard library.
 - **Kotlin/Wasm:** planned.
 - **Compose:** planned. Support for the Jetpack Compose compiler plugin.
+
+## Sponsor
+
+krusty uses about a third of the memory of the native `kotlinc` on the same build, so more builds fit
+on each CI runner. If that saves your organization money, please consider sending part of it back
+through [GitHub Sponsors](https://github.com/sponsors/qnox) to fund the roadmap.
 
 ## Building from source
 

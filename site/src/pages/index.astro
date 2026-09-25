@@ -50,7 +50,7 @@ const jsonLd = {
         <img src={badge("krusty-conformance.json")} alt="Kotlin codegen/box conformance" height="20" />
       </p>
       <p>
-        <a href={`${repo}/releases/latest`}>Download</a> · <a href={repo}>GitHub</a>
+        <a href={`${repo}/releases/latest`}>Download</a> · <a href={repo}>GitHub</a> · <a href="https://github.com/sponsors/qnox">Sponsor</a>
       </p>
 
       <h2>Install</h2>
@@ -79,6 +79,11 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
         <li>Kotlin/Wasm: planned.</li>
         <li>Compose: planned.</li>
       </ul>
+
+      <h2>Sponsor</h2>
+      <p>
+        krusty uses about a third of the memory of the native <code>kotlinc</code> on the same build, so more builds fit on each CI runner. If that saves your organization money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
+      </p>
     </main>
     <footer>
       Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
