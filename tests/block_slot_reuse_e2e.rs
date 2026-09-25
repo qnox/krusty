@@ -27,7 +27,7 @@ fn local_variable_rows(class_file: &std::path::Path) -> Vec<String> {
 }
 
 /// Compile `src` with kotlinc and krusty and require the same local-variable slots.
-fn same_local_slots(name: &str, src: &str, class: &str) {
+fn same_local_slots(name: &str, src: &str, class: &str, extra_classpath: &[std::path::PathBuf]) {
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skip ({name}: no scratch directory)");
         return;
@@ -36,11 +36,17 @@ fn same_local_slots(name: &str, src: &str, class: &str) {
     std::fs::create_dir_all(&reference).unwrap();
     let src_path = dir.join(format!("{name}.kt"));
     std::fs::write(&src_path, src).unwrap();
-    let args = [
-        "-d".to_string(),
-        reference.to_string_lossy().into_owned(),
-        src_path.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec!["-d".to_string(), reference.to_string_lossy().into_owned()];
+    if !extra_classpath.is_empty() {
+        args.push("-cp".to_string());
+        args.push(
+            std::env::join_paths(extra_classpath)
+                .expect("fixture classpath is valid")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    args.push(src_path.to_string_lossy().into_owned());
     let Some((code, stderr)) = common::kotlinc_compile(&args) else {
         eprintln!("skip ({name}: reference toolchain unavailable)");
         return;
@@ -48,7 +54,9 @@ fn same_local_slots(name: &str, src: &str, class: &str) {
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let classes = common::compile_in_process(src, name, &[stdlib], Some(jdk.as_path()))
+    let mut classpath = extra_classpath.to_vec();
+    classpath.push(stdlib);
+    let classes = common::compile_in_process(src, name, &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, bytes) = classes
         .iter()
@@ -195,6 +203,7 @@ fn a_catch_parameter_after_a_returning_try_body_sits_above_the_result_temporary(
     }\n\
 }\n",
         "SlotReuseTryReturnKt",
+        &[],
     );
 }
 
@@ -211,6 +220,7 @@ fn a_catch_parameter_after_a_throwing_try_body_sits_above_the_result_temporary()
     }\n\
 }\n",
         "SlotReuseTryThrowKt",
+        &[],
     );
 }
 
@@ -220,10 +230,13 @@ fn a_catch_parameter_after_a_throwing_try_body_sits_above_the_result_temporary()
 /// before it, and the local after the call takes the slot the block before it left.
 #[test]
 fn an_inline_call_after_a_block_lays_its_arguments_out_from_the_lowered_frame() {
+    let library = common::kotlinc_library(INLINE_LIBRARY)
+        .expect("reference compiler must build the inline-slot fixture");
     same_local_slots(
         "slotReuseInlineArguments",
         INLINE_ARGUMENTS,
         "SlotReuseInlineArgumentsKt",
+        &[library],
     );
 }
 
@@ -236,7 +249,9 @@ fun box(): String {{\n\
     return if (r == \"23 19 -7\") \"OK\" else \"FAIL: $r\"\n\
 }}\n"
     );
-    assert_eq!(run(&src), "OK");
+    let output = common::expect_box_run_against_kotlinc(INLINE_LIBRARY, &src)
+        .expect("reference compiler must build the inline-slot fixture");
+    assert_eq!(output, "OK");
 }
 
 /// A materialized inline body (`Continuation(context) { }` builds an object from its lambda) is
@@ -322,15 +337,24 @@ fn local_stores(class_file: &std::path::Path, method: &str) -> Vec<u16> {
         .collect()
 }
 
-const INLINE_ARGUMENTS: &str = "fun bounded(c: Boolean, n: Int, m: Long): Long {\n\
+const INLINE_LIBRARY: &str = "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+package slotfixture\n\
+@kotlin.internal.InlineOnly\n\
+inline fun lesser(a: Long, b: Long): Long = if (a < b) a else b\n\
+@kotlin.internal.InlineOnly\n\
+inline fun assertFlag(value: Boolean) { if (!value) throw IllegalStateException(\"flag\") }\n";
+
+const INLINE_ARGUMENTS: &str = "import slotfixture.assertFlag\n\
+import slotfixture.lesser\n\
+fun bounded(c: Boolean, n: Int, m: Long): Long {\n\
     var r = 0L\n\
     if (c) {\n\
         val a = n + 1\n\
         val b = a.toLong() * 2\n\
         r = b\n\
     }\n\
-    r += minOf(if (c) { val y = n * 3L; y + 1 } else m, if (n > 0) { val w = m - 1; w } else r)\n\
-    check(if (c) { val t = n; t > -5 } else true)\n\
+    r += lesser(if (c) { val y = n * 3L; y + 1 } else m, if (n > 0) { val w = m - 1; w } else r)\n\
+    assertFlag(if (c) { val t = n; t > -5 } else true)\n\
     val after = r\n\
     return after\n\
 }\n";
