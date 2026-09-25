@@ -168,6 +168,17 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   So `vararg x: Int` records nothing, while a nullable primitive, a `Unit` parameter, a suspend
   function type, `KSuspendFunctionN` or any context parameter does. Test:
   `tests/metadata_version_requirement_e2e.rs`.
+- Local classifiers (kotlinc 2.4.20): a local class, an anonymous object, and any class nested in
+  one get a full `Class` record with LOCAL visibility (5): members, supertypes (`Any` when none is
+  declared) and nested class names. An anonymous object records no constructor. The class id is
+  the raw internal name of the classifier declared in executable code, then `.`-separated segments
+  for classes nested in it (`app/AKt$make$Local.In`), listed in `StringTableTypes.local_name`.
+  Every literal class id (a local one, or a name with `$`) opens a new string-table `Record`, which
+  the plain strings after it extend (`JvmStringTable.getQualifiedClassNameIndex`), and reuses an
+  equal string only when its locality matches. A member whose parameter, receiver or return type
+  names a local classifier at the outermost position records its JVM descriptor, since the
+  reader's class-id mapping cannot produce the classifier's JVM name.
+  Test: `tests/metadata_local_classes_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

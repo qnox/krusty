@@ -90,7 +90,13 @@ pub(crate) fn descriptor_needs_recording(ty: crate::types::Ty) -> bool {
     ty.non_null().is_reference_array()
 }
 
-pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) -> Pb {
+/// Plain strings share one `Record` per run, as kotlinc's `JvmStringTable` extends its last trivial
+/// record; an index in `record_starts` (a literal class id) opens a new run.
+pub(crate) fn serialize_string_table_types(
+    records: &[Pb],
+    local_names: &[u32],
+    record_starts: &[u32],
+) -> Pb {
     let mut out = Pb::new();
     let mut i = 0;
     while i < records.len() {
@@ -101,7 +107,10 @@ pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) 
         }
 
         let mut end = i + 1;
-        while end < records.len() && records[end].is_empty() {
+        while end < records.len()
+            && records[end].is_empty()
+            && !record_starts.contains(&(end as u32))
+        {
             end += 1;
         }
         let mut record = Pb::new();
@@ -170,6 +179,23 @@ mod tests {
         )));
     }
 
+    /// kotlinc's `JvmStringTable` opens a record for each literal class id and extends it with the
+    /// plain strings that follow, so `["me", "()La/B;", "a/L$1", "x"]` with a local `a/L$1` at 2 is
+    /// two runs of two, plus the local-name list.
+    #[test]
+    fn a_literal_class_id_opens_its_own_record_run() {
+        let plain = Pb::new();
+        let encoded = serialize_string_table_types(
+            &[plain.clone(), plain.clone(), plain.clone(), plain],
+            &[2],
+            &[2],
+        );
+        assert_eq!(
+            encoded.as_bytes(),
+            &[0x0a, 0x02, 0x08, 0x02, 0x0a, 0x02, 0x08, 0x02, 0x2a, 0x01, 0x02]
+        );
+    }
+
     #[test]
     fn string_table_types_merge_only_plain_record_runs() {
         let plain = Pb::new();
@@ -186,6 +212,7 @@ mod tests {
                 operation.clone(),
                 operation,
             ],
+            &[],
             &[],
         );
 

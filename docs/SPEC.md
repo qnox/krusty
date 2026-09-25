@@ -7002,6 +7002,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A function records its JVM signature exactly when kotlinc's class mapper cannot rebuild it.**
   The descriptor derived from the declared types' class ids is compared with the physical one, as
   kotlinc 2.4.20 does; see `docs/METADATA_NOTES.md`.
+- **Local classes and anonymous objects carry full class metadata.** A classifier declared in
+  executable code, or nested in one, records its members with LOCAL visibility under a local class
+  id, and an anonymous object records no constructor, as kotlinc 2.4.20 does; see
+  `docs/METADATA_NOTES.md`. Test: `tests/metadata_local_classes_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part
