@@ -4,6 +4,8 @@
 
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
+#[path = "captured_field_storage_e2e.rs"]
+mod captured_field_storage_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]

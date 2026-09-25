@@ -157,7 +157,6 @@ diagnostics/functions/tailRecursion/realStringRepeat.kt
 diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher.kt
 diagnostics/functions/tailRecursion/tailrecWithExplicitObjectDispatcher.kt
 elvis/kt6694ExactAnnotationForElvis.kt
-enum/deepInnerClassInEnumEntryClass2.kt
 enum/emptyEnumValuesValueOf.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt
@@ -329,7 +328,6 @@ inlineClasses/unboxNullableValueOfInlineClassWithNullablePrimitiveUnderlyingType
 inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
-innerNested/nestedInnerClass.kt
 innerNested/superConstructorCall/deepInnerHierarchy.kt
 innerNested/superConstructorCall/deepLocalHierarchy.kt
 intrinsics/kt8666.kt
@@ -341,16 +339,10 @@ ir/serializationRegressions/anonFakeOverride.kt
 kclass/kclass1.kt
 lateinit/innerIsInitialized.kt
 lazyCodegen/when.kt
-localClass/innerTakesCapturedFromOuter.kt
-localClass/innerWithCapture.kt
 localClass/virtualCallFromConstructor.kt
-localClasses/closureOfInnerLocalClass.kt
-localClasses/closureWithSelfInstantiation.kt
-localClasses/innerClassInLocalClass.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt
 localClasses/localClassInParameterInitializer.kt
-localClasses/ownClosureOfInnerLocalClass.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/basic/expectActualFakeOverrides.kt
 multiplatform/k2/basic/extensionPropertyWithAnonymousExtension.kt
@@ -373,7 +365,6 @@ nothingValue/nothingValueException.kt
 nullCheckOptimization/isNullable.kt
 nullCheckOptimization/kt22410.kt
 objects/flist.kt
-objects/innerClassInsideAnonymousObject.kt
 objects/interfaceCompanionObjectReference.kt
 objects/kt3684.kt
 objects/kt46136.kt
