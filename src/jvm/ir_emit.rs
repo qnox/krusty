@@ -26,6 +26,7 @@ mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
 mod bridge_emission;
+mod bytecode_inline_call;
 mod call_operands;
 mod checked_facts;
 mod condition_emission;
@@ -12612,6 +12613,9 @@ struct Emitter<'a> {
     statement_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
+    /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
+    /// call in it marks its own line again after the inlined code.
+    inside_condition: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -12689,6 +12693,7 @@ impl<'a> Emitter<'a> {
             block_depth: 0,
             statement_line: None,
             record_locals: false,
+            inside_condition: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
@@ -12714,6 +12719,7 @@ impl<'a> Emitter<'a> {
         inline_only: bool,
         descriptor: &str,
         args: &[u32],
+        leading_non_argument_operands: usize,
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
@@ -12732,17 +12738,27 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
+        let Some(materialized_roles) = self
+            .ir
+            .call_materialized_lambda_params
+            .get(&call_expression)
+        else {
+            return false;
+        };
         let lambda_parameters: Vec<usize> = args
             .iter()
             .enumerate()
-            .filter(|(_, &argument)| {
+            .filter(|(index, &argument)| {
                 matches!(
                     self.ir.expr(argument),
                     IrExpr::Lambda {
                         inline_body: Some(_),
                         ..
                     }
-                )
+                ) && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| materialized_roles.get(parameter))
+                    == Some(&false)
             })
             .map(|(i, _)| i)
             .collect();
@@ -12752,7 +12768,7 @@ impl<'a> Emitter<'a> {
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
         // compiler reuses slots belonging to host locals that are not written yet.
         let spliced_frame =
-            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, None, base);
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, base);
         let top_local = spliced_frame
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
@@ -12771,6 +12787,9 @@ impl<'a> Emitter<'a> {
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
+            if !lambda_parameters.contains(&i) {
+                continue;
+            }
             let (bodies, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
@@ -13012,7 +13031,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
+            &lam_splices,
             0,
             self.cw,
             reified,
@@ -13078,7 +13097,7 @@ impl<'a> Emitter<'a> {
             body,
             descriptor,
             base,
-            crate::jvm::inline::ParameterBinding::Stored(&lam_splices),
+            &lam_splices,
             splice_start,
             self.cw,
             reified,
@@ -13123,14 +13142,6 @@ impl<'a> Emitter<'a> {
         if lines.is_empty() {
             return;
         }
-        // An `@InlineOnly` body is meant to be invisible: the reference compiler gives it no line
-        // entries and no source map, so a stack trace never names it.
-        let source_file = (!inline_only)
-            .then_some(body.source_file.as_deref())
-            .flatten();
-        // The path a line is recorded under is the class the code was READ from — for a multifile
-        // facade's function, the part class that holds its body, not the facade the call names.
-        let path = body.defining_class.as_str();
         let call_line = code.current_line().unwrap_or(1);
         // The highest line the class's own code can claim. `source_line_count` already counts the
         // position past the last line, where a synthesized mark (a closing brace's implicit return)
@@ -13146,25 +13157,9 @@ impl<'a> Emitter<'a> {
                 code.add_line_mark_at(at, line);
                 continue;
             }
-            // Without the dependency's file name there is nothing to map its lines against, so its
-            // marks are dropped rather than written as lines of the caller's own file.
-            let Some(source_file) = source_file else {
-                continue;
-            };
-            let (name, path, source) = match body.dependency_source_map.as_ref() {
-                Some(map) => {
-                    let Some(mapped) = map.resolve(line) else {
-                        continue;
-                    };
-                    mapped
-                }
-                None => (source_file, path, line),
-            };
-            let output = self
-                .cw
-                .source_map_for_inlining(claimable)
-                .and_then(|map| map.map_line(name, path, source, call_line));
-            if let Some(output) = output {
+            if let Some(output) =
+                self.map_inlined_line(body, inline_only, line, call_line, claimable)
+            {
                 code.add_line_mark_at(at, output);
             }
         }
@@ -13582,6 +13577,25 @@ impl<'a> Emitter<'a> {
             )
         });
         if has_lambda_arg {
+            let Some(materialized_roles) = self
+                .ir
+                .call_materialized_lambda_params
+                .get(&call_expression)
+            else {
+                return false;
+            };
+            let substitutes_literal = args.iter().enumerate().any(|(index, &argument)| {
+                matches!(
+                    self.ir.expr(argument),
+                    IrExpr::Lambda {
+                        inline_body: Some(_),
+                        ..
+                    }
+                ) && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| materialized_roles.get(parameter))
+                    == Some(&false)
+            });
             // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
             // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the
             // `Continuation(ctx){…}` fake-constructor's `new …$Continuation$1(ctx, resumeWith)` — there is
@@ -13591,149 +13605,45 @@ impl<'a> Emitter<'a> {
                 crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
                 });
-            if body_invokes_lambda {
+            if body_invokes_lambda && substitutes_literal {
                 return self.try_inline_unified(
                     call_expression,
                     name,
                     inline_only,
                     splice_desc,
                     args,
+                    leading_non_argument_operands,
                     &body,
                     base,
                     code,
                     reified,
                 );
             }
-        }
-        // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`
-        // value, `t?.let(x)`) needs NO invoke-site substitution: the verbatim splice below binds the
-        // param slot to the materialized `Function` object, and the body's own
-        // `FunctionN.invoke` interface calls dispatch on it — exactly kotlinc's inlined shape.
-        let Some(physical_params) = parse_descriptor_params(splice_desc) else {
-            return false;
-        };
-        if physical_params.len() != args.len() {
-            return false;
-        }
-        let ret_words = descriptor_ret_words(descriptor);
-        // kotlinc reads an `@InlineOnly` callee's arguments in place when its body passes
-        // `canInlineArgumentsInPlace` and no argument's code stores a local or jumps out of itself
-        // (`InplaceArgumentsMethodTransformer`): no parameter slot is written, and the slots close.
-        // An argument is only admitted when its code cannot contain either.
-        let in_place = match in_place_arguments::Selection::for_call(
-            self.ir,
-            call_expression,
-            args,
-            inline_only,
-            &body,
-            splice_desc,
-            base,
-        ) {
-            Some(selection) => selection,
-            None => return false,
-        };
-        let binding = in_place.binding();
-        let top_local = in_place.top_local();
-        // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
-        // paths). Probe at offset 0; switch padding and absolute side-table/fixup offsets require a
-        // second splice at the method's real byte offset, while relative branches do not.
-        let Some(probe) = crate::jvm::inline::splice_unified(
-            &body,
-            splice_desc,
-            base,
-            binding,
-            0,
-            self.cw,
-            reified,
-        ) else {
-            crate::trace_compiler!(
-                "splice",
-                "splice_unified probe failed for {owner}.{name}{descriptor} (splice_desc={splice_desc})"
-            );
-            return false;
-        };
-        let arg_words: i32 = physical_params
-            .iter()
-            .map(|ty| slot_words(*ty) as i32)
-            .sum();
-        let needs_relayout = probe.needs_relayout;
-        let needs_empty_stack = !probe.handlers.is_empty() || !probe.external_branches.is_empty();
-        if needs_empty_stack && code.stack_height() != 0 {
-            return false;
-        }
-        if !needs_relayout {
-            // Position-independent: append the bytes directly. A DIVERGING body (ends in `athrow`, e.g.
-            // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
-            // A speculative splice DECLINES on a descriptor mismatch rather than bailing the file:
-            // nothing has been pushed, so the ordinary call path still gets its chance to emit this
-            // call correctly. Only the committed paths turn the mismatch into a bail.
-            if self
-                .emit_call_descriptor_operands(
+            // A literal lambda used as a value needs kotlinc's anonymous-object regeneration
+            // before MethodNode can own it. Keep only that still-unmigrated shape on the byte
+            // bridge; no-lambda calls never fall back to it.
+            return self
+                .try_inline_materialized_lambda_body(
                     call_expression,
-                    leading_non_argument_operands,
+                    &target,
                     args,
-                    &physical_params,
+                    leading_non_argument_operands,
+                    &body,
+                    reified,
                     code,
                 )
-                .is_err()
-            {
-                return false;
-            }
-            let ret_words = if probe.falls_through { ret_words } else { 0 };
-            let splice_start = code.bytes.len();
-            code.splice_inline(
-                &probe.bytes,
-                &probe.external_branches,
-                body.max_stack + probe.stack_growth,
-                top_local,
-                arg_words,
-                ret_words,
-                probe.falls_through,
-            );
-            self.record_spliced_lines(&probe.lines, &body, inline_only, splice_start, code);
-            self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
-            return true;
+                .is_some();
         }
-        // See the branchless arm above: decline, do not bail.
-        if self
-            .emit_call_descriptor_operands(
-                call_expression,
-                leading_non_argument_operands,
-                args,
-                &physical_params,
-                code,
-            )
-            .is_err()
-        {
-            return false;
-        }
-        let splice_start = code.bytes.len();
-        let Some(bs) = crate::jvm::inline::splice_unified(
+        self.try_inline_classpath_body(
+            call_expression,
+            &target,
+            args,
+            leading_non_argument_operands,
             &body,
-            splice_desc,
-            base,
-            binding,
-            splice_start,
-            self.cw,
             reified,
-        ) else {
-            crate::trace_compiler!("splice", "probe declined ({descriptor})");
-            return false;
-        };
-        bind_inline_handlers(code, &bs.handlers);
-        let ret_words = if bs.falls_through { ret_words } else { 0 };
-        code.splice_inline(
-            &bs.bytes,
-            &bs.external_branches,
-            body.max_stack + bs.stack_growth,
-            top_local,
-            arg_words,
-            ret_words,
-            bs.falls_through,
-        );
-        self.record_spliced_lines(&bs.lines, &body, inline_only, 0, code);
-        self.record_spliced_locals(&bs.locals, inline_only, 0, code);
-        true
+            code,
+        )
+        .is_some()
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -13820,6 +13730,10 @@ impl<'a> Emitter<'a> {
                     let source = self.value_ty(i);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
                     self.adapt_physical_operand(source, semantic, Some(ty), jt, code);
+                    // kotlinc's `visitVariable` marks the initializer's line, then the
+                    // declaration's, before the store (after an inlined call, both are written).
+                    debug_lines::mark_expression_start(self.ir, i, code);
+                    debug_lines::mark_statement(self.ir, e, code);
                     let slot = reuse.unwrap_or_else(|| {
                         let s = self.next_slot;
                         self.next_slot += slot_words(jt);
@@ -18442,7 +18356,8 @@ impl<'a> Emitter<'a> {
                     // writes one inverted branch.
                     if is_stmt {
                         if let Some(jump) = self.loop_jump_target(*body) {
-                            let unconditional = self.emit_cond_branch(*c, jump, true, code);
+                            let unconditional = self
+                                .in_condition(|this| this.emit_cond_branch(*c, jump, true, code));
                             code.set_stack(entry_height);
                             // A constant-true guard emitted an unconditional jump. Emitting any
                             // later arm after it would leave dead bytecode without a stack-map
@@ -18458,7 +18373,7 @@ impl<'a> Emitter<'a> {
                     let next = code.new_label();
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,
                     // unframed body. Suspend flattening produces this shape for some do-while loops.
-                    if self.emit_cond_branch(*c, next, false, code) {
+                    if self.in_condition(|this| this.emit_cond_branch(*c, next, false, code)) {
                         self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;

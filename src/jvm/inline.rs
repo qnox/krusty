@@ -18,7 +18,6 @@ pub use method_bodies::{MethodBodies, PropertyAccess, StaticMemberRealization};
 mod continuation_flow;
 mod debug_lines;
 mod frame_layout;
-mod in_place_arguments;
 mod invoke_receiver;
 mod local_compaction;
 mod reified_operands;
@@ -26,7 +25,6 @@ mod scalar_adapters;
 mod splice_result;
 use continuation_flow::caller_continuation_reachable;
 pub(super) use frame_layout::spliced_frame;
-pub(super) use in_place_arguments::InPlacePlan;
 use local_compaction::LocalCompaction;
 use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
 pub(super) use reified_operands::{ReifiedArgument, ReifiedArguments};
@@ -1586,31 +1584,18 @@ fn incremented_local_slot(insn: &Insn) -> Option<u16> {
     }
 }
 
-/// How a spliced body's parameters receive the caller's arguments, which the caller has pushed.
-#[derive(Clone, Copy)]
-pub(super) enum ParameterBinding<'a> {
-    /// Stored into the parameter slots; each listed lambda parameter is substituted at its invoke.
-    Stored(&'a [LambdaSplice]),
-    /// Read where the body loads them, kotlinc's in-place arguments: no slot is written.
-    InPlace(&'a InPlacePlan),
-}
-
 /// Relocate one inline body and splice its literal lambda bodies at their checked invoke sites.
-/// Stored and in-place arguments, branch relocation, reified operands, and scalar adapter
-/// cancellation all converge here so no narrower fallback can emit a different body shape.
+/// Branch relocation, reified operands, and scalar adapter cancellation converge here while the
+/// MethodNode migration still owns inline-lambda substitution.
 pub(super) fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
     base: u16,
-    binding: ParameterBinding<'_>,
+    lambdas: &[LambdaSplice],
     start_offset: usize,
     cw: &mut ClassWriter,
     reified: &ReifiedArguments,
 ) -> Option<SpliceResult> {
-    let (lambdas, in_place): (&[LambdaSplice], Option<&InPlacePlan>) = match binding {
-        ParameterBinding::Stored(lambdas) => (lambdas, None),
-        ParameterBinding::InPlace(plan) => (&[], Some(plan)),
-    };
     // A `reifiedOperationMarker` body specializes its reified type parameter at the call site. Without
     // the call's reified type arguments (`reified` empty) it can't be specialized — the marker THROWS at
     // runtime — so skip (the caller falls back / drops the file, never miscompiles). With them, the
@@ -1708,18 +1693,6 @@ pub(super) fn splice_unified(
                 }
             }
         }
-    }
-    // Arguments read in place: the caller has pushed them, so each parameter's first load goes and
-    // a load repeated right after it duplicates the argument, as kotlinc's transformer leaves it.
-    if let Some(plan) = in_place {
-        for &(at, load) in plan.rewrites() {
-            edits.push(Edit {
-                at,
-                len: 1,
-                repl: load.replacement(),
-            });
-        }
-        edits.sort_by_key(|edit| edit.at);
     }
     // With NO literal lambdas to substitute (`t?.let(x)` — a passed `Function` value), invoke sites
     // remain ordinary interface calls on the parameter object.
@@ -1888,13 +1861,8 @@ pub(super) fn splice_unified(
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
     // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
     // body's locals through a map that both rebases and compacts.
-    // Arguments read in place close their parameters' slots the same way: nothing is stored there.
     let removed_indices: Vec<usize> = lambdas.iter().map(|lambda| lambda.param_index).collect();
-    let compaction = if let Some(plan) = in_place {
-        plan.compaction().clone()
-    } else {
-        LocalCompaction::parameters(descriptor, &removed_indices)?
-    };
+    let compaction = LocalCompaction::parameters(descriptor, &removed_indices)?;
     remap_locals(&mut insns, |slot| compaction.compact(slot, base))?;
     // Return handling: drop a trailing return (fall through with the result on the stack), and redirect
     // any earlier return to the continuation just past the body. These are ordinary CFG edges; output
@@ -2598,7 +2566,7 @@ mod tests {
             &body,
             "(I)I",
             1,
-            ParameterBinding::Stored(&[]),
+            &[],
             0,
             &mut cw,
             &ReifiedArguments::default(),

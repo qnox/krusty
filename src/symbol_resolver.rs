@@ -8447,6 +8447,7 @@ mod tests {
             origin: Origin::Library,
             source_receiver: None,
             declared_params: None,
+            lambda_materialized: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,

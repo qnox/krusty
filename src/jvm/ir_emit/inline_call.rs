@@ -4,6 +4,7 @@ use super::parse_physical_method_desc;
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
+#[derive(Clone, Copy)]
 pub(super) struct InlineStaticTarget<'a> {
     pub(super) owner: &'a str,
     pub(super) name: &'a str,

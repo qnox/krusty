@@ -85,7 +85,7 @@ impl DescriptorArityMismatch {
 }
 
 impl Emitter<'_> {
-    fn default_operand_origins(
+    pub(super) fn default_operand_origins(
         &self,
         call: u32,
         operands: &[u32],

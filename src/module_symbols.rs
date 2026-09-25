@@ -911,6 +911,7 @@ fn fn_info(
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
         declared_params,
+        lambda_materialized: sig.call_sig().lambda_materialized.into_boxed_slice(),
         context_count: sig.context_count,
         contract: sig.contract.clone(),
         equality_bound: sig.equality_bound,
@@ -1020,6 +1021,7 @@ fn source_callable(
         origin: Origin::Module { facade: owner },
         source_receiver: None,
         declared_params,
+        lambda_materialized: Box::new([]),
         context_count: 0,
         contract: None,
         equality_bound: None,

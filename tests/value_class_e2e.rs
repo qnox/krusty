@@ -368,6 +368,31 @@ fn callable_reference_keeps_a_nullable_value_class_parameter_boxed() {
 }
 
 #[test]
+fn generic_inline_call_keeps_callable_roles_below_a_value_class_result_wrapper() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+@JvmInline
+value class WrappedDouble(val value: Double)
+
+interface Adapter<FROM, TO> {
+    fun decode(value: FROM): TO
+}
+
+class StringAdapter : Adapter<String, WrappedDouble> {
+    override fun decode(value: String) = WrappedDouble(value.toDouble())
+}
+
+fun box(): String {
+    val source: String? = "2019"
+    val decoded = source?.let(StringAdapter()::decode)!!
+    return if (decoded.value == 2019.0) "OK" else "value:${decoded.value}"
+}
+"#,
+        "ValueClassInlineCallableReferenceResult",
+    );
+}
+
+#[test]
 fn generic_underlying_metadata_keeps_the_owners_type_parameter() {
     common::expect_box_ok_with_stdlib(
         "inline class ICInt<T : Int>(val value: T)\n\
@@ -478,6 +503,28 @@ fn value_class_member_safe_cast_observes_the_boxed_interface_argument() {
              return if (sink == 5) \"OK\" else \"Fail:$sink\"\n\
          }\n",
         "ValueClassMemberSafeCast",
+    );
+}
+
+#[test]
+fn dead_must_inline_call_does_not_reject_value_class_when_expression() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+@JvmInline
+value class Foo<T : Any>(val value: T)
+
+fun <T : Any, R : Any> transform(value: Foo<T>): Foo<R> =
+    when {
+        true -> value as Foo<R>
+        else -> TODO()
+    }
+
+fun box(): String {
+    val transformed = transform<Int, Number>(Foo(42))
+    return if (transformed.value is Number) "OK" else "Fail"
+}
+"#,
+        "DeadMustInlineValueClassBranch",
     );
 }
 

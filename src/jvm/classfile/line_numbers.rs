@@ -140,6 +140,7 @@ impl CodeBuilder {
         }
         let line = line.min(u16::MAX as u32) as u16;
         let pc = self.bytes.len() as u16;
+        let forgotten = std::mem::take(&mut self.line_forgotten);
         let retained = self.retained_line_mark.is_some_and(|index| {
             // Retention names an ENTRY, so it applies only while that entry is still the last one
             // and still sits at this offset. It therefore expires on its own as soon as the pc
@@ -167,7 +168,7 @@ impl CodeBuilder {
             }
             // The line already in effect, carried from an EARLIER pc: no entry is written here, so
             // this offset holds none of this mark's to retain.
-            Some((_, ll)) if *ll == line => None,
+            Some((_, ll)) if *ll == line && !forgotten => None,
             _ => {
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)
@@ -198,6 +199,26 @@ impl CodeBuilder {
             // The line already in effect needs no entry of its own.
             Some((_, last_line)) if *last_line == line => {}
             _ => self.line_marks.push((pc, line)),
+        }
+    }
+
+    /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
+    /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
+    /// whose code ran under the callee's lines rather than the caller's.
+    pub(crate) fn forget_line(&mut self) {
+        self.line_forgotten = true;
+    }
+
+    /// Record an inlined body's line number at the current offset, as ASM copies a
+    /// `LineNumberNode`: the entry is written even when the line is already in effect, and a
+    /// second entry at one offset follows the first rather than replacing it.
+    pub(crate) fn inlined_line(&mut self, line: u16) {
+        if self.dead || self.bytes.len() > u16::MAX as usize {
+            return;
+        }
+        let pc = self.bytes.len() as u16;
+        if self.line_marks.last() != Some(&(pc, line)) {
+            self.line_marks.push((pc, line));
         }
     }
 

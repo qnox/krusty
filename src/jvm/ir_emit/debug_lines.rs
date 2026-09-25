@@ -88,6 +88,14 @@ pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder
 }
 
 impl Emitter<'_> {
+    /// Run `emit` as the emission of a `when` branch condition (kotlinc's `isInsideCondition`).
+    pub(super) fn in_condition<R>(&mut self, emit: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = std::mem::replace(&mut self.inside_condition, true);
+        let result = emit(self);
+        self.inside_condition = outer;
+        result
+    }
+
     /// Put a call's own line back in effect at its physical dispatch.
     ///
     /// A multi-line call's operands each mark their own line as they are pushed, so by the time the

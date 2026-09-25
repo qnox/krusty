@@ -26,12 +26,6 @@ impl LocalCompaction {
         Some(Self { removed })
     }
 
-    pub(super) fn all_parameters(descriptor: &str) -> Option<Self> {
-        Some(Self {
-            removed: parameter_slots(descriptor)?,
-        })
-    }
-
     pub(super) fn is_removed(&self, slot: u16) -> bool {
         self.removed
             .iter()
@@ -61,16 +55,4 @@ fn parameter_slots(descriptor: &str) -> Option<Vec<RemovedParameter>> {
             })
             .collect()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wide_removed_parameters_close_two_instruction_slots() {
-        let compact = LocalCompaction::all_parameters("(JI)V").expect("descriptor");
-        assert_eq!(compact.compact(3, 7), 7);
-        assert_eq!(compact.compact(4, 7), 8);
-    }
 }

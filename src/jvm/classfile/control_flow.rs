@@ -121,6 +121,26 @@ impl CodeBuilder {
         self.adjust(delta);
     }
 
+    /// A jump an inlined body names by opcode (`goto` or any conditional), moving the stack by
+    /// `delta` words. After a `goto` nothing is reachable until an arrival is bound.
+    pub(crate) fn jump(&mut self, opcode: u8, l: Label, delta: i32) {
+        self.branch(opcode, l, delta);
+        if opcode == 0xa7 {
+            self.dead = true;
+        }
+    }
+
+    /// One instruction of an inlined body, already encoded: no branch operand and no padding that
+    /// depends on its offset. It moves the stack by `delta` words; after a `terminal` one (`athrow`,
+    /// a return) nothing is reachable until an arrival is bound.
+    pub(crate) fn instruction(&mut self, bytes: &[u8], delta: i32, terminal: bool) {
+        if !self.dead {
+            self.bytes.extend_from_slice(bytes);
+        }
+        self.adjust(delta);
+        self.dead |= terminal;
+    }
+
     pub fn goto(&mut self, l: Label) {
         self.branch(0xa7, l, 0);
         self.dead = true;
@@ -234,6 +254,41 @@ impl CodeBuilder {
     }
     pub fn ifle(&mut self, l: Label) {
         self.branch(0x9e, l, -1);
+    }
+
+    /// Append a pool-relocated inline body whose arguments are already on the stack.
+    pub fn splice_inline(
+        &mut self,
+        bytes: &[u8],
+        external_branches: &[(usize, Label)],
+        body_stack: u16,
+        top_local: u16,
+        arg_words: i32,
+        ret_words: i32,
+        falls_through: bool,
+    ) {
+        let baseline = self.cur_stack - arg_words;
+        // A dead splice has unbound inner frames/handlers and no pushed arguments to consume;
+        // only its height bookkeeping survives for the enclosing emitter.
+        if self.dead {
+            self.cur_stack = baseline + ret_words;
+            return;
+        }
+        self.fixups.extend(external_branches.iter().copied());
+        if top_local > self.max_locals {
+            self.max_locals = top_local;
+        }
+        // Peak is the larger of the args-present prologue height and the body's internal peak.
+        let peak = (baseline + arg_words).max(baseline + body_stack as i32);
+        if peak > self.max_stack as i32 {
+            self.max_stack = peak as u16;
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.cur_stack = baseline + ret_words;
+        if self.cur_stack > self.max_stack as i32 {
+            self.max_stack = self.cur_stack as u16;
+        }
+        self.dead |= !falls_through;
     }
 
     /// Resolve all branch offsets whose destinations belong to this builder.

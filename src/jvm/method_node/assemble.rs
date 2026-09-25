@@ -599,3 +599,15 @@ impl MethodNode {
         })
     }
 }
+
+/// One instruction's bytes, with its operands interned into `sink`, or `None` for a jump or switch,
+/// whose offsets only a layout can fill in.
+pub fn encode_instruction(
+    insn: &Insn,
+    sink: &mut impl ConstantSink,
+) -> Result<Option<Vec<u8>>, AssembleError> {
+    Ok(match encode(insn, sink)? {
+        Encoded::Fixed(bytes) => Some(bytes),
+        _ => None,
+    })
+}

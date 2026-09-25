@@ -1,6 +1,5 @@
 //! Caller-frame layout for an inline splice.
 
-use super::in_place_arguments::InPlacePlan;
 use super::local_compaction::LocalCompaction;
 use super::{
     decode_stackmap, disassemble, free_local_slot_at, lambda_invoke_sites, null_check_deletions,
@@ -27,7 +26,6 @@ pub(in crate::jvm) fn spliced_frame(
     body: &MethodCode,
     descriptor: &str,
     lambda_params: &[usize],
-    in_place: Option<&InPlacePlan>,
     base: u16,
 ) -> Option<SplicedFrame> {
     let offsets_of_param = param_offsets(descriptor)?;
@@ -43,11 +41,7 @@ pub(in crate::jvm) fn spliced_frame(
                 .map(|slot| (lambda, slot))
         })
         .collect::<Option<Vec<_>>>()?;
-    let compaction = if let Some(plan) = in_place {
-        plan.compaction().clone()
-    } else {
-        LocalCompaction::parameters(descriptor, lambda_params)?
-    };
+    let compaction = LocalCompaction::parameters(descriptor, lambda_params)?;
     let parameter_end = param_store_ops(descriptor, 0)?
         .last()
         .map(|&(slot, op)| slot + if matches!(op, 0x37 | 0x39) { 2 } else { 1 })

@@ -7,10 +7,10 @@
 //! straight into a `goto` is threaded to where that `goto` (and any `goto` it leads into in turn)
 //! finally goes.
 //!
-//! The cleanup then removes those `nop`s, except the first `nop` of a debug range (from a line
-//! number or a local variable's range boundary up to the next line number) that holds no other
-//! instruction, and a `nop` that is the first instruction of a protected range. Only the `nop`s this
-//! pass made are cleaned up: every other `nop` krusty writes is already one kotlinc keeps.
+//! The cleanup then removes every `nop` in the body, except the first `nop` of a debug range (from a
+//! line number or a local variable's range boundary up to the next line number) that holds no other
+//! instruction, and a `nop` that is the first instruction of a protected range. An inlined body
+//! brings its own `nop`s, including kotlinc's leading one and those before rewritten returns.
 //!
 //! Jumps to a `pinned` label are left alone: a `goto` to one is neither redundant nor threaded
 //! through, and a jump to one is not threaded. krusty pins the labels that stand after an
@@ -115,22 +115,29 @@ pub(crate) fn remove(method: &mut MethodNode, pinned: &BTreeSet<LabelId>) -> boo
             }
         }
     }
-    if redundant.is_empty() {
-        return changed;
-    }
     for &at in &redundant {
         method.nodes[at] = Node::Insn(Insn::Op(NOP));
     }
+    remove_redundant_nops(method) || changed || !redundant.is_empty()
+}
+
+/// kotlinc's `RedundantNopsCleanupMethodTransformer`: remove every `nop` [`required_nops`] does not
+/// keep; `true` when any went.
+fn remove_redundant_nops(method: &mut MethodNode) -> bool {
+    if !method.nodes.iter().any(is_nop) {
+        return false;
+    }
     let required = required_nops(method);
-    let mut removed: Vec<usize> = redundant
-        .into_iter()
-        .filter(|at| !required.contains(at))
+    let removed: Vec<usize> = method
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(at, node)| (is_nop(node) && !required.contains(&at)).then_some(at))
         .collect();
-    removed.sort_unstable();
     for &at in removed.iter().rev() {
         method.nodes.remove(at);
     }
-    true
+    !removed.is_empty()
 }
 
 /// The `nop`s kotlinc's cleanup keeps, by node position.
@@ -292,13 +299,24 @@ mod tests {
     #[test]
     fn a_line_number_at_a_label_between_keeps_the_goto() {
         // 0 iconst_0; 1 goto 3; 2 (a line starts here) nop; 3 ireturn: the line between ends the
-        // run.
+        // run. The `nop` shares its line with the `ireturn`, so the cleanup still removes it.
         let body = body(
             &[Ok(0x03), Err((GOTO, 3)), Ok(NOP), Ok(IRETURN)],
             &[0, 2],
             None,
         );
-        assert_eq!(body.run(), None);
+        let mut expected = ops(&[0x03]);
+        expected.push(body.jump(GOTO, 3));
+        expected.push(Insn::Op(IRETURN));
+        assert_eq!(body.run(), Some(expected));
+    }
+
+    #[test]
+    fn a_nop_the_body_already_had_is_cleaned_up_too() {
+        // An inlined body's leading `nop` and the one in front of its rewritten return go, as
+        // kotlinc's cleanup removes every `nop` it does not need.
+        let body = body(&[Ok(NOP), Ok(0x03), Ok(NOP), Ok(IRETURN)], &[0], None);
+        assert_eq!(body.run(), Some(ops(&[0x03, IRETURN])));
     }
 
     #[test]
