@@ -22,7 +22,7 @@ fn constructors(dir: &std::path::Path, class: &str) -> Vec<String> {
         .collect()
 }
 
-/// Compile `src` with BOTH compilers; `None` when the provisioned toolchain is unavailable.
+/// Compile `src` with BOTH compilers; `None` when either compiler cannot be run.
 fn compile_both(tag: &str, src: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     // Per-TAG directory: these tests run in parallel and would otherwise share one output tree.
     let base = std::env::temp_dir().join(format!("krusty_priv_ctor_{tag}_{}", std::process::id()));
@@ -66,9 +66,8 @@ class Hidden private constructor() {
 }
 class Plain(val x: Int)
 "#;
-    let Some((krusty_dir, kotlinc_dir)) = compile_both("alone", src) else {
-        return; // toolchain not provisioned
-    };
+    let (krusty_dir, kotlinc_dir) =
+        compile_both("alone", src).expect("reference kotlinc is provisioned");
     for class in ["Hidden", "Plain"] {
         assert_eq!(
             constructors(&krusty_dir, class),
@@ -97,9 +96,8 @@ class Made private constructor(val x: Int) {
 }
 fun box(): String = if (Made.make().x == 7) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, kotlinc_dir)) = compile_both("companion", src) else {
-        return; // toolchain not provisioned
-    };
+    let (krusty_dir, kotlinc_dir) =
+        compile_both("companion", src).expect("reference kotlinc is provisioned");
     assert_eq!(
         constructors(&krusty_dir, "Made"),
         constructors(&kotlinc_dir, "Made"),
@@ -139,9 +137,8 @@ class Hidden2 private constructor(val x: Int) {
 }
 fun box(): String = if (Hidden2.Maker().make() == 1 && Hidden2.viaSecondary() == 2) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, kotlinc_dir)) = compile_both("nested_default", src) else {
-        return; // toolchain not provisioned
-    };
+    let (krusty_dir, kotlinc_dir) =
+        compile_both("nested_default", src).expect("reference kotlinc is provisioned");
     assert_eq!(
         constructors(&krusty_dir, "Hidden2"),
         constructors(&kotlinc_dir, "Hidden2"),
@@ -170,9 +167,8 @@ open class Base3 private constructor(val x: Int) {
 }
 fun box(): String = if (Base3.make().x == 5) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, kotlinc_dir)) = compile_both("subclass", src) else {
-        return; // toolchain not provisioned
-    };
+    let (krusty_dir, kotlinc_dir) =
+        compile_both("subclass", src).expect("reference kotlinc is provisioned");
     assert_eq!(
         constructors(&krusty_dir, "Base3"),
         constructors(&kotlinc_dir, "Base3"),
