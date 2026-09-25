@@ -10,6 +10,11 @@ pub struct ResolvedSuperCall {
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
+    /// The selected declaration's own parameter types, before the call site's generic
+    /// substitution. A `super` call dispatches to that declaration, so its physical signature, not
+    /// the substituted one, names the method: `super.foo(r)` through `B : A<String>` calls
+    /// `A.foo(T)`.
+    pub physical_params: Vec<Ty>,
     pub ret: Ty,
     pub physical_ret: Ty,
     /// Empty for a source signature whose descriptor is derived from the semantic parameter types.
@@ -46,15 +51,19 @@ impl ResolvedSuperCall {
         let external_property = member.external_property_identity;
         let physical_owner = member.owner?;
         let (owner, interface) = match realization {
-            // A selected class declaration remains the exact non-virtual target even when it was
-            // inherited through another class. An interface declaration reached through a class
-            // supertype must instead name that direct class in the InterfaceMethodref search path;
-            // the normalized declaration kind, not its symbol-source origin, decides the shape.
-            crate::libraries::MemberRealization::Dispatch if member.is_interface() => {
+            // A dispatched `super` call names the supertype it is qualified with, as kotlinc's
+            // `invokespecial` does, and the JVM resolves the declaration from there: an interface
+            // declaration through the InterfaceMethodref search path, a class declaration inherited
+            // through a class supertype through that supertype. The normalized declaration kind,
+            // not its symbol-source origin, decides the shape.
+            crate::libraries::MemberRealization::Dispatch
+                if member.is_interface() || !interface =>
+            {
                 (dispatch_owner, interface)
             }
-            // A class declaration is named through a Methodref even when the qualifier is an
-            // interface: `super<I>.hashCode()` calls `Object.hashCode`, which `I` only inherits.
+            // A class declaration reached through an interface qualifier is named on its declaring
+            // class through a Methodref: `super<I>.hashCode()` calls `Object.hashCode`, which `I`
+            // only inherits.
             crate::libraries::MemberRealization::Dispatch => (physical_owner, false),
             crate::libraries::MemberRealization::Direct { .. } => (physical_owner, interface),
             crate::libraries::MemberRealization::Intrinsic(_)
@@ -65,6 +74,7 @@ impl ResolvedSuperCall {
             owner,
             name: member.physical_name.unwrap_or(member.name),
             params: member.params,
+            physical_params: member.physical_params,
             ret: member.ret,
             physical_ret: member.physical_ret,
             descriptor: member.descriptor,
