@@ -1151,74 +1151,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file) — never the prior `Function0`-vs-`Function1` miscompile. Proven by an ABI signature diff:
   `take(block: suspend () -> Int)` lowers to `void take(Function1)`
   (`tests/suspend_e2e.rs::suspend_function_type_lowers_to_function1_continuation`).
-- **`SuspendLambda` codegen (leaf, no captures).** A `suspend` lambda literal (`{ 42 }`) flowing into a
-  suspend function-type position compiles to a concrete class
-  `… extends kotlin/coroutines/jvm/internal/SuspendLambda implements Function{n+1}` — NOT krusty's
-  `invokedynamic`/`LambdaMetafactory` path (which can't realize the `SuspendLambda` ABI). The class has
-  `<init>(Continuation completion)` → `super(n+1, completion)`, `invokeSuspend(Object result)` (the body,
-  result boxed), and the erased `invoke(Object arg)` = `new This((Continuation)arg).invokeSuspend(Unit)`.
-  The creation site is `new This((Continuation) null)` (the completion is supplied when the lambda is
-  invoked). `lower_arg` routes a lambda bound for an `IrType::Function{suspend:true}` parameter to
-  `lower_suspend_lambda`; any non-lambda suspend value still bails. Proven end-to-end:
-  `make(): suspend () -> Int = { 42 }` returns a `Function1` a Java driver invokes with a continuation →
-  boxed 42 (`tests/suspend_e2e.rs::leaf_suspend_lambda_creates_and_invokes`). **Captures**: a free
-  variable the lambda reads becomes a `final` field set in `<init>(cap.., Continuation completion)` and
-  copied into the fresh instance `invoke` builds (`new This(this.cap.., (Continuation)arg)`); the
-  creation site passes the captured values (`new This(captureValues.., null)`). `invokeSuspend` loads
-  each capture field into a local before running the body. Proven: `make(n: Int): suspend () -> Int =
-  { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Own
-  parameters use fields after the captures, populated by `create`/`invoke` and reloaded by
-  `invokeSuspend`; parameters and captures may coexist. **Internal suspension**: a lambda whose body
-  is a single TAIL suspend call (`{ foo() }`, `{ suspendOnce() }`) compiles its `invokeSuspend` to a state machine with the
-  lambda instance itself as the continuation — a `label` field on the class, dispatch on `this.label`:
-  state 0 threads `this` (cast `Continuation`) into the callee and sets `label=1` (a classpath/sibling
-  callee, resolved by its logical signature, gets its descriptor rewritten to the CPS form here), then
-  returns `COROUTINE_SUSPENDED` up if the callee suspends else the value; state 1 (the async resume,
-  re-entered by the callee's `resumeWith`) returns the resumed `result`. A suspending body that isn't a
-  supported state-machine shape still bails rather than emitting partial CPS. Lambda-suspension
-  detection walks AST call identities and reads each checker's exact provider-neutral `ResolvedCall`
-  (same-file, sibling-module, and classpath alike); it never classifies by a same-named declaration.
-  Proven both
-  completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
-  (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
-  real kotlinc parking primitive suspends then resumes to 42
-  (`::suspend_lambda_internal_suspension_async_resume`). A **non-tail** body that BINDS the result and
-  computes a tail expression (`{ val a = foo(); a + 1 }`) is handled: state 0 resumes into the binding
-  (`a = unbox(callResult)`) and runs the tail; state 1 binds `a` from the invokeSuspend `result` and
-  runs the same tail. Limited to a SINGLE suspension; the invokeSuspend body is lowered with
-  `next_value` reset to 2 (`this`=0, `result`=1) so the bound local can't collide with the machine's
-  marker/result temps. Proven: `{ val a = foo(); a + 1 }` → 43 (`::suspend_lambda_non_tail_body_runs`).
-  **Multiple suspensions / control flow** use the GENERAL lambda-mode machine: ir_lower builds
-  `invokeSuspend` with the plain body and registers `(FunId, ClassId, field_base)` in
-  `ir.suspend_lambda_sm`; the coroutine pass's `build_lambda_state_machine` reuses the same `Flat`
-  flattener as functions — the continuation is the lambda instance (`cont_v = this`, value 0), its
-  `result`/`label`/spilled fields are appended to the lambda class after the captures/params
-  (`field_base`; `Flat.setfield` adds it), and `invokeSuspend` stores its `result` parameter into the
-  `result` field at entry, then loops `while(true){ r = this.result; <restore spilled>; when(this.label){
-  states } }`. Proven both completion modes incl. spilling a value across a second suspension:
-  `{ val a = foo(); val b = bar(); a + b }` → 142 synchronously (`::suspend_lambda_two_suspensions_runs`),
-  and `{ val a = suspendOnce(); val b = plain(); a + b }` parks then resumes to 142
-  (`::suspend_lambda_two_suspensions_async_resume`). A lambda that BOTH captures and suspends is handled
-  by the same general machine: a capture is reloaded from its field into its local (value-index `2+i`)
-  in the `invokeSuspend` PROLOGUE at every entry (so it survives a re-entry) and is excluded from
-  spilling. Proven: `make(n: Int): suspend () -> Int = { val a = foo(); n + a }`, `make(10).invoke(k)` →
-  52 (`::suspend_lambda_captures_with_suspension_runs`).
-  **Own parameters** (leaf, no captures): a
-  parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
-  fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
-  field, then calls `invokeSuspend(Unit)`; `invokeSuspend` loads the param fields into locals bound to
-  the lambda's parameter names. The class implements `Function{arity+1}`. Proven:
-  `make(): suspend (Int) -> Int = { it + 1 }`, `make().invoke(10, k)` → 11
-  (`::suspend_lambda_with_parameter_runs`). This is also the shape a coroutine-builder lambda takes
-  (`runBlocking`/`launch` accept `suspend CoroutineScope.() -> T` — a receiver lambda is a 1-parameter
-  suspend lambda), so builders are ordinary classpath calls once their suspend-lambda argument compiles.
-  **Own parameters WITH captures**: the two are the same mechanism — captures are the leading fields,
-  stored by the constructor from the creation site; parameter slots are the fields after them, stored by
-  `create`/`invoke`; `invokeSuspend` reloads both. They are therefore modeled together, not just
-  separately (the earlier leaf-only restriction was a scope limit, not a machine limit). Proven for a
-  receiver slot plus a captured `var` (`withScope { seen += budget }`) and for a value parameter plus a
-  capture, each box-run (`tests/suspend_receiver_lambda_e2e.rs::suspend_receiver_lambda_captures_and_receiver`,
-  `::suspend_value_param_lambda_captures`).
+- **Suspend lambdas.** A `suspend` lambda literal lowers like any lambda: an `IrExpr::Lambda` over a
+  lifted private function whose leading parameters are the captures (a mutable capture is its `Ref`
+  holder), recorded in `suspend_funs`. The coroutine pass gives that function the CPS signature and an
+  IR state machine with its own `ContinuationImpl` class, which re-enters it through an `access$`
+  forwarder; the creation site is the ordinary `Function{arity+1}` lambda. Its arity counts the
+  continuation (`suspend () -> Int` is `Function1`). This runs, but is not kotlinc's shape: kotlinc
+  compiles the literal to a `SuspendLambda` subclass whose `invokeSuspend` holds the machine, with
+  `create`/`invoke` and an erased `invoke` bridge, created by `new C(captures…, null)`. Moving to that
+  shape is step 6 of `docs/JVM_INLINE_BEFORE_CPS.md` §1a. Behaviour is covered by
+  `tests/suspend_e2e.rs` (`suspend_lambda_*`) and `tests/suspend_receiver_lambda_e2e.rs`.
 - **A suspend lambda's parameter slots bind the RECEIVER as `this` — for a classpath callee too.** A
   `suspend R.() -> T` parameter folds its receiver into the erased `Function{n+1}`'s FIRST slot, and the
   checker resolves a bare member in the body against that receiver. Lowering binds the leading
@@ -4331,7 +4273,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exact-arity overload) never mis-binds against a wider same-named overload. LOWERING: the block is `suspend
   CoroutineScope.() -> T`, erased in the descriptor to a bare `Function2` with no `suspend` flag; `lower_arg`
   detects the suspend lambda STRUCTURALLY (its checked `Ty::Fun` ends in a `Continuation` param) and routes
-  it to `lower_suspend_lambda`, which builds the real `SuspendLambda` state machine (the `CoroutineScope`
+  it through the suspend-lambda lowering described under "Suspend lambdas" (the `CoroutineScope`
   receiver binds as the body's implicit `this`, like any receiver lambda). The lambda body is lowered as a `suspend` context
   (`cur_fn_suspend`) so a suspend MEMBER call inside it (`repo.get(…)` on a classpath `suspend` interface) is
   CPS-threaded, and `suspend_member_call` detection consults the library for classpath members. Supports a
@@ -7917,8 +7859,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   underlying-typed field (VerifyError). The `SetField` boundary pairs the stored value with the
   field's pre-erasure type; `Boxed → UnboxedX` then unboxes exactly like a local store. kotlinc
   parity: its erased bridge `unbox-impl`s each value-class argument before the spill (verified on
-  `createMangling.kt`). NULLABLE value-class lambda parameters stay declined in
-  `lower_suspend_lambda` (boxed/null spill interplay unmodeled).
+  `createMangling.kt`). NULLABLE value-class lambda parameters stay declined (boxed/null spill
+  interplay unmodeled).
   (`suspend_lambda_with_value_class_params`; corpus
   `coroutines/inlineClasses/direct/createMangling.kt` box-OK, 2921 → 2922, FAIL 0.)
 
