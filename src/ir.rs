@@ -34,6 +34,7 @@ mod annotations;
 mod bindings;
 mod bottom_values;
 mod bridges;
+mod cast_targets;
 mod callee;
 mod catches;
 mod companion_blocks;
