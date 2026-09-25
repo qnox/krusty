@@ -170,20 +170,60 @@ fn eligible_points(
                         || class.is_interface)
             })
         });
-    if !route.context.null_out_dead_spills
-        || !(top_level || final_member)
-        || ir.private_methods.contains(&fid)
-        || !ir.fn_decl_lines.contains_key(&fid)
-        || ir.suspend_lambda_sm.iter().any(|(lambda, _, _)| *lambda == fid)
-        || ir.jvm_suspend_interface_bodies.contains_key(&fid)
+    let suspend_set = route.suspend_set;
+    // Checked in order, each only while every earlier one holds.
+    let declines: [(&dyn Fn() -> bool, &str); 10] = [
+        (
+            &|| !route.context.null_out_dead_spills,
+            "no spill clean-up in the runtime",
+        ),
+        (
+            &|| !(top_level || final_member),
+            "not top-level or a final member",
+        ),
+        (&|| ir.private_methods.contains(&fid), "private"),
+        (
+            &|| !ir.fn_decl_lines.contains_key(&fid),
+            "no declaration line",
+        ),
+        (
+            &|| {
+                ir.suspend_lambda_sm
+                    .iter()
+                    .any(|(lambda, _, _)| *lambda == fid)
+            },
+            "a suspend lambda",
+        ),
+        (
+            &|| ir.jvm_suspend_interface_bodies.contains_key(&fid),
+            "an interface body",
+        ),
         // Spliced inline bodies are a later step: the splice does not mark the call's own line
         // yet, which the transformer's `@DebugMetadata` reads off the body.
-        || splices_inline_code(ir, body)
+        (&|| splices_inline_code(ir, body), "splices an inline body"),
         // A classpath inline body or an inline lambda that suspends is spliced into this frame.
-        || !spliced_inline_suspensions(ir, body, route.suspend_set).is_empty()
-        || suspends_under_try(ir, body, route.suspend_set)
-        || reads_current_continuation(ir, body)
-    {
+        (
+            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
+            "suspends in a spliced inline body",
+        ),
+        (
+            &|| suspends_under_try(ir, body, suspend_set),
+            "suspends under a try",
+        ),
+        (
+            &|| reads_current_continuation(ir, body),
+            "reads its own continuation",
+        ),
+    ];
+    let declined = declines
+        .iter()
+        .find_map(|(declines, reason)| declines().then_some(*reason));
+    if let Some(reason) = declined {
+        crate::trace_compiler!(
+            "suspend",
+            "transformer declines {}: {reason}",
+            function.name
+        );
         return None;
     }
     let points = suspension_points_in_order(ir, body, route.suspend_set);
@@ -194,7 +234,23 @@ fn eligible_points(
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };
-    (!points.is_empty() && points.iter().all(|&call| plain_call(call))).then_some(points)
+    if points.is_empty() {
+        crate::trace_compiler!(
+            "suspend",
+            "transformer declines {}: it has no suspension point",
+            function.name
+        );
+        return None;
+    }
+    if !points.iter().all(|&call| plain_call(call)) {
+        crate::trace_compiler!(
+            "suspend",
+            "transformer declines {}: a suspension point is not a plain call",
+            function.name
+        );
+        return None;
+    }
+    Some(points)
 }
 
 /// Whether a suspension point runs inside a `try`, which FixStack's handler bookkeeping and the
