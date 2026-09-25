@@ -10,7 +10,7 @@ use super::common;
 
 const SOURCE: &str = r#"open class Plain private constructor(val x: Int, val y: String) {
     private constructor(y: String) : this(1, y)
-    private constructor(z: Long, w: String = "w") : this(z.toInt(), w)
+    private constructor(z: Long, w: String = "w") : this(1, w)
 
     fun own() = Plain("own")
     fun anon() = object { fun make() = Plain(5L) }.make()
