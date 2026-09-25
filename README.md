@@ -1,8 +1,10 @@
-# krusty
+<p align="center"><img src="site/public/krusty.png" alt="krusty, a crab mascot" width="240"></p>
+
+# krusty: a Kotlin compiler written in Rust
 
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Supported Kotlin">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance">
 </p>
 
@@ -11,14 +13,18 @@
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
-**krusty** is a memory-conscious **Kotlin → JVM bytecode compiler** written in Rust. Its frontend
-builds a module-wide source and symbol view. Its backend lowers one checked file per call while
-carrying the state needed to finalize module metadata. It emits `.class` files,
+**krusty** is a memory-conscious **Kotlin compiler written in Rust**, built as a **drop-in
+replacement for `kotlinc`** on the JVM: the same command-line flags in, and `.class` files that are
+byte-for-byte identical to `kotlinc`'s out. Its frontend builds a module-wide source and
+symbol view. Its backend lowers one checked file per call while carrying the state needed to
+finalize module metadata. It emits `.class` files,
 `@kotlin.Metadata`, and `META-INF/*.kotlin_module` for the supported language subset.
 
 **Goal:** emit bytecode that is **byte-for-byte identical** to the reference `kotlinc` for every
 construct krusty supports, not only ABI-compatible output. Differential bytecode tests, Kotlin/Java
 consumer tests, and the Kotlin `codegen/box` corpus provide the oracle for that goal.
+
+Website: [krustythecompiler.dev](https://krustythecompiler.dev) · Downloads: [latest release](https://github.com/qnox/krusty/releases/latest)
 
 ---
 

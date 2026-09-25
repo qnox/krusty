@@ -3,7 +3,7 @@ name = "Krusty"
 version = "0.0.1"
 schema_version = 1
 authors = ["Anton Efimchuk <anton.efimchuk@gmail.com>"]
-description = "Krusty language server for Kotlin."
+description = "Kotlin language server backed by krusty, a Kotlin compiler written in Rust."
 repository = "https://github.com/qnox/krusty"
 
 [language_servers.krusty-lsp]
