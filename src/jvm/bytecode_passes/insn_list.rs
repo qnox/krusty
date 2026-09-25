@@ -6,9 +6,7 @@
 
 use std::cell::RefCell;
 
-use crate::jvm::method_node::Node;
-#[cfg(test)]
-use crate::jvm::method_node::{LabelId, MethodNode};
+use crate::jvm::method_node::{LabelId, MethodNode, Node};
 
 /// A node's identity in its [`InsnList`], stable while other nodes come and go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -89,7 +87,6 @@ impl InsnList {
         self.first
     }
 
-    #[cfg(test)]
     pub(crate) fn last(&self) -> Option<NodeId> {
         self.last
     }
@@ -220,7 +217,6 @@ impl InsnList {
     }
 
     /// The position of the label node placing `label`.
-    #[cfg(test)]
     pub(crate) fn label_node(&self, label: LabelId) -> Option<NodeId> {
         self.ids()
             .into_iter()
@@ -238,13 +234,11 @@ impl InsnList {
 /// A [`MethodNode`] whose instructions are being edited as an [`InsnList`]. `method.nodes` stays
 /// empty until [`EditableMethod::finish`]; the try/catch and local-variable tables refer to labels,
 /// which keep their identity on their own.
-#[cfg(test)]
 pub(crate) struct EditableMethod {
     pub method: MethodNode,
     pub insns: InsnList,
 }
 
-#[cfg(test)]
 impl EditableMethod {
     pub(crate) fn new(mut method: MethodNode) -> Self {
         let nodes = std::mem::take(&mut method.nodes);

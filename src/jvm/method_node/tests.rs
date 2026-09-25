@@ -656,3 +656,25 @@ fn an_instruction_without_labels_encodes_and_decodes_alone() {
         })
     );
 }
+
+#[test]
+fn a_codegen_marker_reads_as_the_inline_marker_call_it_stands_for() {
+    use crate::jvm::bytecode::{CodegenMarker, CODEGEN_MARKER_OP};
+    let pool = TestPool::new();
+    for (operand, name, desc) in [
+        (1, "mark", "(I)V"),
+        (2, "beforeInlineCall", "()V"),
+        (3, "afterInlineCall", "()V"),
+    ] {
+        assert_eq!(
+            Insn::decode(&[CODEGEN_MARKER_OP, operand], &pool),
+            Ok(Insn::Method {
+                op: 0xb8,
+                owner: CodegenMarker::OWNER.to_string(),
+                name: name.to_string(),
+                desc: desc.to_string(),
+                interface: false,
+            })
+        );
+    }
+}

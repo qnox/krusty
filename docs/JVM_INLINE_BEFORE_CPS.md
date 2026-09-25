@@ -63,12 +63,47 @@ Steps, one PR each:
 | 1 | The transformer for named functions, with the analyses and FixStack, tested against kotlinc. Not wired. |
 | 2 | Wiring for top-level functions: the emitter marks suspension points, the continuation class comes from the layout. |
 | 3 | Members and `$suspendImpl`. |
-| 4 | FixStack's `try` handling (saved stacks around handlers). |
+| 4 | Suspension points inside `try` (range splitting and handler frames). |
 | 5 | Spliced inline bodies, including inline suspend functions (markers 6/7) and fake continuations. |
 | 6 | Suspend lambdas (`invokeSuspend`). |
 | 7 | Delete the IR machine and the two-pass machine for the JVM. |
 
 Each step reports box passes, byte-identical files and divergent classes before and after.
+
+### Step 2 as landed
+
+* `jvm::suspend::bytecode_machine` routes a top-level (static, non-private) suspend function to
+  the transformer when every suspension point is a plain call outside any `try`, the emitter
+  splices no classpath inline body into it (a same-file inline function the common IR already
+  expanded is part of the body), it does not read its own continuation, and stdlib has
+  `SpillingKt` (the transformer always nulls out dead spills). Everything else keeps the IR
+  machine until its step lands. The function keeps its body and only takes the CPS signature.
+  Spliced bodies wait for step 5 because the splice does not yet mark the inline call's own line
+  (kotlinc's `line N` on a `nop` before the body), and the transformer reads `@DebugMetadata`'s
+  next-line array off the method's line table.
+* The emitter writes kotlinc's markers with a private opcode (`0xff` plus a marker byte, see
+  `CodegenMarker`) so the pool never interns `InlineMarker`; `MethodNode::read_code` decodes it as
+  the `InlineMarker` call the transformer expects. The call's `Object` result is coerced to the
+  callee's declared result after `afterInlineCall`, as kotlinc does.
+* FixStack needs nothing for a protected range: its analysis follows the exception edges, and the
+  try/catch part kotlinc drives from codegen's save-stack pseudo-instructions has nothing to act
+  on, because krusty's emitter never enters a `try` with values on the stack. Suspension points
+  inside a `try` are still step 4 (the transformer's range splitting is not yet checked against
+  kotlinc end to end).
+* `ClassWriter::finish_with_coroutines` runs the transformer over the finished method before the
+  other rewrites and hands back the spill fields and `@DebugMetadata`; the continuation class is
+  written afterwards from them. A function whose suspension points are all tail calls gets no
+  continuation class; a failed transformation fails the file.
+
+Known gaps, both byte differences in the function's own method (the continuation class matches):
+
+* kotlinc's optimizer runs after the transformer (redundant temporaries, dead code, `nop`
+  removal, slot compaction). krusty does not run its rewrites over a transformed body yet; they
+  move to method nodes in the emitter refactor, and then run here.
+* The constants the transformed body adds are interned at the end of the pool, not in kotlinc's
+  first-use order.
+* A body the common IR expanded from a same-file inline function has no `$i$f`/`$i$a`
+  inline-depth locals, so its local-variable table and slots differ from kotlinc's.
 
 ## 2. The symptom this exists to fix
 

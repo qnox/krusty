@@ -4,9 +4,10 @@
 //! the call's result at the closing one. A suspension point needs this, because resuming enters the
 //! method with an empty stack.
 //!
-//! The try/catch part (saving a stack that is not empty where a protected range starts) and the
-//! break/continue and fake-`ifeq` pseudo-instructions are not ported: krusty's emitter never
-//! produces them, and [`fix_stack`] reports a body that would need them.
+//! The try/catch part is driven by codegen's save-stack pseudo-instructions around a `try` entered
+//! with values on the stack; it is not ported, and neither are the break/continue and fake-`ifeq`
+//! pseudo-instructions, because krusty's emitter never produces them. Protected ranges and their
+//! handlers otherwise need nothing from FixStack: its analysis follows the exception edges.
 
 use super::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Executor,
@@ -215,8 +216,6 @@ impl Executor<FixStackInterpreter> for FixStackFrames<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FixStackError {
     Analysis(AnalyzerError),
-    /// A protected range whose start the try/catch part of FixStack would have to handle.
-    TryCatchBlocks,
     /// A closing marker where more than the call's result is on the stack.
     ResultShape(usize),
     /// An uninitialized value on the stack an opening marker saves.
@@ -277,10 +276,6 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
         }
         return Ok(());
     }
-    if !method.method.try_catch_blocks.is_empty() {
-        return Err(FixStackError::TryCatchBlocks);
-    }
-
     let snapshot = method.snapshot();
     let mut opening = vec![None; snapshot.nodes.len()];
     for (before, after) in &pairs {

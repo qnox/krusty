@@ -55,11 +55,53 @@ pub(crate) fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
         0xc5 => 4,
         // krusty's temporary coroutine-site marker (`impdep1` + kind + ordinal).
         0xfe => 4,
+        // krusty's stand-in for one of kotlinc's `InlineMarker` calls (`impdep2` + kind).
+        CODEGEN_MARKER_OP => 2,
         0xb9 | 0xba | 0xc8 | 0xc9 => 5,
         _ => 1,
     };
     pc.checked_add(len).filter(|end| *end <= code.len())?;
     Some(len)
+}
+
+/// The opcode krusty writes in place of a call of kotlinc's `kotlin/jvm/internal/InlineMarker`.
+///
+/// kotlinc's codegen leaves those calls in a body for the passes that follow it: the coroutine
+/// transformer and FixStack read them and delete every one. Writing the calls themselves would
+/// intern `InlineMarker` into the class's constant pool, where kotlinc's final class has no such
+/// entry. `impdep2` (`0xff`) is reserved by JVMS §6.2 for an implementation's own use, so it is
+/// written instead, and a body read into a method node gets the call back (see [`CodegenMarker`]).
+pub(crate) const CODEGEN_MARKER_OP: u8 = 0xff;
+
+/// Which `InlineMarker` method a [`CODEGEN_MARKER_OP`] stands for; its one operand byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodegenMarker {
+    /// `mark(I)V`: the id is pushed by an ordinary constant instruction before it.
+    Mark = 1,
+    BeforeInlineCall = 2,
+    AfterInlineCall = 3,
+}
+
+impl CodegenMarker {
+    pub(crate) const OWNER: &'static str = "kotlin/jvm/internal/InlineMarker";
+
+    pub(crate) fn from_operand(operand: u8) -> Option<CodegenMarker> {
+        Some(match operand {
+            1 => CodegenMarker::Mark,
+            2 => CodegenMarker::BeforeInlineCall,
+            3 => CodegenMarker::AfterInlineCall,
+            _ => return None,
+        })
+    }
+
+    /// The `InlineMarker` method's name and descriptor.
+    pub(crate) fn method(self) -> (&'static str, &'static str) {
+        match self {
+            CodegenMarker::Mark => ("mark", "(I)V"),
+            CodegenMarker::BeforeInlineCall => ("beforeInlineCall", "()V"),
+            CodegenMarker::AfterInlineCall => ("afterInlineCall", "()V"),
+        }
+    }
 }
 
 #[cfg(test)]
