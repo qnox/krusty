@@ -6854,11 +6854,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classes join as `Object`, kotlinc casts each value to the type the join has in Kotlin before it gets
   there
   (`StackValue.coerce`: a `checkcast` whenever the JVM types differ and the target is not `Object`),
-  and so does krusty: a reassigned local is coerced to its declared type like its initializer, and a
+  and so does krusty: a reassigned local is coerced to its declared type like its initializer, a
   boxed primitive from its wrapper to a wider target such as `Number` (the constant side of
-  `t ?: 42` over `T : Number?`). Tests: `tests/computed_frames_e2e.rs` (runs, byte-identical facades, and
-  every written table equal to the computed one), `tests/frame_computation_e2e.rs` (the computation
-  reproduces kotlinc's own tables). `max_stack` and `max_locals` are ASM's `COMPUTE_MAXS` over the
+  `t ?: 42` over `T : Number?`), and the value of a `try` body and of each catch to the `try`'s type
+  before the result temporary stores it (`try { Right(x) } catch (t: Throwable) { Left(t) }` casts
+  both to `Either`; without the casts the merged `Object` fails verification at the `areturn`).
+  Tests: `tests/computed_frames_e2e.rs` (runs, byte-identical facades, a `try`'s instructions and
+  frames equal to kotlinc's, and every written table equal to the computed one),
+  `tests/frame_computation_e2e.rs` (the computation reproduces kotlinc's own tables). `max_stack` and `max_locals` are ASM's `COMPUTE_MAXS` over the
   same final body: the deepest stack the dataflow reaches (at least 1 when a block is dead, for its
   `athrow`), and the argument words plus every slot an instruction or a local-variable entry names.
 

@@ -171,6 +171,11 @@ impl Emitter<'_> {
             self.emit(body, code);
         } else {
             self.emit_value(body, code);
+            // kotlinc materializes the body and every catch at the `try`'s own type before the
+            // store (`StackValue.coerce`), so a subclass (`Right` in an `Either`-typed `try`) is
+            // cast up to it. The written frames merge the stored classes at `Object`, which only
+            // that cast keeps assignable to the result's type.
+            self.adapt_physical_operand_for(body, self.value_ty(body), rt, code);
             store(rt, result_slot.unwrap(), code);
         }
         if let Some(finalizer) = finally {
@@ -264,6 +269,7 @@ impl Emitter<'_> {
                 self.emit(c.body, code);
             } else {
                 self.emit_value(c.body, code);
+                self.adapt_physical_operand_for(c.body, self.value_ty(c.body), rt, code);
                 store(rt, result_slot.unwrap(), code);
             }
             if finally.is_some() {
