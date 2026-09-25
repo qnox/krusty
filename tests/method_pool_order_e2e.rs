@@ -248,3 +248,19 @@ fn a_nullable_enum_property_interns_its_annotation_with_the_declared_members() {
         &["Node"],
     );
 }
+
+/// A companion `var` hoisted to its outer class keeps a setter on the companion, and that setter
+/// interns its `<set-?>` local's descriptor with its own body, before the next member.
+#[test]
+fn a_hoisted_companion_setter_interns_its_locals_with_its_body() {
+    assert_identical(
+        "HoistedCompanionSetter",
+        "class Holder {\n\
+         \x20   companion object {\n\
+         \x20       var label = \"x\"\n\
+         \x20       fun touch() {}\n\
+         \x20   }\n\
+         }\n",
+        &["Holder$Companion", "Holder"],
+    );
+}
