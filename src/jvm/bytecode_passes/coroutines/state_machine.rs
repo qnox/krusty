@@ -7,7 +7,8 @@ use super::super::descriptors;
 use super::super::insn_list::{EditableMethod, NodeId};
 use super::super::opcodes::*;
 use super::markers::{
-    int_constant_insn, is_fake_local_variable_for_inline, is_suspend_marker, SuspendMarker,
+    int_constant_insn, is_fake_local_variable_for_inline, is_suspend_marker,
+    suspend_lambda_parameter_slots, SuspendMarker,
 };
 use super::suspension_points::SuspensionPoint;
 use super::{coroutine_suspended, NamedFunction};
@@ -29,9 +30,12 @@ fn jump(op: u8, target: LabelId) -> Node {
     Node::Insn(Insn::Jump { op, target })
 }
 
-/// The slots the machine adds, and the class it keeps its state in.
+/// Where the machine keeps its state: the class declaring `label`, `result` and the spill fields
+/// (a named function's continuation class, or the suspend lambda itself), the line its own code is
+/// attributed to, and the slots of the continuation and of the resumption result.
 pub(crate) struct Machine<'a> {
-    pub function: &'a NamedFunction<'a>,
+    pub state_class: &'a str,
+    pub line_number: u16,
     pub continuation_index: u16,
     pub data_index: u16,
 }
@@ -40,7 +44,7 @@ impl Machine<'_> {
     fn label_field(&self, op: u8) -> Node {
         Node::Insn(Insn::Field {
             op,
-            owner: self.function.continuation_class.to_string(),
+            owner: self.state_class.to_string(),
             name: "label".to_string(),
             desc: "I".to_string(),
         })
@@ -62,8 +66,12 @@ impl Machine<'_> {
 }
 
 /// `prepareMethodNodePreludeForNamedFunction`.
-pub(crate) fn prepare_prelude(method: &mut EditableMethod, machine: &Machine) {
-    let completion = machine.function.completion_slot;
+pub(crate) fn prepare_prelude(
+    method: &mut EditableMethod,
+    machine: &Machine,
+    function: &NamedFunction,
+) {
+    let completion = function.completion_slot;
     for id in method.insns.ids() {
         if let Node::Insn(Insn::Var { op: ALOAD, slot }) = method.insns.node(id) {
             if *slot == completion {
@@ -72,7 +80,7 @@ pub(crate) fn prepare_prelude(method: &mut EditableMethod, machine: &Machine) {
         }
     }
 
-    let class = machine.function.continuation_class;
+    let class = machine.state_class;
     let create = method.method.new_label();
     let created = method.method.new_label();
     let result_start = method.method.new_label();
@@ -110,7 +118,7 @@ pub(crate) fn prepare_prelude(method: &mut EditableMethod, machine: &Machine) {
     ];
     // `generateContinuationConstructorCall`.
     let mut constructor = String::from("(");
-    if let Some(receiver) = machine.function.dispatch_receiver {
+    if let Some(receiver) = function.dispatch_receiver {
         nodes.push(var(ALOAD, 0));
         constructor.push_str(&descriptors::of_internal_name(receiver));
     }
@@ -270,7 +278,7 @@ pub(crate) fn transform_call_and_return_state_label(
             jump(IF_ACMPNE, after_loaded_result),
             Node::Label(return_label),
             Node::Line {
-                line: machine.function.line_number,
+                line: machine.line_number,
                 start: return_label,
             },
             var(ALOAD, suspend_marker_var),
@@ -338,7 +346,7 @@ pub(crate) fn generate_tableswitch(
     let switch_label = method.method.new_label();
     let first_state = method.method.new_label();
     let default = method.method.new_label();
-    let line = machine.function.line_number;
+    let line = machine.line_number;
     let mut labels = vec![first_state];
     labels.extend_from_slice(state_labels);
     let mut nodes = vec![
@@ -496,30 +504,30 @@ pub(crate) fn remove_empty_catch_blocks(method: &mut EditableMethod) {
         .collect();
 }
 
-/// `getOrCreateStartingLabel` and `getOrCreateEndingLabel`.
-fn boundary_labels(method: &mut EditableMethod) -> (LabelId, LabelId) {
-    let start = match method.insns.first().map(|id| method.insns.node(id)) {
-        Some(Node::Label(label)) => *label,
-        _ => {
-            let label = method.method.new_label();
-            method.insns.insert_after(None, vec![Node::Label(label)]);
-            label
-        }
-    };
-    let end = match method.insns.last().map(|id| method.insns.node(id)) {
-        Some(Node::Label(label)) => *label,
-        _ => {
-            let label = method.method.new_label();
-            method.insns.add(Node::Label(label));
-            label
-        }
-    };
-    (start, end)
+/// `getOrCreateStartingLabel`.
+fn starting_label(method: &mut EditableMethod) -> LabelId {
+    if let Some(Node::Label(label)) = method.insns.first().map(|id| method.insns.node(id)) {
+        return *label;
+    }
+    let label = method.method.new_label();
+    method.insns.insert_after(None, vec![Node::Label(label)]);
+    label
+}
+
+/// `getOrCreateEndingLabel`.
+fn ending_label(method: &mut EditableMethod) -> LabelId {
+    if let Some(Node::Label(label)) = method.insns.last().map(|id| method.insns.node(id)) {
+        return *label;
+    }
+    let label = method.method.new_label();
+    method.insns.add(Node::Label(label));
+    label
 }
 
 /// `extendParameterRanges`: the parameters span the whole method again.
 pub(crate) fn extend_parameter_ranges(method: &mut EditableMethod, last_parameter_slot: u16) {
-    let (start, end) = boundary_labels(method);
+    let start = starting_label(method);
+    let end = ending_label(method);
     for slot in 0..=last_parameter_slot {
         let Some(first) = method
             .method
@@ -537,5 +545,50 @@ pub(crate) fn extend_parameter_ranges(method: &mut EditableMethod, last_paramete
             index += 1;
             keep
         });
+    }
+}
+
+/// `extendSuspendLambdaParameterRanges`: a suspend lambda's parameters are read from their fields
+/// on every entry, before the `tableswitch`, so each spans the method from the first label after
+/// the last parameter marker — one entry, moved to the end of the table.
+pub(crate) fn extend_suspend_lambda_parameter_ranges(method: &mut EditableMethod) {
+    let slots = suspend_lambda_parameter_slots(&method.insns);
+    if slots.is_empty() {
+        return;
+    }
+    let Some(last_marker) =
+        method.insns.ids().into_iter().rev().find(|&id| {
+            is_suspend_marker(&method.insns, id, SuspendMarker::SuspendLambdaParameter)
+        })
+    else {
+        return;
+    };
+    let mut cursor = method.insns.next(last_marker);
+    let start = loop {
+        let Some(id) = cursor else {
+            return;
+        };
+        if let Node::Label(label) = method.insns.node(id) {
+            break *label;
+        }
+        cursor = method.insns.next(id);
+    };
+    for slot in slots {
+        let Some(first) = method
+            .method
+            .local_variables
+            .iter()
+            .position(|local| local.slot == slot)
+        else {
+            continue;
+        };
+        let mut extended = method.method.local_variables[first].clone();
+        method
+            .method
+            .local_variables
+            .retain(|local| local.slot != slot);
+        extended.start = start;
+        extended.end = ending_label(method);
+        method.method.local_variables.push(extended);
     }
 }

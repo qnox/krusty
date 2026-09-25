@@ -13,10 +13,10 @@ use super::super::analysis::{
 use super::super::descriptors;
 use super::super::insn_list::EditableMethod;
 use super::super::opcodes::*;
-use super::markers::{is_fake_local_variable_for_inline, is_suspend_marker, SuspendMarker};
+use super::markers::{is_fake_local_variable_for_inline, suspend_lambda_parameter_slots};
 use super::spilled_types::spilled_variable_field_types;
 use super::suspension_points::SuspensionPoint;
-use super::{CoroutineError, SpillField, SpilledLocal, StateMachineLayout};
+use super::{CoroutineError, DeclaredSpillFields, SpillField, SpilledLocal, StateMachineLayout};
 use crate::jvm::method_node::{Insn, LabelId, LocalVariable, Node};
 
 const OBJECT: &str = "Ljava/lang/Object;";
@@ -70,9 +70,19 @@ pub(crate) struct SpillContext<'a> {
     /// `$completion`'s slot in a named function.
     pub completion_slot: Option<u16>,
     pub is_static: bool,
+    /// The spill fields the state class declares before spilling (`initialVarsCountByType`).
+    pub declared: &'a [DeclaredSpillFields<'a>],
 }
 
 impl SpillContext<'_> {
+    /// The highest declared index of the spill fields of `normalized` type.
+    fn declared_max(&self, normalized: &str) -> Option<usize> {
+        self.declared
+            .iter()
+            .find(|declared| declared.descriptor == normalized)
+            .map(|declared| declared.max_index)
+    }
+
     fn field(&self, op: u8, name: &str, descriptor: &str) -> Node {
         Node::Insn(Insn::Field {
             op,
@@ -110,12 +120,17 @@ pub(crate) fn spill_variables(
         return Ok(());
     }
     let frames = spilled_variable_field_types(method, context.owner)?;
-    let suspend_lambda_parameters = suspend_lambda_parameter_slots(method);
+    let suspend_lambda_parameters = suspend_lambda_parameter_slots(&method.insns);
     let snapshot = method.snapshot();
     let liveness = analyze_liveness(&snapshot);
 
-    // Field counts by normalized type, in first-seen order (`maxVarsCountByType`).
-    let mut max_counts: Vec<(String, usize)> = Vec::new();
+    // Field counts by normalized type, the declared kinds first, then in first-seen order
+    // (`maxVarsCountByType`).
+    let mut max_counts: Vec<(String, usize)> = context
+        .declared
+        .iter()
+        .map(|declared| (declared.descriptor.to_string(), declared.max_index))
+        .collect();
     let mut references = Vec::new();
     let mut primitives = Vec::new();
     let mut all = Vec::new();
@@ -155,7 +170,10 @@ pub(crate) fn spill_variables(
         }
     }
 
-    let cleanups = variables_to_clean_up(method, points, &references);
+    // `initialSpilledVariablesCount`: kotlinc takes the declared reference kind's highest index as
+    // the count a point without a preceding point is compared against.
+    let initial_references = context.declared_max(OBJECT).unwrap_or(0);
+    let cleanups = variables_to_clean_up(method, points, &references, initial_references);
     layout.spilled_locals = points
         .iter()
         .enumerate()
@@ -211,7 +229,8 @@ pub(crate) fn spill_variables(
     }
 
     for (ty, max) in max_counts {
-        for index in 0..=max {
+        let first = context.declared_max(&ty).map_or(0, |declared| declared + 1);
+        for index in first..=max {
             layout.fields.push(SpillField {
                 name: field_name(&ty, index),
                 descriptor: ty.clone(),
@@ -343,11 +362,12 @@ fn local_name(method: &EditableMethod, slot: u16, index: usize) -> Option<String
 }
 
 /// `calculateVariablesToCleanup`: for each point, how many reference fields it fills and the most
-/// any directly preceding point filled; the fields in between are nulled.
+/// any directly preceding point filled, `initial` without one; the fields in between are nulled.
 fn variables_to_clean_up(
     method: &EditableMethod,
     points: &[SuspensionPoint],
     references: &[Vec<SpillableVariable>],
+    initial: usize,
 ) -> Vec<(usize, usize)> {
     let snapshot = method.snapshot();
     let graph = ControlFlowGraph::build(&snapshot, true);
@@ -374,7 +394,11 @@ fn variables_to_clean_up(
                 }
                 stack.extend(graph.predecessors(node).iter().copied());
             }
-            let predecessor = predecessors.iter().map(|&p| count(p)).max().unwrap_or(0);
+            let predecessor = predecessors
+                .iter()
+                .map(|&p| count(p))
+                .max()
+                .unwrap_or(initial);
             (count(index), predecessor)
         })
         .collect()
@@ -432,23 +456,6 @@ fn variables_to_reinitialize(
         }
     }
     result
-}
-
-/// `collectSuspendLambdaParameterSlots`: the slots a `mark(10)` follows a load of.
-fn suspend_lambda_parameter_slots(method: &EditableMethod) -> Vec<u16> {
-    let insns = &method.insns;
-    insns
-        .ids()
-        .into_iter()
-        .filter(|&id| is_suspend_marker(insns, id, SuspendMarker::SuspendLambdaParameter))
-        .filter_map(|id| {
-            let load = insns.prev(id).and_then(|push| insns.prev(push))?;
-            match insns.node(load) {
-                Node::Insn(Insn::Var { slot, .. }) => Some(*slot),
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 /// `generateSpillAndUnspill`.
