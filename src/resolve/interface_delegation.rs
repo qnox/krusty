@@ -10,9 +10,9 @@ use std::collections::{HashSet, VecDeque};
 use crate::fir::{
     ResolvedDelegatedCall, ResolvedDelegatedCallTarget, ResolvedDelegatedContextParameter,
     ResolvedDelegatedFunction, ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedMember,
-    ResolvedDelegatedModuleTarget, ResolvedDelegatedProperty, ResolvedDelegatedTypeParameter,
-    ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation,
-    ResolvedModuleIndex, ResolvedTy,
+    ResolvedDelegatedModuleTarget, ResolvedDelegatedProperty, ResolvedDelegatedPropertyDeclaration,
+    ResolvedDelegatedTypeParameter, ResolvedFunctionOverrideTarget,
+    ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::libraries::{FnKind, FunctionInfo, PropKind, PropertyInfo};
 use crate::symbol_source::{CompositeSource, SymbolSource};
@@ -635,8 +635,18 @@ fn delegation_members(
         {
             return None;
         }
+        let declaration = setter.unwrap_or(getter);
+        let (target, declared_ty) =
+            super::override_plans::property_declaration(index, declaration)?;
+        let overridden = Box::new(ResolvedDelegatedPropertyDeclaration {
+            target,
+            owner: declaration.owner,
+            ty: ResolvedTy::new(declared_ty).ok()?,
+            interface: declaration.getter.owner_is_interface,
+        });
         members.push(ResolvedDelegatedMember::Property(
             ResolvedDelegatedProperty {
+                overridden,
                 name: getter.name.clone().into_boxed_str(),
                 ty: ResolvedTy::new(property_type).ok()?,
                 context_parameters: getter

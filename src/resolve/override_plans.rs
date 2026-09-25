@@ -130,6 +130,28 @@ fn target(
         })
 }
 
+/// The exact declaration `property` selects and its unsubstituted declared type: the signature a
+/// generated implementation (an interface delegation forwarder) must bridge to.
+pub(super) fn property_declaration(
+    index: &ResolvedModuleIndex,
+    property: &PropertyInfo,
+) -> Option<(ResolvedPropertyOverrideTarget, Ty)> {
+    let selected = target(index, property)?;
+    let declared = match selected {
+        ResolvedPropertyOverrideTarget::Module(_) => {
+            index.signature(property.stable_declaration?)?.result.get()
+        }
+        ResolvedPropertyOverrideTarget::External(_) => {
+            let getter = &property.getter;
+            getter
+                .declared_ret
+                .or_else(|| getter.generic_sig.as_ref().map(|signature| signature.ret))
+                .unwrap_or(getter.ret)
+        }
+    };
+    Some((selected, declared))
+}
+
 fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
