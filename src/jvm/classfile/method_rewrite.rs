@@ -2,9 +2,10 @@
 //!
 //! kotlinc does not write its temporaries onto the operand stack while generating code; it writes
 //! them as locals and lets a bytecode pass fold them (see `bytecode_passes::temporaries`). This is
-//! the place krusty does the same. It runs when the class is written, because only then is every
-//! table final: several line and local-variable tables are attached after a method is added, and
-//! which values are temporaries depends on them. The method is read back into a
+//! the place krusty does the same. The rewrite is first decided when a method is added, so frame
+//! classes are interned in kotlinc's order, and that outcome is reused when the class is written if
+//! every table the decision read is unchanged. Methods whose line or local-variable tables are
+//! attached later are decided again from those final tables. The method is read back into a
 //! [`MethodNode`](crate::jvm::method_node::MethodNode) (see [`finished_node`]), kotlinc's passes run over it, and it is laid out again: every table
 //! keyed by a byte offset — exception ranges, line numbers, local ranges, the implicit return —
 //! hangs off a label and moves with it.
@@ -38,10 +39,46 @@ pub(super) struct RewriteSource {
     pub name: String,
     pub desc: String,
     pub builder: CodeBuilder,
+    /// The rewrite already decided when the method was added (see [`ClassWriter::remembered_rewrite`]).
+    pub decided: Option<Decided>,
+}
+
+/// A rewrite decided from a method's tables, reused when the class is written if they still hold.
+#[derive(Clone)]
+pub(super) struct Decided {
+    inputs: RewriteInputs,
+    outcome: Option<Rewritten>,
+}
+
+/// Everything of a method the rewrite reads besides its source and the constant pool.
+#[derive(Clone, PartialEq)]
+struct RewriteInputs {
+    code: Option<Vec<u8>>,
+    exceptions: Vec<(u16, u16, u16, u16)>,
+    lnt: Vec<(u16, u16)>,
+    lvt: Vec<LvtEntry>,
+    implicit_void_return_pc: Option<u16>,
+    max_stack: u16,
+    max_locals: u16,
+}
+
+impl RewriteInputs {
+    fn of(method: &MethodInfo) -> Self {
+        RewriteInputs {
+            code: method.code.clone(),
+            exceptions: method.exceptions.clone(),
+            lnt: method.lnt.clone(),
+            lvt: method.lvt.clone(),
+            implicit_void_return_pc: method.implicit_void_return_pc,
+            max_stack: method.max_stack,
+            max_locals: method.max_locals,
+        }
+    }
 }
 
 /// A rewritten method's `Code` and every table that moved with it. Its frames and maxima are
 /// computed from it when the class is written.
+#[derive(Clone)]
 pub(super) struct Rewritten {
     pub(super) code: Vec<u8>,
     pub(super) exceptions: Vec<(u16, u16, u16, u16)>,
@@ -92,10 +129,18 @@ impl ClassWriter {
     /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
     pub(super) fn rewrite_methods(&mut self) {
         for index in 0..self.methods.len() {
-            let Some(source) = self.methods[index].rewrite_source.take() else {
+            let Some(mut source) = self.methods[index].rewrite_source.take() else {
                 continue;
             };
-            let Some(rewritten) = self.rewritten(&self.methods[index], &source) else {
+            let decided = source
+                .decided
+                .take()
+                .filter(|decided| decided.inputs == RewriteInputs::of(&self.methods[index]));
+            let rewritten = match decided {
+                Some(decided) => decided.outcome,
+                None => self.rewritten(&self.methods[index], &source),
+            };
+            let Some(rewritten) = rewritten else {
                 continue;
             };
             let method = &mut self.methods[index];
@@ -108,6 +153,28 @@ impl ClassWriter {
         }
     }
 
+    /// The rewrite of the method at `index`, remembered for when the class is written. The
+    /// rewrite reads the method's tables, which can still change until then, and the constant
+    /// pool, which only grows: a constant it found keeps its index, so an outcome that found every
+    /// constant it looked for holds while the tables do. One that missed a constant is decided
+    /// again, when a later method may have added it.
+    pub(super) fn remembered_rewrite(&mut self, index: usize) -> Option<Rewritten> {
+        let method = &self.methods[index];
+        let source = method.rewrite_source.as_deref()?;
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let outcome = self.rewritten_with(method, source, &mut pool);
+        if !pool.missed() {
+            let inputs = RewriteInputs::of(method);
+            if let Some(source) = self.methods[index].rewrite_source.as_deref_mut() {
+                source.decided = Some(Decided {
+                    inputs,
+                    outcome: outcome.clone(),
+                });
+            }
+        }
+        outcome
+    }
+
     /// `method` after kotlinc's rewrites, or `None` when none applies or the rewritten body could
     /// not be proven to keep its frames.
     pub(super) fn rewritten(
@@ -115,18 +182,30 @@ impl ClassWriter {
         method: &MethodInfo,
         source: &RewriteSource,
     ) -> Option<Rewritten> {
+        self.rewritten_with(
+            method,
+            source,
+            &mut PoolLookup::new(&self.cp, &self.bootstrap_methods),
+        )
+    }
+
+    fn rewritten_with(
+        &self,
+        method: &MethodInfo,
+        source: &RewriteSource,
+        pool: &mut PoolLookup<'_>,
+    ) -> Option<Rewritten> {
         let bytes = method.code.as_ref()?;
         if bytes.is_empty() || source.builder.bytes != *bytes {
             return None;
         }
-        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let FinishedNode {
             mut node,
             implicit_return,
-        } = self.finished_node(method, source, bytes, &pool)?;
+        } = self.finished_node(method, source, bytes, pool)?;
         // The builder's labels and branch fixups name offsets of the emitted bytes, so the node must
         // lay out exactly as emitted.
-        if pool.missed() || node.assemble(&mut pool).ok()?.code != *bytes {
+        if pool.missed() || node.assemble(pool).ok()?.code != *bytes {
             return None;
         }
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
@@ -223,7 +302,7 @@ impl ClassWriter {
         }
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
-        let assembled = node.assemble(&mut pool).ok()?;
+        let assembled = node.assemble(pool).ok()?;
         if pool.missed()
             || assembled
                 .exception_table
@@ -289,5 +368,68 @@ impl StackTops for FrameTypes {
             Some(VerificationType::Reference(name)) => **name == *class,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::classfile::{ACC_PUBLIC, ACC_STATIC};
+
+    /// `static int f() { int t = 1; return t; }` with `t` a temporary the rewrite folds.
+    fn writer_with_temporary() -> ClassWriter {
+        let mut writer = ClassWriter::new("T", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        code.push_int(1, &mut writer);
+        code.istore(0);
+        code.iload(0);
+        code.ireturn();
+        code.link();
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "f", "()I", &code);
+        writer
+    }
+
+    #[test]
+    fn a_rewrite_decided_when_the_method_is_added_is_the_one_written() {
+        let mut writer = writer_with_temporary();
+        let fresh = {
+            let method = &writer.methods[0];
+            let source = method.rewrite_source.as_deref().expect("rewrite source");
+            writer
+                .rewritten(method, source)
+                .expect("the temporary folds")
+        };
+        // Make the remembered result observably different from a fresh rewrite. The line is valid
+        // but is not part of the source method, so it can reach the method only through reuse.
+        let remembered_line = vec![(0, 7)];
+        let source = writer.methods[0]
+            .rewrite_source
+            .as_deref_mut()
+            .expect("rewrite source");
+        let remembered = source
+            .decided
+            .as_mut()
+            .and_then(|decided| decided.outcome.as_mut())
+            .expect("remembered rewrite");
+        assert_eq!(remembered.code, fresh.code);
+        remembered.lnt.clone_from(&remembered_line);
+        writer.rewrite_methods();
+        assert_eq!(writer.methods[0].code.as_deref(), Some(&fresh.code[..]));
+        assert_eq!(writer.methods[0].lnt, remembered_line);
+    }
+
+    #[test]
+    fn a_table_attached_after_the_method_is_added_is_rewritten_again() {
+        let mut writer = writer_with_temporary();
+        writer.methods[0].lnt = vec![(0, 7)];
+        let method = &writer.methods[0];
+        let source = method.rewrite_source.as_deref().expect("rewrite source");
+        let fresh = writer
+            .rewritten(method, source)
+            .expect("the temporary folds");
+        assert_eq!(fresh.lnt, vec![(0, 7)]);
+        writer.rewrite_methods();
+        assert_eq!(writer.methods[0].lnt, vec![(0, 7)]);
+        assert_eq!(writer.methods[0].code.as_deref(), Some(&fresh.code[..]));
     }
 }
