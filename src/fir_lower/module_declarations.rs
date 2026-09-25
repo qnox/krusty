@@ -54,9 +54,18 @@ fn publish_callable(
             callable.declaration,
         ))?
         .flags;
-    let owner = index
-        .enclosing_classifier(callable.declaration)
-        .map(|classifier| classifier.classifier);
+    let owner = index.enclosing_classifier(callable.declaration);
+    let owner_kind = owner
+        .map(|classifier| {
+            index
+                .declaration_header(classifier.declaration)
+                .map(|header| classifier_kind(header.flags))
+                .ok_or(FirFileLoweringFailure::MissingModuleClassifier(
+                    classifier.classifier,
+                ))
+        })
+        .transpose()?;
+    let owner = owner.map(|classifier| classifier.classifier);
     let signature =
         index
             .signature(callable.declaration)
@@ -88,6 +97,7 @@ fn publish_callable(
                 ))?
                 .into(),
             owner,
+            owner_kind,
             flags,
             parameters: parameters.into_boxed_slice(),
             result: signature.result.get(),

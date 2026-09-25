@@ -24,7 +24,6 @@ bridges/delegationProperty.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/kt2702.kt
-bridges/kt46389.kt
 bridges/returnTypeSignature.kt
 bridges/simpleReturnType.kt
 bridges/special.kt
@@ -91,8 +90,6 @@ coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/inlineSuspendFinally.kt
-coroutines/featureIntersection/interfaceMethodWithBody.kt
-coroutines/featureIntersection/interfaceMethodWithBodyGeneric.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/featureIntersection/tailrec/realStringRepeat.kt
@@ -125,7 +122,6 @@ coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/inlineSuspendFunction.kt
 coroutines/inlineSuspendLambdaNonLocalReturn.kt
 coroutines/kt28844.kt
-coroutines/kt45377.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
@@ -155,7 +151,6 @@ delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegation/delegationDifferentModule.kt
 delegation/genericFunctionInGenericInterface.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 diagnostics/functions/tailRecursion/defaultArgs.kt
 diagnostics/functions/tailRecursion/defaultArgs2.kt
 diagnostics/functions/tailRecursion/defaultArgsWithSideEffects.kt
@@ -195,8 +190,6 @@ funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/kt46908_functionSupertype.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
-funInterface/kt79092-sam.kt
-funInterface/kt79092.kt
 funInterface/noConversionForSubtype.kt
 funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nullableSam.kt
@@ -238,7 +231,6 @@ inline/fakeOverrideInlining.kt
 inline/fakeOverrideInliningCrossModule.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
-inline/multipleInheritanceClash.kt
 inline/typeSubstitutionInFakeOverride.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineClasses/anySuperCall.kt
@@ -365,12 +357,10 @@ localClasses/ownClosureOfInnerLocalClass.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/basic/expectActualFakeOverrides.kt
 multiplatform/k2/basic/extensionPropertyWithAnonymousExtension.kt
-multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
-multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/dispatchReceiverValue.kt
 multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
@@ -481,15 +471,12 @@ statics/syntheticAccessor.kt
 strings/concatGenericWithNullablePrimitiveUpperBound.kt
 strings/kt13213.kt
 strings/kt47917.kt
-super/interfaceHashCode.kt
 super/kt14243.kt
 super/kt14243_2.kt
 super/kt14243_class.kt
 super/kt4982.kt
 syntheticAccessors/kt10047.kt
-traits/kt36973.kt
 traits/traitImplGenericDelegation.kt
-traits/traitWithPrivateMemberAccessFromLambda.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 typeErasure/funWithReifiedTypeParameterInsideClass.kt
 typeErasure/funWithReifiedTypeParameterInsideInnerClass.kt
