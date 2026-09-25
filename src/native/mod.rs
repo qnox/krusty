@@ -19,6 +19,7 @@
 
 mod prebuilt;
 mod target;
+mod target_contract;
 
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};
