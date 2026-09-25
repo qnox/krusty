@@ -18,9 +18,8 @@
 //! directly: it is the difference between a miscompile and a correct method, and no byte
 //! comparison of a differing method would name it.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    import kotlinx.serialization.StringFormat\n\

@@ -1,0 +1,19 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[incompatible_dependent_bound_calls_are_rejected_exactly]
+2.4.0..2.4.10:
+  Bad.kt:4:47: error: return type mismatch: expected 'String', actual 'U (of fun <U> bad)'.
+  fun <U> bad(u: U): String = Box("x").orElse { u }
+                                                ^
+  Bad.kt:5:36: error: unresolved reference. None of the following candidates is applicable because of a receiver type mismatch:
+  fun <R, T : R> Box<T>.orElse(fallback: () -> R): R
+  fun explicitBad(): String = Box(1).orElse<String, Int> { "x" }
+                                     ^^^^^^
+2.4.20:
+  Bad.kt:4:47: error: return type mismatch: expected 'String', actual 'U (of fun <U> bad)'.
+  fun <U> bad(u: U): String = Box("x").orElse { u }
+                                                ^
+  Bad.kt:5:36: error: candidate 'fun <R, T : R> Box<T>.orElse(fallback: () -> R): R' is inapplicable because of a receiver type mismatch.
+  fun explicitBad(): String = Box(1).orElse<String, Int> { "x" }
+                                     ^^^^^^

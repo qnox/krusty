@@ -935,6 +935,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .map_or(c.is_value, |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
+                    let classifier_is_annotation = classifier_declaration_flags.map_or_else(
+                        || c.is_annotation(),
+                        |flags| flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS),
+                    );
                     if compact_headers.is_none() {
                         assert_eq!(
                             classifier_header.primary_parameters.len(),
@@ -1481,22 +1485,24 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             )
                         })
                         .collect::<Vec<_>>();
-                    // Primary-constructor defaults are executable checked body units. Compact
-                    // signatures retain their presence in `ctor_param_names`; they must not retain
-                    // or inspect initializer syntax merely to support legacy literal substitution.
-                    let ctor_defaults: Vec<Option<CtorDefaultValue>> = if compact_headers.is_some()
-                    {
-                        vec![None; classifier_header.primary_parameters.len()]
-                    } else {
-                        c.props
-                            .iter()
-                            .map(|p| {
-                                p.default.and_then(|dx| {
-                                    extract_ctor_default(file, dx, &class_names, &*libraries)
+                    // Ordinary primary-constructor defaults are executable checked body units.
+                    // Annotation defaults additionally form a closed, file-independent semantic
+                    // declaration shape: a construction in another file must carry them without
+                    // borrowing an ExprId from the declaring file. Normalize only that language-
+                    // required compact value here; ordinary constructors retain presence alone.
+                    let ctor_defaults: Vec<Option<CtorDefaultValue>> =
+                        if compact_headers.is_some() && !classifier_is_annotation {
+                            vec![None; classifier_header.primary_parameters.len()]
+                        } else {
+                            c.props
+                                .iter()
+                                .map(|p| {
+                                    p.default.and_then(|dx| {
+                                        extract_ctor_default(file, dx, &class_names, &*libraries)
+                                    })
                                 })
-                            })
-                            .collect()
-                    };
+                                .collect()
+                        };
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = classifier_header
                         .primary_parameters
@@ -3030,17 +3036,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
                         classifier: internal,
-                        kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
-                            crate::libraries::TypeKind::Annotation
-                        } else if classifier_flags.has(ClassFlags::OBJECT) {
-                            crate::libraries::TypeKind::Object
-                        } else if classifier_is_enum {
-                            crate::libraries::TypeKind::Enum
-                        } else if classifier_flags.has(ClassFlags::INTERFACE) {
-                            crate::libraries::TypeKind::Interface
-                        } else {
-                            crate::libraries::TypeKind::Class
-                        },
+                        companion: direct_companion,
+                        kind: frontend_class_kind(classifier_flags, classifier_is_enum),
                         is_sealed: classifier_flags.has(ClassFlags::SEALED),
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
@@ -3442,6 +3439,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             source_decl: Some(d),
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
+                            applied_annotations: Vec::new(),
                             annotation_class_arguments: resolved_annotation_class_arguments,
                             generated_nested_classifiers,
                             props,
@@ -3585,6 +3583,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     source_decl: None,
                                     visibility: Visibility::Public,
                                     annotations: Vec::new(),
+                                    applied_annotations: Vec::new(),
                                     annotation_class_arguments: Vec::new(),
                                     generated_nested_classifiers: Vec::new(),
                                     props: Vec::new(),

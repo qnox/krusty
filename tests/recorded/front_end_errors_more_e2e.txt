@@ -1,0 +1,34 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[mixed_argument_diagnostics_are_shared_across_source_callables#constructor]
+2.4.0..2.4.10:
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+  no value passed for parameter 'first'.
+2.4.20:
+  no value passed for parameter 'first'.
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+
+[mixed_argument_diagnostics_are_shared_across_source_callables#local]
+2.4.0..2.4.10:
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+  no value passed for parameter 'first'.
+2.4.20:
+  no value passed for parameter 'first'.
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+
+[mixed_argument_diagnostics_are_shared_across_source_callables#member]
+2.4.0..2.4.10:
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+  no value passed for parameter 'first'.
+2.4.20:
+  no value passed for parameter 'first'.
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+
+[mixed_argument_diagnostics_are_shared_across_source_callables#top-level]
+2.4.0..2.4.10:
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.
+  no value passed for parameter 'first'.
+2.4.20:
+  no value passed for parameter 'first'.
+  mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.

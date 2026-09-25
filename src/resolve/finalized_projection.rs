@@ -473,6 +473,71 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (&declaration, spellings) in &table.stable_declared_spellings {
         index.publish_declaration_spellings(declaration, spellings.clone());
     }
+    for class in table.classes.values() {
+        if let Some(declaration) = class.stable_declaration {
+            index.publish_declaration_applied_annotations(
+                declaration,
+                class.applied_annotations.iter().cloned(),
+            );
+            if class.is_annotation() {
+                let constructor = class
+                    .primary_constructor_declaration
+                    .and_then(|constructor| index.callable_for_declaration(constructor));
+                if let Some(constructor) = constructor {
+                    index.publish_annotation_constructor_defaults(
+                        constructor.id,
+                        class.ctor_defaults.iter().cloned(),
+                    );
+                }
+            }
+        }
+        let (Some(declaration), Some(companion)) =
+            (class.stable_declaration, class.companion_internal)
+        else {
+            continue;
+        };
+        let Some(companion_class) = table.classes.get(&companion) else {
+            continue;
+        };
+        let generated_accessor = companion_class
+            .methods
+            .values()
+            .flatten()
+            .find(|signature| {
+                signature
+                    .plugin_expression
+                    .as_ref()
+                    .is_some_and(|expression| {
+                        expression.plugin == "serialization" && expression.operation == "serializer"
+                    })
+            });
+        let Some(accessor) = generated_accessor else {
+            continue;
+        };
+        let field = companion
+            .nested_segment_within(class.internal)
+            .map(Box::<str>::from)
+            .or_else(|| {
+                class
+                    .generated_nested_classifiers
+                    .iter()
+                    .find(|generated| {
+                        generated.classifier == companion
+                            && generated.purpose
+                                == crate::types::GeneratedClassifierPurpose::SerializationCompanion
+                    })
+                    .map(|generated| generated.source_name.clone())
+            });
+        let Some(field) = field else {
+            continue;
+        };
+        index.publish_serialization_companion_accessor(
+            declaration,
+            field,
+            companion,
+            accessor.params.len(),
+        );
+    }
     for (declaration, suppressions) in table.visibility_suppressed_declarations() {
         index.publish_visibility_suppression(
             declaration,

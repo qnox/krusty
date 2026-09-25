@@ -11,7 +11,7 @@ use crate::source::SourceInput;
 
 fn module_target(call: &FirConstructorCall) -> crate::fir::CallableId {
     match &call.target {
-        FirConstructorTarget::Module(target) => *target,
+        FirConstructorTarget::Module { declaration, .. } => *declaration,
         FirConstructorTarget::External { .. } => panic!("expected a module constructor"),
     }
 }

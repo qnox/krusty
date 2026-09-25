@@ -1379,6 +1379,29 @@ pub struct LocalClassNameProvenance {
     pub ordinal: Option<u32>,
 }
 
+/// Where a body-local callable sits among the callables kotlinc lifts out of one declaration.
+///
+/// kotlinc numbers the lambdas and the name-clashing local functions it lifts in one sequence per
+/// lexical owner and outermost declaration name (`container`: a function's name, a property's,
+/// `<init>` for constructors and initializers, `<get-x>` for an accessor). `path` walks from that
+/// declaration down to this callable, one step per enclosing local callable; each step's
+/// `position` is its place in the source order of the sequence. Whether a lambda takes a place at
+/// all depends on its type (a suspend lambda becomes a class instead), which only checking knows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiftingSite {
+    pub owner: String,
+    pub container: String,
+    pub path: Vec<LiftingStep>,
+}
+
+/// One enclosing local callable of a [`LiftingSite`]: its source name (`None` for a lambda) and its
+/// position in the sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiftingStep {
+    pub name: Option<String>,
+    pub position: u32,
+}
+
 /// One parsed import directive with the source span of each path segment.
 #[derive(Clone, Debug)]
 pub struct ImportPath {
@@ -1609,6 +1632,17 @@ pub struct File {
     /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
     /// in the body, while this count preserves the function type's context-receiver shape.
     pub anon_fun_context_count: std::collections::HashMap<u32, u32>,
+    /// Backend-neutral naming provenance of each callable reference, by expression id, from the
+    /// file's local-class naming walk. A backend that realizes the reference as a class of its own
+    /// names it from this.
+    pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
+    /// Lifting provenance of each lambda literal, by expression id, from the file's local-function
+    /// naming walk.
+    pub lambda_lifting_sites: std::collections::HashMap<u32, LiftingSite>,
+    /// Lifting provenance of each local function declaration, by statement id.
+    pub local_function_lifting_sites: std::collections::HashMap<StmtId, LiftingSite>,
+    /// Lifting provenance of the accessors of each local delegated property, by statement id.
+    pub local_delegate_lifting_sites: std::collections::HashMap<StmtId, Vec<LiftingSite>>,
     /// Declared receiver type of an anonymous extension function (`fun R.(x: A) { … }`), keyed by
     /// the desugared lambda's `ExprId.0`.
     pub anon_fun_receivers: std::collections::HashMap<u32, TypeRef>,
@@ -1792,6 +1826,10 @@ impl File {
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();
+        self.callable_reference_provenance = Default::default();
+        self.lambda_lifting_sites = Default::default();
+        self.local_function_lifting_sites = Default::default();
+        self.local_delegate_lifting_sites = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();

@@ -1,7 +1,7 @@
-//! Cross-module bytecode inliner (inliner #2): a *branchless* `inline fun` compiled by the real
-//! `kotlinc` into a separate library is **spliced** into the caller by krusty — no `invokestatic` to
-//! the library function survives, and the result is correct under the JVM verifier. Proves the
-//! emitter's unified bytecode-splice path end-to-end.
+//! Cross-module bytecode inliner: an `inline fun` compiled by the real `kotlinc` into a separate
+//! library is **spliced** into the caller by krusty — no `invokestatic` to the library function
+//! survives, and the result is correct under the JVM verifier. Proves the emitter's unified
+//! bytecode-splice path end-to-end.
 
 use super::common;
 
@@ -10,7 +10,7 @@ fn env(k: &str) -> Option<String> {
 }
 
 #[test]
-fn branchless_inline_fn_is_spliced_not_called() {
+fn user_inline_functions_are_spliced_not_called() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping inline_splice_e2e: set JAVA_HOME");
         return;
@@ -19,13 +19,9 @@ fn branchless_inline_fn_is_spliced_not_called() {
     let stdlib_path = stdlib;
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    // 1. A library with a branchless `inline fun`, compiled by the *real* kotlinc (persistent server).
-    let Some(libout) = common::compile_libs(
-        "inline_splice",
-        &[(
-            "Lib.kt",
+    // 1. A library with user-defined inline functions, compiled by the real kotlinc server.
+    let Some(libout) = common::kotlinc_library(
         "package lib\ninline fun triple(x: Int): Int = x * 3\ninline fun atLeast(x: Int, lo: Int): Int = if (x < lo) lo else x\ninline fun applyIt(x: Int, f: (Int) -> Int): Int = f(x)\n",
-        )],
     ) else {
         return;
     };
@@ -33,7 +29,10 @@ fn branchless_inline_fn_is_spliced_not_called() {
     // 2. A caller that uses the inline fn, compiled by krusty (in-process) with the lib on its
     // classpath. `a` is a live caller local across the spliced `triple(a)` call — if the splice
     // clobbered its slot, `a + b` would be wrong. Exercises the splice-base (no slot collision).
-    let main_src = "import lib.triple\nimport lib.atLeast\nimport lib.applyIt\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    val e = applyIt(b) { it + 1 }\n    return if (a == 5 && b == 15 && c == 20 && d == 15 && e == 16) \"OK\" else \"fail:a=$a b=$b c=$c d=$d e=$e\"\n}\n";
+    // `f` keeps the left arithmetic operand live while the branchy `atLeast` body executes. This is
+    // intentionally a user-defined inline function: the regression must exercise generic splice
+    // dataflow, not a stdlib intrinsic or a classifier/member-name special case.
+    let main_src = "import lib.triple\nimport lib.atLeast\nimport lib.applyIt\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    val e = applyIt(b) { it + 1 }\n    val f = 7 + atLeast(b, 20)\n    return if (a == 5 && b == 15 && c == 20 && d == 15 && e == 16 && f == 27) \"OK\" else \"fail:a=$a b=$b c=$c d=$d e=$e f=$f\"\n}\n";
     let cp = vec![libout.clone(), stdlib_path.clone()];
     let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
         .expect("krusty(main) failed to compile");

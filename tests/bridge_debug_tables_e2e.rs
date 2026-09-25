@@ -13,9 +13,8 @@
 //! every such class — and in every `@Serializable` class twice over, since a generated `$serializer`
 //! bridges both `serialize` and `deserialize`.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
     let Some(dir) = common::scratch_dir() else {

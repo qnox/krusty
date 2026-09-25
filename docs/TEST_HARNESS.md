@@ -12,7 +12,7 @@ parameters.
   recipe is a plain download, so do what it does:
 
   ```sh
-  ver=2.4.10
+  ver=2.4.20
   dest="$PWD/target/cache/kotlinc/$ver"
   mkdir -p "$dest"
   curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
@@ -106,9 +106,60 @@ CI builds the conformance test binary once and runs that artifact against every 
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
 uses the same configurable process-group conformance deadline as the local harness, including its
-spawned compiler and runner JVMs. Each leg must score at least 55% of backend-applicable cases before
-a release can publish. Unsupported and miscompiled applicable cases count against that floor; cases
-excluded solely by the selected backend do not.
+spawned compiler and runner JVMs. A release publishes only after every leg matches both exact outcome
+manifests.
+
+## Box Outcome Manifests
+
+`tests/box_expected_failures/<version>.txt` names, one path per line relative to
+`compiler/testData/codegen/box`, the corpus files krusty is still allowed to fail against that Kotlin
+release. `tests/box_expected_not_applicable/<version>.txt` records the files intentionally excluded
+from the JVM backend. Pass is implicit: a path in neither file must pass. The conformance test fails
+on every transition among pass, fail, and not-applicable, so losing applicability cannot silently
+improve the score. Duplicate or corpus-absent entries also fail. Sharded and filtered runs judge only
+the files they ran while validating manifest paths against the complete discovered corpus.
+
+After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
+with the change, so review sees exactly which files moved:
+
+```sh
+KRUSTY_BLESS_BOX_FAILURES=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
+```
+
+Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
+is replaced atomically. The goal is to empty both sets of non-passing outcomes; once they are empty,
+the manifests and `tests/box_ratchet.rs` are deleted.
+
+A pull request is judged against its own base, so two that each match the lists can still disagree
+with them once both land: one fixes a file the other's list still names, or their changes interact.
+The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "require branches to
+be up to date") on and the `conformance` checks required, every merge is checked on the combined
+commit before master moves. A branch that falls behind merges master in and re-blesses.
+
+The manifests only shrink. The required `ci` job runs `scripts/check-box-lists.sh` before building
+and fails a pull request that adds an entry to either manifest compared with its merge base,
+including one entry swapped for another: a regression is fixed, not recorded, and a fix does not
+pay for one. A manifest for a newly supported Kotlin version is exempt.
+
+The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
+every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
+whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
+does it for every manifest version at once.
+
+A test that pins what kotlinc reports does not write it down: it states what it observes and reads
+the value from `tests/recorded/<test module>.txt`, keyed by the running test's path and by Kotlin
+version range (`tests/common/recorded.rs`). `common::assert_errors_match_kotlinc` (the whole
+`file:line:column: message` ledger through both CLIs) and `common::assert_messages_match_kotlinc`
+(the frontend's messages) cover the usual shapes; `common::recorded(|| …)`,
+`common::recorded_named(label, || …)` and `common::recorded_line(|| …)` take any value computed from
+kotlinc's run. When the file has no value for the version under test, a local run computes it from
+that kotlinc, writes it and passes; commit the diff. Ranges are closed and merged across adjacent
+versions (`2.4.0..2.4.10:`), while the newest version remains explicit (`2.4.20:`). A newly supported
+release therefore has no value until its own kotlinc records one. Under CI (`CI` set) a missing value
+fails instead of recording.
+`KRUSTY_RECORD=1` re-records every value the run reaches, e.g. after a kotlinc patch update:
+`KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
+output is ever recorded, so a recorded value stays an oracle for krusty.
 
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
@@ -152,6 +203,18 @@ and mixed-Java tests are `not-diffed` (their reference orchestration isn't mirro
 kotlinc's `META-INF/*.kotlin_module` artifact is not yet compared. The first run pays one warm
 kotlinc compile (~0.4 s) per file — raise `KRUSTY_SERVER_POOL` on a large-RAM host; later runs hit
 the on-disk cache. Pair with `KRUSTY_BOX_ONLY=<substring>` for a focused divergence loop.
+
+To check that a change moves no output byte (a refactor, or a determinism fix), dump every compiled
+class from two builds and compare the directories:
+
+```text
+KRUSTY_NO_RUN=1 KRUSTY_CLASS_DUMP=target/dump-before ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+KRUSTY_NO_RUN=1 KRUSTY_CLASS_DUMP=target/dump-after ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+diff -rq target/dump-before target/dump-after
+```
+
+Two dumps from the same build must also be identical: the compiler's output may not depend on hash
+map iteration order.
 
 ## Profiling
 
@@ -218,6 +281,8 @@ Optional profiling knobs:
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
 - `KRUSTY_FAIL_CAP=<n>` caps reported conformance failures.
+- `KRUSTY_BLESS_BOX_FAILURES=1` atomically rewrites the Kotlin version's fail and not-applicable
+  manifests from a full local conformance run instead of checking against them.
 
 Optional compiler trace:
 
@@ -230,19 +295,26 @@ unless the requested category is enabled.
 
 ## Current Conformance
 
-Latest verified codegen/box metric (2026-06-28):
+There is no conformance number written down in this repository, deliberately. Every figure committed
+to a document went stale within days of the commit that changed it, and a stale number read as
+current is worse than no number. The live measure is the **conformance badge** in `README.md`: the
+`conformance` job recomputes it per reference version on every master build and publishes the share
+of the `codegen/box` corpus whose `box()` returns `OK` on krusty-emitted bytecode. Read the badge, or
+the `conformance` job of the latest master CI run, when you need today's figure; run the gate locally
+when you need this checkout's.
 
-```text
-scanned: 7351 | krusty-compiled: 2078 | box()=OK: 2078 | skipped(unsupported): 5273 | FAIL: 0
-```
+A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
+measured at the time it landed, not a claim about the present, and must not be quoted as current.
 
-Only compare `box()=OK` numbers when `FAIL: 0`. The historical `1842 -> 1585` cliff in
-`target/ir_conformance_trend.csv` was a real temporary coverage drop from a conformance-safety cleanup,
-not the current metric. That cleanup stopped counting unsupported shapes as compiled support
-(builder-inference directives, JS-runtime-only files, advanced `Result<T>`/value-class cases, and
-unsupported `UByte`/`UShort` value-class paths). Later passes recovered past both plateaus; this checkout
-is currently at `2078 OK / 0 FAIL`. Likewise, `KRUSTY_NO_RUN=1` is for compile/emit profiling only; it
-skips JVM execution and must not be reported as runtime conformance.
+Two rules hold whatever the number is. Only compare `box()=OK` counts when `FAIL: 0` — a count taken
+beside a failure is not a coverage measurement. And `KRUSTY_NO_RUN=1` is for compile/emit profiling
+only: it skips JVM execution, so its output must never be reported as runtime conformance.
+
+One historical artifact is worth keeping, because the shape of the graph invites the wrong reading:
+the `1842 -> 1585` cliff in `target/ir_conformance_trend.csv` was a real temporary coverage drop from
+a conformance-safety cleanup, not a regression. That cleanup stopped counting unsupported shapes as
+compiled support (builder-inference directives, JS-runtime-only files, advanced `Result<T>`/value-class
+cases, and unsupported `UByte`/`UShort` value-class paths). Later passes recovered past both plateaus.
 
 For corpus triage, use the survey binary through the gate profile:
 
@@ -256,7 +328,17 @@ For corpus triage, use the survey binary through the gate profile:
 
 The parse-only TSV records exact corpus file, Kotlin block, failure stage, line, column, diagnostic,
 and source line. Its summary separately reports discovered cases, Kotlin blocks, parsed cases, lex
-failures, parse failures, AST failures, and panics; any failed case makes the command fail.
+failures, parse failures, AST failures, and panics; any failed case makes the command fail. Backend
+applicability is deliberately not consulted: valid syntax must reach a complete AST even where a
+later phase has no support for it, and capability diagnostics come after parsing.
+
+The parse gate does not reach a clean sweep of the corpus, and the one case it cannot is an input
+defect rather than a parser gap: `contextParameters/withExtensionReceiverInType.kt` carries extra
+closing parentheses, and the pinned reference compiler reports syntax errors at exactly the same two
+positions krusty rejects. The file is marked backend-inapplicable, but applicability cannot make
+invalid syntax valid. Accepting it would take a corpus-path exception, silent delimiter recovery
+reported as success, or a weakened invalid-syntax diagnostic, so the gate keeps the defect visible
+instead. No parser change should be needed once the pinned input is corrected.
 
 The harness builds the survey with the normal `gate` profile, applies the configurable
 `KRUSTY_TEST_TIMEOUT_SECONDS` deadline, provisions the same toolchain/corpus, and reports specific
