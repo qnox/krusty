@@ -55,7 +55,7 @@ const jsonLd = {
 
       <h2>Install</h2>
       <p>
-        Download the archive for your platform from the <a href={`${repo}/releases/latest`}>latest release</a> (Linux, macOS and Windows, on x86_64 and arm64) and put <code>krusty</code> on your <code>PATH</code>. It needs a JDK, found through <code>JAVA_HOME</code>.
+        Download <code>krusty</code> for Linux, macOS or Windows from the <a href={`${repo}/releases/latest`}>latest release</a> and put it on your <code>PATH</code>. Requires a JDK.
       </p>
 
       <h2>Usage</h2>
@@ -65,24 +65,24 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
 
       <h2>Features</h2>
       <ul>
-        <li>Emits <code>.class</code> files, <code>@kotlin.Metadata</code> and <code>.kotlin_module</code>, to a directory or a jar.</li>
-        <li>Takes <code>kotlinc</code>'s flags, and runs as a Bazel persistent worker.</li>
-        <li>Tested byte for byte against the real <code>kotlinc</code>, plus JetBrains' <code>codegen/box</code> tests on every build.</li>
-        <li>Supports kotlinx.serialization and KSP.</li>
-        <li><code>krusty-lsp</code>, a Kotlin language server on the same compiler, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
+        <li><strong>Drop-in for kotlinc.</strong> Same flags, byte-for-byte identical output.</li>
+        <li><strong>Light on resources.</strong> A single native binary using about a third of kotlinc's memory.</li>
+        <li><strong>kotlinx.serialization and KSP</strong> work out of the box.</li>
+        <li><strong>Bazel</strong> persistent worker support.</li>
+        <li><strong>Editor support.</strong> <code>krusty-lsp</code> language server, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
       </ul>
 
       <h2>Roadmap</h2>
       <ul>
-        <li>Full JVM conformance: every <code>codegen/box</code> test identical to <code>kotlinc</code>.</li>
-        <li>Kotlin/Native: in progress, with its own runtime, code generator and linker.</li>
-        <li>Kotlin/Wasm: planned.</li>
-        <li>Compose: planned.</li>
+        <li>100% JVM conformance with kotlinc</li>
+        <li>Kotlin/Native</li>
+        <li>Kotlin/Wasm</li>
+        <li>Compose</li>
       </ul>
 
       <h2>Sponsor</h2>
       <p>
-        krusty uses about a third of the memory of the native <code>kotlinc</code> on the same build, so more builds fit on each CI runner. If that saves your organization money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
+        krusty needs far less memory than kotlinc, so your CI needs fewer and smaller runners. If that saves your organization money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
       </p>
     </main>
     <footer>

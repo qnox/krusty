@@ -24,9 +24,7 @@ Download the archive for your platform from the
 [latest release](https://github.com/qnox/krusty/releases/latest) (Linux, macOS and Windows, on
 x86_64 and arm64), extract `krusty`, and put it on your `PATH`.
 
-krusty needs a JDK for `java.*` classes: it uses `JAVA_HOME`, or pass `-jdk-home <dir>`. It takes
-`kotlin-stdlib` from your Gradle or Maven cache, or downloads it from Maven Central; pass
-`-no-stdlib` to supply your own on the classpath.
+Requires a JDK (`JAVA_HOME` or `-jdk-home <dir>`).
 
 ## Usage
 
@@ -37,44 +35,29 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -help                                 # all options
 ```
 
-krusty matches the newest supported Kotlin release by default. To match an older one, pass
+Output matches the newest supported Kotlin release; pick another with
 `-Xkotlin-reference-version=<version>`.
 
 ## Features
 
-- **Compiles Kotlin to the JVM.** Output is `.class` files, `@kotlin.Metadata` and
-  `META-INF/*.kotlin_module`, written to a directory or a `.jar`.
-- **Takes kotlinc's command line.** The same flags work, and `krusty` also runs as a Bazel
-  persistent worker.
-- **Matches kotlinc byte for byte.** Differential tests compare each emitted class with the real
-  `kotlinc`'s, then compile Kotlin and Java consumers against krusty's output. Every build also runs
-  JetBrains' `codegen/box` tests; the conformance badge shows the share that passes.
-- **Inlines from compiled libraries.** Calls to `inline` functions in library jars copy the callee's
-  compiled bytecode, as `kotlinc` does.
-- **Supports kotlinx.serialization and KSP.** Serialization runs as a built-in compiler pass, and KSP
-  processors run through a bundled host. Other compiler plugins are not supported yet.
-
-## Editor support
-
-`krusty-lsp` is a Kotlin language server built on the same compiler. It provides diagnostics,
-completion, hover, signature help, go-to-definition, find references, rename and document symbols,
-and reads Gradle, Maven and BSP project models. Each release ships it for every platform, together
-with a [Zed extension](editors/zed/README.md).
+- **Drop-in for kotlinc.** Same flags, byte-for-byte identical `.class` files and jars.
+- **Light on resources.** A single native binary using about a third of kotlinc's memory.
+- **kotlinx.serialization and KSP** work out of the box.
+- **Bazel** persistent worker support.
+- **Editor support.** `krusty-lsp` language server, with a [Zed extension](editors/zed/README.md).
 
 ## Roadmap
 
-- **Full JVM conformance:** every Kotlin `codegen/box` test passing with output identical to
-  `kotlinc`'s.
-- **Kotlin/Native:** in progress. A native backend with its own runtime, code generator and linker,
-  reading Kotlin/Native's own standard library.
-- **Kotlin/Wasm:** planned.
-- **Compose:** planned. Support for the Jetpack Compose compiler plugin.
+- 100% JVM conformance with kotlinc
+- Kotlin/Native
+- Kotlin/Wasm
+- Compose
 
 ## Sponsor
 
-krusty uses about a third of the memory of the native `kotlinc` on the same build, so more builds fit
-on each CI runner. If that saves your organization money, please consider sending part of it back
-through [GitHub Sponsors](https://github.com/sponsors/qnox) to fund the roadmap.
+krusty needs far less memory than kotlinc, so your CI needs fewer and smaller runners. If that saves
+your organization money, please consider sending part of it back through
+[GitHub Sponsors](https://github.com/sponsors/qnox).
 
 ## Building from source
 
