@@ -577,6 +577,19 @@ pub enum IrCheckedOperation {
         class: Ty,
         member: IrProgressionMember,
     },
+    /// The last element a stepped progression reaches (`getProgressionLastElement`), over the
+    /// step type `ty` (`Int` or `Long`).
+    ProgressionLastElement {
+        first: ExprId,
+        last: ExprId,
+        step: ExprId,
+        ty: Ty,
+    },
+    /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
+    /// message is `Step must be positive, was: $step.`.
+    IllegalProgressionStep {
+        step: ExprId,
+    },
     RangeLoop {
         variable: u32,
         counter: Ty,

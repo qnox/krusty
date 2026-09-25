@@ -75,3 +75,42 @@ impl FirProgressionClass {
             })
     }
 }
+
+/// Where a counted loop's progression comes from, as kotlinc's `HeaderInfoBuilder` handlers see
+/// it. The checker builds this from the selected `kotlin.ranges` declarations; common lowering turns
+/// it into the loop's first, last and step.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FirProgressionSource {
+    /// `start..end`, `start..<end`, `start until end` or `start downTo end`.
+    Literal {
+        operation: FirRangeOperation,
+        start: super::FirExprId,
+        end: super::FirExprId,
+    },
+    /// A progression value read through its `first`, `last` and `step`.
+    Value {
+        progression: FirProgressionClass,
+        iterable: super::FirExprId,
+    },
+    /// `nested step step`.
+    Step {
+        nested: Box<FirProgressionSource>,
+        step: super::FirExprId,
+    },
+    /// `nested.reversed()`.
+    Reversed(Box<FirProgressionSource>),
+}
+
+impl FirProgressionSource {
+    /// Whether kotlinc can iterate this progression with an inclusive last bound, which `step` and
+    /// `reversed` need (`revertToLastInclusive`): only `until` and `..<` have no inclusive form.
+    pub fn has_inclusive_last(&self) -> bool {
+        !matches!(
+            self,
+            Self::Literal {
+                operation: FirRangeOperation::Until | FirRangeOperation::OpenEnd,
+                ..
+            }
+        )
+    }
+}

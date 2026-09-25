@@ -70,13 +70,13 @@ impl BodyLowering<'_> {
             }),
             FirLoopHeader::Progression {
                 variable,
-                progression,
-                iterable,
+                counter,
+                source,
             } => self.progression_loop(ProgressionLoop {
                 target,
                 variable: *variable,
-                progression: *progression,
-                iterable: *iterable,
+                counter: *counter,
+                source,
                 body,
             }),
             FirLoopHeader::Iterable {

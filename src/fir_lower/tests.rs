@@ -261,19 +261,37 @@ fn literal_until_bound_and_int_update_need_no_common_ir_temporaries() {
         "fun sum(): Int { var sum = 0; for (value in 0 until 10) sum += value; return sum }\n",
         "LiteralUntilLoop",
     );
-    let update = ir
+    // Without a Java-like counter loop the body starts with `val value = inductionVar;
+    // inductionVar += 1`, as kotlinc's `ProgressionLoopHeader` builds it.
+    let body = ir
         .exprs
         .iter()
         .find_map(|expression| match expression {
             IrExpr::While {
-                update: Some(update),
+                body,
+                update: None,
+                post_test: true,
                 ..
-            } => Some(*update),
+            } => Some(*body),
             _ => None,
         })
-        .expect("counted-loop update");
+        .expect("counted loop");
+    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+        panic!("counted-loop body must be a block")
+    };
+    let [loop_variable, update, ..] = stmts[..] else {
+        panic!("counted-loop body must start with its variable and update")
+    };
+    assert!(matches!(
+        ir.expr(loop_variable),
+        IrExpr::Variable {
+            init: Some(induction),
+            named: true,
+            ..
+        } if matches!(ir.expr(*induction), IrExpr::GetValue(_))
+    ));
     let IrExpr::SetValue { value, .. } = ir.expr(update) else {
-        panic!("exclusive counted loop must have a direct update")
+        panic!("counted loop must step its induction variable directly")
     };
     assert!(matches!(
         ir.expr(*value),

@@ -2020,10 +2020,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result type is `kotlin.ranges.IntRange`/`LongRange`/`CharRange`; members like `.first`/`.last` resolve
   to the classpath `getFirst`/`getLast` getters. `until`/`downTo`/`step` are **not** operators — they are
   ordinary stdlib infix functions and parse as infix calls (`a until b` → `a.until(b)`), resolved through
-  the library set like any extension call. A `for (x in r)` over a stored `IntRange`/`LongRange` value
-  iterates as a counted loop (`last = r.getLast(); i = r.getFirst(); while (i <= last) { x = i; …; i++ }`),
-  matching kotlinc's specialized loop and avoiding per-element boxing; `Char` ranges and progressions use
-  the iterator protocol. The syntactic `for (i in a..b)` counted loop now spans `Int`/`Long`/`UInt`/
+  the library set like any extension call. A `for (x in r)` over a progression value, `step`, `reversed()`,
+  `downTo` or `until` iterates as a counted loop (see the `ForLoopsLowering` entry below). The syntactic `for (i in a..b)` counted loop now spans `Int`/`Long`/`UInt`/
   `ULong`/`Char` counters (not just `Int`): the counter takes the uniform bound type, signed/`Long`/`Char`
   compare with the direct opcode, and the unsigned case compares with `Integer.compareUnsigned`/
   `Long.compareUnsigned` (a signed `<=` would misorder values past the sign bit). `tests/range_value_e2e.rs`.
@@ -6876,6 +6874,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop runs: a constant or a read of an immutable local of the counter's own type is re-read in place
   (`createLoopTemporaryVariableIfNecessary`), while a widened bound such as `0L..n` is a conversion
   and is copied. (`tests/counted_loop_shape_e2e.rs`.)
+- **Counted `for` loops over any signed progression follow kotlinc's `HeaderInfoBuilder`.** The
+  checker (`src/fir/body_check/progressions.rs`) matches the iterable, by the selected `kotlin.ranges`
+  declaration and never by name, as a `downTo`/`until` call, `step`, `reversed()`, a range literal or a
+  progression value, and records a `FirProgressionSource`. A progression value is read once through
+  `getFirst`/`getLast`/`getStep` of its most precise type (through `val` initializers and implicit
+  casts, `irCastIfNeeded`); a `*Range` steps by 1 upwards, any other progression tests the step's sign
+  at run time. `step` (`StepHandler`) throws `IllegalArgumentException("Step must be positive, was: s.")`
+  for a non-positive argument, negates it to follow the nested direction (at run time when that is
+  unknown), and moves `last` with `ProgressionUtilKt.getProgressionLastElement` unless the step is ±1.
+  `reversed()` (`ReversedHandler`) swaps first and last and negates the step; `step` and `reversed()`
+  over `until`/`..<`, which have no inclusive form, iterate the resulting progression value. An
+  inclusive bound that cannot overflow iterates as `if (i <= last) do { val x = i; i += step; body }
+  while (i <= last)`, the loop variable a copy of the induction variable. (`tests/counted_loop_shape_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

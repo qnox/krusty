@@ -753,6 +753,10 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::Count
                 | crate::libraries::CompilerIntrinsic::TrimIndent
                 | crate::libraries::CompilerIntrinsic::TrimMargin
+                | crate::libraries::CompilerIntrinsic::RangeDownTo
+                | crate::libraries::CompilerIntrinsic::RangeUntil
+                | crate::libraries::CompilerIntrinsic::ProgressionStep
+                | crate::libraries::CompilerIntrinsic::ProgressionReversed
                 | crate::libraries::CompilerIntrinsic::NumericConversion
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | crate::libraries::CompilerIntrinsic::PrimitiveCompare

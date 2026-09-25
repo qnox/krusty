@@ -6,7 +6,9 @@ mod context_parameters;
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod ranges;
-pub use ranges::{FirProgressionClass, FirRangeCounterKind, FirRangeOperation};
+pub use ranges::{
+    FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
+};
 
 use crate::diag::Span;
 use crate::kt_string::KtString;
@@ -1719,11 +1721,11 @@ pub enum FirLoopHeader {
         start: FirExprId,
         end: FirExprId,
     },
-    /// A loop over a progression value, iterated through its `first`, `last` and `step`.
+    /// A counted loop over a progression built by `kotlin.ranges` or held in a value.
     Progression {
         variable: LocalValueId,
-        progression: FirProgressionClass,
-        iterable: FirExprId,
+        counter: FirRangeCounterKind,
+        source: FirProgressionSource,
     },
     Iterable {
         variable: LocalValueId,

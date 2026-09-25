@@ -4099,7 +4099,7 @@ impl BodyFirChecker<'_> {
                         iterable: iterable_expression,
                     }
                 } else if let Some(header) =
-                    self.progression_loop_header(variable, element_ty, iterable_expression)
+                    self.progression_loop_header(variable, element_ty, *iterable, iterable_expression)
                 {
                     header
                 } else {

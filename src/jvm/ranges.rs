@@ -194,6 +194,33 @@ pub(super) fn realize(
                 };
                 ir.exprs[expression] = read;
             }
+            IrExpr::Checked(IrCheckedOperation::ProgressionLastElement {
+                first,
+                last,
+                step,
+                ty,
+            }) => {
+                let callable = runtime.progression_last_element_callable(ty).ok_or(
+                    RangeRealizationFailure::Progression(ProgressionMemberFailure {
+                        expression: expression as ExprId,
+                        class: ty,
+                        member: IrProgressionMember::Last,
+                    }),
+                )?;
+                ir.exprs[expression] = IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: callable.owner,
+                        name: callable.name,
+                        descriptor: callable.descriptor,
+                        inline: callable.inline,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![first, last, step],
+                };
+            }
+            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
+                ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
+            }
             IrExpr::Checked(
                 IrCheckedOperation::Call { .. }
                 | IrCheckedOperation::ConstructorDelegation { .. }
@@ -461,6 +488,29 @@ fn unsigned_compare_slots(
         lhs: compared,
         rhs: zero,
     }))
+}
+
+/// `throw IllegalArgumentException("Step must be positive, was: $step.")`, as the stdlib's `step`
+/// checks it.
+fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
+    let prefix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        crate::kt_string::KtString::from("Step must be positive, was: "),
+    )));
+    let suffix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(crate::kt_string::KtString::from("."))));
+    let message = ir.add_expr(IrExpr::StringConcat(vec![prefix, step, suffix]));
+    let exception = ir.add_expr(IrExpr::New {
+        internal: crate::types::type_name("java/lang/IllegalArgumentException"),
+        args: vec![message],
+        ctor_params: None,
+        ctor_desc: Some("(Ljava/lang/String;)V".to_string()),
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    });
+    for expression in [prefix, suffix, message, exception] {
+        copy_expression_facts(ir, cause, expression);
+    }
+    IrExpr::Throw { operand: exception }
 }
 
 fn next_value_slot(ir: &IrFile) -> u32 {

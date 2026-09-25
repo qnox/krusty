@@ -30,6 +30,9 @@ pub enum FirLoweringFailure {
         origin: OriginId,
         ty: crate::types::Ty,
     },
+    /// A reversed or stepped loop progression whose last bound has no inclusive form, which the
+    /// checker only accepts from `until` and `..<`.
+    IrreversibleProgression,
     MissingCallable(CallableId),
     UnsupportedCallableReference(CallableId),
     UnsupportedExternalCallableReference(crate::fir::ExternalCallableId),

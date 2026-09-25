@@ -12,7 +12,9 @@
 //!   * a bound that cannot change while the loop runs (a constant or an immutable local) is read in
 //!     place, anything else is copied into a temporary first;
 //!   * a progression value is read once and iterated through its `first`, `last` and `step`, with
-//!     the direction taken from the step's sign unless the value is a `*Range`.
+//!     the direction taken from the step's sign unless the value is a `*Range`;
+//!   * `step` checks its argument, follows the nested progression's direction, and moves `last` to
+//!     the last element it reaches; `reversed` swaps first and last and negates the step.
 use super::common;
 
 fn assert_identical(name: &str, src: &str) {
@@ -150,4 +152,64 @@ fn progression_values_still_iterate_correctly() {
         return;
     };
     assert_eq!(actual, "22 15 0 2 3 ace");
+}
+
+#[test]
+fn stepped_progressions_check_and_follow_their_step() {
+    assert_identical(
+        "SteppedProgressions",
+        "fun byArgument(n: Int, s: Int): Int { var t = 0; for (i in 1..n step s) t += i; return t }\n\
+         fun downBy(n: Int): Int { var t = 0; for (i in n downTo 1 step 2) t += i; return t }\n\
+         fun unknownDirection(p: IntProgression, s: Int): Int { var t = 0; for (i in p step s) t += i; return t }\n\
+         fun constant(): Int { var t = 0; for (i in 1..10 step 3) t += i; return t }\n\
+         fun constantDown(): Int { var t = 0; for (i in 10 downTo 1 step 3) t += i; return t }\n\
+         fun longs(n: Long): Long { var t = 0L; for (i in 0L..n step 2L) t += i; return t }\n\
+         fun chars(c: Char): Int { var t = 0; for (x in 'a'..c step 2) t += x - 'a'; return t }\n\
+         fun unit(n: Int): Int { var t = 0; for (i in 1..n step 1) t += i; return t }\n\
+         fun until(n: Int): Int { var t = 0; for (i in 0 until n step 3) t += i; return t }\n\
+         fun range(r: IntRange): Int { var t = 0; for (i in r step 2) t += i; return t }\n",
+    );
+}
+
+#[test]
+fn reversed_progressions_swap_their_bounds() {
+    assert_identical(
+        "ReversedProgressions",
+        "fun constant(): Int { var t = 0; for (i in (1..10).reversed()) t += i; return t }\n\
+         fun up(n: Int): Int { var t = 0; for (i in (1..n).reversed()) t += i; return t }\n\
+         fun until(a: Int, b: Int): Int { var t = 0; for (i in (a until b).reversed()) t += i; return t }\n\
+         fun down(a: Int, b: Int): Int { var t = 0; for (i in (a downTo b).reversed()) t += i; return t }\n\
+         fun steppedFirst(n: Int): Int { var t = 0; for (i in (1..n step 2).reversed()) t += i; return t }\n\
+         fun steppedAfter(n: Int, s: Int): Int { var t = 0; for (i in (1..n).reversed() step s) t += i; return t }\n\
+         fun longs(n: Long): Long { var t = 0L; for (i in (0L..n).reversed()) t += i; return t }\n\
+         fun chars(c: Char): Int { var t = 0; for (x in (c downTo 'a').reversed()) t += x - 'a'; return t }\n\
+         fun value(p: IntProgression): Int { var t = 0; for (i in p.reversed()) t += i; return t }\n",
+    );
+}
+
+/// A non-positive step throws before the loop runs, and the bounds are still evaluated in source
+/// order once each.
+#[test]
+fn stepped_and_reversed_progressions_still_iterate_correctly() {
+    let src = "fun steps(n: Int, s: Int): String { var t = \"\"; for (i in 1..n step s) t += i; return t }\n\
+               fun reversedSteps(n: Int, s: Int): String { var t = \"\"; for (i in (1..n).reversed() step s) t += i; return t }\n\
+               var log = \"\"\n\
+               fun logged(v: Int): Int { log += v; return v }\n\
+               fun box(): String {\n\
+               \x20   val failure = try { steps(3, 0) } catch (e: IllegalArgumentException) { e.message }\n\
+               \x20   var order = 0\n\
+               \x20   for (i in (logged(1)..logged(4)).reversed() step logged(2)) order += i\n\
+               \x20   var top = 0\n\
+               \x20   for (i in Int.MAX_VALUE - 4..Int.MAX_VALUE step 2) top += 1\n\
+               \x20   var chars = \"\"\n\
+               \x20   for (c in ('a'..'g' step 3).reversed()) chars += c\n\
+               \x20   return \"${steps(9, 4)} ${reversedSteps(9, 4)} $failure $order $log $top $chars\"\n\
+               }\n";
+    let Some(actual) =
+        common::compile_and_run_box(src, "stepped_progressions", &[common::stdlib_jar()], None)
+    else {
+        eprintln!("skipping: JVM runner unavailable");
+        return;
+    };
+    assert_eq!(actual, "159 951 Step must be positive, was: 0. 6 142 3 gda");
 }

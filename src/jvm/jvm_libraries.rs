@@ -6110,6 +6110,23 @@ impl JvmLibraries {
         })
     }
 
+    /// `kotlin.internal.getProgressionLastElement` over an `Int` or `Long` step.
+    pub(super) fn progression_last_element_callable(&self, ty: Ty) -> Option<LibraryCallable> {
+        let primitive = match ty {
+            Ty::Int => "I",
+            Ty::Long => "J",
+            _ => return None,
+        };
+        Some(LibraryCallable::library(
+            type_name("kotlin/internal/ProgressionUtilKt"),
+            "getProgressionLastElement",
+            vec![ty, ty, ty],
+            ty,
+            ty,
+            format!("({primitive}{primitive}{primitive}){primitive}"),
+        ))
+    }
+
     pub(super) fn unsigned_compare_callable(&self, ty: Ty) -> Option<LibraryCallable> {
         let (owner, primitive, physical) = match ty {
             Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
