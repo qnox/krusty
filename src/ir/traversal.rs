@@ -413,6 +413,26 @@ fn default_expr_stub_safe_with_locals(
     }
 }
 
+/// Expressions in one function body's value namespace, each once. A nested lambda's captures read
+/// this namespace, while its `inline_body` uses the lambda function's own slots and return
+/// boundary, so a rewrite of this body's values never reaches through that boundary.
+pub(crate) fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![body];
+    let mut expressions = Vec::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        match &ir.exprs[current as usize] {
+            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+            _ => for_each_child(&ir.exprs, current, &mut |child| pending.push(child)),
+        }
+        expressions.push(current);
+    }
+    expressions
+}
+
 /// Shift every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` by `by`, throughout the
 /// expression tree rooted at `e`. Used when a pass **appends parameters** to a function: the body's
 /// locals (numbered from the old parameter count) must move up by the number of new parameters so

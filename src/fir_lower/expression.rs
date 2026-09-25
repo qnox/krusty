@@ -1338,13 +1338,21 @@ impl BodyLowering<'_> {
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
                 );
-                self.checked_lambda(*callable, body, suspend)?
+                let lambda = self.checked_lambda(*callable, body, suspend)?;
+                if suspend {
+                    self.record_generated_class_provenance(expression_id, lambda as usize);
+                }
+                lambda
             }
         };
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
-        self.record_callable_reference_provenance(expression_id, first_generated);
+        // A suspend lambda's own provenance went to its node above; the references in its body
+        // carry theirs.
+        if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
+            self.record_callable_reference_provenance(expression_id, first_generated);
+        }
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
@@ -1391,10 +1399,20 @@ impl BodyLowering<'_> {
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;
         };
+        self.record_generated_class_provenance(expression_id, reference);
+    }
+
+    /// Attach the naming provenance and enclosure of a node a target may realize as a class of its
+    /// own (a callable reference, a suspend lambda) to the IR node `node` lowered from it.
+    fn record_generated_class_provenance(
+        &mut self,
+        expression_id: crate::fir::FirExprId,
+        node: usize,
+    ) {
         if let Some(enclosure) = self.enclosure {
             self.ir
                 .callable_reference_enclosures
-                .insert(reference as u32, enclosure);
+                .insert(node as u32, enclosure);
         }
         let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
             return;
@@ -1424,7 +1442,7 @@ impl BodyLowering<'_> {
             return;
         };
         self.ir.callable_reference_provenance.insert(
-            reference as u32,
+            node as u32,
             crate::ir::IrLocalClassNameProvenance {
                 source: crate::ir::IrModuleSource { source, package },
                 lexical_owner,

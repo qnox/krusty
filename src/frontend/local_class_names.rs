@@ -39,7 +39,8 @@ pub(super) struct InventedLocalNames {
     pub anonymous_enclosing_functions: HashMap<DeclId, AnonymousEnclosingFunction>,
     /// Suspend function → the ordinal its continuation takes in its own chain.
     pub continuations: HashMap<AnonymousEnclosingFunction, u32>,
-    /// Callable reference → its target-neutral lexical provenance.
+    /// Callable reference or suspend lambda (each compiled to a class of its own) → its
+    /// target-neutral lexical provenance.
     pub references: HashMap<ExprId, LocalClassNameProvenance>,
 }
 
@@ -158,6 +159,15 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
 
 impl Inventor<'_> {
     /// The next position of `chain`'s sequence, as a chain one segment longer.
+    /// The ordinal a position [`Self::next`] handed out ends with.
+    fn ordinal(position: &Chain) -> u32 {
+        position
+            .segments
+            .last()
+            .and_then(|ordinal| ordinal.parse().ok())
+            .expect("a generated-class position is an ordinal")
+    }
+
     fn next(&mut self, chain: &Chain) -> Chain {
         let counter = self.counters.entry(chain.counter_key()).or_insert(0);
         *counter += 1;
@@ -357,6 +367,12 @@ impl Inventor<'_> {
         match file.expr(expression) {
             Expr::Lambda { body, .. } => {
                 let own = self.next(chain);
+                // A lambda a target compiles to a class of its own (a suspend lambda's
+                // `SuspendLambda`) is named by its position in the chain. Whether it is suspend
+                // is only known once it is typed, so every lambda carries the name.
+                self.names
+                    .references
+                    .insert(expression, chain.provenance(Some(Self::ordinal(&own))));
                 self.expr(*body, &own);
             }
             // A class literal has no generated callable-reference class and therefore consumes no

@@ -31,10 +31,50 @@ pub(crate) struct TransformedSuspension {
 /// A function whose machine kotlinc's coroutine transformer builds from its bytecode.
 #[derive(Clone, Debug)]
 pub(crate) struct TransformedMachine {
-    /// The internal name of its continuation class.
+    /// The internal name of its continuation class: for a suspend lambda, the lambda's own class.
     pub continuation_class: String,
     /// Its suspension points, in encounter order.
     pub suspensions: Vec<TransformedSuspension>,
+    /// Set for a suspend lambda's `invokeSuspend`, which the transformer takes in its lambda mode.
+    pub lambda: Option<SuspendLambdaMachine>,
+}
+
+/// What the transformer's lambda mode needs from a suspend lambda's `invokeSuspend` beyond its
+/// suspension points.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaMachine {
+    /// The declarations that read the lambda's parameters back from their fields at the top of the
+    /// body. codegen marks each with `mark(10)`, after which the coroutine starts.
+    pub parameter_reads: Vec<ExprId>,
+    /// The spill fields the class declares for those parameters, by normalized descriptor, with the
+    /// highest index of each (kotlinc's `continuationClassVarsCountByType`), in declaration order.
+    pub declared_spill_fields: Vec<(String, usize)>,
+}
+
+/// A value a suspend lambda's class captures.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaCapture {
+    /// Its field, by index into the class's `IrClass::fields`.
+    pub field: u32,
+    /// The captured value's type.
+    pub ty: crate::types::Ty,
+    /// Whether it is the enclosing class's `this`, which the constructor names `$receiver`.
+    pub receiver: bool,
+}
+
+/// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
+/// emitter writes with the members kotlinc declares for it.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaClass {
+    /// The class's `invokeSuspend`, the lambda's body.
+    pub invoke_suspend: u32,
+    /// The lambda's Kotlin function type.
+    pub function_type: crate::types::Ty,
+    /// The captured values, in constructor order.
+    pub captures: Vec<SuspendLambdaCapture>,
+    /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
+    /// it is kept in when the body reads it.
+    pub parameters: Vec<(crate::types::Ty, Option<u32>)>,
 }
 
 /// The suspend functions whose machine is built during emission, with their suspensions: those
@@ -44,6 +84,7 @@ pub(crate) struct TransformedMachine {
 pub(crate) struct EmitTimeMachines {
     functions: HashMap<u32, Vec<SplicedSuspension>>,
     transformed: HashMap<u32, TransformedMachine>,
+    suspend_lambdas: HashMap<crate::types::TypeName, SuspendLambdaClass>,
 }
 
 impl EmitTimeMachines {
@@ -61,5 +102,21 @@ impl EmitTimeMachines {
 
     pub(crate) fn transformed(&self, function: u32) -> Option<&TransformedMachine> {
         self.transformed.get(&function)
+    }
+
+    pub(crate) fn record_suspend_lambda(
+        &mut self,
+        class: crate::types::TypeName,
+        lambda: SuspendLambdaClass,
+    ) {
+        self.suspend_lambdas.insert(class, lambda);
+    }
+
+    /// The suspend lambda `class` realizes, when it is one.
+    pub(crate) fn suspend_lambda(
+        &self,
+        class: crate::types::TypeName,
+    ) -> Option<&SuspendLambdaClass> {
+        self.suspend_lambdas.get(&class)
     }
 }

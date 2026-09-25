@@ -46,6 +46,12 @@ pub(super) fn reference_invoke_bridge_parameter(ordinal: u16) -> String {
     format!("p{}", ordinal + 1)
 }
 
+/// A value parameter of a suspend lambda's typed `invoke` or of its erased bridge, the
+/// continuation included. kotlinc numbers both from one.
+pub(super) fn suspend_lambda_invoke_parameter(ordinal: u16) -> String {
+    format!("p{}", ordinal + 1)
+}
+
 pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
     match ordinal {
         1 => "p1",

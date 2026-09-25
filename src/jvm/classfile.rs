@@ -15,6 +15,7 @@ mod control_flow;
 mod copied_class;
 mod coroutine_markers;
 mod coroutine_transform;
+mod debug_metadata;
 mod descriptor_mentions;
 mod inner_classes;
 mod line_numbers;
@@ -990,6 +991,27 @@ impl ClassWriter {
         });
     }
 
+    /// Declare a field ahead of every field declared so far (a suspend lambda's spill fields,
+    /// which the coroutine transformer adds after the class's own).
+    pub(super) fn add_leading_field(&mut self, access: u16, name: &str, desc: &str) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.fields.insert(
+            0,
+            FieldInfo {
+                access,
+                name: n,
+                desc: d,
+                signature: None,
+                const_value: None,
+                visible_anns: Vec::new(),
+                invisible_anns: Vec::new(),
+                pending_visible: Vec::new(),
+                pending_invisible: Vec::new(),
+            },
+        );
+    }
+
     /// Declare a field whose pool entries intern at the FIELD-TABLE visit (after every method) —
     /// kotlinc's writer order. Use for a field the method bodies don't introduce; a field whose
     /// name/descriptor the bodies DO intern can use either form (the table interning dedups).
@@ -1281,56 +1303,6 @@ impl ClassWriter {
             u2(&mut body, n_d2);
             self.ev_str_array(&mut body, d2);
         }
-        self.runtime_annotations.push(body);
-    }
-
-    /// Add the runtime-visible `DebugMetadata` annotation for a suspend continuation.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_debug_metadata(
-        &mut self,
-        f: &str,
-        l: &[i32],
-        nl: &[i32],
-        i: &[i32],
-        s: &[String],
-        n: &[String],
-        m: &str,
-        c: &str,
-        v: i32,
-    ) {
-        let anno_type = self
-            .cp
-            .utf8("Lkotlin/coroutines/jvm/internal/DebugMetadata;");
-        let mut body = Vec::new();
-        u2(&mut body, anno_type);
-        u2(&mut body, 9); // element_value_pairs: f, l, nl, i, s, n, m, c, v
-        let n_f = self.cp.utf8("f");
-        u2(&mut body, n_f);
-        self.ev_str(&mut body, f);
-        let n_l = self.cp.utf8("l");
-        u2(&mut body, n_l);
-        self.ev_int_array(&mut body, l);
-        let n_nl = self.cp.utf8("nl");
-        u2(&mut body, n_nl);
-        self.ev_int_array(&mut body, nl);
-        let n_i = self.cp.utf8("i");
-        u2(&mut body, n_i);
-        self.ev_int_array(&mut body, i);
-        let n_s = self.cp.utf8("s");
-        u2(&mut body, n_s);
-        self.ev_str_array(&mut body, s);
-        let n_n = self.cp.utf8("n");
-        u2(&mut body, n_n);
-        self.ev_str_array(&mut body, n);
-        let n_m = self.cp.utf8("m");
-        u2(&mut body, n_m);
-        self.ev_str(&mut body, m);
-        let n_c = self.cp.utf8("c");
-        u2(&mut body, n_c);
-        self.ev_str(&mut body, c);
-        let n_v = self.cp.utf8("v");
-        u2(&mut body, n_v);
-        self.ev_int(&mut body, v);
         self.runtime_annotations.push(body);
     }
 
@@ -1839,6 +1811,14 @@ impl ClassWriter {
 
     /// Whether a method with exactly this name+descriptor has already been added (used to avoid
     /// emitting a bridge that would duplicate an existing method).
+    /// Whether the class already declares `name` `desc`, without interning either.
+    pub fn declares_method(&self, name: &str, desc: &str) -> bool {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return false;
+        };
+        self.methods.iter().any(|m| m.name == n && m.desc == d)
+    }
+
     pub fn has_method(&mut self, name: &str, desc: &str) -> bool {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
