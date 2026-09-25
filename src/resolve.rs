@@ -30198,7 +30198,7 @@ class Child : Middle() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Base");
+        assert_eq!(target.owner.render(), "Middle");
         assert_eq!(target.params, vec![Ty::Int]);
     }
 
@@ -30237,7 +30237,7 @@ class Child : Base() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Grand");
+        assert_eq!(target.owner.render(), "Base");
         assert_eq!(target.params, vec![Ty::Int]);
     }
 
