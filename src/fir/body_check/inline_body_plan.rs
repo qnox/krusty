@@ -732,6 +732,14 @@ mod tests {
     #[test]
     fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
+        assert!(
+            classpath
+                .iter()
+                .any(|jar| jar.file_name().is_some_and(|name| name
+                    .to_string_lossy()
+                    .starts_with("kotlinx-coroutines-core"))),
+            "kotlinx-coroutines-core was not provisioned: {classpath:?}"
+        );
         let platform = Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),

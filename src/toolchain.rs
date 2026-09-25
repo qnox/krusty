@@ -234,8 +234,18 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
         group.replace('.', "/")
     );
     let download = maven_download_path(&file);
+    // Maven Central refuses or drops a connection now and then; retry before reporting the jar as
+    // unavailable, because a missing jar silently leaves its library off every test's classpath.
     let status = std::process::Command::new("curl")
-        .args(["-sfL", "--max-time", "60", "-o"])
+        .args([
+            "-sfL",
+            "--max-time",
+            "60",
+            "--retry",
+            "4",
+            "--retry-all-errors",
+        ])
+        .args(["--retry-delay", "2", "-o"])
         .arg(&download)
         .arg(&url)
         .status()
