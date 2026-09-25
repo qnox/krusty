@@ -157,6 +157,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     &[],
                 ),
             };
+            let target_params = match &sc.delegate {
+                CtorDelegateTarget::This { target_params, .. }
+                | CtorDelegateTarget::Super { target_params, .. } => target_params.as_slice(),
+                CtorDelegateTarget::ImplicitEnumBase => &[],
+            };
             let target_owner = match &sc.delegate {
                 CtorDelegateTarget::Super { owner, .. } => *owner,
                 CtorDelegateTarget::This { .. } | CtorDelegateTarget::ImplicitEnumBase => {
@@ -199,40 +204,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             for &statement in &sc.delegate_prelude {
                 e.emit(statement, &mut sctor);
             }
-            let dargs = sc.delegate_args.clone();
-            if dargs.iter().any(|&a| e.emits_control_flow(a)) {
-                let temps = e.spill_to_temps(&dargs, &mut sctor);
-                sctor.aload(0);
-                if forwards_owner_prefix {
-                    for (index, ty) in forwarded_prefix_tys.iter().enumerate() {
-                        let slot = 1 + forwarded_prefix_tys[..index]
-                            .iter()
-                            .map(|ty| slot_words(*ty))
-                            .sum::<u16>();
-                        load(*ty, slot, &mut sctor);
-                    }
-                    target_jvm_tys.splice(0..0, forwarded_prefix_tys.iter().copied());
-                }
-                for &(slot, t, _) in &temps {
-                    load(t, slot, &mut sctor);
-                }
-                e.release_operand_spills(&temps);
+            let forwarded = if forwards_owner_prefix {
+                forwarded_prefix_tys.as_slice()
             } else {
-                sctor.aload(0);
-                if forwards_owner_prefix {
-                    for (index, ty) in forwarded_prefix_tys.iter().enumerate() {
-                        let slot = 1 + forwarded_prefix_tys[..index]
-                            .iter()
-                            .map(|ty| slot_words(*ty))
-                            .sum::<u16>();
-                        load(*ty, slot, &mut sctor);
-                    }
-                    target_jvm_tys.splice(0..0, forwarded_prefix_tys.iter().copied());
-                }
-                for &a in &dargs {
-                    e.emit_value(a, &mut sctor);
-                }
-            }
+                &[]
+            };
+            e.emit_constructor_delegation_arguments(
+                &sc.delegate_args,
+                target_params,
+                forwarded,
+                &mut sctor,
+            );
+            target_jvm_tys.splice(0..0, forwarded.iter().copied());
             let semantic_default_masks =
                 constructor_default_masks(&sc.default_parameters, target_jvm_tys.len());
             let emitted_default_masks = if semantic_default_masks.is_empty() {

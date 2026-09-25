@@ -1045,13 +1045,8 @@ impl BodyLowering<'_> {
                     target: *target,
                     dispatch_receiver: self.receiver(dispatch_receiver)?,
                     extension_receiver: self.receiver(extension_receiver)?,
-                    context_arguments: context_arguments
-                        .iter()
-                        .copied()
-                        .map(|receiver| {
-                            self.expression_with_conversion(receiver.value, receiver.conversion)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                    context_arguments: self
+                        .module_property_context_arguments(*target, context_arguments)?,
                     substitutions: lower_substitutions(substitutions),
                 };
                 Ok(self.ir.add_expr(IrExpr::Checked(operation)))
@@ -1112,13 +1107,8 @@ impl BodyLowering<'_> {
                     target: *target,
                     dispatch_receiver: self.receiver(dispatch_receiver)?,
                     extension_receiver: self.receiver(extension_receiver)?,
-                    context_arguments: context_arguments
-                        .iter()
-                        .copied()
-                        .map(|receiver| {
-                            self.expression_with_conversion(receiver.value, receiver.conversion)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                    context_arguments: self
+                        .module_property_context_arguments(*target, context_arguments)?,
                     value: self.expression_with_conversion(value, conversion)?,
                     substitutions: lower_substitutions(substitutions),
                 };

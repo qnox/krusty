@@ -84,6 +84,7 @@ use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::FinallyRegion;
+mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_fields;
 mod type_operation_emission;
@@ -5842,26 +5843,17 @@ fn emit_class(
             for &statement in &c.super_arg_prelude {
                 e.emit(statement, &mut ctor);
             }
-            // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
-            let super_args = c.super_args.clone();
-            if super_args.iter().any(|&a| e.emits_control_flow(a)) {
-                let temps = e.spill_to_temps(&super_args, &mut ctor);
-                ctor.aload(0);
-                for &(slot, t, _) in &temps {
-                    load(t, slot, &mut ctor);
-                }
-                e.release_operand_spills(&temps);
-            } else {
-                ctor.aload(0);
-                for &a in &super_args {
-                    e.emit_value(a, &mut ctor);
-                }
-            }
             // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
             // primary. The checker records whether this exact selection is that primary; only then
             // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
             // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
             let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c, &superclass);
+            e.emit_constructor_delegation_arguments(
+                &c.super_args,
+                &c.super_ctor_params,
+                &[],
+                &mut ctor,
+            );
             let super_defaults =
                 e.ir.super_constructor_default_arguments
                     .get(&c.fq_name_id())

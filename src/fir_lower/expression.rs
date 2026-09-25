@@ -275,20 +275,7 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                if declared_result.is_some_and(|declared| declared != expression.ty.get()) {
-                    // Preserve the checked semantic conversion from the declaration's result to
-                    // its call-site substitution. Whether that conversion crosses a physical ABI
-                    // boundary is target-owned; the JVM records its answer after generic erasure.
-                    let coercion = self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    });
-                    self.ir.declaration_result_coercions.insert(coercion);
-                    coercion
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared_result, expression.ty.get())
             }
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => {
@@ -1332,7 +1319,11 @@ impl BodyLowering<'_> {
                 target,
                 extension_receiver,
                 arguments,
-            } => self.checked_local_call(target.clone(), *extension_receiver, arguments)?,
+            } => {
+                let (call, declared) =
+                    self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
+                self.declaration_result(call, Some(declared), expression.ty.get())
+            }
             FirExprKind::Lambda { callable, body } => {
                 let suspend = matches!(
                     expression.ty.get().non_null(),
@@ -1450,6 +1441,22 @@ impl BodyLowering<'_> {
                 ordinal: provenance.ordinal,
             },
         );
+    }
+
+    /// Preserve the checked semantic conversion from a declaration's result to its call-site
+    /// substitution. Whether that conversion crosses a physical ABI boundary is target-owned; the
+    /// JVM records its answer after generic erasure.
+    fn declaration_result(&mut self, call: ExprId, declared: Option<Ty>, result: Ty) -> ExprId {
+        if declared.is_none_or(|declared| declared == result) {
+            return call;
+        }
+        let coercion = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: result,
+        });
+        self.ir.declaration_result_coercions.insert(coercion);
+        coercion
     }
 
     pub(super) fn expression_with_conversion(
