@@ -1456,6 +1456,8 @@ pub struct IrProperty {
     /// visibility of an accessor or a target-specific storage realization; they must not recover it
     /// from a rendered owner/property-name key.
     pub visibility: crate::types::Visibility,
+    /// Checked Kotlin return-value status, inherited from the property this one overrides.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Resolved Kotlin annotation identities. Backends interpret annotations in their own namespace;
     /// common lowering does not turn them into storage or calling-convention choices.
     pub annotations: Box<[TypeName]>,
@@ -2566,6 +2568,8 @@ pub struct IrFile {
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
     pub fn_param_no_infer: std::collections::HashMap<u32, Vec<bool>>,
+    /// Function id → checked non-default Kotlin return-value status, which Kotlin metadata records.
+    pub fn_return_value_statuses: std::collections::HashMap<u32, crate::types::ReturnValueStatus>,
     /// Class identity → per-primary-constructor-parameter checked default expression (`None` =
     /// required). This is the target-neutral constructor contract. A target backend consumes it when
     /// choosing that class's physical default-argument ABI; common lowering does not distinguish value
@@ -2709,16 +2713,6 @@ pub struct IrFile {
     /// one atomic point. Keeping this semantic category separate prevents a structural block from being
     /// mistaken for a cross-unit call merely because both can suspend.
     pub intrinsic_suspension_points: std::collections::HashMap<u32, IrIntrinsicSuspensionPoint>,
-    /// A `suspend` LAMBDA's `invokeSuspend` that contains MULTIPLE suspensions / control flow and needs
-    /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
-    /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
-    /// (after its captures/parameters), where the coroutine pass appends the `result`/`label`/spilled
-    /// fields. Common lowering builds `invokeSuspend` with the plain body; the pass flattens it.
-    /// `field_base` is
-    /// the number of leading capture/parameter fields — the pass reloads them into locals `2..` at each
-    /// `invokeSuspend` entry (so a captured/parameter value survives a re-entry), excludes them from
-    /// spilling, and places the result/label/spilled fields after them.
-    pub suspend_lambda_sm: Vec<(u32, u32, u32)>,
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
@@ -3436,6 +3430,15 @@ impl IrFile {
 
     pub fn has_external_value_class_name(&self, internal: TypeName) -> bool {
         self.external_value_class_name(internal).is_some()
+    }
+
+    /// Every value class this IR knows: the file's own and the external ones its checked facts name.
+    pub(crate) fn value_class_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .iter()
+            .filter(|class| class.is_value)
+            .map(|class| class.fq_name)
+            .chain(self.external_value_classes.keys().copied())
     }
 
     /// Return a value class's declared, one-level underlying semantic type without making callers

@@ -1151,74 +1151,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file) — never the prior `Function0`-vs-`Function1` miscompile. Proven by an ABI signature diff:
   `take(block: suspend () -> Int)` lowers to `void take(Function1)`
   (`tests/suspend_e2e.rs::suspend_function_type_lowers_to_function1_continuation`).
-- **`SuspendLambda` codegen (leaf, no captures).** A `suspend` lambda literal (`{ 42 }`) flowing into a
-  suspend function-type position compiles to a concrete class
-  `… extends kotlin/coroutines/jvm/internal/SuspendLambda implements Function{n+1}` — NOT krusty's
-  `invokedynamic`/`LambdaMetafactory` path (which can't realize the `SuspendLambda` ABI). The class has
-  `<init>(Continuation completion)` → `super(n+1, completion)`, `invokeSuspend(Object result)` (the body,
-  result boxed), and the erased `invoke(Object arg)` = `new This((Continuation)arg).invokeSuspend(Unit)`.
-  The creation site is `new This((Continuation) null)` (the completion is supplied when the lambda is
-  invoked). `lower_arg` routes a lambda bound for an `IrType::Function{suspend:true}` parameter to
-  `lower_suspend_lambda`; any non-lambda suspend value still bails. Proven end-to-end:
-  `make(): suspend () -> Int = { 42 }` returns a `Function1` a Java driver invokes with a continuation →
-  boxed 42 (`tests/suspend_e2e.rs::leaf_suspend_lambda_creates_and_invokes`). **Captures**: a free
-  variable the lambda reads becomes a `final` field set in `<init>(cap.., Continuation completion)` and
-  copied into the fresh instance `invoke` builds (`new This(this.cap.., (Continuation)arg)`); the
-  creation site passes the captured values (`new This(captureValues.., null)`). `invokeSuspend` loads
-  each capture field into a local before running the body. Proven: `make(n: Int): suspend () -> Int =
-  { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Own
-  parameters use fields after the captures, populated by `create`/`invoke` and reloaded by
-  `invokeSuspend`; parameters and captures may coexist. **Internal suspension**: a lambda whose body
-  is a single TAIL suspend call (`{ foo() }`, `{ suspendOnce() }`) compiles its `invokeSuspend` to a state machine with the
-  lambda instance itself as the continuation — a `label` field on the class, dispatch on `this.label`:
-  state 0 threads `this` (cast `Continuation`) into the callee and sets `label=1` (a classpath/sibling
-  callee, resolved by its logical signature, gets its descriptor rewritten to the CPS form here), then
-  returns `COROUTINE_SUSPENDED` up if the callee suspends else the value; state 1 (the async resume,
-  re-entered by the callee's `resumeWith`) returns the resumed `result`. A suspending body that isn't a
-  supported state-machine shape still bails rather than emitting partial CPS. Lambda-suspension
-  detection walks AST call identities and reads each checker's exact provider-neutral `ResolvedCall`
-  (same-file, sibling-module, and classpath alike); it never classifies by a same-named declaration.
-  Proven both
-  completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
-  (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
-  real kotlinc parking primitive suspends then resumes to 42
-  (`::suspend_lambda_internal_suspension_async_resume`). A **non-tail** body that BINDS the result and
-  computes a tail expression (`{ val a = foo(); a + 1 }`) is handled: state 0 resumes into the binding
-  (`a = unbox(callResult)`) and runs the tail; state 1 binds `a` from the invokeSuspend `result` and
-  runs the same tail. Limited to a SINGLE suspension; the invokeSuspend body is lowered with
-  `next_value` reset to 2 (`this`=0, `result`=1) so the bound local can't collide with the machine's
-  marker/result temps. Proven: `{ val a = foo(); a + 1 }` → 43 (`::suspend_lambda_non_tail_body_runs`).
-  **Multiple suspensions / control flow** use the GENERAL lambda-mode machine: ir_lower builds
-  `invokeSuspend` with the plain body and registers `(FunId, ClassId, field_base)` in
-  `ir.suspend_lambda_sm`; the coroutine pass's `build_lambda_state_machine` reuses the same `Flat`
-  flattener as functions — the continuation is the lambda instance (`cont_v = this`, value 0), its
-  `result`/`label`/spilled fields are appended to the lambda class after the captures/params
-  (`field_base`; `Flat.setfield` adds it), and `invokeSuspend` stores its `result` parameter into the
-  `result` field at entry, then loops `while(true){ r = this.result; <restore spilled>; when(this.label){
-  states } }`. Proven both completion modes incl. spilling a value across a second suspension:
-  `{ val a = foo(); val b = bar(); a + b }` → 142 synchronously (`::suspend_lambda_two_suspensions_runs`),
-  and `{ val a = suspendOnce(); val b = plain(); a + b }` parks then resumes to 142
-  (`::suspend_lambda_two_suspensions_async_resume`). A lambda that BOTH captures and suspends is handled
-  by the same general machine: a capture is reloaded from its field into its local (value-index `2+i`)
-  in the `invokeSuspend` PROLOGUE at every entry (so it survives a re-entry) and is excluded from
-  spilling. Proven: `make(n: Int): suspend () -> Int = { val a = foo(); n + a }`, `make(10).invoke(k)` →
-  52 (`::suspend_lambda_captures_with_suspension_runs`).
-  **Own parameters** (leaf, no captures): a
-  parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
-  fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
-  field, then calls `invokeSuspend(Unit)`; `invokeSuspend` loads the param fields into locals bound to
-  the lambda's parameter names. The class implements `Function{arity+1}`. Proven:
-  `make(): suspend (Int) -> Int = { it + 1 }`, `make().invoke(10, k)` → 11
-  (`::suspend_lambda_with_parameter_runs`). This is also the shape a coroutine-builder lambda takes
-  (`runBlocking`/`launch` accept `suspend CoroutineScope.() -> T` — a receiver lambda is a 1-parameter
-  suspend lambda), so builders are ordinary classpath calls once their suspend-lambda argument compiles.
-  **Own parameters WITH captures**: the two are the same mechanism — captures are the leading fields,
-  stored by the constructor from the creation site; parameter slots are the fields after them, stored by
-  `create`/`invoke`; `invokeSuspend` reloads both. They are therefore modeled together, not just
-  separately (the earlier leaf-only restriction was a scope limit, not a machine limit). Proven for a
-  receiver slot plus a captured `var` (`withScope { seen += budget }`) and for a value parameter plus a
-  capture, each box-run (`tests/suspend_receiver_lambda_e2e.rs::suspend_receiver_lambda_captures_and_receiver`,
-  `::suspend_value_param_lambda_captures`).
+- **Suspend lambdas.** A `suspend` lambda literal lowers like any lambda: an `IrExpr::Lambda` over a
+  lifted private function whose leading parameters are the captures (a mutable capture is its `Ref`
+  holder), recorded in `suspend_funs`. The coroutine pass gives that function the CPS signature and an
+  IR state machine with its own `ContinuationImpl` class, which re-enters it through an `access$`
+  forwarder; the creation site is the ordinary `Function{arity+1}` lambda. Its arity counts the
+  continuation (`suspend () -> Int` is `Function1`). This runs, but is not kotlinc's shape: kotlinc
+  compiles the literal to a `SuspendLambda` subclass whose `invokeSuspend` holds the machine, with
+  `create`/`invoke` and an erased `invoke` bridge, created by `new C(captures…, null)`. Moving to that
+  shape is step 6 of `docs/JVM_INLINE_BEFORE_CPS.md` §1a. Behaviour is covered by
+  `tests/suspend_e2e.rs` (`suspend_lambda_*`) and `tests/suspend_receiver_lambda_e2e.rs`.
 - **A suspend lambda's parameter slots bind the RECEIVER as `this` — for a classpath callee too.** A
   `suspend R.() -> T` parameter folds its receiver into the erased `Function{n+1}`'s FIRST slot, and the
   checker resolves a bare member in the body against that receiver. Lowering binds the leading
@@ -1970,7 +1912,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (nullable-bound) `T`, the `& Any` intersection throws NPE on `null`
   (`tests/definitely_non_null_type_e2e.rs`). `as T?` and primitive
   casts are a plain `checkcast`/coercion. The safe cast `x as? T` lowers to
-  `{ val t = x; if (t is T) t as T else null }` — `instanceof` then `checkcast` on a match, `null` on a
+  `{ val t = x; if (t is T) t as T else null }` (with no `t` when `x` is a stable read of an
+  immutable local or parameter, which is tested and cast in place, as kotlinc's `irLetS` does)
+  — `instanceof` then `checkcast` on a match, `null` on a
   mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive
   `as? Int` would yield the boxed `Int?` wrapper — not yet modeled, so it skips). `SafeCast` in
   `tests/feature_box_e2e.rs`. `is`/`as`/`as?` targets resolve through the **same** name→internal map the
@@ -4377,7 +4321,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exact-arity overload) never mis-binds against a wider same-named overload. LOWERING: the block is `suspend
   CoroutineScope.() -> T`, erased in the descriptor to a bare `Function2` with no `suspend` flag; `lower_arg`
   detects the suspend lambda STRUCTURALLY (its checked `Ty::Fun` ends in a `Continuation` param) and routes
-  it to `lower_suspend_lambda`, which builds the real `SuspendLambda` state machine (the `CoroutineScope`
+  it through the suspend-lambda lowering described under "Suspend lambdas" (the `CoroutineScope`
   receiver binds as the body's implicit `this`, like any receiver lambda). The lambda body is lowered as a `suspend` context
   (`cur_fn_suspend`) so a suspend MEMBER call inside it (`repo.get(…)` on a classpath `suspend` interface) is
   CPS-threaded, and `suspend_member_call` detection consults the library for classpath members. Supports a
@@ -4512,6 +4456,52 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   visit as any other declared property, so a generic field's `Signature` lands after `this`. Tests:
   `tests/method_pool_order_e2e.rs::a_property_initializer_interns_its_value_before_its_field` and
   `::a_data_class_generic_field_signature_follows_its_constructor`.
+- **The primary constructor's descriptor covers every argument, plain parameters included.** The
+  pool seeder derived the constructor's descriptor from its property-backed parameters only, so
+  `open class Base(p: Int)` seeded `()V` where kotlinc writes `(I)V`, and a `$default` overload's
+  marker descriptor dropped the plain parameters the same way. Both now come from the constructor's
+  arguments (`primary_ctor_descriptor`), as the emitted `<init>` does. The seeded LocalVariableTable
+  after `this` lists every named parameter, plain ones included. The `$default` overload is written
+  right after the primary, so its body (`String.valueOf` for `val b: String = "$a"`, the delegating
+  `<init>`) interns there; only its header descriptor is seeded, and a data class's synthesized
+  members are seeded after it rather than before. Tests:
+  `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_in_the_constructor_header` and
+  `::a_default_constructor_body_interns_before_data_members`.
+- **A plain constructor parameter is annotated like a property-backed one.** kotlinc writes
+  `@NotNull`/`@Nullable` (and the parameter's own annotations) on every source parameter of the
+  primary constructor, `class Derived(label: String)` included; the compiler's prefix (outer
+  instance, captures) takes no slot. krusty sized the table from the property-backed parameters and
+  keyed it by a descriptor that left the plain ones out, so the annotations were lost. It now builds
+  one list per source parameter (`primary_ctor_source_parameters`) for the annotation pass and the
+  pool seeder alike. Like kotlinc, it writes no nullability annotation on a private constructor
+  (declared `private`, a value class's primary, or one hidden behind a marker accessor). The seeder
+  interns only the constructor's header (name, descriptor, `Signature`, annotations); the body is
+  the first code krusty emits, so it interns its null checks, super call and stores in order by
+  itself. The all-defaults no-argument `<init>()` interns its header before its body, as ASM visits
+  it. Test: `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call`.
+- **An attribute name interns with the first method that uses it, `Code` included.** ASM interns a
+  method's attribute names when it sizes that method, in method order: `Code` and its
+  sub-attributes, then `Signature`, `Deprecated` and the annotation attributes. krusty interned
+  `Code` ahead of every method's names, so an interface whose first method is abstract put `Code`
+  before that method's `Signature` or `RuntimeInvisibleParameterAnnotations`. `Code` now joins the
+  per-method first-use sequence. Test:
+  `tests/method_pool_order_e2e.rs::an_abstract_first_method_interns_its_attribute_names_before_code`.
+- **Compiler-written members intern in visit order too.** An inherited interface forwarder
+  (`class Plain : Greeter` calling `Greeter.greet` through `invokespecial`) interns its name,
+  descriptor and `@NotNull`/`@Nullable` types before its body, as ASM visits the header and its
+  annotations before the code. An anonymous object's constructor is seeded like any class with a
+  computed `@Metadata`, so its `this` local follows the constructor rather than the members after
+  it. A sealed class's nested subclasses intern where the `InnerClasses` table is written, after
+  `@Metadata`, not ahead of the constructor. Tests:
+  `tests/method_pool_order_e2e.rs::an_inherited_forwarder_interns_its_annotations_before_its_body`,
+  `::an_anonymous_object_constructor_interns_this_before_its_members` and
+  `::a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes`.
+- **A synthesized data-class member writes its locals with its body.** kotlinc gives `equals`,
+  `hashCode`, `toString`, `componentN` and `copy` a `LocalVariableTable` (receiver and parameters)
+  but no line, and interns it as it writes the method. krusty attached those tables after every
+  member, so a `data object`'s `equals` interned `other` after `<clinit>`. Recording a data-class
+  member now marks it as a debug-locals declaration, so emission writes the table in place. Test:
+  `tests/method_pool_order_e2e.rs::a_data_object_equals_interns_its_locals_with_its_body`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
@@ -6982,6 +6972,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter (the written name, else `value`, or `<set-?>` when delegated), and a delegated property
   records its `x$delegate` field; `lateinit` and delegation are property flags. Measured against kotlinc
   2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_property_flags_e2e.rs`.
+- **Status an override inherits.** An override records the return-value status of the first
+  declaration it overrides that has one (Java declarations have none and are skipped) and is
+  `operator`/`infix` when any declaration it overrides is. Kotlin's `Any` is the implicit supertype
+  of a classifier that declares none, so `toString`/`equals`/`hashCode` overrides have override
+  edges like any other. Measured against kotlinc 2.4.0, 2.4.10 and 2.4.20. Test:
+  `tests/metadata_return_value_status_e2e.rs`.
+- **`@Metadata` field order and own type parameters.** Messages serialize fields in ascending
+  field-number order, as kotlinc's generated `writeTo` does, and a `Type` refers to a type parameter
+  its declaration owns by name and to an enclosing class's by id. Measured against kotlinc 2.4.0,
+  2.4.10 and 2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_type_reference_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part
@@ -7917,6 +7917,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_finally_with_its_own_handler_types_the_parked_exception` in `tests/try_debug_lines_e2e.rs`
   (an `Int`/`Unit` statement `try` inside a finalizer, complete exception table and frames).
 
+- **Lowering declares the temporaries kotlinc's IR lowerings declare, and no others.** Each rule
+  below is read off kotlinc 2.4.20's source and checked against its `javap` output; lowering
+  records the choice in the IR, and the backend allocates whatever lowering declared. Ownership is
+  split exactly as in kotlinc: common lowering decides only the semantic snapshot/reuse shape
+  (whether a value is held in a temporary or re-read from a stable binding) and records that
+  temporary in the IR; it never reasons about stores, loads or slots. Removing a physical
+  store/load pair is owned by the JVM backend's bytecode temporaries pass (kotlinc's
+  `TemporaryVariablesEliminationTransformer`), which never re-decides the semantic shape:
+  - A `when` with a subject always holds the subject in a temporary, even when the subject reads
+    an immutable local. `Fir2IrVisitor.generateWhenSubjectVariable` creates `tmp_subject` for
+    every subject expression, and `JvmOptimizationLowering` puts a subject temporary whose
+    initializer is a variable read into `dontTouchTemporaryVals`, so it is not removed. Where the
+    subject is read once (a `tableswitch`, a single comparison), the bytecode temporaries pass
+    removes the store/load pair, as kotlinc's does.
+  - A destructuring declaration whose initializer is a stable read of an immutable local or
+    parameter declares no container: every `componentN` call reads the binding again.
+    `JvmOptimizationLowering.removeUnnecessaryTemporaryVariables` drops a `val` temporary
+    initialized by such a read (or by a constant). A mutable local, a call, or any other
+    initializer keeps its container temporary.
+  - A safe cast `x as? T` of a stable immutable read tests and casts `x` in place;
+    `TypeOperatorLowering` builds it with `irLetS`, which declares nothing for an `IrGetValue` of
+    an immutable value.
+  - `Array(size, init)`, `IntArray(size, init)` and the other primitive array constructors lower
+    as `ArrayConstructorLowering` does, declaring in this order: the index (`0`); the size, unless
+    it is a stable read or an integer constant; the array; the function value, unless it is a
+    lambda literal; and in the loop body the element index, a copy of the index taken before the
+    initializer runs. A lambda literal is spliced with its parameter bound to the element index,
+    as `IrInlinable.inline` remaps it, so it declares no local of its own. A non-lambda function
+    value is therefore evaluated after the array is allocated (arguments still run in source
+    order; only a negative size, which throws at the allocation, can observe the difference).
+  - A classifier callable-reference adapter (`::Array`, `::IntArray`) numbers its own
+    temporaries after its parameters, so a temporary it declares does not reuse a parameter's
+    value index.
+
+  The stability test is the read stability common IR publishes for each `GetValue`
+  (`IrFile::binding_read_stability`), not the shape of the FIR expression. In the 2.4.20 box
+  corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
+  `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
+  `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the
+  destructured loop element `$dest$…`, and inlines stdlib inline array constructors such as
+  `UIntArray(size) { … }`, whose lambda parameter keeps a local there.
+
+  Tests: `fir_lower::tests::lowering_temporaries` checks each lowered shape, and
+  `tests/block_slot_reuse_e2e.rs` compares full class bytes for destructuring, a `when`
+  subject, a safe cast and the array constructor with a stable, a computed and a constant size,
+  and local-variable slots for a destructured loop element. It runs an array constructor whose
+  size and function value log their evaluation (a negative size logs only the size, as under
+  kotlinc) and `::Array` and `::IntArray` references passed as functions.
+
 - **The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to
   it:** nothing stands between them, so the jump would be to the next instruction. Every other
   catch has the next handler, or its own copy of the finalizer, in the way and still needs it.
@@ -8165,8 +8214,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   underlying-typed field (VerifyError). The `SetField` boundary pairs the stored value with the
   field's pre-erasure type; `Boxed → UnboxedX` then unboxes exactly like a local store. kotlinc
   parity: its erased bridge `unbox-impl`s each value-class argument before the spill (verified on
-  `createMangling.kt`). NULLABLE value-class lambda parameters stay declined in
-  `lower_suspend_lambda` (boxed/null spill interplay unmodeled).
+  `createMangling.kt`). NULLABLE value-class lambda parameters stay declined (boxed/null spill
+  interplay unmodeled).
   (`suspend_lambda_with_value_class_params`; corpus
   `coroutines/inlineClasses/direct/createMangling.kt` box-OK, 2921 → 2922, FAIL 0.)
 

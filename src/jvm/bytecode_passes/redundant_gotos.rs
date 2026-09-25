@@ -173,7 +173,9 @@ pub(crate) fn required_nops(method: &MethodNode) -> BTreeSet<usize> {
         })
         .collect();
     for pair in points.windows(2) {
-        let [(from, _), (to, true)] = *pair else {
+        // kotlinc's `recordNopsRequiredForDebugger`: a stretch that starts at a line number and
+        // runs to the next debug point keeps a `nop` when it has no other instruction.
+        let [(from, true), (to, _)] = *pair else {
             continue;
         };
         let mut first_nop = None;
@@ -317,6 +319,27 @@ mod tests {
         // kotlinc's cleanup removes every `nop` it does not need.
         let body = body(&[Ok(NOP), Ok(0x03), Ok(NOP), Ok(IRETURN)], &[0], None);
         assert_eq!(body.run(), Some(ops(&[0x03, IRETURN])));
+    }
+
+    #[test]
+    fn only_a_stretch_that_starts_at_a_line_keeps_its_nop() {
+        // 0 (line) iconst_0; 1 istore_0; 2 nop; 3 (line) iload_0; 4 ireturn, where `x` ends at 2: the
+        // `nop` lies between the end of `x` and a line, a stretch no line starts, so it goes. An
+        // inlined lambda's `nop`s after its locals end are removed this way.
+        let after_end = body(
+            &[Ok(0x03), Ok(0x3b), Ok(NOP), Ok(0x1a), Ok(IRETURN)],
+            &[0, 3],
+            Some((0, 2)),
+        );
+        assert_eq!(after_end.run(), Some(ops(&[0x03, 0x3b, 0x1a, IRETURN])));
+        // A line whose only instruction is the `nop`, up to the end of `x`, keeps it: nothing
+        // changes.
+        let alone_on_its_line = body(
+            &[Ok(0x03), Ok(0x3b), Ok(NOP), Ok(0x1a), Ok(IRETURN)],
+            &[0, 2],
+            Some((0, 3)),
+        );
+        assert_eq!(alone_on_its_line.run(), None);
     }
 
     #[test]

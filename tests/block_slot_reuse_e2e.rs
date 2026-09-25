@@ -130,7 +130,7 @@ fn local_slot_rows(
 }
 
 fn run(src: &str) -> String {
-    common::compile_and_run_with_stdlib(src, "Main").expect("box() ran")
+    common::expect_box_run_with_stdlib(src, "Main")
 }
 
 /// `a`, `b` and `z` all take slot 3: each branch's local is left at the end of its branch.
@@ -820,5 +820,191 @@ fun box(): String {\n\
     if (mixed(true, 2) != 8.0 || mixed(false, -1) != 4.5) return \"FAIL mixed\"\n\
     return \"OK\"\n\
 }\n";
+    assert_eq!(run(src), "OK");
+}
+
+/// Lowering temporaries follow kotlinc's: a destructuring declaration of an immutable binding has no
+/// container temporary (kotlinc's `JvmOptimizationLowering` drops the `<destruct>` read of a `val`),
+/// so the components take the slots right after the binding. The whole class matches kotlinc.
+#[test]
+fn destructuring_an_immutable_binding_needs_no_container_slot() {
+    byte_identical(
+        "slotTempDestructureStable",
+        "data class P(val a: String, val b: Int)\n\
+fun parameter(p: P): String {\n\
+    val (a, b) = p\n\
+    val q = b + 1\n\
+    return a + b + q\n\
+}\n\
+fun local(): String {\n\
+    val p = P(\"x\", 1)\n\
+    val (a, b) = p\n\
+    val q = b + 1\n\
+    return a + b + q\n\
+}\n\
+fun variable(): String {\n\
+    var p = P(\"x\", 1)\n\
+    val (a, b) = p\n\
+    p = P(\"y\", 2)\n\
+    return a + b + p\n\
+}\n",
+        "SlotTempDestructureStableKt",
+    );
+}
+
+/// A destructured `for` element is an immutable binding too: its components are read from the
+/// element's slot. krusty still names the element in the table (`$dest$`), kotlinc does not, so
+/// only the source locals are compared.
+#[test]
+fn a_destructured_loop_element_needs_no_container_slot() {
+    same_local_slots_of(
+        "slotTempDestructureLoop",
+        "class C(val i: Int) {\n\
+    operator fun component1() = i + 1\n\
+    operator fun component2() = i + 2\n\
+}\n\
+class Cs(val n: Int) {\n\
+    operator fun iterator() = CIterator(n)\n\
+}\n\
+class CIterator(val n: Int) {\n\
+    var k = 0\n\
+    operator fun hasNext(): Boolean = k < n\n\
+    operator fun next(): C {\n\
+        k += 1\n\
+        return C(k)\n\
+    }\n\
+}\n\
+fun loop(xs: Cs): Int {\n\
+    var s = 0\n\
+    for ((a, b) in xs) {\n\
+        s += a * 10 + b\n\
+    }\n\
+    return s\n\
+}\n",
+        "SlotTempDestructureLoopKt",
+        &[],
+        |local| !local.starts_with('$'),
+    );
+}
+
+/// A `when` subject is always kotlinc's `tmp_subject`, even when it reads a parameter or an
+/// immutable local. The temporaries pass then drops the store where the subject is read once (a
+/// `tableswitch`, a single comparison) and keeps it where it is read again (`s` in `keys`), so
+/// `y` and `r` keep kotlinc's slots and the whole class matches.
+#[test]
+fn a_when_subject_reading_an_immutable_binding_is_held_like_kotlinc() {
+    byte_identical(
+        "slotTempWhenSubject",
+        "fun switch(x: Int): String {\n\
+    val r = when (x) { 1 -> \"a\"; 2 -> \"b\"; else -> \"c\" }\n\
+    val k = x + 1\n\
+    return r + k\n\
+}\n\
+fun single(p: Int): Int {\n\
+    val x = p + 1\n\
+    val r = when (x) { 1 -> 5; else -> 3 }\n\
+    return r\n\
+}\n\
+class K(val v: Int)\n\
+fun keys(s: K, a: K, b: K): Int {\n\
+    val y = 1\n\
+    val r = when (s) { a -> 1; b -> 2; else -> 3 }\n\
+    return r + y\n\
+}\n\
+class W(val n: Int)\n\
+fun types(a: Any): Int = when (a) { is W -> a.n; is Int -> a; else -> 0 }\n",
+        "SlotTempWhenSubjectKt",
+    );
+}
+
+/// `x as? T` of a parameter or an immutable local tests and casts it in place, with no temporary
+/// (kotlinc's `irLetS`), so `r` and `q` keep kotlinc's slots and the whole class matches.
+#[test]
+fn a_safe_cast_of_an_immutable_binding_needs_no_slot() {
+    byte_identical(
+        "slotTempSafeCast",
+        "interface Sized { val n: Int }\n\
+class S(override val n: Int) : Sized\n\
+fun parameter(x: Any): Int {\n\
+    val r = x as? S\n\
+    val q = 1\n\
+    return (r?.n ?: 0) + q\n\
+}\n\
+fun local(y: Any): Int {\n\
+    val x: Any = y\n\
+    val r = x as? Sized\n\
+    val q = 2\n\
+    return (r?.n ?: 0) + q\n\
+}\n",
+        "SlotTempSafeCastKt",
+    );
+}
+
+/// `IntArray(size) { init }` in kotlinc's `ArrayConstructorLowering` order: the index, the size
+/// only when it is neither a constant nor a stable read, the array, and the element index inside
+/// the loop, which the lambda's parameter is remapped onto; captured stable values are read in
+/// place. `arr`, `q` and the lambda's own `sq` keep kotlinc's slots and the whole class matches.
+#[test]
+fn array_constructor_temporaries_take_kotlinc_slots() {
+    byte_identical(
+        "slotTempArrayConstructor",
+        "fun stable(n: Int): Int {\n\
+    val arr = IntArray(n) { it * 2 }\n\
+    val q = arr[1]\n\
+    return q\n\
+}\n\
+fun computed(n: Int, m: Int): Int {\n\
+    val arr = IntArray(n + 1) { it * m }\n\
+    val q = arr[1]\n\
+    return q\n\
+}\n\
+fun constant(): Long {\n\
+    val arr = LongArray(4) { i -> val sq = i * 3L; sq + 1 }\n\
+    val q = arr[1]\n\
+    return q\n\
+}\n",
+        "SlotTempArrayConstructorKt",
+    );
+}
+
+/// kotlinc evaluates the size, allocates the array and only then evaluates a function-value
+/// initializer; each is evaluated once and the elements see their own index. A negative size
+/// throws at the allocation, before the function value is evaluated (kotlinc 2.4.20 logs `n`).
+#[test]
+fn array_constructor_evaluates_its_function_value_after_the_array() {
+    let src = "var log = \"\"\n\
+var n = 2\n\
+fun size(): Int { log += \"n\"; return n }\n\
+fun init(): (Int) -> String { log += \"f\"; return { \"y$it\" } }\n\
+fun box(): String {\n\
+    val arr = Array(size(), init())\n\
+    var k = 1\n\
+    val sums = IntArray(3) { k += it; k }\n\
+    if (arr[0] != \"y0\" || arr[1] != \"y1\") return \"FAIL: elements\"\n\
+    if (log != \"nf\") return \"FAIL: order $log\"\n\
+    if (sums[0] != 1 || sums[1] != 2 || sums[2] != 4 || k != 4) return \"FAIL: sums\"\n\
+    log = \"\"\n\
+    n = -1\n\
+    try { Array(size(), init()) } catch (e: Throwable) { log += \"!\" }\n\
+    return if (log == \"n!\") \"OK\" else \"FAIL: a negative size ran $log\"\n\
+}\n";
+    assert_eq!(run(src), "OK");
+}
+
+/// An `::Array` reference adapter numbers its temporaries after its own parameters, so the index
+/// it declares first does not overwrite the size it was passed.
+#[test]
+fn an_array_constructor_reference_keeps_its_parameters() {
+    let src =
+        "fun g(b: (Int, (Int) -> String) -> Array<String>): Array<String> = b(2) { \"O$it\" }\n\
+fun h(b: (Int, (Int) -> Int) -> IntArray): IntArray = b(3, ::twice)\n\
+fun box(): String {\n\
+    val strings = g(::Array)\n\
+    val ints = h(::IntArray)\n\
+    if (strings[0] != \"O0\" || strings[1] != \"O1\") return \"FAIL: strings\"\n\
+    if (ints[0] != 0 || ints[1] != 2 || ints[2] != 4) return \"FAIL: ints\"\n\
+    return \"OK\"\n\
+}\n\
+fun twice(i: Int) = i * 2\n";
     assert_eq!(run(src), "OK");
 }

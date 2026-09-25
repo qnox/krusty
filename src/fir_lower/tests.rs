@@ -15,6 +15,7 @@ use crate::ir::{
 use crate::types::Ty;
 
 mod local_classifier_provenance;
+mod lowering_temporaries;
 
 use super::lower_body;
 
@@ -568,6 +569,8 @@ fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
             (leaf, Ty::obj("Leaf"), 0),
             (middle, Ty::obj_args("Middle", &[Ty::String]), 1),
             (root, Ty::obj_args("Root", &[Ty::String]), 2),
+            // A classifier that declares no supertype still has Kotlin's implicit root.
+            (crate::types::wk::any(), Ty::obj("kotlin/Any"), 3),
         ]
     );
     ir.validate_determined_types()

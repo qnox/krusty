@@ -1,9 +1,13 @@
 //! Lower checked `when` decisions into common IR.
 //!
 //! The checker publishes one FIR identity for a subject and every predicate use. This boundary
-//! materializes an unstable subject once and redirects those uses to its snapshot.
+//! materializes the subject once, as kotlinc's `tmp_subject`, and redirects those uses to it.
+//!
+//! Lowering owns only that semantic shape: it records the temporary and every use reads it.
+//! Removing the physical store/load pair when the subject is read once belongs to the JVM
+//! backend's bytecode temporaries pass, never to this module.
 
-use crate::fir::{FirExprId, FirExprKind, FirWhenBranch, FirWhenCondition};
+use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition};
 use crate::ir::{ExprId, IrBinOp, IrExpr};
 use crate::types::Ty;
 
@@ -23,24 +27,14 @@ impl BodyLowering<'_> {
                     .body
                     .expr(subject)
                     .ok_or(FirLoweringFailure::MissingExpression(subject))?;
-                let stable_local = match &subject_expression.kind {
-                    FirExprKind::ValueRead(value) if !self.local_value_is_mutable(*value) => {
-                        Some(*value)
-                    }
-                    _ => None,
-                };
                 let subject_ty = subject_expression.ty.get();
                 let value = self.expression(subject)?;
 
-                // An immutable local is already a stable snapshot. Any other subject, including a
-                // mutable local, needs a dedicated value because conditions may have side effects.
-                if let Some(local) = stable_local {
-                    let slot = self.value_slot(local);
-                    if matches!(self.ir.expr(value), IrExpr::GetValue(read) if *read == slot) {
-                        return Ok::<_, FirLoweringFailure>(slot);
-                    }
-                }
-
+                // Every subject gets its own value, a read of an immutable local included: kotlinc's
+                // FIR-to-IR declares `tmp_subject` for any subject expression, and
+                // `JvmOptimizationLowering` deliberately keeps one initialized from a variable read
+                // (`dontTouchTemporaryVals`). Whether its store survives is then the bytecode
+                // temporaries pass's decision, exactly as in kotlinc.
                 let temporary = self.allocate_temporary();
                 prefix.push(self.ir.add_expr(IrExpr::Variable {
                     index: temporary,

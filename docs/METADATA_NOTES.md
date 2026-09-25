@@ -129,6 +129,26 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   Tests: `tests/metadata_property_flags_e2e.rs`, `class_builder` unit test
   `private_setter_records_value_parameter_before_the_property_name`.
 
+- `ReturnValueStatus` lives in `Function.flags` bits 16-17 and `Property.flags` bits 17-18
+  (Unspecified 0, MustUse 1, ExplicitlyIgnorable 2). With the return-value checker disabled, the
+  default of kotlinc 2.4.0-2.4.20 (`FirMustUseReturnValueStatusComponent`), a declaration takes the
+  status of the first declaration it overrides that records one, else Unspecified. The stdlib records
+  MustUse on most API (`Any.toString`, `Continuation.resumeWith`, `List.get`) and ExplicitlyIgnorable
+  on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
+  override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the
+  `operator` (bit 8) and `infix` (bit 9) modifiers when any declaration it overrides has them. Test:
+  `tests/metadata_return_value_status_e2e.rs`.
+- Field order and type-parameter references (kotlinc 2.4.0, 2.4.10, 2.4.20): the protoc-generated
+  `writeTo` emits every message's fields in ascending field-number order, repeated fields together
+  and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's
+  `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
+  it. A `Type` naming a type parameter the declaration being written owns (a member function's or
+  property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
+  `type_parameter` (f7). A setter is a declaration of its own, so its value parameter addresses the
+  property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the return and receiver
+  types but writes `type_parameter` in `setter_value_parameter`). krusty builds the record in any
+  order and `Pb::canonical` sorts it. Test: `tests/metadata_type_reference_e2e.rs`.
+
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one
 record per string (no range compression) ⇒ semantically equivalent, not byte-identical, to

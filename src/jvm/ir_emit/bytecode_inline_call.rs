@@ -6,17 +6,21 @@
 //! `@InlineOnly` callee whose body loads its parameters first — evaluated in place where the body
 //! loads it (`InplaceArgumentsMethodTransformer`). The inlined body then follows.
 //!
-//! This path owns bodies without inline-lambda arguments. A public inline call it cannot transform
-//! remains a legal direct call; a splice-only declaration fails explicitly. The legacy byte splicer
-//! is not a fallback for this route.
+//! A call without literal lambda arguments that the port cannot transform remains a legal direct
+//! call. A call whose body invokes a literal lambda takes the route [`LambdaCallRoute`] planned for
+//! it before emission; the byte splice is never a fallback for either.
 
 use std::collections::HashMap;
 
 use super::*;
-use crate::jvm::inliner::{self, Binding, Parameter, Parameters};
+
+mod lambda_node;
+mod lambda_route;
+use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
+pub(super) use lambda_route::LambdaCallRoute;
 
 const ACC_STATIC: u16 = 0x0008;
 
@@ -38,14 +42,17 @@ impl Emitter<'_> {
     /// deliberately unavailable to no-lambda calls, so it cannot become their fallback again.
     pub(super) fn try_inline_materialized_lambda_body(
         &mut self,
-        call_expression: u32,
-        target: &InlineStaticTarget<'_>,
-        args: &[u32],
-        leading_non_argument_operands: usize,
-        body: &crate::jvm::classreader::MethodCode,
-        reified: &crate::jvm::inline::ReifiedArguments,
+        call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
+        let ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            body,
+            reified,
+        } = *call;
         let physical = parse_descriptor_params(target.splice_desc)?;
         if physical.len() != args.len() {
             return None;
@@ -156,19 +163,23 @@ impl Emitter<'_> {
             .fold(frame_size, u16::max)
     }
 
-    /// Inline `target` through the ported inliner. `None` when this path does not cover a live call;
-    /// `Some(())` once the inlined code is written, or when the call is already unreachable and
-    /// therefore needs no bytecode.
+    /// Inline `target`, a call without literal lambda arguments its body invokes, through the
+    /// ported inliner. `None` when this path does not cover a live call, which then stays a direct
+    /// call; `Some(())` once the inlined code is written, or when the call is already unreachable
+    /// and therefore needs no bytecode.
     pub(super) fn try_inline_classpath_body(
         &mut self,
-        call_expression: u32,
-        target: &InlineStaticTarget<'_>,
-        args: &[u32],
-        leading_non_argument_operands: usize,
-        body: &crate::jvm::classreader::MethodCode,
-        reified: &crate::jvm::inline::ReifiedArguments,
+        call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
+        let ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            body,
+            reified,
+        } = *call;
         if code.is_dead() {
             return Some(());
         }
@@ -202,29 +213,158 @@ impl Emitter<'_> {
             crate::trace_compiler!("splice", "unified inliner cannot bind the arguments");
             return None;
         };
-        let parameters = Parameters {
+        let parameters =
+            self.call_parameters(&supplies, &physical, args, &HashMap::new(), Vec::new());
+        let base = self.inline_splice_base(self.frame.size());
+        // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
+        // the source map numbers them after any call inlined into an argument; this first pass only
+        // settles whether the port covers the body.
+        if let Err(error) = inliner::inline(
+            &callee,
+            &parameters,
+            &[],
+            target.inline_only,
+            base,
+            reified,
+            &mut UnmappedLines,
+        ) {
+            crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
+            return None;
+        }
+        let inlined_call = InlinedCall {
+            call: *call,
+            physical: &physical,
+            supplies: &supplies,
+        };
+        self.emit_inlined_call(&inlined_call, &callee, &parameters, &[], base, code)
+            .expect("the body was inlined before its arguments were evaluated");
+        Some(())
+    }
+
+    /// Inline a call that route planning gave to the port ([`LambdaCallRoute::MethodInliner`]):
+    /// each literal lambda its body invokes is compiled to a node and placed at those `invoke`s.
+    /// An error is a broken invariant of that plan and fails the emission; the call is never
+    /// retried as a splice.
+    pub(super) fn inline_classpath_lambda_call(
+        &mut self,
+        call: &ClasspathInlineCall<'_, '_>,
+        callee: &MethodNode,
+        code: &mut CodeBuilder,
+    ) -> Result<(), &'static str> {
+        let ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            ..
+        } = *call;
+        if code.is_dead() {
+            return Ok(());
+        }
+        let physical = parse_descriptor_params(target.splice_desc)
+            .ok_or("an inline callee's descriptor cannot be parsed")?;
+        let supplies = self
+            .parameter_supplies(
+                call_expression,
+                target,
+                args,
+                leading_non_argument_operands,
+                &physical,
+                callee,
+            )
+            .ok_or("a function-typed argument has no published materialization role")?;
+        let mut lambdas = Vec::new();
+        let mut captured = Vec::new();
+        let mut lambda_bindings = HashMap::new();
+        for (index, &argument) in args.iter().enumerate() {
+            if !matches!(
+                self.ir.expr(argument),
+                IrExpr::Lambda {
+                    inline_body: Some(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
+            let argument = self.inline_lambda_node(argument, target.name)?;
+            let start = captured.len();
+            for &(capture, ty) in &argument.captures {
+                captured.push(Parameter {
+                    category: Category::of_descriptor(&type_descriptor(ty)),
+                    binding: self.caller_local_binding(capture, ty),
+                });
+            }
+            let mut lambda = argument.lambda;
+            lambda.captured = start..captured.len();
+            lambda_bindings.insert(index, lambdas.len());
+            lambdas.push(lambda);
+        }
+        let parameters =
+            self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
+        let base = self.inline_splice_base(self.frame.size());
+        let inlined_call = InlinedCall {
+            call: *call,
+            physical: &physical,
+            supplies: &supplies,
+        };
+        self.emit_inlined_call(&inlined_call, callee, &parameters, &lambdas, base, code)
+            .map_err(|error| {
+                crate::trace_compiler!("splice", "the inliner rejected a planned call: {error:?}");
+                "the inliner rejected a call its route planning gave it"
+            })
+    }
+
+    /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary.
+    fn call_parameters(
+        &self,
+        supplies: &[Supply],
+        physical: &[Ty],
+        args: &[u32],
+        lambda_bindings: &HashMap<usize, usize>,
+        captured: Vec<Parameter>,
+    ) -> Parameters {
+        Parameters {
             parameters: supplies
                 .iter()
-                .zip(&physical)
+                .zip(physical)
                 .zip(args)
-                .map(|((supply, &ty), &argument)| Parameter {
+                .enumerate()
+                .map(|(index, ((supply, &ty), &argument))| Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
-                    binding: match supply {
-                        Supply::CallerLocal => self.caller_local_binding(argument, ty),
-                        Supply::Stored | Supply::InPlace => Binding::Temporary,
+                    binding: match (lambda_bindings.get(&index), supply) {
+                        (Some(&lambda), _) => Binding::Lambda(lambda),
+                        (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                        (None, Supply::Stored | Supply::InPlace) => Binding::Temporary,
                     },
                 })
                 .collect(),
-        };
-        let base = self.inline_splice_base(self.frame.size());
-        let inlined = match inliner::inline(&callee, &parameters, target.inline_only, base, reified)
-        {
-            Ok(inlined) => inlined,
-            Err(error) => {
-                crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
-                return None;
-            }
-        };
+            captured,
+        }
+    }
+
+    /// Evaluate the call's arguments into their temporaries, then write the inlined body.
+    fn emit_inlined_call(
+        &mut self,
+        call: &InlinedCall<'_, '_>,
+        callee: &MethodNode,
+        parameters: &Parameters,
+        lambdas: &[inliner::Lambda],
+        base: u16,
+        code: &mut CodeBuilder,
+    ) -> Result<(), InlineError> {
+        let InlinedCall {
+            call:
+                ClasspathInlineCall {
+                    call_expression,
+                    target,
+                    args,
+                    leading_non_argument_operands,
+                    body,
+                    reified,
+                },
+            physical,
+            supplies,
+        } = *call;
         let temporaries = parameters.temporaries();
 
         // Arguments, in order: each is stored right after it is evaluated.
@@ -255,7 +395,7 @@ impl Emitter<'_> {
                 call_expression,
                 leading_non_argument_operands,
                 args,
-                &physical,
+                physical,
                 index,
                 code,
             );
@@ -273,22 +413,44 @@ impl Emitter<'_> {
         debug_lines::mark_expression_start(self.ir, call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        let mut lines = CallLines {
+            emitter: self,
+            body,
+            inline_only: target.inline_only,
+            call_line,
+            claimable,
+        };
+        let inlined = inliner::inline(
+            callee,
+            parameters,
+            lambdas,
+            target.inline_only,
+            base,
+            reified,
+            &mut lines,
+        );
+        let inlined = match inlined {
+            Ok(inlined) => inlined,
+            Err(error) => {
+                for lease in leases {
+                    self.release_temporary(lease);
+                }
+                self.frame.rewind_to(argument_frame);
+                return Err(error);
+            }
+        };
         let placement = InlinePlacement {
             call_expression,
             args,
             leading_non_argument_operands,
-            physical: &physical,
+            physical,
             in_place,
             origins: &origins,
         };
-        self.write_inlined_node(
-            &inlined,
-            body,
-            target.inline_only,
-            call_line,
-            placement,
-            code,
-        );
+        self.write_inlined_node(&inlined, placement, code);
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
@@ -301,7 +463,7 @@ impl Emitter<'_> {
             self.release_temporary(lease);
         }
         self.frame.rewind_to(argument_frame);
-        Some(())
+        Ok(())
     }
 
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
@@ -453,9 +615,6 @@ impl Emitter<'_> {
     fn write_inlined_node(
         &mut self,
         inlined: &MethodNode,
-        body: &crate::jvm::classreader::MethodCode,
-        inline_only: bool,
-        call_line: u16,
         mut placement: InlinePlacement<'_>,
         code: &mut CodeBuilder,
     ) {
@@ -477,9 +636,6 @@ impl Emitter<'_> {
                 catch_type,
             );
         }
-        let claimable = u16::try_from(self.ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
         let mut top_local = 0u16;
         let mut duplicating: Option<(u8, u16)> = None;
         for (at, node) in inlined.nodes.iter().enumerate() {
@@ -499,13 +655,7 @@ impl Emitter<'_> {
                     }
                     bound_at[label.index()] = Some(code.bytes.len());
                 }
-                Node::Line { line, .. } => {
-                    if let Some(line) =
-                        self.map_inlined_line(body, inline_only, *line, call_line, claimable)
-                    {
-                        code.inlined_line(line);
-                    }
-                }
+                Node::Line { line, .. } => code.inlined_line(*line),
                 Node::Insn(insn) => {
                     if let Insn::Var { op, slot } = insn {
                         top_local = top_local.max(slot + var_words(*op));
@@ -648,7 +798,71 @@ impl Emitter<'_> {
     }
 }
 
+/// Lines left as the body's own, for the pass that only checks the body can be inlined.
+struct UnmappedLines;
+
+impl inliner::SourceLines for UnmappedLines {
+    fn map(&mut self, line: u16) -> Option<u16> {
+        Some(line)
+    }
+    fn synthetic(&mut self) -> Option<u16> {
+        None
+    }
+    fn call_site(&self) -> Option<u16> {
+        None
+    }
+}
+
+/// The inlined body's lines, mapped into the caller's source map against the call's line.
+struct CallLines<'e, 'a, 'b> {
+    emitter: &'e mut Emitter<'a>,
+    body: &'b crate::jvm::classreader::MethodCode,
+    inline_only: bool,
+    call_line: u16,
+    claimable: u16,
+}
+
+impl inliner::SourceLines for CallLines<'_, '_, '_> {
+    fn map(&mut self, line: u16) -> Option<u16> {
+        self.emitter.map_inlined_line(
+            self.body,
+            self.inline_only,
+            line,
+            self.call_line,
+            self.claimable,
+        )
+    }
+    fn synthetic(&mut self) -> Option<u16> {
+        self.emitter
+            .cw
+            .source_map_for_inlining(self.claimable)
+            .and_then(|map| map.map_synthetic_line(1))
+    }
+    fn call_site(&self) -> Option<u16> {
+        Some(self.call_line)
+    }
+}
+
 /// What writing the inlined node needs to know about the call's arguments.
+/// One call to a classpath inline function, as the call dispatch found it.
+#[derive(Clone, Copy)]
+pub(super) struct ClasspathInlineCall<'a, 't> {
+    pub call_expression: u32,
+    pub target: &'a InlineStaticTarget<'t>,
+    pub args: &'a [u32],
+    pub leading_non_argument_operands: usize,
+    pub body: &'a crate::jvm::classreader::MethodCode,
+    pub reified: &'a crate::jvm::inline::ReifiedArguments,
+}
+
+/// A call on its way through the port, with what the call site decided per parameter.
+#[derive(Clone, Copy)]
+struct InlinedCall<'a, 't> {
+    call: ClasspathInlineCall<'a, 't>,
+    physical: &'a [Ty],
+    supplies: &'a [Supply],
+}
+
 struct InlinePlacement<'a> {
     call_expression: u32,
     args: &'a [u32],

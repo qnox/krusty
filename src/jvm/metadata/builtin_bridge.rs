@@ -103,6 +103,7 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                                 is_operator: member.is_operator,
                                 is_infix: member.is_infix,
                                 is_abstract: member.is_abstract,
+                                return_value_status: member.return_value_status,
                                 formals: member
                                     .formals
                                     .into_iter()

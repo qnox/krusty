@@ -63,6 +63,10 @@ struct FileMapping {
     ranges: Vec<RangeMapping>,
 }
 
+/// The file kotlinc's synthetic lines belong to (`FAKE_FILE_NAME`, `FAKE_PATH`).
+const FAKE_FILE_NAME: &str = "fake.kt";
+const FAKE_PATH: &str = "kotlin/jvm/internal/FakeKt";
+
 /// How far past its end the most recently opened range may be stretched to take in a new line.
 ///
 /// The reference compiler lets the range at the frontier of the output space absorb a line up to
@@ -125,6 +129,17 @@ impl SourceMap {
     /// next free output line. So a body whose lines are 1739 and 1814..=1816 takes two rows, not one
     /// row spanning the whole distance between them.
     pub fn map_line(&mut self, name: &str, path: &str, source: u16, call_line: u16) -> Option<u16> {
+        self.map(name, path, source, Some(call_line))
+    }
+
+    /// The output line of synthetic line `id` (`mapSyntheticLineNumber`): a line of kotlinc's fake
+    /// file, which no call expanded, so the debug stratum does not name it. An `@InlineOnly` call
+    /// marks one before a lambda that starts on the call's own line.
+    pub fn map_synthetic_line(&mut self, id: u16) -> Option<u16> {
+        self.map(FAKE_FILE_NAME, FAKE_PATH, id, None)
+    }
+
+    fn map(&mut self, name: &str, path: &str, source: u16, call_site: Option<u16>) -> Option<u16> {
         let global_max = self.max_used;
         let file = self
             .files
@@ -138,7 +153,7 @@ impl SourceMap {
                 } else {
                     0
                 };
-                range.call_site == Some(call_line)
+                range.call_site == call_site
                     && source >= range.source
                     && source - range.source < range.range.saturating_add(slack)
             };
@@ -160,7 +175,7 @@ impl SourceMap {
             source,
             dest: output,
             range: 1,
-            call_site: Some(call_line),
+            call_site,
         };
         match file {
             Some(file) => self.files[file].ranges.push(range),
@@ -378,6 +393,23 @@ mod tests {
              + 1 Main.kt\nMainKt\n+ 2 Lib.kt\nLibKt\n\
              *L\n1#1,3:1\n2#2,8:4\n\
              *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n2#1:4,8\n*E\n"
+        );
+    }
+
+    /// kotlinc's map for `repeat(n) { s += it }` in a seven-line file, where the lambda starts on
+    /// the `@InlineOnly` call's line: the synthetic line takes the fake file's line 1, and the
+    /// debug stratum leaves it out.
+    #[test]
+    fn a_synthetic_line_maps_into_the_fake_file() {
+        let mut map = SourceMap::new("t.kt", "TKt", 7);
+        assert_eq!(map.map_synthetic_line(1), Some(8));
+        assert_eq!(map.map_synthetic_line(1), Some(8));
+        assert_eq!(
+            map.render().expect("a map"),
+            "SMAP\nt.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 t.kt\nTKt\n+ 2 fake.kt\nkotlin/jvm/internal/FakeKt\n\
+             *L\n1#1,7:1\n1#2:8\n\
+             *S KotlinDebug\n*F\n+ 1 t.kt\nTKt\n*L\n*E\n"
         );
     }
 

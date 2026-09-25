@@ -72,6 +72,11 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
     move_fact(&mut ir.fn_context_counts, implementation, declaration);
     move_fact(&mut ir.fn_param_no_infer, implementation, declaration);
     move_fact(
+        &mut ir.fn_return_value_statuses,
+        implementation,
+        declaration,
+    );
+    move_fact(
         &mut ir.default_stub_boxed_params,
         implementation,
         declaration,
