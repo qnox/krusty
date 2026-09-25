@@ -3108,6 +3108,8 @@ pub struct IrAppliedClassifier {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrPropertyOverride {
     pub implementation: crate::fir::ResolvedPropertyOverrideTarget,
+    /// Common-IR getter of a compiler-generated implementation (see `IrFunctionOverride`).
+    pub implementation_getter: Option<FunId>,
     pub implementation_owner: TypeName,
     pub overridden: crate::fir::ResolvedPropertyOverrideTarget,
     pub overridden_owner: TypeName,

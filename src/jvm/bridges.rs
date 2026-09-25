@@ -255,9 +255,13 @@ fn property_bridges(
             }
             crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
         };
-        if edge.implementation_owner == internal_name
-            && implementation_property.is_none_or(|property| property.class != Some(cid as u32))
-        {
+        let declared_here = match edge.implementation_getter {
+            Some(getter) => ir.classes[cid].methods.contains(&getter),
+            None => {
+                implementation_property.is_some_and(|property| property.class == Some(cid as u32))
+            }
+        };
+        if edge.implementation_owner == internal_name && !declared_here {
             continue;
         }
         let source_getter = property_getter_name(&edge.name);
@@ -268,6 +272,7 @@ fn property_bridges(
             }
         };
         let target_getter = match edge.implementation {
+            _ if edge.implementation_getter.is_some() => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
                 external_method_name(classpath, target)?

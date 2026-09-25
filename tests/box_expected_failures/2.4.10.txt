@@ -21,7 +21,6 @@ binaryOp/kt11163.kt
 binaryOp/kt11163_properIeee754comparisons.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/unsignedArrayForEach.kt
-bridges/delegationProperty.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/kt2702.kt
@@ -64,7 +63,6 @@ casts/objectToPrimitiveWithAssertion.kt
 classes/implementingInterfaceByParentClass.kt
 classes/kt2224.kt
 classes/selfcreate.kt
-classes/typedDelegation.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
 closures/capturedLocalGenericFun.kt
@@ -214,7 +212,6 @@ funInterface/suspendFunInterfaceConversionCodegen.kt
 function/defaultsWithVarArg2.kt
 functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/subclass.kt
-functions/delegatedPropertyWithMultipleOverriddens_generics.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 functions/kt1199.kt
@@ -438,7 +435,6 @@ properties/complexPropertyInitializer.kt
 properties/const/intermoduleInlineConst.kt
 properties/fieldInsideField.kt
 properties/fieldInsideNested.kt
-properties/kt4373.kt
 properties/lateinit/accessorException.kt
 properties/lateinit/topLevel/accessorException.kt
 properties/lateinit/topLevel/uninitializedMemberAccess.kt

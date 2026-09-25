@@ -339,3 +339,57 @@ fn dependency_interface_delegation_uses_opaque_external_targets() {
     };
     assert_eq!(output, "OK");
 }
+
+/// A delegated property whose interface declares it through a type parameter keeps kotlinc's shape:
+/// open accessors with the applied type plus bridges with the erased one. Without the bridges a
+/// read or write through the interface type fails with `AbstractMethodError`.
+const GENERIC_PROPERTY_SRC: &str = "interface Slot<T> {\n\
+    var stored: T\n\
+    val count: T\n\
+}\n\
+class Box(var inner: String) : Slot<String> {\n\
+    override var stored: String\n\
+        get() = inner\n\
+        set(value) { inner = value }\n\
+    override val count: String get() = inner.length.toString()\n\
+}\n\
+class Crate(slot: Slot<String>) : Slot<String> by slot\n\
+interface Gauge<T> { val level: T }\n\
+class Meter(gauge: Gauge<Int>) : Gauge<Int> by gauge\n\
+fun box(): String {\n\
+    val crate: Slot<String> = Crate(Box(\"fail\"))\n\
+    crate.stored = \"OK\"\n\
+    val meter: Gauge<Int> = Meter(object : Gauge<Int> { override val level = 2 })\n\
+    if (crate.count != \"2\" || meter.level != 2) return \"fail: \" + crate.count\n\
+    return crate.stored\n\
+}\n";
+
+#[test]
+fn delegated_generic_property_is_reachable_through_the_interface() {
+    common::expect_box_ok_with_stdlib(GENERIC_PROPERTY_SRC, "Crate");
+}
+
+#[test]
+fn delegated_generic_property_accessors_match_kotlinc() {
+    let classes = common::expect_classes_with_stdlib(GENERIC_PROPERTY_SRC, "Crate");
+    let Some(reference) = common::kotlinc_library(GENERIC_PROPERTY_SRC) else {
+        return;
+    };
+    // `Meter` is left out: kotlinc boxes a primitive result that overrides a type-parameter one
+    // (`getLevel()Integer`), which krusty does not do for any override yet.
+    let accessors = |bytes: &[u8]| {
+        krusty::jvm::classreader::parse_class(bytes)
+            .expect("class parses")
+            .methods
+            .into_iter()
+            .filter(|method| method.name != "<init>")
+            .map(|method| (method.name, method.descriptor, method.access))
+            .collect::<Vec<_>>()
+    };
+    let (_, emitted) = classes
+        .iter()
+        .find(|(name, _)| name == "Crate")
+        .expect("krusty emits Crate");
+    let expected = std::fs::read(reference.join("Crate.class")).expect("kotlinc emits Crate");
+    assert_eq!(accessors(emitted), accessors(&expected));
+}

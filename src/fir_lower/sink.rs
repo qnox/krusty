@@ -63,6 +63,7 @@ fn lower_property_override_plans(
         .iter()
         .map(|edge| crate::ir::IrPropertyOverride {
             implementation: edge.implementation,
+            implementation_getter: None,
             implementation_owner: edge.implementation_owner,
             overridden: edge.overridden,
             overridden_owner: edge.overridden_owner,
