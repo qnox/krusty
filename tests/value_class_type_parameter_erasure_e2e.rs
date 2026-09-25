@@ -101,3 +101,23 @@ fn a_nullable_occurrence_of_a_primitive_bounded_type_parameter_is_its_wrapper() 
                }\n";
     common::expect_box_same_as_kotlinc(src, "NullablePrimitiveBound");
 }
+
+/// Same-arity overloads keep their selected declaration's mangle and descriptor. The nullable
+/// underlying of `NullableBox` keeps that bound boxed; `TextBox` uses its reference carrier.
+#[test]
+fn same_arity_value_class_bound_overloads_keep_exact_realizations() {
+    let src = "@JvmInline value class NullableBox(val x: Any?)\n\
+               @JvmInline value class TextBox(val x: String)\n\
+               interface Choices {\n\
+               \x20   fun <T : NullableBox?> pick(value: T): T = value\n\
+               \x20   fun pick(value: TextBox): TextBox = value\n\
+               }\n\
+               class Implementation : Choices\n\
+               fun box(): String {\n\
+               \x20   val choices: Choices = Implementation()\n\
+               \x20   val nullable = choices.pick<NullableBox?>(NullableBox(null))\n\
+               \x20   val text = choices.pick(TextBox(\"OK\"))\n\
+               \x20   return if (nullable?.x == null) text.x else \"nullable\"\n\
+               }\n";
+    common::expect_box_same_as_kotlinc(src, "BoundOverloads");
+}
