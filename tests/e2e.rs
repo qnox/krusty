@@ -1767,6 +1767,8 @@ mod toplevel_property_ref_e2e;
 
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
+#[path = "super_argument_outer_receiver_e2e.rs"]
+mod super_argument_outer_receiver_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
 #[path = "tparam_bounded_by_tparam_e2e.rs"]

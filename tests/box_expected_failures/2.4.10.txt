@@ -46,7 +46,6 @@ casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
 casts/objectToPrimitiveWithAssertion.kt
 classes/kt2224.kt
-classes/selfcreate.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
 collections/clashWithInternalMapMethod.kt
@@ -266,7 +265,6 @@ inlineClasses/unboxNullableValueOfInlineClassWithNullablePrimitiveUnderlyingType
 inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
-innerNested/superConstructorCall/deepInnerHierarchy.kt
 intrinsics/kt8666.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
