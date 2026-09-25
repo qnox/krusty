@@ -188,22 +188,57 @@ impl FrameMap {
         }
     }
 
-    /// The frame size below the call operands held on top of it for one call, as kotlinc's frame
-    /// is at that call: `operands` are the values the call reads, and only a run of their holders
-    /// entered last is looked through.
-    pub(super) fn size_below_call_operands(&self, operands: &[u32]) -> u16 {
-        let mut size = self.size;
+    /// The frame size below call-operand holders that already occupy their target parameter slots.
+    /// Only a top run belonging to this call is considered, and every holder must have the same
+    /// slot and width after the callee's parameters are laid out from the candidate base. Thus the
+    /// spliced parameter stores write each holder's own value back into its own slot; reordered,
+    /// duplicated, or shifted operands conservatively keep the current size.
+    pub(super) fn aligned_call_operand_base(&self, parameters: &[(Option<u32>, u16)]) -> u16 {
+        let mut base = self.size;
+        let mut holders = Vec::new();
         for entry in self.entries.iter().rev() {
             match entry.occupant {
                 Occupant::Key(FrameKey::CallOperand(value))
-                    if operands.contains(&value) && entry.slot < size =>
+                    if parameters
+                        .iter()
+                        .any(|(operand, _)| *operand == Some(value))
+                        && entry.slot < base =>
                 {
-                    size = entry.slot;
+                    base = entry.slot;
+                    holders.push((value, entry.slot, entry.words));
                 }
                 _ => break,
             }
         }
-        size
+        if holders.is_empty() {
+            return self.size;
+        }
+        let mut target = base;
+        let mut matched = 0;
+        for &(operand, words) in parameters {
+            if let Some(value) = operand {
+                if let Some(&(_, slot, held_words)) =
+                    holders.iter().find(|&&(held, _, _)| held == value)
+                {
+                    let unique = parameters
+                        .iter()
+                        .filter(|(candidate, _)| *candidate == Some(value))
+                        .count()
+                        == 1;
+                    if !unique || slot != target || held_words != words {
+                        return self.size;
+                    }
+                    matched += 1;
+                }
+            }
+            let Some(next) = target.checked_add(words) else {
+                return self.size;
+            };
+            target = next;
+        }
+        (matched == holders.len())
+            .then_some(base)
+            .unwrap_or(self.size)
     }
 
     pub(super) fn mark(&self) -> Mark {
@@ -347,16 +382,33 @@ mod tests {
     }
 
     #[test]
-    fn the_size_at_a_call_looks_through_only_its_own_operand_holders_on_top() {
+    fn a_call_reuses_only_operand_holders_aligned_with_its_parameter_slots() {
         let mut frame = FrameMap::default();
         frame.enter(FrameKey::Value(0), Ty::Int);
         frame.enter(FrameKey::CallOperand(1), Ty::Long);
         assert_eq!(frame.enter(FrameKey::CallOperand(2), Ty::obj("A")), 3);
-        assert_eq!(frame.size_below_call_operands(&[1, 2]), 1);
-        assert_eq!(frame.size_below_call_operands(&[1]), 4);
-        assert_eq!(frame.size_below_call_operands(&[2]), 3);
+        assert_eq!(
+            frame.aligned_call_operand_base(&[(Some(1), 2), (Some(2), 1)]),
+            1
+        );
+        assert_eq!(
+            frame.aligned_call_operand_base(&[(Some(2), 1), (Some(1), 2)]),
+            4
+        );
+        assert_eq!(
+            frame.aligned_call_operand_base(&[(Some(1), 2), (Some(1), 2)]),
+            4
+        );
+        assert_eq!(frame.aligned_call_operand_base(&[(Some(2), 1)]), 3);
+        assert_eq!(
+            frame.aligned_call_operand_base(&[(None, 1), (Some(2), 1)]),
+            4
+        );
         frame.enter(FrameKey::Value(3), Ty::Int);
-        assert_eq!(frame.size_below_call_operands(&[1, 2]), 5);
+        assert_eq!(
+            frame.aligned_call_operand_base(&[(Some(1), 2), (Some(2), 1)]),
+            5
+        );
     }
 
     #[test]

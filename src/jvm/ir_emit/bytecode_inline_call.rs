@@ -50,16 +50,22 @@ impl Emitter<'_> {
         if physical.len() != args.len() {
             return None;
         }
-        // Every operand is on the stack before the body stores any parameter, so the holders
-        // lowering spilled this call's operands to are free for the body, as kotlinc's frame is.
-        let operands = args
+        // Every operand is on the stack before the body stores any parameter. A top run of holders
+        // can therefore supply the inline frame only when each holder is already at that
+        // parameter's exact slot; otherwise the stores could permute or overwrite a value that the
+        // expanded caller still reads later.
+        let parameters = args
             .iter()
-            .filter_map(|&argument| match self.ir.expr(argument) {
-                IrExpr::GetValue(value) => Some(*value),
-                _ => None,
+            .zip(&physical)
+            .map(|(&argument, &ty)| {
+                let holder = match self.ir.expr(argument) {
+                    IrExpr::GetValue(value) => Some(*value),
+                    _ => None,
+                };
+                (holder, slot_words(ty))
             })
             .collect::<Vec<_>>();
-        let base = self.inline_splice_base(self.frame.size_below_call_operands(&operands));
+        let base = self.inline_splice_base(self.frame.aligned_call_operand_base(&parameters));
         let frame = crate::jvm::inline::spliced_frame(body, target.splice_desc, &[], base)?;
         let probe = crate::jvm::inline::splice_unified(
             body,

@@ -2508,10 +2508,10 @@ pub struct IrFile {
     /// provider realization and structural expansion, so backends need not reconstruct an inline
     /// call from the resulting block/loop shape.
     pub inline_regions: std::collections::HashSet<ExprId>,
-    /// `Variable` declarations holding a call operand: an inline expansion's parameter (an
-    /// argument, a receiver, a capture) or an argument spilled to keep evaluation order. kotlinc
-    /// keeps such a value on the stack or stores it once evaluated, so a slot is taken for it only
-    /// after the value's own locals and temporaries have left.
+    /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
+    /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
+    /// for evaluation order. This is provenance, not a storage decision; a backend decides how
+    /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: std::collections::HashSet<ExprId>,
     /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for

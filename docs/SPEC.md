@@ -2768,10 +2768,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lowering holds one call operand in (an inline expansion's argument, receiver or capture, or an
   argument spilled to keep evaluation order; `IrFile::call_operand_bindings`) is the exception:
   kotlinc has no variable for it, it keeps the operand on the stack or stores it once evaluated,
-  so the holder is entered after its value, and a materialized inline body, whose operands are all
-  on the stack before it stores a parameter, is spliced from the frame size below the holders of
-  its own operands (`val k = Continuation(ctx) { }` puts `k` in 1 and the stored context in 2,
-  where kotlinc stores it). Likewise
+  so the holder is entered after its value. A materialized inline body, whose operands are all on
+  the stack before it stores a parameter, is spliced from below its own holders only when every
+  holder already occupies that parameter's exact slot; reordered, duplicated, or shifted holders
+  keep the full caller frame, preventing the splice from overwriting a value the expansion still
+  uses. (`val k = Continuation(ctx) { }` puts `k` in 1 and the stored context in 2, where kotlinc
+  stores it.) Likewise
   every `try` that is not `Unit` enters its result temporary once its body is emitted, a valued one
   included (`val s = try { val x; … } catch (e) { … }` puts `s` in 1, `x` and the temporary in 2,
   `e` in 3). `tests/block_slot_reuse_e2e.rs` (local-variable slots against kotlinc for a `when`
@@ -2779,7 +2781,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value-producing and a throwing body; the slots of an inlined stdlib call's locals and of a
   same-file inline argument in an initializer; a runtime pin for loops, handlers, `when` merges,
   safe calls and a `finally` inside initializers), and `FrameMap`'s unit tests for the frame size
-  below a call's operand holders.
+  below parameter-aligned call-operand holders.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

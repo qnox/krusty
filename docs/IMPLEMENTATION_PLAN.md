@@ -4468,7 +4468,9 @@ shadow with no output change.
   result temporary after its body too. The call operands lowering holds in values of its own (an
   inline expansion's argument, receiver or capture, an argument spilled for evaluation order;
   `IrFile::call_operand_bindings`) have no kotlinc variable, so their holders are entered after
-  their values, and the materialized-lambda splice starts below its own operands' holders. In the
+  their values. A materialized-lambda splice starts below its own operands' holders only when each
+  holder already occupies the corresponding parameter slot; reordered or shifted holders keep the
+  full caller frame so the splice cannot overwrite a value the expansion still uses. In the
   2.4.20 box corpus 1,944 of 25,236 classes change and no box outcome moves; 25 classes become
   byte-identical and none stops being (files 255 -> 269). Of the 795 methods whose
   local-variable slots change, 31 now match kotlinc and 131 more are closer, 596 are as close as
