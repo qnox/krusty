@@ -1,4 +1,14 @@
 use super::ExprId;
+use crate::types::Ty;
+
+/// A stdlib function a counted loop calls on its own, as resolution selected it. A backend calls
+/// it as an ordinary external call of the selected declaration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrRuntimeFunction {
+    pub function: crate::fir::ExternalCallableId,
+    pub parameters: Vec<Ty>,
+    pub result: Ty,
+}
 
 /// The progression a checked counted loop iterates, as the checker matched it (kotlinc's
 /// `HeaderInfoBuilder`). Operands are lowered expressions; each backend builds its loop header and
@@ -20,10 +30,11 @@ pub enum IrProgressionSource {
         last: ExprId,
         step: Option<ExprId>,
     },
-    /// `nested step step`.
+    /// `nested step step`, moving `last` with the selected `getProgressionLastElement`.
     Step {
         nested: Box<IrProgressionSource>,
         step: ExprId,
+        last_element: IrRuntimeFunction,
     },
     /// `nested.reversed()`.
     Reversed(Box<IrProgressionSource>),
@@ -54,7 +65,7 @@ impl IrProgressionSource {
                 f(*last);
                 step.iter().for_each(|step| f(*step));
             }
-            Self::Step { nested, step } => {
+            Self::Step { nested, step, .. } => {
                 nested.visit(f);
                 f(*step);
             }
@@ -84,7 +95,7 @@ impl IrProgressionSource {
                     *step = map(*step);
                 }
             }
-            Self::Step { nested, step } => {
+            Self::Step { nested, step, .. } => {
                 nested.map_operands(map);
                 *step = map(*step);
             }

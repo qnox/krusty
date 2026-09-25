@@ -170,13 +170,6 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *start = map(*start);
                 *end = map(*end);
             }
-            IrCheckedOperation::ProgressionLastElement {
-                first, last, step, ..
-            } => {
-                *first = map(*first);
-                *last = map(*last);
-                *step = map(*step);
-            }
             IrCheckedOperation::IllegalProgressionStep { step } => *step = map(*step),
             IrCheckedOperation::RangeContains {
                 value, start, end, ..

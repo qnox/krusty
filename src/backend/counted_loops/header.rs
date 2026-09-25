@@ -13,7 +13,7 @@
 use crate::fir::FirRangeOperation;
 use crate::ir::{
     ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrProgressionSource,
-    IrShortCircuitKind,
+    IrRuntimeFunction, IrShortCircuitKind,
 };
 use crate::types::Ty;
 
@@ -217,9 +217,13 @@ impl Realizer<'_> {
                 last,
                 step,
             } => self.progression_value_header(ty, *setup, *first, *last, *step),
-            IrProgressionSource::Step { nested, step } => {
+            IrProgressionSource::Step {
+                nested,
+                step,
+                last_element,
+            } => {
                 let nested = self.progression_header(nested, ty);
-                self.stepped_header(nested, *step)
+                self.stepped_header(nested, *step, last_element)
             }
             IrProgressionSource::Reversed(nested) => {
                 let nested = self.progression_header(nested, ty);
@@ -331,7 +335,12 @@ impl Realizer<'_> {
     /// `StepHandler`: the step argument is checked to be positive, negated to follow the nested
     /// progression's direction (tested at run time when that is unknown), and `last` is moved to
     /// the last element the stepped progression reaches.
-    fn stepped_header(&mut self, nested: ProgressionHeader, step: ExprId) -> ProgressionHeader {
+    fn stepped_header(
+        &mut self,
+        nested: ProgressionHeader,
+        step: ExprId,
+        last_element: &IrRuntimeFunction,
+    ) -> ProgressionHeader {
         let nested = nested.revert_to_last_inclusive();
         let step_ty = nested.step_ty;
         let step_argument = self.bound_operand(step, step_ty);
@@ -450,18 +459,13 @@ impl Realizer<'_> {
         let last = if unit_step {
             Operand::stable(last)
         } else {
-            let first = self.as_step_type(first, nested.ty, step_ty);
-            let last = self.as_step_type(last, nested.ty, step_ty);
-            let element = self.add(IrExpr::Checked(
-                IrCheckedOperation::ProgressionLastElement {
-                    first,
-                    last,
-                    step: final_step.value,
-                    ty: step_ty,
-                },
-            ));
+            // The selected overload's element type (`Int` for a `Char` progression).
+            let element_ty = last_element.result;
+            let first = self.as_step_type(first, nested.ty, element_ty);
+            let last = self.as_step_type(last, nested.ty, element_ty);
+            let element = self.runtime_call(last_element, vec![first, last, final_step.value]);
             Operand {
-                value: self.as_step_type(element, step_ty, nested.ty),
+                value: self.as_step_type(element, element_ty, nested.ty),
                 can_change: true,
             }
         };

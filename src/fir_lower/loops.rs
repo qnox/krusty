@@ -172,9 +172,18 @@ impl BodyLowering<'_> {
                 progression,
                 iterable,
             } => self.progression_value(progression, *iterable)?,
-            FirProgressionSource::Step { nested, step } => IrProgressionSource::Step {
+            FirProgressionSource::Step {
+                nested,
+                step,
+                last_element,
+            } => IrProgressionSource::Step {
                 nested: Box::new(self.progression_source(nested)?),
                 step: self.expression(*step)?,
+                last_element: crate::ir::IrRuntimeFunction {
+                    function: last_element.function,
+                    parameters: last_element.parameters.to_vec(),
+                    result: last_element.result,
+                },
             },
             FirProgressionSource::Reversed(nested) => {
                 IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))

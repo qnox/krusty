@@ -6039,18 +6039,6 @@ impl JvmLibraries {
         })
     }
 
-    /// The `kotlin.internal.getProgressionLastElement` overload the stdlib declares over `(ty, ty,
-    /// ty)`, as kotlinc's `getProgressionLastElementByReturnType` selects it.
-    pub(super) fn progression_last_element_callable(&self, ty: Ty) -> Option<LibraryCallable> {
-        self.top_level_overloads(
-            crate::types::wk::PROGRESSION_LAST_ELEMENT,
-            crate::types::wk::kotlin_internal_package(),
-        )
-        .into_iter()
-        .map(|function| function.callable)
-        .find(|callable| callable.params == [ty, ty, ty] && callable.ret == ty)
-    }
-
     pub(super) fn unsigned_compare_callable(&self, ty: Ty) -> Option<LibraryCallable> {
         let (owner, primitive, physical) = match ty {
             Ty::UInt => ("java/lang/Integer", "I", Ty::Int),

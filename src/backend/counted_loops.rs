@@ -28,8 +28,8 @@ mod header;
 mod loop_shape;
 
 use crate::ir::{
-    ExprId, IrBindingStability, IrCheckedOperation, IrConst, IrExpr, IrFile, IrProgressionSource,
-    IrShortCircuitKind, IrTypeOp,
+    Callee, ExprId, IrBindingStability, IrCheckedOperation, IrConst, IrExpr, IrFile,
+    IrProgressionSource, IrRuntimeFunction, IrShortCircuitKind, IrTypeOp,
 };
 use crate::types::Ty;
 
@@ -193,6 +193,24 @@ impl Realizer<'_> {
             op: IrTypeOp::ImplicitCoercion,
             arg: expression,
             type_operand: target,
+        })
+    }
+
+    /// A call of a runtime function resolution selected, realized by the backend like any other
+    /// call of that external declaration.
+    fn runtime_call(&mut self, function: &IrRuntimeFunction, args: Vec<ExprId>) -> ExprId {
+        self.add(IrExpr::Call {
+            callee: Callee::External {
+                target: function.function,
+                default_provider: None,
+                params: function.parameters.clone(),
+                ret: function.result,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: None,
+            },
+            dispatch_receiver: None,
+            args,
         })
     }
 

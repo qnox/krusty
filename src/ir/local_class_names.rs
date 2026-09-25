@@ -155,10 +155,6 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             *counter = ty(*counter, names);
             return;
         }
-        IrCheckedOperation::ProgressionLastElement { ty: step, .. } => {
-            *step = ty(*step, names);
-            return;
-        }
         IrCheckedOperation::IllegalProgressionStep { .. } => return,
         IrCheckedOperation::CallableReference {
             function_type,

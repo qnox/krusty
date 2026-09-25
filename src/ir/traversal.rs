@@ -90,13 +90,6 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*start);
                 f(*end);
             }
-            IrCheckedOperation::ProgressionLastElement {
-                first, last, step, ..
-            } => {
-                f(*first);
-                f(*last);
-                f(*step);
-            }
             IrCheckedOperation::IllegalProgressionStep { step } => f(*step),
             IrCheckedOperation::RangeContains {
                 value, start, end, ..

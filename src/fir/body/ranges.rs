@@ -56,6 +56,15 @@ pub struct FirProgressionClass {
     pub step: Option<super::FirPropertyTarget>,
 }
 
+/// A stdlib function a counted loop calls on its own (`getProgressionLastElement`), as resolution
+/// selected it from the provider's declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirRuntimeFunction {
+    pub function: super::ExternalCallableId,
+    pub parameters: Box<[Ty]>,
+    pub result: Ty,
+}
+
 /// Where a counted loop's progression comes from, as kotlinc's `HeaderInfoBuilder` handlers see
 /// it. The checker builds this from the selected `kotlin.ranges` declarations; common lowering turns
 /// it into the loop's first, last and step.
@@ -72,10 +81,12 @@ pub enum FirProgressionSource {
         progression: Box<FirProgressionClass>,
         iterable: super::FirExprId,
     },
-    /// `nested step step`.
+    /// `nested step step`, moving `last` with the `getProgressionLastElement` overload resolution
+    /// selected for the progression's class.
     Step {
         nested: Box<FirProgressionSource>,
         step: super::FirExprId,
+        last_element: FirRuntimeFunction,
     },
     /// `nested.reversed()`.
     Reversed(Box<FirProgressionSource>),

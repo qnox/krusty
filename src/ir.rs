@@ -57,7 +57,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
-pub use progression::IrProgressionSource;
+pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -571,14 +571,6 @@ pub enum IrCheckedOperation {
         end: ExprId,
         negated: bool,
         counter: Ty,
-    },
-    /// The last element a stepped progression reaches (`getProgressionLastElement`), over the
-    /// step type `ty` (`Int` or `Long`).
-    ProgressionLastElement {
-        first: ExprId,
-        last: ExprId,
-        step: ExprId,
-        ty: Ty,
     },
     /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
     /// message is `Step must be positive, was: $step.`.

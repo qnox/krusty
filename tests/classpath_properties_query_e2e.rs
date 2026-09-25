@@ -255,4 +255,28 @@ fn progression_classes_publish_first_last_and_step() {
             );
         }
     }
+    // A stepped progression moves `last` with the `getProgressionLastElement` overload over its
+    // element type (`Int` for a `Char` progression), selected from the stdlib's declarations.
+    let symbols = lib.symbols(
+        krusty::symbol_source::SymbolNamespace::Package(
+            krusty::types::wk::kotlin_internal_package(),
+        ),
+        krusty::types::wk::PROGRESSION_LAST_ELEMENT,
+    );
+    let (functions, _) = symbols.callables.clone().into_parts();
+    for element in [Ty::Int, Ty::Long, Ty::UInt, Ty::ULong] {
+        let overload = functions
+            .overloads
+            .iter()
+            .find(|function| {
+                matches!(function.callable.params.as_slice(), [first, last, _]
+                    if *first == element && *last == element)
+                    && function.callable.ret == element
+            })
+            .unwrap_or_else(|| panic!("getProgressionLastElement over {element:?} is declared"));
+        assert!(
+            overload.callable.external_identity.is_some(),
+            "getProgressionLastElement over {element:?} publishes an external identity"
+        );
+    }
 }

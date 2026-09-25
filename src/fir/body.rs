@@ -8,6 +8,7 @@ pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod ranges;
 pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
+    FirRuntimeFunction,
 };
 
 use crate::diag::Span;

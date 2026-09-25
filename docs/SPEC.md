@@ -7064,8 +7064,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   override kotlinc selects, not `IntProgression.getFirst`). A `*Range` steps by 1 upwards, any other
   progression tests the step's sign at run time. `step` (`StepHandler`) throws `IllegalArgumentException("Step must be positive, was: s.")`
   for a non-positive argument, negates it to follow the nested direction (at run time when that is
-  unknown), and moves `last` with the stdlib's own `kotlin.internal.getProgressionLastElement` overload
-  for the step type unless the step is ±1.
+  unknown), and moves `last` with the `kotlin.internal.getProgressionLastElement` overload the
+  resolver selects from the stdlib's declarations for the progression class's element type (`Int`
+  for a `Char` progression) unless the step is ±1. The selected function travels in the progression
+  plan, FIR and IR, and the backend calls it as an ordinary external call.
   `reversed()` (`ReversedHandler`) swaps first and last and negates the step; `step` and `reversed()`
   over `until`/`..<`, which have no inclusive form, iterate the resulting progression value. An
   inclusive bound that cannot overflow iterates on the JVM as `if (i <= last) do { val x = i; i += step;

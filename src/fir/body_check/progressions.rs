@@ -1,7 +1,7 @@
 use super::*;
 use crate::fir::{
     FirCallArgument, FirConversionKind, FirExprKind, FirProgressionClass, FirProgressionSource,
-    FirRangeCounterKind, FirStatementKind,
+    FirRangeCounterKind, FirRuntimeFunction, FirStatementKind,
 };
 use crate::libraries::CompilerIntrinsic;
 use crate::resolve::ResolvedCall;
@@ -107,12 +107,14 @@ impl BodyFirChecker<'_> {
                     end,
                 })
             }
-            (CompilerIntrinsic::ProgressionStep, Some(step)) => {
-                nested()?.map(|nested| FirProgressionSource::Step {
+            (CompilerIntrinsic::ProgressionStep, Some(step)) => match nested()? {
+                Some(nested) => Some(FirProgressionSource::Step {
                     nested: Box::new(nested),
                     step,
-                })
-            }
+                    last_element: self.progression_last_element(checked, source)?,
+                }),
+                None => None,
+            },
             (CompilerIntrinsic::ProgressionReversed, None) => {
                 nested()?.map(|nested| FirProgressionSource::Reversed(Box::new(nested)))
             }
@@ -257,6 +259,27 @@ impl BodyFirChecker<'_> {
                 crate::types::wk::ProgressionClass::Progression => Some(member(plan.step)?),
             },
         }))
+    }
+
+    /// The `getProgressionLastElement` overload resolution selected for the stepped progression's
+    /// class. A stepped progression without one is a missing stable target.
+    fn progression_last_element(
+        &self,
+        stepped: FirExprId,
+        source: ExprId,
+    ) -> Result<FirRuntimeFunction, BodyCheckFailure> {
+        let span = self.file.expr_span(source);
+        let plan = self
+            .body
+            .expr(stepped)
+            .and_then(|stepped| self.info.progression_plan(stepped.ty.get().non_null()))
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let function = &plan.last_element;
+        Ok(FirRuntimeFunction {
+            function: function.function,
+            parameters: function.parameters.clone(),
+            result: function.result,
+        })
     }
 
     fn most_precise_type(&self, expression: FirExprId) -> Option<Ty> {

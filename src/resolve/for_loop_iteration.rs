@@ -4,7 +4,8 @@
 
 use crate::ast::{Expr, ExprId, StmtId};
 use crate::diag::Span;
-use crate::fir::ExternalPropertyId;
+use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 
 use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
@@ -12,12 +13,24 @@ use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
 /// The members of a `kotlin.ranges` progression class a counted loop reads, selected from the
 /// class's own declarations. Only the class identity is compiler-known (`wk::progression_class`);
 /// the element type is the selected `first`'s type.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProgressionPlan {
     pub class: wk::ProgressionClass,
     pub first: ProgressionMember,
     pub last: ProgressionMember,
     pub step: ProgressionMember,
+    /// The `getProgressionLastElement` overload a stepped progression of this class moves its
+    /// `last` with (`getProgressionLastElementByReturnType`), over the element type, or `Int` for a
+    /// `Char` progression.
+    pub last_element: RuntimeFunction,
+}
+
+/// A stdlib function a counted loop calls on its own, selected from the provider's declarations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeFunction {
+    pub function: ExternalCallableId,
+    pub parameters: Box<[Ty]>,
+    pub result: Ty,
 }
 
 /// A selected member property of a progression class, read on a receiver of that class.
@@ -169,6 +182,14 @@ impl Checker<'_> {
         else {
             return;
         };
+        let element = if first.ty == Ty::Char {
+            step.ty
+        } else {
+            first.ty
+        };
+        let Some(last_element) = self.progression_last_element(element) else {
+            return;
+        };
         self.progression_plans.insert(
             ty,
             ProgressionPlan {
@@ -176,7 +197,36 @@ impl Checker<'_> {
                 first,
                 last,
                 step,
+                last_element,
             },
         );
+    }
+
+    /// The `kotlin.internal.getProgressionLastElement` overload from and to `element`. Its step
+    /// parameter's type is the declaration's.
+    fn progression_last_element(&self, element: Ty) -> Option<RuntimeFunction> {
+        let symbols = self.fed_source().symbols(
+            crate::symbol_source::SymbolNamespace::Package(wk::kotlin_internal_package()),
+            wk::PROGRESSION_LAST_ELEMENT,
+        );
+        let (functions, _) = symbols.callables.clone().into_parts();
+        functions
+            .overloads
+            .into_iter()
+            .filter(|function| function.kind == crate::libraries::FnKind::TopLevel)
+            .find_map(|function| {
+                let callable = function.callable;
+                let [first, last, _] = callable.params.as_slice() else {
+                    return None;
+                };
+                if *first != element || *last != element || callable.ret != element {
+                    return None;
+                }
+                Some(RuntimeFunction {
+                    function: callable.external_identity?,
+                    parameters: callable.params.into_boxed_slice(),
+                    result: callable.ret,
+                })
+            })
     }
 }

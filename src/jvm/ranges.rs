@@ -13,14 +13,6 @@ use crate::types::Ty;
 pub(super) enum RangeRealizationFailure {
     Initialization(crate::libraries::PlatformInitializationError),
     Operation(RangeOperationFailure),
-    Helper(ProgressionHelperFailure),
-}
-
-/// A counted-loop helper (`getProgressionLastElement`) the runtime lacks for elements of type `ty`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ProgressionHelperFailure {
-    expression: ExprId,
-    ty: Ty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,29 +171,6 @@ pub(super) fn realize(
                     },
                 ))?;
                 ir.exprs[expression] = replacement;
-            }
-            IrExpr::Checked(IrCheckedOperation::ProgressionLastElement {
-                first,
-                last,
-                step,
-                ty,
-            }) => {
-                let callable = runtime.progression_last_element_callable(ty).ok_or(
-                    RangeRealizationFailure::Helper(ProgressionHelperFailure {
-                        expression: expression as ExprId,
-                        ty,
-                    }),
-                )?;
-                ir.exprs[expression] = IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: callable.owner,
-                        name: callable.name,
-                        descriptor: callable.descriptor,
-                        inline: callable.inline,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![first, last, step],
-                };
             }
             IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
                 ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
