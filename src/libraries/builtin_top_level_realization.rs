@@ -311,8 +311,9 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     }
     let receiver = facts.receiver?;
     let class = |ty: Ty, classes: &[&str]| {
-        ty.obj_internal()
-            .is_some_and(|name| ty.type_args().is_empty() && classes.iter().any(|class| name.matches(class)))
+        ty.obj_internal().is_some_and(|name| {
+            ty.type_args().is_empty() && classes.iter().any(|class| name.matches(class))
+        })
     };
     const PROGRESSIONS: [&str; 3] = [
         "kotlin/ranges/IntProgression",

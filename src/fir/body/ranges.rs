@@ -59,11 +59,23 @@ impl FirProgressionClass {
     pub fn of(ty: Ty) -> Option<Self> {
         const CLASSES: [(&str, FirRangeCounterKind, bool); 6] = [
             ("kotlin/ranges/IntRange", FirRangeCounterKind::Int, true),
-            ("kotlin/ranges/IntProgression", FirRangeCounterKind::Int, false),
+            (
+                "kotlin/ranges/IntProgression",
+                FirRangeCounterKind::Int,
+                false,
+            ),
             ("kotlin/ranges/LongRange", FirRangeCounterKind::Long, true),
-            ("kotlin/ranges/LongProgression", FirRangeCounterKind::Long, false),
+            (
+                "kotlin/ranges/LongProgression",
+                FirRangeCounterKind::Long,
+                false,
+            ),
             ("kotlin/ranges/CharRange", FirRangeCounterKind::Char, true),
-            ("kotlin/ranges/CharProgression", FirRangeCounterKind::Char, false),
+            (
+                "kotlin/ranges/CharProgression",
+                FirRangeCounterKind::Char,
+                false,
+            ),
         ];
         CLASSES
             .iter()

@@ -191,10 +191,12 @@ impl ProgressionHeader {
             Direction::Increasing => self.bound_check(lowering, variables, Direction::Increasing),
             Direction::Decreasing => self.bound_check(lowering, variables, Direction::Decreasing),
             Direction::Unknown => {
-                let positive = lowering.compare_with_zero(variables.step, self.step_ty, IrBinOp::Gt);
+                let positive =
+                    lowering.compare_with_zero(variables.step, self.step_ty, IrBinOp::Gt);
                 let increasing = self.bound_check(lowering, variables, Direction::Increasing);
                 let increasing = lowering.short_circuit_and(positive, increasing);
-                let negative = lowering.compare_with_zero(variables.step, self.step_ty, IrBinOp::Lt);
+                let negative =
+                    lowering.compare_with_zero(variables.step, self.step_ty, IrBinOp::Lt);
                 let decreasing = self.bound_check(lowering, variables, Direction::Decreasing);
                 let decreasing = lowering.short_circuit_and(negative, decreasing);
                 lowering.short_circuit_or(increasing, decreasing)
@@ -279,7 +281,11 @@ fn step_constant(step_ty: Ty, value: i64) -> IrConst {
 
 /// The type a progression of `ty` steps by: `Long` for a `Long` progression, `Int` otherwise.
 fn step_type(ty: Ty) -> Ty {
-    if ty == Ty::Long { Ty::Long } else { Ty::Int }
+    if ty == Ty::Long {
+        Ty::Long
+    } else {
+        Ty::Int
+    }
 }
 
 fn exclusive_bound(
@@ -388,8 +394,14 @@ impl BodyLowering<'_> {
             .then(|| exclusive_bound(self, last.value, direction, ty))
             .flatten();
         let step_ty = step_type(ty);
-        let unit = if direction == Direction::Decreasing { -1 } else { 1 };
-        let step = self.ir.add_expr(IrExpr::Const(step_constant(step_ty, unit)));
+        let unit = if direction == Direction::Decreasing {
+            -1
+        } else {
+            1
+        };
+        let step = self
+            .ir
+            .add_expr(IrExpr::Const(step_constant(step_ty, unit)));
         Ok(ProgressionHeader {
             ty,
             step_ty,
@@ -445,13 +457,13 @@ impl BodyLowering<'_> {
         let member = |lowering: &mut Self, member| {
             let progression = lowering.ir.add_expr(lowering.ir.expr(value).clone());
             Operand {
-                value: lowering
-                    .ir
-                    .add_expr(IrExpr::Checked(IrCheckedOperation::ProgressionMember {
+                value: lowering.ir.add_expr(IrExpr::Checked(
+                    IrCheckedOperation::ProgressionMember {
                         progression,
                         class,
                         member,
-                    })),
+                    },
+                )),
                 can_change: true,
             }
         };
@@ -500,9 +512,10 @@ impl BodyLowering<'_> {
             None => step_argument,
         };
         // A constant step equal to the nested one changes nothing.
-        if let (Some(argument), Some(nested_step)) =
-            (step_argument_constant, constant_value(self, nested.step.value))
-        {
+        if let (Some(argument), Some(nested_step)) = (
+            step_argument_constant,
+            constant_value(self, nested.step.value),
+        ) {
             if nested_step.checked_abs() == Some(argument) {
                 return Ok(nested);
             }
@@ -533,7 +546,10 @@ impl BodyLowering<'_> {
             Direction::Decreasing => match step_argument_slot {
                 None => {
                     let negated = self.negated(Operand::stable(step_argument), step_ty);
-                    Operand::stable(self.loop_temporary(negated, step_ty, &mut step_statements).1)
+                    Operand::stable(
+                        self.loop_temporary(negated, step_ty, &mut step_statements)
+                            .1,
+                    )
                 }
                 Some(slot) => {
                     let negated = self.negated_read(slot, step_ty);
@@ -561,7 +577,9 @@ impl BodyLowering<'_> {
                             value: chosen,
                             can_change: true,
                         };
-                        Operand::stable(self.loop_temporary(chosen, step_ty, &mut step_statements).1)
+                        Operand::stable(
+                            self.loop_temporary(chosen, step_ty, &mut step_statements).1,
+                        )
                     }
                     Some(slot) => {
                         let negated = self.negated_read(slot, step_ty);
@@ -626,8 +644,9 @@ impl BodyLowering<'_> {
 
     fn illegal_step(&mut self, step: ExprId) -> ExprId {
         let step = self.ir.add_expr(self.ir.expr(step).clone());
-        self.ir
-            .add_expr(IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }))
+        self.ir.add_expr(IrExpr::Checked(
+            IrCheckedOperation::IllegalProgressionStep { step },
+        ))
     }
 
     /// `asStepType`/`asElementType`: the coercion between a `Char` element and its `Int` step.

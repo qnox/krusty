@@ -587,9 +587,7 @@ pub enum IrCheckedOperation {
     },
     /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
     /// message is `Step must be positive, was: $step.`.
-    IllegalProgressionStep {
-        step: ExprId,
-    },
+    IllegalProgressionStep { step: ExprId },
     RangeLoop {
         variable: u32,
         counter: Ty,

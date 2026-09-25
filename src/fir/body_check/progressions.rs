@@ -18,15 +18,20 @@ impl BodyFirChecker<'_> {
         iterable_source: ExprId,
         iterable: FirExprId,
     ) -> Option<FirLoopHeader> {
-        let counter = FirRangeCounterKind::of(variable_ty.get())
-            .filter(|counter| matches!(counter, FirRangeCounterKind::Int | FirRangeCounterKind::Long | FirRangeCounterKind::Char))?;
+        let counter = FirRangeCounterKind::of(variable_ty.get()).filter(|counter| {
+            matches!(
+                counter,
+                FirRangeCounterKind::Int | FirRangeCounterKind::Long | FirRangeCounterKind::Char
+            )
+        })?;
         let source = self.progression_source(iterable_source, iterable)?;
         let matches_counter = match &source {
             FirProgressionSource::Value { progression, .. } => progression.counter == counter,
-            _ => self.body.expr(iterable).and_then(|expression| {
-                FirProgressionClass::of(expression.ty.get().non_null())
-            })
-            .is_some_and(|progression| progression.counter == counter),
+            _ => self
+                .body
+                .expr(iterable)
+                .and_then(|expression| FirProgressionClass::of(expression.ty.get().non_null()))
+                .is_some_and(|progression| progression.counter == counter),
         };
         matches_counter.then_some(FirLoopHeader::Progression {
             variable,
@@ -91,7 +96,8 @@ impl BodyFirChecker<'_> {
             receiver.conversion.is_none_or(|conversion| {
                 matches!(
                     conversion.kind,
-                    FirConversionKind::SmartCast { .. } | FirConversionKind::NullabilityWidening { .. }
+                    FirConversionKind::SmartCast { .. }
+                        | FirConversionKind::NullabilityWidening { .. }
                 )
             })
         })?;

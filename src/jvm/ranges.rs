@@ -496,7 +496,9 @@ fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
     let prefix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
         crate::kt_string::KtString::from("Step must be positive, was: "),
     )));
-    let suffix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(crate::kt_string::KtString::from("."))));
+    let suffix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        crate::kt_string::KtString::from("."),
+    )));
     let message = ir.add_expr(IrExpr::StringConcat(vec![prefix, step, suffix]));
     let exception = ir.add_expr(IrExpr::New {
         internal: crate::types::type_name("java/lang/IllegalArgumentException"),
