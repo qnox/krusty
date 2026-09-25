@@ -6794,6 +6794,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result boundary. Tests: `tests/native_boxed_numbers_e2e.rs`
   (`a_generic_result_widened_to_a_nullable_primitive_keeps_its_null`); the box corpus's
   `boxing/kt84727.kt` in the native lane.
+- **Native: a null cast to an erased type parameter names the parameter.** `null as T` with
+  `T : Any` has no descriptor left to test against, yet it still raises a NullPointerException.
+  Kotlin/Native 2.4.10 and 2.4.20 raise it with no message. krusty uses the JVM's text, rendered
+  from the same shared IR (`IrFile::rendered_cast_target`). The one difference is the owner of a
+  top-level function: this target has no file facades, so the function stays in its package.
+  `null cannot be cast to non-null type T of p.generic`, where the JVM says `T of p.FileKt.generic`.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
+  `tests/unboxing_coercion_e2e.rs`
+  (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
 - **An extension receiver constrains its declared formal through the receiver's supertypes.** In
   `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
   `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.

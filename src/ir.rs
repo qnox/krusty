@@ -34,6 +34,7 @@ pub enum IrNodeOrigin {
 mod bindings;
 mod bottom_values;
 mod bridges;
+mod cast_targets;
 mod constants;
 mod constructors;
 mod default_arguments;
