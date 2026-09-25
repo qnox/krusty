@@ -19,8 +19,9 @@
 //! the single operation that does it — the previous arrangement had three frame builders, two of
 //! which silently omitted the temporaries and were right only by accident.
 
-use super::frame_map::TempSlot;
-use super::{Emitter, VerifType};
+use super::frame_map::{TempRole, TempSlot};
+use super::{store, Emitter, VerifType};
+use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
 /// Identity of a leased backend temporary slot. A newtype on purpose: it is not a value id and
@@ -94,6 +95,40 @@ impl Emitter<'_> {
     pub(super) fn release_temporary(&mut self, lease: TemporaryLease) {
         if let Some(temp) = self.temporaries.release(lease) {
             self.frame.leave_temp(temp);
+        }
+    }
+
+    /// Evaluate each of `ops` into a fresh temporary, in order. Each is leased, so a later operand's
+    /// frames see the earlier ones as live rather than `Top`; the caller loads them and then hands
+    /// them to [`Self::release_operand_spills`]. Returns `(slot, ty, lease)` per operand.
+    pub(super) fn spill_to_temps(
+        &mut self,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, TemporaryLease)> {
+        let mut temps = Vec::new();
+        for &o in ops {
+            self.emit_value(o, code);
+            let t = self.value_ty(o);
+            crate::trace_compiler!(
+                "splice",
+                "spill inline operand expression={o} node={:?} type={t:?}",
+                self.ir.expr(o)
+            );
+            let temp = self.frame.enter_temp(TempRole::OperandSpill, t);
+            let slot = temp.slot();
+            store(t, slot, code);
+            let lease = self.lease_frame_temporary(temp, t);
+            temps.push((slot, t, lease));
+        }
+        temps
+    }
+
+    /// Release spilled operands once they are loaded, newest first as they were entered, so the
+    /// frame's cursor returns below the first of them.
+    pub(super) fn release_operand_spills(&mut self, temps: &[(u16, Ty, TemporaryLease)]) {
+        for &(_, _, lease) in temps.iter().rev() {
+            self.release_temporary(lease);
         }
     }
 

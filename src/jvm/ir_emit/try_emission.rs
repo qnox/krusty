@@ -13,7 +13,15 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
+use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, store, Emitter};
+
+/// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
+pub(super) struct TryParts<'a> {
+    pub(super) body: u32,
+    pub(super) catches: &'a [crate::ir::IrCatch],
+    pub(super) finally: Option<u32>,
+    pub(super) result: Ty,
+}
 
 /// One `try`'s protected region while it is being emitted.
 ///
@@ -97,47 +105,19 @@ impl Emitter<'_> {
     pub(super) fn emit_try(
         &mut self,
         expression: u32,
-        body: u32,
-        catches: &[crate::ir::IrCatch],
-        finally: Option<u32>,
-        result: &Ty,
+        parts: TryParts<'_>,
+        discarded: bool,
         code: &mut CodeBuilder,
     ) {
-        let rt = ir_ty_to_jvm(result);
-        let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
-        // A `try` with a `finally` reserves its two slots HERE, before anything inside it is
-        // emitted, because that is where kotlinc reserves them: the return value a `return` out of
-        // the `try` parks while the finalizer runs, then the exception the catch-all parks while
-        // it runs. Every local an inlined copy of the finalizer declares sits above both.
-        //
-        // Reserving them where they are first USED put the first copy's locals underneath instead,
-        // which moved the parked exception one slot up and showed as an extra `top` in every frame
-        // recorded while the finalizer ran.
-        //
-        // Nested `try`s SHARE both, as kotlinc's do: only one return is ever in flight, and a
-        // `try` inside the body runs its handler strictly before the enclosing one is entered, so
-        // the enclosing slots are free for it. The parked-exception slot therefore stays in the
-        // reuse pool while the body is emitted and is taken back out before the handler, where it
-        // holds the exception across the whole inlined finalizer.
-        let inherited_return_spill = self.pending_return_spills.last().copied().flatten();
-        let own_return_spill = (inherited_return_spill.is_none()
-            && finally.is_some()
-            && slot_words(self.ret) > 0
-            && self.parks_a_returned_value(expression))
-        .then(|| self.frame.enter_temp(TempRole::ReturnValue, self.ret));
-        let return_spill = inherited_return_spill.or(own_return_spill.as_ref().map(TempSlot::slot));
-        self.pending_return_spills.push(return_spill);
-        let mut own_parked = None;
-        let parked_slot = finally.is_some().then(|| {
-            let reserved = self.free_exception_slots.pop().unwrap_or_else(|| {
-                let fresh = self
-                    .frame
-                    .enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
-                own_parked.insert(fresh).slot()
-            });
-            self.free_exception_slots.push(reserved);
-            reserved
-        });
+        let TryParts {
+            body,
+            catches,
+            finally,
+            result,
+        } = parts;
+        let rt = ir_ty_to_jvm(&result);
+        // A discarded `try` runs its branches as statements: no value reaches the result temporary.
+        let is_stmt = discarded || matches!(rt, Ty::Unit | Ty::Nothing);
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -179,8 +159,10 @@ impl Emitter<'_> {
         // kotlinc's `visitTry` enters a result temporary for every `try` that is not `Unit` once
         // the body is emitted, so it takes the slot the body's locals have just left and the catch
         // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores.
+        // A discarded `try` still enters it, at the `try`'s own type: kotlinc stores each branch
+        // there and drops the stores once nothing reads them.
         let result_temp = (rt != Ty::Unit).then(|| {
-            let temp_ty = if is_stmt {
+            let temp_ty = if rt == Ty::Nothing {
                 Ty::obj("java/lang/Void")
             } else {
                 rt
@@ -238,10 +220,6 @@ impl Emitter<'_> {
         // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
         // finally re-enters the handler and the finally runs twice. Collect each catch body's range
         // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
-        // A catch body is a scope of its own: the slot reserved for a `return` out of the TRY is
-        // live there — the caught exception now occupies the one beside it — so a `return` written
-        // in a catch takes a slot of its own, as kotlinc's does.
-        self.pending_return_spills.push(None);
         for (ordinal, c) in catches.iter().enumerate() {
             let handler = code.new_label();
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
@@ -252,14 +230,11 @@ impl Emitter<'_> {
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
             let exc_ty = Ty::obj(&exc_internal);
-            // A typed catch's parameter takes the slot the `finally` catch-all parks its own
-            // exception in, which is what kotlinc emits: the two are never live at once — a catch
-            // body runs because its type MATCHED, and the catch-all parks only while unwinding past
-            // it — and the parked value is dead the moment the handler rethrows. Giving the
-            // parameter a slot of its own instead pushed it above the reserved one and cost a wide
-            // `astore` at every catch.
-            let cslot =
-                parked_slot.unwrap_or_else(|| self.frame.enter(FrameKey::Value(c.var), exc_ty));
+            // kotlinc's `visitTryWithInfo` enters the catch parameter at the handler, above the
+            // result temporary, and leaves it at the end of the catch body, before that catch's
+            // copy of the finalizer: every catch, and the catch-all after them, starts from the
+            // same frame size.
+            let cslot = self.frame.enter(FrameKey::Value(c.var), exc_ty);
             self.slots.insert(c.var, (cslot, exc_ty));
             // The `finally` guards this catch from its ENTRY, the store of the caught exception
             // included — kotlinc protects the handler's own entry the same way it protects the
@@ -292,9 +267,7 @@ impl Emitter<'_> {
                 self.return_finalizers.pop();
             }
             self.slots.remove(&c.var);
-            if parked_slot.is_none() {
-                self.frame.leave(FrameKey::Value(c.var));
-            }
+            self.frame.leave(FrameKey::Value(c.var));
             // The catch body is protected by the finally handler (a throw in a catch runs the finally),
             // but the catch's own inlined finally (below) is not.
             let cbody_end = code.new_label();
@@ -359,7 +332,6 @@ impl Emitter<'_> {
                 code.add_exception(range_start, range_end, handler, exc_ci);
             }
         }
-        self.pending_return_spills.pop();
 
         // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
         // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the
@@ -371,12 +343,11 @@ impl Emitter<'_> {
             // catch body (`fin_ranges`), which are complete by now.
             code.bind_handler(fin_handler, &fin_ranges);
             let thr_ty = Ty::obj("java/lang/Throwable");
-            let tslot = parked_slot.expect("a finalizer reserves its parked-exception slot");
-            // Live again from here: it holds the caught exception across the whole inlined
-            // finalizer, so a `try` inside that copy must not be handed the same slot.
-            if let Some(position) = self.free_exception_slots.iter().rposition(|&s| s == tslot) {
-                self.free_exception_slots.remove(position);
-            }
+            // kotlinc enters the caught throwable as a temporary at the handler, above whatever the
+            // `try` still holds (its result temporary), and leaves it after the reload that
+            // rethrows it.
+            let parked = self.frame.enter_temp(TempRole::CaughtException, thr_ty);
+            let tslot = parked.slot();
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
             debug_lines::mark_block_entry(self.ir, f, code);
@@ -392,19 +363,18 @@ impl Emitter<'_> {
             // slot; otherwise the trailing `aload tslot; athrow` reads what the verifier sees as
             // `top`. It is a backend temporary, not a value, and holds its own lease: nested
             // catch-all handlers each lease their own, and a lease cannot collide with a value id.
-            let parked = self.lease_temporary(tslot, thr_ty);
+            let parked = self.lease_frame_temporary(parked, thr_ty);
             self.emit(f, code);
-            self.release_temporary(parked);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
             if !fin_diverges {
                 load(thr_ty, tslot, code);
+            }
+            self.release_temporary(parked);
+            if !fin_diverges {
                 code.athrow();
             }
-            // The parked exception is dead past the rethrow, so the slot returns to the pool for an
-            // enclosing handler to lease.
-            self.free_exception_slots.push(tslot);
             // `catch_type` 0 = catch-all (any throwable), matching kotlinc's `finally` table entry.
             for (rs, re) in fin_ranges {
                 code.add_exception(rs, re, fin_handler, 0);
@@ -428,41 +398,10 @@ impl Emitter<'_> {
             // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
             self.bind(after, code);
         }
-        self.pending_return_spills.pop();
-        // The parked-exception slot stays in the reuse pool after this `try`, where a later `try`
-        // takes it back, so it stays entered: a local declared after this `try` must not get it.
-        if let Some(parked) = own_parked {
-            self.frame.keep_for_method(parked);
-        }
-        // Newest first, as they were entered.
-        for temp in [result_temp, own_return_spill].into_iter().flatten() {
+        // kotlinc leaves the result temporary when the `try`'s value is read (or discarded).
+        if let Some(temp) = result_temp {
             self.frame.leave_temp(temp);
         }
-    }
-
-    /// Whether a `return` anywhere inside this `try` parks its value while a finalizer runs.
-    ///
-    /// A lambda's body is a function of its own and its `return`s belong to it, so the walk stops
-    /// there; everything else this `try` owns is reached, including its catch and finally bodies —
-    /// a `return` written in either of those parks its value the same way.
-    fn parks_a_returned_value(&self, expression: crate::ir::ExprId) -> bool {
-        let mut pending = vec![expression];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            match self.ir.expr(node) {
-                crate::ir::IrExpr::Return(Some(_)) => return true,
-                crate::ir::IrExpr::Lambda { captures, .. } => {
-                    pending.extend(captures.iter().copied())
-                }
-                _ => crate::ir::for_each_child(&self.ir.exprs, node, &mut |child| {
-                    pending.push(child)
-                }),
-            }
-        }
-        false
     }
 
     /// The loop a `break`/`continue` leaves: its continue target, its exit target, and the

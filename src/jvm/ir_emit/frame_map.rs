@@ -8,22 +8,19 @@
 //! everything entered since a point. The slot numbers kotlinc writes are that stack order,
 //! renumbered only by its final gap-closing pass (`local_slots::compact` here).
 //!
-//! # Keyed locals are reused; temporaries are not yet
+//! # Releases lower the cursor
 //!
-//! Leaving a keyed local that is the top live entry moves the cursor back to its slot, as kotlinc's
-//! `leave` does, so the statements after a block reuse the slots of the locals the block declared.
-//! Unkeyed temporaries are still released without moving the cursor: their placement and release
-//! points do not match kotlinc's yet, and a keyed leave below them reclaims their slots only once
-//! none of them is live. A release that kotlinc's stack would reject — a local left while something
-//! entered after it is still live — is reported under the `slots` trace category instead of
-//! failing, and keeps the cursor.
+//! Leaving the top live entry moves the cursor back to its slot, whether it is a keyed local or a
+//! temporary, as kotlinc's `leave` and `leaveTemp` do: the statements after a block reuse the slots
+//! of the locals the block declared, and the code after a released temporary reuses its slot. A
+//! release that kotlinc's stack would reject — an entry left while something entered after it is
+//! still live — is reported under the `slots` trace category instead of failing, and keeps the
+//! cursor.
 //!
-//! Four cursor movements kotlinc's frame does not make are kept as named operations until the
-//! stage that removes them: [`FrameMap::rewind_to`] (each copy of a spliced lambda body is laid out
-//! from the same base), [`FrameMap::give_back`] (a vararg array returns its slot when nothing was
-//! entered above it), [`FrameMap::reserve_through`] (a spliced inline body's locals are claimed
-//! without being entered) and [`FrameMap::keep_for_method`] (a temporary whose slot is handed out
-//! again after its owner ends).
+//! Two cursor movements kotlinc's frame does not make are kept as named operations until the
+//! inline-call stage removes them: [`FrameMap::rewind_to`] (each copy of a spliced lambda body is
+//! laid out from the same base) and [`FrameMap::reserve_through`] (a spliced inline body's locals
+//! are claimed without being entered).
 
 use super::slot_words;
 use crate::types::Ty;
@@ -84,9 +81,6 @@ struct Entry {
     occupant: Occupant,
     slot: u16,
     words: u16,
-    /// This entry backs a method-wide reuse pool, so an inline-call/frame rewind must not discard
-    /// its reservation even when the entry was created after the rewind mark.
-    kept_for_method: bool,
 }
 
 /// A live unkeyed temporary. Not `Copy`: leaving it consumes it, so it is left at most once.
@@ -94,7 +88,6 @@ struct Entry {
 pub(super) struct TempSlot {
     id: u32,
     slot: u16,
-    words: u16,
 }
 
 impl TempSlot {
@@ -140,11 +133,7 @@ impl FrameMap {
     /// Enter an unkeyed temporary of type `ty`.
     pub(super) fn enter_temp(&mut self, role: TempRole, ty: Ty) -> TempSlot {
         let (id, slot) = self.push(Occupant::Temp(role), ty);
-        TempSlot {
-            id,
-            slot,
-            words: slot_words(ty),
-        }
+        TempSlot { id, slot }
     }
 
     /// Leave the most recently entered local keyed `key`.
@@ -248,34 +237,16 @@ impl FrameMap {
         }
     }
 
-    /// Release every call-local entry made since `mark`, in any order, as kotlinc's `Mark.dropTo`
-    /// does. Method-wide reservations survive: their numeric slots remain in a reuse pool after the
-    /// construct that first entered them.
+    /// Release every entry made since `mark`, in any order, as kotlinc's `Mark.dropTo` does.
     pub(super) fn drop_to(&mut self, mark: Mark) {
-        self.entries
-            .retain(|entry| entry.id < mark.id || entry.kept_for_method);
+        self.entries.retain(|entry| entry.id < mark.id);
     }
 
     /// Release everything entered since `mark` AND move the cursor back to it: the next spliced copy
     /// of a lambda body is laid out from the same base as the one before it.
     pub(super) fn rewind_to(&mut self, mark: Mark) {
         self.drop_to(mark);
-        self.size = self
-            .entries
-            .iter()
-            .filter(|entry| entry.kept_for_method)
-            .map(|entry| entry.slot + entry.words)
-            .fold(mark.size, u16::max);
-    }
-
-    /// Leave a temporary, and return its slot to the cursor when nothing was allocated above it
-    /// since — the one reuse a vararg array has always made.
-    pub(super) fn give_back(&mut self, temp: TempSlot) {
-        let (slot, words) = (temp.slot, temp.words);
-        self.leave_temp(temp);
-        if self.size == slot + words {
-            self.size = slot;
-        }
+        self.size = mark.size;
     }
 
     /// Claim every slot below `top` without entering it: a spliced inline body lays its own locals
@@ -295,34 +266,19 @@ impl FrameMap {
             occupant,
             slot,
             words,
-            kept_for_method: false,
         });
         self.size += words;
         self.max = self.max.max(self.size);
         (id, slot)
     }
 
-    /// Keep a temporary entered for the rest of the method: its owner hands the slot out again after
-    /// the code that entered it ends, so no later local may be given it.
-    pub(super) fn keep_for_method(&mut self, temp: TempSlot) {
-        match self.entries.iter_mut().find(|entry| entry.id == temp.id) {
-            Some(entry) => entry.kept_for_method = true,
-            None => crate::trace_compiler!(
-                "slots",
-                "keep temporary at slot {} for method: already dropped",
-                temp.slot
-            ),
-        }
-    }
-
     /// Remove one entry. kotlinc throws "Descriptor can be left only if it is last" when it is not
-    /// the top one; here that is reported and the cursor is kept. A keyed local left from the top
-    /// returns the cursor to its slot; a temporary keeps it.
+    /// the top one; here that is reported and the cursor is kept. An entry left from the top returns
+    /// the cursor to its slot.
     fn leave_at(&mut self, index: usize) {
         let entry = self.entries.remove(index);
         match self.entries.get(index) {
-            None if matches!(entry.occupant, Occupant::Key(_)) => self.size = entry.slot,
-            None => {}
+            None => self.size = entry.slot,
             Some(above) => crate::trace_compiler!(
                 "slots",
                 "leave {:?} at slot {} is not last: {:?} at slot {} was entered after it and is live ({} above)",
@@ -412,12 +368,24 @@ mod tests {
     }
 
     #[test]
-    fn a_temporary_release_keeps_the_cursor() {
+    fn a_temporary_released_from_the_top_returns_its_slot() {
         let mut frame = FrameMap::default();
+        frame.enter(FrameKey::Value(0), Ty::Int);
         let temp = frame.enter_temp(TempRole::BooleanOperand, Ty::Boolean);
         frame.leave_temp(temp);
+        assert_eq!((frame.size(), frame.max()), (1, 2));
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Long), 1);
+    }
+
+    #[test]
+    fn a_temporary_released_under_a_live_one_keeps_the_cursor() {
+        let mut frame = FrameMap::default();
+        let array = frame.enter_temp(TempRole::VarargArray, Ty::obj("A"));
+        let above = frame.enter_temp(TempRole::OperandSpill, Ty::Int);
+        frame.leave_temp(array);
+        assert_eq!(frame.size(), 2);
+        frame.leave_temp(above);
         assert_eq!(frame.size(), 1);
-        assert_eq!(frame.enter(FrameKey::Value(0), Ty::Int), 1);
     }
 
     #[test]
@@ -444,40 +412,36 @@ mod tests {
     }
 
     #[test]
-    fn a_temporary_kept_for_the_method_is_never_reclaimed() {
-        let mut frame = FrameMap::default();
-        let block = frame.mark();
-        frame.enter(FrameKey::Value(0), Ty::Int);
-        let parked = frame.enter_temp(TempRole::CaughtException, Ty::obj("T"));
-        frame.keep_for_method(parked);
-        frame.leave_block(block);
-        assert_eq!(
-            frame.occupants(),
-            vec![(Occupant::Temp(TempRole::CaughtException), 1)]
-        );
-        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 2);
-    }
-
-    #[test]
-    fn a_method_kept_temporary_survives_a_rewind_to_an_earlier_mark() {
+    fn a_rewind_cannot_strand_a_handler_slot() {
+        // kotlinc enters a handler's throwable at the handler and leaves it before the `athrow`,
+        // so no handler slot outlives its handler for a rewind to strand. One entered inside a
+        // spliced copy is dropped with the copy; one entered after the rewind comes from the
+        // cursor, and a local entered while it is live goes above it.
         let mut frame = FrameMap::default();
         frame.enter(FrameKey::Receiver, Ty::obj("A"));
         let inline_call = frame.mark();
-        let parked = frame.enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
-        frame.keep_for_method(parked);
+        let inner = frame.enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
+        frame.leave_temp(inner);
         frame.enter(FrameKey::Value(0), Ty::Long);
 
         frame.rewind_to(inline_call);
 
         assert_eq!(
             frame.occupants(),
+            vec![(Occupant::Key(FrameKey::Receiver), 0)]
+        );
+        assert_eq!(frame.size(), 1);
+        let handler = frame.enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
+        assert_eq!(handler.slot(), 1);
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 2);
+        assert_eq!(
+            frame.occupants(),
             vec![
                 (Occupant::Key(FrameKey::Receiver), 0),
                 (Occupant::Temp(TempRole::CaughtException), 1),
+                (Occupant::Key(FrameKey::Value(1)), 2),
             ]
         );
-        assert_eq!(frame.size(), 2);
-        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 2);
     }
 
     #[test]
@@ -504,7 +468,7 @@ mod tests {
         );
         frame.leave_temp(second);
         assert!(frame.occupants().is_empty());
-        assert_eq!(frame.size(), 2);
+        assert_eq!(frame.size(), 1);
     }
 
     #[test]
@@ -563,20 +527,6 @@ mod tests {
         assert!(frame.occupants().len() == 1 && frame.size() == 1);
         assert_eq!(frame.enter(FrameKey::Value(1), Ty::Long), first);
         assert_eq!(frame.max(), 3);
-    }
-
-    #[test]
-    fn give_back_returns_a_top_temporary_only() {
-        let mut frame = FrameMap::default();
-        let array = frame.enter_temp(TempRole::VarargArray, Ty::obj("A"));
-        frame.give_back(array);
-        assert_eq!(frame.size(), 0);
-
-        let array = frame.enter_temp(TempRole::VarargArray, Ty::obj("A"));
-        let _above = frame.enter_temp(TempRole::OperandSpill, Ty::Int);
-        frame.give_back(array);
-        assert_eq!(frame.size(), 2);
-        assert_eq!(frame.max(), 2);
     }
 
     #[test]

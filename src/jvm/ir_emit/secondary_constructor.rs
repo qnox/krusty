@@ -208,9 +208,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 for &(slot, t, _) in &temps {
                     load(t, slot, &mut sctor);
                 }
-                for &(_, _, lease) in &temps {
-                    e.release_temporary(lease);
-                }
+                e.release_operand_spills(&temps);
             } else {
                 sctor.aload(0);
                 if forwards_owner_prefix {

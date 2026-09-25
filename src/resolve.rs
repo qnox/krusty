@@ -67220,20 +67220,12 @@ impl<'a> Checker<'a> {
                     self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
                 };
                 exit_flows.push(scope.flow_snapshot());
-                // A `try` used as a statement needn't have body/catch agree; merge leniently
-                // (mismatch → `Unit`) so only an expression use that needs a value is constrained. A
-                // diverging (`Nothing`) branch drops out. Two values of the SAME class with differing
-                // type arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare
-                // `emptyList()` catch) merge to that class with erased arguments (`List<*>`), assignable
-                // to the declared `List<Backup>` return — instead of collapsing to `Unit`, which wrongly
-                // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`.
-                //
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
                 // join to `Any`. Restricting this to reference-like branches is intentional. The JVM
                 // lowering currently stores each branch directly into one merge slot, so a primitive
                 // join that requires per-branch widening or boxing (`Int` versus `Long`) cannot be
-                // represented soundly and retains the lenient statement-style fallback below.
+                // represented soundly and retains the lenient join of `try_branch_join`.
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
                 result = if wanted.value_required && reference_like(result) && reference_like(ht) {
@@ -67242,20 +67234,8 @@ impl<'a> Checker<'a> {
                     // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT
                     // declared type can take, rejecting source kotlinc accepts.
                     conditional_branch::join_types(self, scope, wanted.expected, result, ht, e)
-                } else if result == ht {
-                    result
-                } else if result == Ty::Nothing {
-                    ht
-                } else if ht == Ty::Nothing {
-                    result
-                } else if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (result, ht) {
-                    if ai == bi {
-                        Ty::obj_name(ai)
-                    } else {
-                        Ty::Unit
-                    }
                 } else {
-                    Ty::Unit
+                    conditional_branch::try_branch_join(self, wanted.value_required, result, ht)
                 };
             }
             scope.restore_common_flow(&exit_flows);

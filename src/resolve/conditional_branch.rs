@@ -45,6 +45,34 @@ pub(super) fn join_types(
     semantic_join.unwrap_or_else(|| checker.join(left, right, span))
 }
 
+/// Join a `try`'s body and catch types where [`join_types`] does not apply: the `try` is a
+/// statement, or a value-position one has a primitive branch.
+///
+/// A diverging (`Nothing`) branch drops out. Two values of the SAME class with differing type
+/// arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare `emptyList()` catch) merge
+/// to that class with erased arguments (`List<*>`), assignable to a declared `List<Backup>` return.
+/// Branches that otherwise disagree give their common supertype where the value is discarded, as
+/// kotlinc's FIR types every `try` (`try { sb.append(x) } catch (e: E) { println(e) }` is `Any`);
+/// the JVM backend decides from that type whether the `try` holds a result temporary. A statement
+/// `try` is not otherwise constrained. A value-position disagreement keeps the lenient `Unit`: the
+/// backend stores every branch straight into one merge slot and cannot widen or box per branch.
+pub(super) fn try_branch_join(
+    checker: &Checker<'_>,
+    value_required: bool,
+    left: Ty,
+    right: Ty,
+) -> Ty {
+    match (left, right) {
+        _ if left == right => left,
+        (Ty::Nothing, other) | (other, Ty::Nothing) => other,
+        (Ty::Obj(a, _), Ty::Obj(b, _)) if a == b => Ty::obj_name(a),
+        _ if value_required => Ty::Unit,
+        _ => checker
+            .semantic_common_supertype(left, right)
+            .unwrap_or(Ty::Unit),
+    }
+}
+
 /// Return the expression whose value a conditional branch produces.
 ///
 /// A branch written as a block (`if (c) { … } else { … }`) yields its trailing expression, and it

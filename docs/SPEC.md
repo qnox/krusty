@@ -2740,10 +2740,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
   statements after the block take the same numbers again (`if (c) { val a } else { val b }; val z`
   puts all three in one slot). A `do` body's locals stay live through the condition, and a catch
-  parameter is left when its catch ends. Backend temporaries do not hand slots back yet: a released
-  temporary keeps the cursor, a variable left below one that is still live keeps it too, and a
-  `finally`'s parked-exception slot stays taken for the rest of the method because a later `try`
-  takes it from the reuse pool again. A `Nothing`-typed `try` (a body and catches that all
+  parameter is left when its catch ends. A released backend temporary hands its slot back the
+  same way (see the `try`/`finally` slots below); a variable left below an entry that is still live
+  keeps the cursor. A `Nothing`-typed `try` (a body and catches that all
   `return` or `throw`) still enters a one-slot result temporary once its body is emitted, as
   kotlinc's `visitTry` enters one for every `try` that is not `Unit` (a `java/lang/Void` nothing
   stores): it takes the slot the body's first local left, so the catch parameter sits above it
@@ -7764,31 +7763,72 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
 
-- **A `try` with a `finally` reserves its two parked slots where it OPENS, and nested `try`s share
-  them.** Such a `try` parks two things while a finalizer runs: the value a `return` out of it
-  computed before leaving, and the exception its catch-all caught. kotlinc reserves both with the
-  `try` itself, so every local an inlined copy of the finalizer declares sits ABOVE them; krusty
-  allocated each where it was first used, which put the first copy's locals underneath and moved
-  everything the `try` parks one slot up. The cost was not a name: a slot-higher parked exception
-  is an extra `top` in every StackMapTable frame recorded while the finalizer runs, and a longer
-  store in every copy, so the frames and the exception table's offsets both diverged.
+- **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
+  `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
+  slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
+  `kotlin-compiler.jar` shows where kotlinc enters and leaves each one, and krusty now does the
+  same:
+  - `visitTryWithInfo` enters the `try`'s result temporary after the body when the `try` is not
+    `Unit` (`enterTemp` at 91), and leaves it when the value is read or discarded
+    (`visitTryWithInfo$4.materializeAt`/`discard` call `leaveTemp`). Every finalizer copy and
+    catch body therefore sits above it. kotlinc's `try` type is the join of its branches even
+    where the value is discarded, so a statement `try` whose branches disagree
+    (`try { sb.append(x) } catch (e: E) { note() }`: `StringBuilder` and `Unit` join to `Any`) has
+    one too. The checker records that join (below); the emitter enters the temporary from the
+    recorded type alone. A discarded `try` runs each branch as a statement, as kotlinc's does
+    (`sb.append(x)` is popped), so nothing stores the temporary.
+  - Each catch parameter is `enter`ed at its handler (340) and left at the end of its catch body by
+    `writeLocalVariablesInTable`, before that catch's finalizer copy.
+  - The catch-all handler enters the caught throwable with `enterTemp(Throwable)` at the handler
+    (693), then runs the finalizer copy, reloads the throwable, calls `leaveTemp` (849) and throws.
+    Nothing is reserved when the `try` opens. The catch parameters and the parked throwable reach
+    the same slot because each is entered from the same frame size, not because they share a
+    reservation.
+  - `generateFinallyBlocksIfNeeded` enters a `return`'s spill with `enterTemp(returnType)` at the
+    `return` (40), above every local in scope there. Every finalizer copy the `return` runs, inner
+    to outer, sits above the spill, which is left after the reload (87).
 
-  Nested `try`s SHARE both slots, which is also what kotlinc emits. Only one return is ever in
-  flight, and a `try` inside the body runs its handler strictly before the enclosing one is
-  entered — so the enclosing slots are free for it. The parked-exception slot stays in the reuse
-  pool while the body is emitted and is taken back out before the handler, where it holds the
-  exception across the whole inlined finalizer and a `try` inside that copy must not be given it.
+  kotlinc has no `&&` operand, operand spill, vararg array or `enumValueOf` argument temporary, so
+  krusty releases each of those as soon as it is loaded. The statements after one reuse its slot.
+  A vararg array no longer gives its slot back through a special case of its own
+  (`FrameMap::give_back` is gone). Spilled operands are released newest first, so the cursor
+  returns below the first of them.
 
-  A TYPED catch's parameter takes the same slot the catch-all parks in, which is also what kotlinc
-  emits: the two are never live at once — a catch body runs because its type MATCHED, and the
-  catch-all parks only while unwinding past it — and the parked value is dead the moment the
-  handler rethrows. A slot of its own pushed the parameter above the reserved one and cost a wide
-  `astore` at every catch. A `return` written in a catch body is the other half of that scope: the
-  slot the TRY reserved is live there, so it takes one of its own, as kotlinc's does.
+  The reservation this replaces entered the return spill and the parked throwable when the
+  `try` opened, shared both across nested `try`s through a reuse pool, and put a typed catch
+  parameter in the parked slot. It reproduced kotlinc only for some shapes. A `return` that runs a
+  finalizer had its spill below the `try`'s own locals (`try { val a; return a } finally { … }`
+  put `a` in 3 where kotlinc has 1). A `finally` in a `Nothing` `try` inside a loop had its locals
+  one slot too high. The pooled parked slot also had to stay entered for the rest of the method,
+  so every local after the first `try` with a `finally` sat one slot high.
 
-  The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to it:
-  nothing stands between them, so the jump would be to the next instruction. Every other catch has
-  the next handler, or its own copy of the finalizer, in the way and still needs it.
+  Tests: `tests/block_slot_reuse_e2e.rs` compares local-variable slots against kotlinc for a
+  one-word and a two-word return spill, nested finalizers run by a `return` in a body and in a
+  catch, catch parameters and the parked throwable with finalizer locals, the local after a valued
+  `try`, and a statement `try` whose branches disagree. It checks full bytes for a statement
+  `try`/`finally` followed by a local, and runs a program that reuses released temporaries' slots
+  at other types. `a_finally_with_its_own_handler_types_the_parked_exception` in
+  `tests/try_debug_lines_e2e.rs` compares a complete exception table and frame list with a
+  statement `try` inside a finalizer.
+
+- **A `try` whose branches disagree is typed as their common supertype where its value is
+  discarded.** kotlinc's FIR types every `try` as the join of its body and catch types, used or
+  not, and its JVM backend decides from that type alone whether the `try` holds a result temporary.
+  The checker records the same join for a statement `try` (`StringBuilder` and `Unit` give `Any`,
+  `Int` and `Unit` give `Any`), and the emitter reads it rather than inspecting branch shapes. A
+  discarded `try` stays a statement for every other purpose: no diagnostic, unused-value rule or
+  box outcome changes. Where the value IS used and the branch types disagree (`fun f() = try {
+  risky() } catch (e: E) { note() }`) the checker keeps its older lenient `Unit`, so such a function
+  still returns `kotlin.Unit` where kotlinc returns the body's boxed value; that is open.
+
+  Tests: `a_statement_try_whose_branches_disagree_enters_a_result_temporary` in
+  `tests/block_slot_reuse_e2e.rs` (the catch parameter lands in slot 2, as kotlinc's does) and
+  `a_finally_with_its_own_handler_types_the_parked_exception` in `tests/try_debug_lines_e2e.rs`
+  (an `Int`/`Unit` statement `try` inside a finalizer, complete exception table and frames).
+
+- **The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to
+  it:** nothing stands between them, so the jump would be to the next instruction. Every other
+  catch has the next handler, or its own copy of the finalizer, in the way and still needs it.
 
   Tests: `a_finally_with_its_own_handler_types_the_parked_exception`, which compares the complete
   exception table and the complete frame list — offsets, `top` padding and all — against kotlinc;

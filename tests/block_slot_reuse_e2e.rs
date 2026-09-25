@@ -1,7 +1,9 @@
 //! Local slots as kotlinc's `FrameMap` hands them out. A block's variables are free again once the
 //! block ends, so a sibling branch, the next loop, and the statements after a block reuse them. A
 //! variable is entered before its initializer, so the initializer's own locals and temporaries sit
-//! above it, and a `try` that is not `Unit` enters its result temporary after its body.
+//! above it, and a `try` that is not `Unit` enters its result temporary after its body. Backend
+//! temporaries are a stack too: a `return` through a `finally` enters its spill at the `return`, a
+//! catch-all enters the caught throwable at its handler, and a released temporary's slot is reused.
 
 use super::common;
 
@@ -33,6 +35,24 @@ fn same_local_slots(name: &str, src: &str, class: &str, extra_classpath: &[std::
     same_local_slots_of(name, src, class, extra_classpath, |_| true);
 }
 
+/// As [`same_local_slots`], with each row kept once. kotlinc splits a local's range around every
+/// inlined copy of a `finally` (`splitLocalVariableRangesByFinallyBlocks`) and krusty does not yet,
+/// so a local live across a finalizer copy has two rows there and one here. The slots are what is
+/// compared.
+fn same_distinct_local_slots(name: &str, src: &str, class: &str) {
+    if let Some((emitted, expected)) = local_slot_rows(name, src, class, &[], |_| true) {
+        assert_eq!(distinct(emitted), distinct(expected), "{name}");
+    }
+}
+
+/// `rows` without the repeats of an earlier row, in table order.
+fn distinct(rows: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(row.clone()))
+        .collect()
+}
+
 /// As [`same_local_slots`], for the rows of the locals `compared` selects by name.
 fn same_local_slots_of(
     name: &str,
@@ -41,6 +61,22 @@ fn same_local_slots_of(
     extra_classpath: &[std::path::PathBuf],
     compared: impl Fn(&str) -> bool,
 ) {
+    if let Some((emitted, expected)) = local_slot_rows(name, src, class, extra_classpath, compared)
+    {
+        assert_eq!(emitted, expected, "{name}");
+    }
+}
+
+/// krusty's and kotlinc's `LocalVariableTable` rows for `class`, compiled with `extra_classpath`
+/// and restricted to the locals `compared` selects; `None` when the reference toolchain is
+/// unavailable.
+fn local_slot_rows(
+    name: &str,
+    src: &str,
+    class: &str,
+    extra_classpath: &[std::path::PathBuf],
+    compared: impl Fn(&str) -> bool,
+) -> Option<(Vec<String>, Vec<String>)> {
     let rows = |class_file: &std::path::Path| -> Vec<String> {
         local_variable_rows(class_file)
             .into_iter()
@@ -49,7 +85,7 @@ fn same_local_slots_of(
     };
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skip ({name}: no scratch directory)");
-        return;
+        return None;
     };
     let reference = dir.join("ref");
     std::fs::create_dir_all(&reference).unwrap();
@@ -68,7 +104,7 @@ fn same_local_slots_of(
     args.push(src_path.to_string_lossy().into_owned());
     let Some((code, stderr)) = common::kotlinc_compile(&args) else {
         eprintln!("skip ({name}: reference toolchain unavailable)");
-        return;
+        return None;
     };
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let stdlib = common::stdlib_jar();
@@ -88,8 +124,9 @@ fn same_local_slots_of(
         !expected.is_empty(),
         "{name}: kotlinc's class has no local variables"
     );
-    assert_eq!(rows(&emitted), expected, "{name}");
+    let emitted = rows(&emitted);
     let _ = std::fs::remove_dir_all(&dir);
+    Some((emitted, expected))
 }
 
 fn run(src: &str) -> String {
@@ -560,4 +597,228 @@ fun sameFile(c: Boolean, n: Int): Long {\n\
         &[],
         |local| ["r", "y", "x$iv", "k"].contains(&local),
     );
+}
+
+/// A `return` through a `finally` enters its spill at the `return`, above `a`, as kotlinc's
+/// `generateFinallyBlocksIfNeeded` does; nothing is reserved when the `try` opens, so `a` is 1.
+#[test]
+fn a_return_spill_is_entered_at_the_return() {
+    same_distinct_local_slots(
+        "slotTempReturnSpill",
+        "fun tryFinally(x: Int): Int {\n\
+    try {\n\
+        val a = x + 1\n\
+        return a\n\
+    } finally {\n\
+        println(\"f\")\n\
+    }\n\
+}\n",
+        "SlotTempReturnSpillKt",
+    );
+}
+
+/// A two-word return spill sits above the two-word `a` (slots 4-5), so the finalizer copy on the
+/// `return` path puts `d` at 6, while the copies on the other paths put it at 2 and 3; `after`
+/// reuses 2.
+#[test]
+fn a_wide_return_spill_lies_under_the_finalizer_copy_it_runs() {
+    same_distinct_local_slots(
+        "slotTempWideReturnSpill",
+        "fun wide(x: Long): Long {\n\
+    try {\n\
+        val a = x + 1\n\
+        if (a > 3) return a * 2\n\
+    } finally {\n\
+        val d = 2.5\n\
+        println(d)\n\
+    }\n\
+    val after = x - 1\n\
+    return after\n\
+}\n",
+        "SlotTempWideReturnSpillKt",
+    );
+}
+
+/// A statement `try` has no result temporary and its catch-all's throwable is left after the
+/// rethrow, so `z` takes slot 1. The whole class matches kotlinc.
+#[test]
+fn a_local_after_a_try_finally_reuses_the_caught_exception_slot() {
+    byte_identical(
+        "slotTempStatementTry",
+        "fun sink(x: Int) {}\n\
+fun statementTryThenLocal(n: Int): Int {\n\
+    try {\n\
+        sink(n)\n\
+    } finally {\n\
+        sink(0)\n\
+    }\n\
+    val z = n + 1\n\
+    return z\n\
+}\n",
+        "SlotTempStatementTryKt",
+    );
+}
+
+/// The result temporary of a valued `try` is left when its value is read, so `z` reuses it.
+#[test]
+fn a_local_after_a_valued_try_reuses_its_result_temporary() {
+    same_local_slots(
+        "slotTempValuedTry",
+        "fun valuedThenLocal(n: Int): Int {\n\
+    val s = try {\n\
+        n / 2\n\
+    } catch (e: ArithmeticException) {\n\
+        0\n\
+    }\n\
+    val z = s + 1\n\
+    return z\n\
+}\n",
+        "SlotTempValuedTryKt",
+        &[],
+    );
+}
+
+/// kotlinc types a `try` as the join of its branches even when its value is discarded, and the
+/// checker records the same join, so a statement `try` whose body is a `StringBuilder` and whose
+/// catch is `Unit` still enters an (`Object`) result temporary after its body: `e` is 2 and `z`
+/// reuses 1.
+#[test]
+fn a_statement_try_whose_branches_disagree_enters_a_result_temporary() {
+    same_local_slots(
+        "slotTempDiscardedTry",
+        "fun discarded(sb: StringBuilder) {\n\
+    try {\n\
+        sb.append(\"x\")\n\
+    } catch (e: Exception) {\n\
+        println(e)\n\
+    }\n\
+    val z = sb.length\n\
+    println(z)\n\
+}\n",
+        "SlotTempDiscardedTryKt",
+        &[],
+    );
+}
+
+/// The catch parameter is entered at its handler and left before that catch's finalizer copy, and
+/// the catch-all's throwable is entered at its handler: the normal-path and catch copies of `f` take
+/// slot 2, the catch-all's copy 3 above the throwable, and `after` 2.
+#[test]
+fn catch_parameters_and_the_caught_throwable_are_entered_at_their_handlers() {
+    same_local_slots(
+        "slotTempFinallyLocal",
+        "fun finallyLocal(n: Int): Int {\n\
+    var r = 0\n\
+    try {\n\
+        r = 10 / n\n\
+    } catch (e: ArithmeticException) {\n\
+        val m = 3\n\
+        r = m\n\
+    } finally {\n\
+        val f = r * 2\n\
+        println(f)\n\
+    }\n\
+    val after = r + 1\n\
+    return after\n\
+}\n",
+        "SlotTempFinallyLocalKt",
+        &[],
+    );
+}
+
+/// Nested `try`s with a `finally` each: every `return` enters its own spill above what is in scope
+/// there and both finalizer copies it runs lie above that spill; a `return` in a catch sits above
+/// the catch parameter.
+#[test]
+fn nested_finalizers_run_by_a_return_lie_above_its_spill() {
+    same_distinct_local_slots(
+        "slotTempNestedTry",
+        "fun nestedTry(n: Int): String {\n\
+    try {\n\
+        try {\n\
+            val a = n + 1\n\
+            if (a > 3) return \"big$a\"\n\
+        } catch (e: IllegalStateException) {\n\
+            val q = \"x\"\n\
+            return q\n\
+        } finally {\n\
+            val g = n * 2\n\
+            println(g)\n\
+        }\n\
+    } finally {\n\
+        val h = n * 3\n\
+        println(h)\n\
+    }\n\
+    val tail = \"t$n\"\n\
+    return tail\n\
+}\n\
+fun returnInCatch(n: Int): Int {\n\
+    try {\n\
+        val a = n + 1\n\
+        return 10 / a\n\
+    } catch (e: ArithmeticException) {\n\
+        val b = n - 1\n\
+        return b\n\
+    } finally {\n\
+        println(\"f\")\n\
+    }\n\
+}\n",
+        "SlotTempNestedTryKt",
+    );
+}
+
+/// Released temporaries hand their slots to what follows, at another type: a return spill, a
+/// caught throwable, a `&&` operand, spilled vararg elements and their array are all reused by
+/// later locals, including two-word ones, and by branchy finalizers that must still see the
+/// parked value.
+#[test]
+fn reused_temporary_slots_verify_and_run() {
+    let src = "var sink = 0\n\
+fun total(vararg values: Int): Long = values[0] * 1L + values[1]\n\
+fun spill(n: Int): Long {\n\
+    try {\n\
+        try {\n\
+            val a = n * 3L\n\
+            if (n > 2) return a\n\
+        } finally {\n\
+            val s: String? = if (n > 5) null else \"s$n\"\n\
+            sink += s?.length ?: -1\n\
+        }\n\
+    } catch (e: IllegalStateException) {\n\
+        return -1L\n\
+    } finally {\n\
+        val d = n * 0.5\n\
+        if (d > 100.0) sink += 1\n\
+    }\n\
+    val after = n * 7L\n\
+    return after\n\
+}\n\
+fun thrower(n: Int): Int {\n\
+    var r = 0\n\
+    try {\n\
+        try {\n\
+            r = 10 / n\n\
+        } finally {\n\
+            r += 1\n\
+        }\n\
+    } catch (e: ArithmeticException) {\n\
+        val w = 2.0\n\
+        r = if (w > 1.5) 2 else 0\n\
+    }\n\
+    val k = r + 1L\n\
+    return if (k > 100L) -1 else r + 1\n\
+}\n\
+fun mixed(a: Boolean, b: Int): Double {\n\
+    val c = a && (if (b > 0) true else b < -5)\n\
+    val d = b * 1.5\n\
+    val w = total(b, if (c) b + 1 else try { b / 0 } catch (e: ArithmeticException) { 7 })\n\
+    return d + w\n\
+}\n\
+fun box(): String {\n\
+    if (spill(1) != 7L || spill(3) != 9L || spill(8) != 24L) return \"FAIL spill\"\n\
+    if (thrower(0) != 3 || thrower(5) != 4) return \"FAIL thrower\"\n\
+    if (mixed(true, 2) != 8.0 || mixed(false, -1) != 4.5) return \"FAIL mixed\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(src), "OK");
 }
