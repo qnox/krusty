@@ -43,13 +43,7 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
 }
 
-pub(super) fn emit_statics(
-    ir: &IrFile,
-    facade: &str,
-    cw: &mut ClassWriter,
-    env: &EmitEnv,
-    param_assertions: bool,
-) {
+pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
@@ -165,10 +159,10 @@ pub(super) fn emit_statics(
             crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
         }
     }
-    // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
-    // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
-    // `const val` is `public static final` with no accessor (kotlinc inlines const reads). A PRIVATE
-    // property gets NO public accessors — only the `access$…$p` bridges, and only when referenced.
+    // A PRIVATE property gets NO public accessors — only the `access$…$p` bridges, and only when
+    // referenced. kotlinc's SyntheticAccessorLowering appends them after every declared and lifted
+    // member, so they trail the facade's methods; the public accessors are placed by
+    // `emit_static_accessors` at the property's source position.
     for (sidx, s) in ir
         .statics
         .iter()
@@ -177,12 +171,16 @@ pub(super) fn emit_statics(
     {
         // A `const val` inlines (no accessor); a CUSTOM-accessor property emits its `getX`/`setX` as
         // ordinary facade methods (from `ir.functions`), so skip the trivial auto-accessor here.
-        if s.is_const || s.custom_accessor || ir.is_jvm_field_static(sidx as u32) {
+        if s.is_const
+            || s.custom_accessor
+            || ir.is_jvm_field_static(sidx as u32)
+            || !s.visibility.is_private()
+        {
             continue;
         }
         let jt = jvm_declared_ty(&s.ty);
         let desc = type_descriptor(jt);
-        if s.visibility.is_private() {
+        {
             if cross_get.contains(&(sidx as u32)) {
                 let mut g = CodeBuilder::new(0);
                 let fref = cw.fieldref(facade, &s.name, &desc);
@@ -213,103 +211,6 @@ pub(super) fn emit_statics(
                     &st,
                 );
             }
-            continue;
-        }
-        // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
-        // body's field cluster; the accessor maps to the property's declaration line.
-        //
-        // An accessor's nullability is the PROPERTY's, which for a value-class-typed static whose
-        // storage was erased is no longer readable off `s.ty` — that holds the carrier now. Reading
-        // it there published a non-null `String` setter for a `var x: Label?` and refused the null
-        // the property accepts, so the declaration's own recorded type answers instead.
-        let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
-        let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
-        let acc_ann = match nullability {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        };
-        // The accessors erase the property's type arguments in their descriptors, so each carries the
-        // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
-        // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let gname = property_getter_name(&s.name);
-        cw.reserve_method_name(&gname);
-        cw.seed_utf8(&format!("(){desc}"));
-        // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
-        // annotation, BEFORE the body's field cluster.
-        if let Some(signature) = &signatures.getter {
-            cw.seed_utf8(signature);
-        }
-        if let Some(a) = acc_ann {
-            cw.seed_utf8(a);
-        }
-        let mut g = CodeBuilder::new(0);
-        if s.line != 0 {
-            g.mark_line(s.line);
-        }
-        let fref = cw.fieldref(facade, &s.name, &desc);
-        g.getstatic(fref, slot_words(jt) as i32);
-        emit_return(jt, &mut g);
-        finish_code_sig::<0x0019>(
-            cw,
-            &gname,
-            &format!("(){desc}"),
-            &mut g,
-            0,
-            signatures.getter.as_deref(),
-        );
-        cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
-        if s.is_var {
-            // A value-class-typed property's setter carries the value-class mangle: the parameter
-            // it takes is the carrier, and a value-class PARAMETER always mangles.
-            let sname = s
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| property_setter_name(&s.name));
-            cw.reserve_method_name(&sname);
-            cw.seed_utf8(&format!("({desc})V"));
-            if let Some(signature) = &signatures.setter {
-                cw.seed_utf8(signature);
-            }
-            let words = slot_words(jt);
-            let mut st = CodeBuilder::new(words);
-            // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
-            // `-Xno-param-assertions` removes it, like every other parameter guard.
-            if param_assertions && jt.is_reference() && nullability == 1 {
-                st.aload(0);
-                st.push_string("<set-?>", cw);
-                let m = cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "checkNotNullParameter",
-                    "(Ljava/lang/Object;Ljava/lang/String;)V",
-                );
-                st.invokestatic(m, 2, 0);
-            }
-            // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
-            if s.line != 0 {
-                st.mark_line(s.line);
-            }
-            load(jt, 0, &mut st);
-            let fref = cw.fieldref(facade, &s.name, &desc);
-            st.putstatic(fref, slot_words(jt) as i32);
-            st.ret_void();
-            finish_code_sig::<0x0019>(
-                cw,
-                &sname,
-                &format!("({desc})V"),
-                &mut st,
-                words,
-                signatures.setter.as_deref(),
-            );
-            cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
-            // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
-            cw.set_method_debug(
-                &sname,
-                &format!("({desc})V"),
-                None,
-                &[("<set-?>".to_string(), desc.clone(), 0)],
-            );
         }
     }
     // A store the JVM already performs is pure redundancy: kotlinc emits no `<clinit>` store for a
@@ -356,5 +257,128 @@ pub(super) fn emit_statics(
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
+    }
+}
+
+/// The public `getX`/`setX` of one plain facade property, emitted at the property's place among the
+/// facade's declared functions: kotlinc's JvmPropertiesLowering replaces each property with its
+/// accessors in place, and the facade's methods follow that declaration order. A `const val`, a
+/// `@JvmField`, a custom-accessor property (its accessors are ordinary facade functions) and a private
+/// property (reached only through `access$…$p` bridges) publish none here.
+pub(super) fn emit_static_accessors(
+    ir: &IrFile,
+    facade: &str,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+    param_assertions: bool,
+    static_index: u32,
+) {
+    let s = &ir.statics[static_index as usize];
+    if !s.is_facade_owned()
+        || s.is_const
+        || s.custom_accessor
+        || ir.is_jvm_field_static(static_index)
+        || s.visibility.is_private()
+    {
+        return;
+    }
+    let signature_formatter = JvmSignatureFormatter::new(ir, env);
+    let jt = jvm_declared_ty(&s.ty);
+    let desc = type_descriptor(jt);
+    // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
+    // body's field cluster; the accessor maps to the property's declaration line.
+    //
+    // An accessor's nullability is the PROPERTY's, which for a value-class-typed static whose
+    // storage was erased is no longer readable off `s.ty` — that holds the carrier now. Reading
+    // it there published a non-null `String` setter for a `var x: Label?` and refused the null
+    // the property accepts, so the declaration's own recorded type answers instead.
+    let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
+    let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
+    let acc_ann = match nullability {
+        1 => Some("Lorg/jetbrains/annotations/NotNull;"),
+        2 => Some("Lorg/jetbrains/annotations/Nullable;"),
+        _ => None,
+    };
+    // The accessors erase the property's type arguments in their descriptors, so each carries the
+    // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
+    // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
+    let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+    let gname = property_getter_name(&s.name);
+    cw.reserve_method_name(&gname);
+    cw.seed_utf8(&format!("(){desc}"));
+    // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
+    // annotation, BEFORE the body's field cluster.
+    if let Some(signature) = &signatures.getter {
+        cw.seed_utf8(signature);
+    }
+    if let Some(a) = acc_ann {
+        cw.seed_utf8(a);
+    }
+    let mut g = CodeBuilder::new(0);
+    if s.line != 0 {
+        g.mark_line(s.line);
+    }
+    let fref = cw.fieldref(facade, &s.name, &desc);
+    g.getstatic(fref, slot_words(jt) as i32);
+    emit_return(jt, &mut g);
+    finish_code_sig::<0x0019>(
+        cw,
+        &gname,
+        &format!("(){desc}"),
+        &mut g,
+        0,
+        signatures.getter.as_deref(),
+    );
+    cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
+    if s.is_var {
+        // A value-class-typed property's setter carries the value-class mangle: the parameter
+        // it takes is the carrier, and a value-class PARAMETER always mangles.
+        let sname = s
+            .setter_jvm_name
+            .clone()
+            .unwrap_or_else(|| property_setter_name(&s.name));
+        cw.reserve_method_name(&sname);
+        cw.seed_utf8(&format!("({desc})V"));
+        if let Some(signature) = &signatures.setter {
+            cw.seed_utf8(signature);
+        }
+        let words = slot_words(jt);
+        let mut st = CodeBuilder::new(words);
+        // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
+        // `-Xno-param-assertions` removes it, like every other parameter guard.
+        if param_assertions && jt.is_reference() && nullability == 1 {
+            st.aload(0);
+            st.push_string("<set-?>", cw);
+            let m = cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "checkNotNullParameter",
+                "(Ljava/lang/Object;Ljava/lang/String;)V",
+            );
+            st.invokestatic(m, 2, 0);
+        }
+        // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
+        if s.line != 0 {
+            st.mark_line(s.line);
+        }
+        load(jt, 0, &mut st);
+        let fref = cw.fieldref(facade, &s.name, &desc);
+        st.putstatic(fref, slot_words(jt) as i32);
+        st.ret_void();
+        finish_code_sig::<0x0019>(
+            cw,
+            &sname,
+            &format!("({desc})V"),
+            &mut st,
+            words,
+            signatures.setter.as_deref(),
+        );
+        cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
+        // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
+        cw.set_method_debug(
+            &sname,
+            &format!("({desc})V"),
+            None,
+            &[("<set-?>".to_string(), desc.clone(), 0)],
+        );
     }
 }
