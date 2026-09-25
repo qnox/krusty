@@ -918,6 +918,12 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
 impl Backend for JvmBackend {
     type State = JvmState;
 
+    fn common_lowering_options(&self) -> crate::ir::CommonLoweringOptions {
+        crate::ir::CommonLoweringOptions {
+            prefer_java_like_counter_loop: true,
+        }
+    }
+
     fn lower_ir_file(
         &self,
         mut file: crate::backend::CheckedIrFile<'_>,

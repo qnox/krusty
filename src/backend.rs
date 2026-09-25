@@ -36,6 +36,11 @@ pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
 
+    /// The target's choices for the shape of target-neutral lowerings.
+    fn common_lowering_options(&self) -> crate::ir::CommonLoweringOptions {
+        crate::ir::CommonLoweringOptions::default()
+    }
+
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR
     /// and compact stable module facts.

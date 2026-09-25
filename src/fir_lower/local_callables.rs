@@ -994,6 +994,7 @@ impl BodyLowering<'_> {
             scopes,
             self.published_local_callables.clone(),
         );
+        nested.options = self.options;
         nested.enclosure = enclosure;
         nested.control_path = self.control_path.clone();
         nested.control_path.push(

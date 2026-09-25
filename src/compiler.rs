@@ -121,6 +121,7 @@ pub fn emit_analyzed<B: Backend>(
                 continue;
             }
         };
+        sink.set_options(backend.common_lowering_options());
         metadata_handoff::attach_stable_function_inference_metadata(
             source_id,
             &index,

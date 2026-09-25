@@ -6862,6 +6862,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same final body: the deepest stack the dataflow reaches (at least 1 when a block is dead, for its
   `athrow`), and the argument words plus every slot an instruction or a local-variable entry names.
 
+- **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** The header
+  (`src/fir_lower/counted_loops.rs`) ports `ProgressionHeaderInfo`: `until` and `..<` have an exclusive
+  bound; on a target that prefers Java-like counter loops (the JVM's `preferJavaLikeCounterLoop`,
+  passed as `CommonLoweringOptions` by the backend), `..` and `downTo` with a constant bound that can
+  move one step outward become exclusive too (`0..10` iterates while `i < 11`, `n downTo 0` while
+  `-1 < i`). An exclusive bound gives a Java counter loop, tested at the top and stepped at the
+  bottom. An inclusive bound may be the extreme value of its type, so the loop is guarded by the entry
+  test, leaves by comparing the counter with the bound before stepping, and jumps back into the body.
+  A decreasing comparison reads the bound first (`last < i`), the step is an addition of `-1` when
+  decreasing, a guard between two `Int`-sized constants is decided at compile time (a `Long` one is
+  not, matching kotlinc), and the bound is copied into a temporary only when it can change while the
+  loop runs: a constant or a read of an immutable local of the counter's own type is re-read in place
+  (`createLoopTemporaryVariableIfNecessary`), while a widened bound such as `0L..n` is a conversion
+  and is copied. (`tests/counted_loop_shape_e2e.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

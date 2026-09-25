@@ -19,7 +19,7 @@ use super::{
     lower_body_with_context,
     properties::{accept_property_body, finalize_properties, predeclare_properties},
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
-    FirLoweringFailure, LocalCallableLoweringContext,
+    FileLoweringContext, FirLoweringFailure,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,12 +118,17 @@ pub struct CommonIrBodySink<'a> {
     source: SourceFileId,
     ir: &'a mut IrFile,
     failure: Option<FirFileLoweringFailure>,
-    local_callables: LocalCallableLoweringContext,
+    local_callables: FileLoweringContext,
     inline_payload_declarations: std::collections::HashSet<DeclarationId>,
     materialized_inline_callables: std::collections::HashSet<CallableId>,
 }
 
 impl<'a> CommonIrBodySink<'a> {
+    /// Adopt the target's choices for the shape of common lowerings (see [`crate::ir::CommonLoweringOptions`]).
+    pub fn set_options(&mut self, options: crate::ir::CommonLoweringOptions) {
+        self.local_callables.options = options;
+    }
+
     pub fn new(
         index: &ResolvedModuleIndex,
         source: SourceFileId,
@@ -133,7 +138,7 @@ impl<'a> CommonIrBodySink<'a> {
             source,
             ir,
             failure: None,
-            local_callables: LocalCallableLoweringContext::default(),
+            local_callables: FileLoweringContext::default(),
             inline_payload_declarations: std::collections::HashSet::new(),
             materialized_inline_callables: std::collections::HashSet::new(),
         };

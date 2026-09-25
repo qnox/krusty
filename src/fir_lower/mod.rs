@@ -142,24 +142,21 @@ pub fn lower_body(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
-    lower_body_with_context(
-        body,
-        index,
-        ir,
-        &mut LocalCallableLoweringContext::default(),
-    )
+    lower_body_with_context(body, index, ir, &mut FileLoweringContext::default())
 }
 
+/// State shared by every body lowered from one source file.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LocalCallableLoweringContext {
+pub(crate) struct FileLoweringContext {
     realizations: HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+    options: crate::ir::CommonLoweringOptions,
 }
 
 pub(crate) fn lower_body_with_context(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
@@ -181,6 +178,7 @@ pub(crate) fn lower_body_with_context(
         vec![HashMap::new()],
         local_callables.realizations.clone(),
     );
+    lowering.options = local_callables.options;
     lowering.enclosure = root_enclosure(&body, index, lowering.ir, declaration);
     lowering.prepare_local_functions()?;
     lowering.realize_local_functions()?;
@@ -282,6 +280,7 @@ pub(crate) fn lower_body_with_context(
 
 struct BodyLowering<'a> {
     body: &'a FirBody,
+    options: crate::ir::CommonLoweringOptions,
     index: &'a ResolvedModuleIndex,
     ir: &'a mut IrFile,
     expression_states: Vec<LoweringState>,
@@ -449,6 +448,7 @@ impl<'a> BodyLowering<'a> {
             expression_states: vec![LoweringState::Uncomputed; body.expression_count()],
             statement_states: vec![LoweringState::Uncomputed; body.statement_count()],
             body,
+            options: crate::ir::CommonLoweringOptions::default(),
             index,
             ir,
             next_temporary: value_slot_count,
