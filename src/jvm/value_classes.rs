@@ -1834,7 +1834,7 @@ pub(crate) fn lower_value_classes(
                     // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
-                    if bridge_mentions_vc && b.kind != crate::ir::BridgeKind::PropertyGetter {
+                    if bridge_mentions_vc {
                         b.name = vc_mangle(
                             &b.name,
                             &b.concrete_params,
@@ -1897,20 +1897,18 @@ pub(crate) fn lower_value_classes(
                     if b.target_name.is_none() {
                         b.target_name = Some(b.name.clone());
                     }
-                    if b.kind != crate::ir::BridgeKind::PropertyGetter {
-                        b.name = vc_mangle(
-                            &b.name,
-                            &b.concrete_params,
-                            &b.erased_ret,
-                            &callable_under,
-                            false,
-                            suspend_sig.contains(&(
-                                Some(c.fq_name),
-                                b.name.clone(),
-                                b.concrete_params.len(),
-                            )),
-                        );
-                    }
+                    b.name = vc_mangle(
+                        &b.name,
+                        &b.concrete_params,
+                        &b.erased_ret,
+                        &callable_under,
+                        false,
+                        suspend_sig.contains(&(
+                            Some(c.fq_name),
+                            b.name.clone(),
+                            b.concrete_params.len(),
+                        )),
+                    );
                     for p in b.erased_params.iter_mut() {
                         *p = erase(p, &callable_under);
                     }
@@ -4504,42 +4502,14 @@ pub(crate) fn lower_value_classes(
                     .obj_internal()
                     .is_some_and(|fq_name| under.contains_key(&fq_name))
             };
-            // An OVERRIDE must carry the name its supertype's accessor has: `override val p: Nothing?`
-            // over an `Inlined?` property is spelled with the supertype's mangled name, or the interface
-            // call finds no implementation. So the mangling type is the supertype's when it has one.
-            // The supertype's accessor has ALREADY been mangled by this pass (it is a real IR method), so
-            // take its exact name rather than recomputing the hash — the override and its bridge must
-            // match byte for byte or the interface call finds no implementation.
-            let plain = property_getter_name(&name);
-            let supers: Vec<TypeName> = ir.classes[ci]
-                .supertypes
-                .iter()
-                .filter_map(|st| st.non_null().obj_internal())
-                .chain(ir.classes[ci].interfaces.iter_ids())
-                .collect();
-            let super_accessor = supers
-                .iter()
-                .filter_map(|st| ir.classes.iter().find(|sc| sc.fq_name == *st))
-                .filter(|sc| sc.properties.iter().any(|sp| sp.name == name))
-                .flat_map(|sc| sc.methods.iter())
-                .map(|&fid| ir.functions[fid as usize].name.clone())
-                .find(|n| n.strip_prefix(&plain).is_some_and(|r| r.starts_with('-')));
-            crate::trace_compiler!(
-                "value_classes",
-                "prop stamp {}.{} super_accessor={super_accessor:?} vc_ty={}",
-                ir.classes[ci].fq_name.render(),
-                name,
-                is_vc_ty(&ty)
-            );
-            if super_accessor.is_none() && !is_vc_ty(&ty) {
+            // The property's own accessor is mangled only when its own type is a value class. When it
+            // merely overrides a value-class property (`override val p: Nothing?`), the own accessor
+            // keeps the plain spelling and its bridge carries the supertype's mangled name.
+            if !is_vc_ty(&ty) {
                 continue;
             }
-            // The property's OWN accessor is mangled only when its own type is a value class. When it
-            // merely overrides a value-class property (`override val p: Nothing?`), the own accessor keeps
-            // the plain spelling and it is the BRIDGE that carries the supertype's mangled name.
-            let own_mangled =
-                is_vc_ty(&ty).then(|| vc_mangle(&plain, &[], &ty, &under, false, false));
-            let getter = own_mangled.clone().unwrap_or_else(|| plain.clone());
+            let plain = property_getter_name(&name);
+            let getter = vc_mangle(&plain, &[], &ty, &under, false, false);
             let setter = vc_mangle(
                 &crate::names::property_setter_name(&name),
                 std::slice::from_ref(&ty),
@@ -4551,7 +4521,7 @@ pub(crate) fn lower_value_classes(
             // Any call already built against the PLAIN spelling (a plugin emits `getX()` before this pass
             // runs) must move to the mangled one too — this is the single place that decides the name.
             let owner = ir.classes[ci].fq_name;
-            let plain_getter = property_getter_name(&name);
+            let plain_getter = plain;
             let plain_setter = crate::names::property_setter_name(&name);
             for e in ir.exprs.iter_mut() {
                 if let IrExpr::Call {
@@ -4583,21 +4553,14 @@ pub(crate) fn lower_value_classes(
                     .unwrap_or(&bridge.name)
                     .to_string();
                 if target == plain_getter {
-                    if let Some(super_name) = super_accessor.clone() {
-                        // The property OVERRIDES a value-class one: the bridge IS the supertype's mangled
-                        // accessor, delegating to this class's own (plain) one.
-                        bridge.name = super_name;
-                        bridge.target_name = Some(getter.clone());
-                    } else {
-                        bridge.target_name = Some(getter.clone());
-                    }
+                    bridge.target_name = Some(getter.clone());
                 } else if target == plain_setter {
                     bridge.target_name = Some(setter.clone());
                 }
             }
             let p = &mut ir.classes[ci].properties[index];
-            p.getter_jvm_name = own_mangled;
-            p.setter_jvm_name = is_vc_ty(&ty).then_some(setter);
+            p.getter_jvm_name = Some(getter);
+            p.setter_jvm_name = Some(setter);
         }
     }
 
