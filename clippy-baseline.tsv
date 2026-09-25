@@ -55,6 +55,7 @@
 1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
 1	src/jvm/bridges.rs	this function has too many arguments (9/7)
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
+1	src/jvm/classfile.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/external_calls.rs	unnecessary closure used with `bool::then`

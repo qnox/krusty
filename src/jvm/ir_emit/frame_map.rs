@@ -236,9 +236,11 @@ impl FrameMap {
             };
             target = next;
         }
-        (matched == holders.len())
-            .then_some(base)
-            .unwrap_or(self.size)
+        if matched == holders.len() {
+            base
+        } else {
+            self.size
+        }
     }
 
     pub(super) fn mark(&self) -> Mark {
