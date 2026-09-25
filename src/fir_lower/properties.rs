@@ -594,6 +594,9 @@ fn materialize_top_level_property(
                 None,
             )
         });
+        for accessor in getter.into_iter().chain(setter) {
+            ir.fn_source_order.insert(accessor, source_order);
+        }
         if let Some(getter) = getter {
             set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
         }
@@ -668,6 +671,9 @@ fn materialize_top_level_property(
             setter,
             type_params,
         });
+    }
+    for accessor in std::iter::once(getter).chain(setter) {
+        ir.fn_source_order.insert(accessor, source_order);
     }
     set_accessor_parameter_identities(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {

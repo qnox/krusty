@@ -113,3 +113,36 @@ pub(super) fn emit_private_member_access_bridge(
         &code,
     );
 }
+
+/// The `public static final synthetic access$<name>` forwarder a PRIVATE facade function gets when
+/// a class body calls it: a cross-class private `invokestatic` is illegal.
+pub(super) fn emit_facade_function_access_bridge(
+    ir: &IrFile,
+    function: u32,
+    facade: &str,
+    cw: &mut ClassWriter,
+) {
+    let f = &ir.functions[function as usize];
+    let param_tys = jvm_function_params(ir, function);
+    let ret = jvm_declared_ty(&f.ret);
+    let desc = method_descriptor(&param_tys, ret);
+    let words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+    let mut g = CodeBuilder::new(words);
+    let mut slot: u16 = 0;
+    for &t in &param_tys {
+        load(t, slot, &mut g);
+        slot += slot_words(t);
+    }
+    let m = cw.methodref(facade, &f.name, &desc);
+    let aw: i32 = words as i32;
+    g.invokestatic(m, aw, slot_words(ret) as i32);
+    emit_return(ret, &mut g);
+    g.ensure_locals(words);
+    g.link();
+    cw.add_method(
+        0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+        &format!("access${}", f.name),
+        &desc,
+        &g,
+    );
+}

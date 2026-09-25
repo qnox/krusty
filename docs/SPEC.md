@@ -6861,6 +6861,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reproduces kotlinc's own tables). `max_stack` and `max_locals` are ASM's `COMPUTE_MAXS` over the
   same final body: the deepest stack the dataflow reaches (at least 1 when a block is dead, for its
   `athrow`), and the argument words plus every slot an instruction or a local-variable entry names.
+- **Class members are written in kotlinc's declaration order after lowering.** kotlinc's
+  `ClassCodegen` writes a class's methods in the order of its lowered IR declarations (`<clinit>`
+  last) and its fields in that same order, and each lowering decides where it puts what it adds.
+  krusty follows the rules that decide most classes: a file facade lists the file's declarations in
+  source order, a top-level property's accessors at the property's position (JvmPropertiesLowering
+  replaces the property in place); lifted local functions follow the declared members in
+  LocalDeclarationPopupLowering's order, where bodies finish postfix and each appends its own local
+  functions in source order (`box$foo$bar` before `box$foo`), and a local function inside a lambda
+  belongs to the body around the lambda; indy lambda methods follow all of them, grouped by the
+  member whose body declares them, in the member order by then; a private facade function's
+  `access$…` bridge (SyntheticAccessorLowering) is appended after every declared and lifted member;
+  and a class's lexical captures and outer instance (LocalDeclarationsLowering, InnerClassesLowering)
+  follow its declared fields. Bridge placement and value-class members are separate rules. Tests:
+  `tests/class_member_order_e2e.rs` (the member lists of every class, names and descriptors in
+  order, equal to kotlinc's).
 
 ## 8. Success criteria for the PoC
 
