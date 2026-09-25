@@ -1098,6 +1098,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_synthetic_classes_e2e.rs"]
+mod metadata_synthetic_classes_e2e;
 #[path = "metadata_type_reference_e2e.rs"]
 mod metadata_type_reference_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
@@ -1951,8 +1953,6 @@ mod local_class_naming_e2e;
 mod unboxing_coercion_e2e;
 
 mod serializer_metadata_class_id_e2e;
-#[path = "common/kotlin_metadata.rs"]
-mod serializer_metadata_test_support;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]

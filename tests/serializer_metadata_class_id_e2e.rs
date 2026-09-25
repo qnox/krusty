@@ -98,10 +98,9 @@ fn assert_d2_matches_kotlinc(src: &str, stem: &str, class_internal: &str) {
         .find(|(name, _)| name == class_internal)
         .unwrap_or_else(|| panic!("{stem}: krusty emitted no {class_internal}"));
 
-    let (_, reference_d2) =
-        super::serializer_metadata_test_support::raw_kotlin_metadata(&reference)
-            .unwrap_or_else(|| panic!("{stem}: kotlinc's {class_internal} carries no @Metadata"));
-    let (_, actual_d2) = super::serializer_metadata_test_support::raw_kotlin_metadata(actual)
+    let (_, reference_d2) = super::common_core::raw_kotlin_metadata(&reference)
+        .unwrap_or_else(|| panic!("{stem}: kotlinc's {class_internal} carries no @Metadata"));
+    let (_, actual_d2) = super::common_core::raw_kotlin_metadata(actual)
         .unwrap_or_else(|| panic!("{stem}: krusty's {class_internal} carries no @Metadata"));
     let reference_class_id = reference_d2
         .first()

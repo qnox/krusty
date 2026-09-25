@@ -3205,6 +3205,47 @@ pub fn metadata_diff_against_kotlinc_cp(
     class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<Result<(), String>> {
+    let (actual, reference) = compile_class_with_kotlinc_and_krusty(name, src, class, cp_jars)?;
+    Some(compare_kotlin_metadata(name, class, &actual, &reference))
+}
+
+/// [`metadata_diff_against_kotlinc_cp`] for a class whose `@Metadata` may carry no `d1`, such as a
+/// `k=3` synthetic class: every element (`k`, `mv`, `xi`, `d1`, `d2`) must equal kotlinc's.
+#[allow(dead_code)]
+pub fn metadata_header_diff_against_kotlinc_cp(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+) -> Option<Result<(), String>> {
+    let (actual, reference) = compile_class_with_kotlinc_and_krusty(name, src, class, cp_jars)?;
+    let header = |bytes: &[u8]| {
+        (
+            kotlin_metadata::kotlin_metadata_ints(bytes),
+            raw_kotlin_metadata(bytes),
+        )
+    };
+    let (expected, emitted) = (header(&reference), header(&actual));
+    assert!(
+        expected.0.is_some(),
+        "{name}: kotlinc {class} carries no @Metadata"
+    );
+    Some(match expected == emitted {
+        true => Ok(()),
+        false => Err(format!(
+            "{name}/{class}: @Metadata differs from kotlinc\n  kotlinc: {expected:?}\n  krusty : {emitted:?}"
+        )),
+    })
+}
+
+/// `class` as kotlinc and krusty compile `src`: `(krusty, kotlinc)` class-file bytes, or `None`
+/// when no reference compiler is provisioned.
+fn compile_class_with_kotlinc_and_krusty(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;
@@ -3226,8 +3267,7 @@ pub fn metadata_diff_against_kotlinc_cp(
         .find(|(n, _)| n == class)
         .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
     let _ = std::fs::remove_dir_all(&dir);
-
-    Some(compare_kotlin_metadata(name, class, actual, &reference))
+    Some((actual.clone(), reference))
 }
 
 /// [`metadata_diff_against_kotlinc_cp`] with BOTH sides compiled under an explicit module name

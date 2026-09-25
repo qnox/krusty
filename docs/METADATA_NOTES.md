@@ -179,6 +179,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   names a local classifier at the outermost position records its JVM descriptor, since the
   reader's class-id mapping cannot produce the classifier's JVM name.
   Test: `tests/metadata_local_classes_e2e.rs`.
+- Expression-generated classes (kotlinc 2.4.20): a callable-reference class (property, mutable,
+  bound, top-level, function, bound-function and adapted references) and an annotation
+  instantiation class (`<Facade>$annotationImpl$<Annotation>$N`) carry `@Metadata(mv, k = 3, xi)`
+  with no `d1`/`d2`, where `xi = 48 | (LOCAL (5) << 8) = 1328`. Before 2.4.20 `xi` is 48. Not yet
+  covered: the public visibility and bit 7 kotlinc writes for such a class regenerated from an
+  inline function (`xi = 0x3b0`/`0x5b0`), and the pre-release bit (2) under experimental language
+  features. Test: `tests/metadata_synthetic_classes_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

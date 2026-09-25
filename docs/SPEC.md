@@ -7006,6 +7006,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   executable code, or nested in one, records its members with LOCAL visibility under a local class
   id, and an anonymous object records no constructor, as kotlinc 2.4.20 does; see
   `docs/METADATA_NOTES.md`. Test: `tests/metadata_local_classes_e2e.rs`.
+- **Callable-reference and annotation-instantiation classes are LOCAL synthetic classes.** Each
+  carries the `k = 3` record with LOCAL visibility in `xi`, as kotlinc 2.4.20 writes it; see
+  `docs/METADATA_NOTES.md`. Test: `tests/metadata_synthetic_classes_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part

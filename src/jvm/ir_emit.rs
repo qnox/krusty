@@ -105,8 +105,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    is_continuation_class, is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL,
-    SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
+    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use scalar_coercion::{
@@ -6797,7 +6797,7 @@ fn emit_prop_ref_class(
     }
 
     emit_singleton_instance_clinit(&mut cw, &fq);
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }
 
 /// Emit a bound property-reference (`obj::prop` → `PropertyReference0Impl` subclass): a constructor
@@ -6858,7 +6858,7 @@ fn emit_bound_prop_ref_class(
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }
 
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
@@ -7000,7 +7000,7 @@ fn emit_toplevel_prop_ref_class(
     }
 
     emit_singleton_instance_clinit(&mut cw, &fq);
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }
 
 /// The wrapper class internal name for a primitive (`Int` → `java/lang/Integer`), for casting an
@@ -7296,10 +7296,7 @@ fn emit_func_ref_class(
             emit_singleton_instance_clinit(&mut cw, &fq);
             add_singleton_instance_field(&mut cw, &fq);
         }
-        // A reference class is local to the scope it was written in.
-        let xi = synthetic_class_xi(SYNTHETIC_LOCAL);
-        cw.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
-        return cw.finish();
+        return finish_local_synthetic_class(cw);
     }
 
     // Numbered JVM function interfaces stop at arity 22. Larger Kotlin function types use the
@@ -7508,7 +7505,7 @@ fn emit_func_ref_class(
         emit_singleton_instance_clinit(&mut cw, &fq);
         add_singleton_instance_field(&mut cw, &fq);
     }
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }
 
 fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
