@@ -6740,6 +6740,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
   `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
   `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
+- **Native: a range over a `Comparable` passes the `compareTo` its element type orders by.** The
+  generator builds `a..b` knowing the element type, so it chooses the order there and hands it to
+  the runtime's range. A final class of the file that declares `compareTo(other: Self): Int` passes
+  that function: it takes the receiver and the other bound and answers an `Int`, and nothing can
+  override it. A `String`, or any element in a file that declares no `Comparable` of its own, passes
+  the runtime's builtin order, since every object such an element holds is a builtin comparable.
+  Anything else declines by name: an open class's `compareTo` may be overridden by the object
+  behind a bound, so no one function orders its range. The range's members use the order it
+  carries, so they no longer decline in a file that declares its own `Comparable`.
+  Tests: `tests/native_comparable_ranges_e2e.rs`
+  (`a_range_over_the_files_own_comparable_orders_by_its_compare_to`,
+  `a_range_over_an_open_comparable_declines`); `tests/reference_range_expression_e2e.rs`
+  (`user_comparable_range_binds_and_contains`, now also run natively).
 - **Native: a throwing initializer leaves nothing half-built.** An `object`'s instance is
   published before its constructor runs (a constructor reaching back into its own object must find
   it), and so are an enum's constants. When the constructor throws, the instance — or every
