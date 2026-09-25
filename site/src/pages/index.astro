@@ -2,7 +2,7 @@
 const repo = "https://github.com/qnox/krusty";
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
-  "krusty is a Kotlin compiler written in Rust. A drop-in replacement for kotlinc on the JVM: the same flags, and .class files byte-for-byte identical to kotlinc's.";
+  "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
 const badge = (file: string) =>
   `https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F${file}`;
 const jsonLd = {
@@ -43,31 +43,57 @@ const jsonLd = {
       <h1>krusty</h1>
       <p class="tag">A Kotlin compiler written in Rust.</p>
       <p>
-        A drop-in replacement for <code>kotlinc</code> on the JVM: the same command-line flags in, and <code>.class</code> files byte-for-byte identical to <code>kotlinc</code>'s out, from a single native binary.
+        Built to be a drop-in replacement for <code>kotlinc</code> on the JVM. For the Kotlin subset it supports, it accepts <code>kotlinc</code>'s command-line flags and aims to emit <code>.class</code> files byte-for-byte identical to <code>kotlinc</code>'s, from a single native binary. The conformance badge shows how much of Kotlin's own test suite it passes today.
       </p>
       <p class="badges">
         <img src={badge("krusty-kotlin.json")} alt="Latest supported Kotlin version" height="20" />
         <img src={badge("krusty-conformance.json")} alt="Kotlin codegen/box conformance" height="20" />
       </p>
       <p>
-        <a href={`${repo}/releases/latest`}>Download</a> · <a href={repo}>Source</a> · <a href={`${repo}/blob/master/docs/SPEC.md`}>Supported language</a>
+        <a href={`${repo}/releases/latest`}>Download</a> · <a href={repo}>GitHub</a> · <a href="https://github.com/sponsors/qnox">Sponsor</a>
+      </p>
+
+      <h2>Install</h2>
+      <p>
+        Download <code>krusty</code> for Linux, macOS or Windows from the <a href={`${repo}/releases/latest`}>latest release</a> and put it on your <code>PATH</code>. krusty needs no JVM to run, but reads the class library of an installed JDK.
       </p>
 
       <h2>Usage</h2>
       <pre><code>krusty src/ -d out/                          # compile to a class directory
 krusty src/ -d mylib.jar -module-name mylib  # or to a jar
 krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
-      <p>
-        Binaries for Linux, macOS and Windows (x86_64, arm64) are on every <a href={`${repo}/releases/latest`}>release</a>. From source: <code>cargo build --release -p krusty-cli</code>.
-      </p>
 
-      <h2>What it does</h2>
+      <h2>Features</h2>
       <ul>
-        <li>Output is diffed against the real <code>kotlinc</code>: class files, <code>@kotlin.Metadata</code>, <code>.kotlin_module</code>.</li>
-        <li>Every build runs JetBrains' <code>codegen/box</code> suite; the badge shows the pass rate.</li>
-        <li>kotlinx.serialization and KSP are supported.</li>
-        <li><code>krusty-lsp</code> is a Kotlin language server on the same compiler, with a <a href={`${repo}/tree/master/editors/zed`}>Zed extension</a>.</li>
+        <li><strong>kotlinc-compatible command line</strong> for the supported subset, output to a class directory or a jar.</li>
+        <li><strong>Byte-level fidelity.</strong> Every change is diffed against the real <code>kotlinc</code>, and every build runs JetBrains' <code>codegen/box</code> suite.</li>
+        <li><strong>Low memory.</strong> On our multi-module benchmark, about a third of the peak memory of the GraalVM-native <code>kotlinc</code>.</li>
+        <li><strong>kotlinx.serialization and KSP.</strong></li>
+        <li><strong>Bazel</strong> persistent worker support.</li>
+        <li><strong>Editor support.</strong> <code>krusty-lsp</code> language server, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
       </ul>
+
+      <h2>Status</h2>
+      <p>krusty compiles plain Kotlin/JVM code today. Not supported yet:</p>
+      <ul>
+        <li>Gradle and Maven integration (use the command line or Bazel)</li>
+        <li>Compose, kapt and compiler plugins other than kotlinx.serialization</li>
+        <li>Kotlin scripts (<code>.kts</code>)</li>
+      </ul>
+
+      <h2>Roadmap</h2>
+      <ul>
+        <li>100% JVM conformance with kotlinc</li>
+        <li>Gradle integration</li>
+        <li>Kotlin/Native</li>
+        <li>Kotlin/Wasm</li>
+        <li>Compose</li>
+      </ul>
+
+      <h2>Sponsor</h2>
+      <p>
+        If krusty saves your team build time or CI money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
+      </p>
     </main>
     <footer>
       Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
