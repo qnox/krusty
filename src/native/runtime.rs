@@ -84,11 +84,12 @@ mod tests {
              void kt_program_entry(void) { kt_sys_write(1, \"OK\\n\", 3); }\n",
         )
         .expect("write the program");
-        for triple in [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "riscv64-unknown-linux-gnu",
-        ] {
+        // Every supported target, from the one list the build script and the target model read:
+        // a target added there is compiled here too.
+        for triple in crate::native::NativeTarget::ALL
+            .iter()
+            .map(|target| target.triple())
+        {
             let output = Command::new("clang")
                 .arg(format!("--target={triple}"))
                 .args([
