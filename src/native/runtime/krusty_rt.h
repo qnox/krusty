@@ -475,7 +475,8 @@ kt_boolean kt_lazy_is_initialized(KRef lazy);
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`: two references, with the three `kotlin.Any` members answering componentwise the way
-   Kotlin's data class does. `Triple` is not one of these and is not realized. */
+   Kotlin's data class does. A member whose first component's call throws returns with that
+   exception pending and never asks the second. `Triple` is not one of these and is not realized. */
 extern const KType kt_type_pair;
 
 KRef kt_pair_of(KRef first, KRef second);
@@ -753,11 +754,13 @@ KRef kt_to_string(KRef value);
    answer for either shape. */
 extern const KType kt_type_string_builder;
 
-/* `StringBuilder()` and `StringBuilder(capacity)`. The capacity is a hint. */
+/* `StringBuilder()` and `StringBuilder(capacity)`. A capacity is a hint; a negative one throws
+   `NegativeArraySizeException` with the capacity as its message, as the JVM's builder does. */
 KRef kt_string_builder_new(void);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
-/* `StringBuilder(text)`: a builder holding a COPY of it. */
+/* `StringBuilder(text)`: a builder holding a COPY of it. When `text` is the program's own
+   `CharSequence` and its `length` or `get` throws, no builder is made: NULL, exception pending. */
 KRef kt_string_builder_with_text(KRef text);
 
 /* `sb.append(value)`, answering the RECEIVER so a chain of them reads as one expression. The value
@@ -765,7 +768,8 @@ KRef kt_string_builder_with_text(KRef text);
 KRef kt_string_builder_append(KRef self, KRef value);
 
 /* `sb.appendLine(value)` and `sb.appendLine()`. The line separator is `\n` on every target, which
-   is what Kotlin specifies rather than the platform's. */
+   is what Kotlin specifies rather than the platform's. When the value's `toString` throws, neither
+   the value nor the newline is added. */
 KRef kt_string_builder_append_line(KRef self, KRef value);
 KRef kt_string_builder_append_new_line(KRef self);
 
@@ -851,6 +855,10 @@ extern const KType kt_type_number_format_exception;
 extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
+/* A `RuntimeException` Kotlin declares no alias for, so its name is Java's:
+   `java.lang.NegativeArraySizeException`. It is what a negative `StringBuilder` capacity throws on
+   the JVM, whose builder allocates its storage as an array of that size. */
+extern const KType kt_type_negative_array_size_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
@@ -881,6 +889,8 @@ kt_boolean kt_result_is_success(KRef value);
 KRef kt_result_get_or_null(KRef value);
 KRef kt_result_exception_or_null(KRef value);
 KRef kt_result_get_or_throw(KRef value);
+/* `Success(value)` or `Failure(exception)`; NULL, with the exception pending, when rendering the
+   value or the exception through its `toString` throws. */
 KRef kt_result_to_string(KRef value);
 
 /* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class

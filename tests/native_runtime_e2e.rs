@@ -240,3 +240,63 @@ fn a_repeat_too_long_for_memory_is_out_of_memory() {
 fn surrogate_halves_concatenate_into_their_character() {
     run_driver("string_plus_surrogates");
 }
+
+#[test]
+fn unboxing_null_raises_and_comes_back() {
+    run_driver("unbox_null_raises");
+}
+
+#[test]
+fn a_number_conversion_of_null_raises_and_comes_back() {
+    run_driver("number_conversion_null_raises");
+}
+
+#[test]
+fn a_builder_joins_a_surrogate_pair_appended_unit_by_unit() {
+    run_driver("builder_joins_surrogate_pair");
+}
+
+#[test]
+fn a_lazy_whose_initializer_throws_stays_uninitialized() {
+    run_driver("lazy_initializer_throws");
+}
+
+#[test]
+fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_throwing_to_string");
+}
+
+#[test]
+fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_line_throwing_to_string");
+}
+
+#[test]
+fn a_negative_builder_capacity_throws_negative_array_size_exception() {
+    run_driver("builder_negative_capacity");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
+    run_driver("builder_from_program_char_sequence");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_that_throws_is_not_made() {
+    run_driver("builder_from_throwing_char_sequence");
+}
+
+#[test]
+fn a_pair_stops_at_the_first_component_that_throws() {
+    run_driver("pair_component_throws");
+}
+
+#[test]
+fn a_result_whose_content_throws_renders_no_text() {
+    run_driver("result_to_string_throws");
+}
+
+#[test]
+fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
+    run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
+}

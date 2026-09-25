@@ -6158,6 +6158,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
+  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
+  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
+  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
+  so its name is Java's. `StringBuilder(text)` over a `CharSequence` the program implements reads
+  it through its own `length` and `get`; when either throws, no builder is made and nothing more of
+  the sequence is read.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`,
+  `builder_from_throwing_char_sequence`).
+- **Native runtime members stop at the first program call that throws.** A runtime member that asks
+  the program's own overrides more than one question — `Pair`'s `equals`, `hashCode` and `toString`,
+  which ask each component in turn, and `Result.toString`, which renders its value or exception and
+  then builds `Success(…)`/`Failure(…)` around it — returns as soon as one of those calls comes back
+  with an exception pending. The second component is never asked, the placeholder the aborted call
+  returned (a `true`, a zero, a `null`) is never read, no text is built from it, and the exception
+  pending afterwards is the very object the call threw. That is Kotlin's answer: the generated
+  data-class members and `Result.toString` propagate the first exception from where it was thrown.
+  Tests: `tests/native_runtime_e2e.rs` (`pair_component_throws`, `result_to_string_throws`).
 
 ## 8. Success criteria for the PoC
 

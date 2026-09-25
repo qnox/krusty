@@ -1011,3 +1011,923 @@ KRef kt_string_plus(KRef a, KRef b) {
     return kt_string_of((KRef)joined, out, length);
 }
 
+/* ---- string builders ------------------------------------------------------------------------
+
+   `kotlin.text.StringBuilder` is a growable UTF-8 buffer, laid out like the growable list above and
+   for the same reasons: one reference field the collector traces, a written length beside it, and
+   doubling so that repeated `append` stays linear. The capacity is the storage array's length; the
+   text is its first `byte_length` bytes.
+
+   `toString` COPIES rather than sharing the storage the way `substring` does. A string is a value
+   and a builder is not: hand out a view and the next `append` rewrites text a program already
+   holds. */
+
+typedef struct KStringBuilder {
+    KObjectHeader header;
+    KRef storage;
+    kt_int byte_length;
+} KStringBuilder;
+
+static const uint32_t kt_string_builder_offsets[] = {offsetof(KStringBuilder, storage)};
+
+static KRef kt_string_builder_to_string(KRef self);
+
+/* `equals` and `hashCode` are IDENTITY, which is what Kotlin answers here: `StringBuilder` does not
+   override either, so two builders holding the same text are different objects and stay that way.
+   Only `toString` is its own. */
+static const kt_fn kt_string_builder_vtable[] = {
+    (kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code, (kt_fn)kt_string_builder_to_string};
+
+const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
+                                      sizeof("kotlin.text.StringBuilder") - 1,
+                                      sizeof(KStringBuilder),
+                                      1,
+                                      0,
+                                      kt_string_builder_offsets,
+                                      &kt_type_any,
+                                      kt_string_builder_vtable,
+                                      3,
+                                      0,
+                                      kt_char_sequence_interfaces,
+                                      1};
+
+static const char *kt_text_of(KRef self, kt_int *byte_length) {
+    /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
+       answers to its own `length` and `get`. Read as a string, its fields would name arbitrary
+       memory, so a caller that can meet one walks it (see `kt_string_builder_with_text`) and any
+       other arriving here is a loud failure rather than a copy of whatever those fields name. */
+    if (self->header.type->walk_length != NULL) {
+        KT_FAIL("krusty: the bytes of a CharSequence the program implements\n");
+    }
+    if (self->header.type == &kt_type_string_builder) {
+        const KStringBuilder *builder = (const KStringBuilder *)self;
+        *byte_length = builder->byte_length;
+        /* An empty builder has a zero-length array, whose body is still a valid address to name. */
+        return kt_bytes_of((KByteArray *)builder->storage);
+    }
+    *byte_length = self->as.string.byte_length;
+    return self->as.string.bytes;
+}
+
+/* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
+   one is not read as zero: Kotlin/JVM's builder allocates its storage as `new byte[capacity]`, so
+   `StringBuilder(-1)` throws that allocation's `NegativeArraySizeException`, whose message is the
+   capacity in decimal, and makes no builder. The same is raised here before the builder is
+   allocated, and the NULL returned is never read: the call site tests for the exception first. */
+KRef kt_string_builder_with_capacity(kt_int capacity) {
+    if (capacity < 0) {
+        /* An `Int` is at most eleven bytes in decimal, the sign included: `-2147483648`. */
+        KByteArray *digits = kt_bytes_new(11);
+        kt_int length = kt_render_long(capacity, kt_bytes_of(digits));
+        KRef message = kt_string_of((KRef)digits, kt_bytes_of(digits), length);
+        kt_throw(kt_throwable_new(&kt_type_negative_array_size_exception, message));
+        return NULL;
+    }
+    KStringBuilder *builder =
+        (KStringBuilder *)kt_gc_allocate(&kt_type_string_builder, sizeof(KStringBuilder));
+    builder->byte_length = 0;
+    /* Stored before the array is allocated, so a collection triggered by that allocation never
+       traces an uninitialized field. */
+    builder->storage = NULL;
+    builder->storage = (KRef)kt_bytes_new(capacity);
+    return (KRef)builder;
+}
+
+KRef kt_string_builder_new(void) { return kt_string_builder_with_capacity(0); }
+
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length);
+
+/* `StringBuilder(text)`: a builder that starts out holding it. A COPY, for the reason `toString`
+   copies -- the text is a value and the builder is about to be written through.
+
+   A `CharSequence` the PROGRAM implements is read the way Kotlin's own builder reads one, unit by
+   unit through its `length` and `get`, since it has no bytes to copy. Its `toString` is not the
+   text: nothing obliges a class to render itself as its characters.
+
+   Those two are the program's own members and may throw. A throw comes back with the exception
+   pending and a placeholder unit or length, so the construction stops at the first one and makes
+   no builder, as Kotlin's constructor does: a placeholder length read on would size the builder
+   from it -- a negative one raising a second exception over the first -- and a placeholder unit
+   would be appended and the next `get` asked. The NULL is never read; the caller finds the
+   exception first. */
+KRef kt_string_builder_with_text(KRef text) {
+    if (text->header.type->walk_length != NULL) {
+        kt_int units = text->header.type->walk_length(text);
+        if (kt_pending_exception() != NULL) {
+            return NULL;
+        }
+        /* `text` stays live in this parameter, and the builder in this local, across every
+           allocation the appends make. */
+        KRef builder = kt_string_builder_with_capacity(units);
+        for (kt_int index = 0; index < units; index++) {
+            char encoded[3];
+            kt_char unit = text->header.type->walk_char_at(text, index);
+            if (kt_pending_exception() != NULL) {
+                return NULL;
+            }
+            kt_int width = kt_render_char(unit, encoded);
+            kt_string_builder_append_bytes(builder, encoded, width);
+        }
+        return builder;
+    }
+    kt_int length = 0;
+    (void)kt_text_of(text, &length);
+    /* `text` stays live in this parameter across the allocation. */
+    KRef builder = kt_string_builder_with_capacity(length);
+    const char *bytes = kt_text_of(text, &length);
+    memcpy(kt_bytes_of((KByteArray *)((KStringBuilder *)builder)->storage), bytes, (size_t)length);
+    ((KStringBuilder *)builder)->byte_length = length;
+    return builder;
+}
+
+/* Grow to hold `additional` more bytes, doubling so repeated `append` stays linear overall. */
+static void kt_string_builder_reserve(KRef self, kt_int additional) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_int capacity = kt_length_of(builder->storage);
+    /* A text longer than an `Int` counts is out of memory, as it is for Kotlin's own builder. Asked
+       before the sum is formed: a sum that overflowed would come out negative, pass as "fits", and
+       send the append's copy past the end of the storage. */
+    if (additional > 0x7fffffff - builder->byte_length) {
+        kt_fail_oom();
+    }
+    kt_int needed = builder->byte_length + additional;
+    if (needed <= capacity) {
+        return;
+    }
+    kt_int grown = capacity == 0 ? 16 : capacity;
+    while (grown < needed) {
+        /* Doubling past the largest `Int` would overflow too; the size needed is the most there is
+           to ask for then. */
+        grown = grown > 0x7fffffff / 2 ? needed : grown * 2;
+    }
+    /* `self` is a root in the caller's frame, so the OLD array stays reachable through it until the
+       new one is stored. */
+    KRef replacement = kt_array_new(&kt_type_byte_array, grown);
+    memcpy(kt_bytes_of((KByteArray *)replacement), kt_bytes_of((KByteArray *)builder->storage),
+           (size_t)builder->byte_length);
+    builder->storage = replacement;
+}
+
+/* `sb.setLength(n)`, by UTF-16 UNIT as Kotlin counts. Shorter truncates; longer pads with NUL,
+   which is what Java's own does and what a program reading the result back would see.
+
+   Truncating cuts on a character boundary, so `kt_string_offset` finds the byte — and asking for a
+   length inside a surrogate pair is the loud failure it already is, for the same reason: UTF-8 has
+   no encoding for half a character. A NUL is one byte, so padding costs one per unit. */
+void kt_string_builder_set_length(KRef self, kt_int length) {
+    if (length < 0) {
+        kt_index_out_of_bounds(length, kt_string_length(self));
+        return;
+    }
+    kt_int units = kt_string_length(self);
+    if (length <= units) {
+        KStringBuilder *builder = (KStringBuilder *)self;
+        /* The text is the builder's own bytes, which `kt_string_of` names without copying: the
+           offset wanted is a byte count into them. */
+        KRef view = kt_string_of(builder->storage, kt_bytes_of((KByteArray *)builder->storage),
+                                 builder->byte_length);
+        builder->byte_length = kt_string_offset(view, length);
+        return;
+    }
+    kt_int padding = length - units;
+    kt_string_builder_reserve(self, padding);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    memset(kt_bytes_of((KByteArray *)builder->storage) + builder->byte_length, 0,
+           (size_t)padding);
+    builder->byte_length += padding;
+}
+
+/* Whether `bytes` is the three-byte encoding of a surrogate code unit, and which half: `ED A0..AF`
+   starts a HIGH (leading) one, `ED B0..BF` a LOW (trailing) one. */
+static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char second_high_bits) {
+    return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
+}
+
+/* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail.
+
+   A `Char` is a UTF-16 unit, and a lone surrogate unit can only be written as its own three-byte
+   sequence. So a supplementary character a program assembles unit by unit -- `for (c in s)
+   sb.append(c)` over any text holding an emoji -- arrives as a high half, then a low one. Stored
+   side by side they are six bytes of CESU-8, which no literal of the same character equals and no
+   terminal prints; the rule is that a low half arriving right after a stored high half becomes one
+   four-byte character with it. Nothing else is rewritten: a lone half with no partner stays the
+   lone unit it is. */
+static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length) {
+    kt_string_builder_reserve(self, length);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *storage = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int at = builder->byte_length;
+    if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
+        kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
+        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
+        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
+                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
+        /* Each half's low ten bits are its share of the code point above U+FFFF. */
+        uint32_t code_point = 0x10000u + (high << 10 | low);
+        at -= 3;
+        storage[at++] = (char)(0xF0u | (code_point >> 18));
+        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        bytes += 3;
+        length -= 3;
+    }
+    memcpy(storage + at, bytes, (size_t)length);
+    builder->byte_length = at + length;
+}
+
+KRef kt_string_builder_append(KRef self, KRef value) {
+    /* The rendering goes through `kt_to_string` rather than `kt_render`, because a value whose type
+       overrides `toString` must answer with ITS text and only the vtable knows that. It allocates,
+       and the result is held in a local across the reserve below so the collector sees the root. */
+    KRef text = kt_to_string(value);
+    /* An override that THREW came back with the exception pending and no string: the append stops
+       there, leaving the builder as it was, and the caller finds the exception. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
+    kt_int length = 0;
+    const char *bytes = kt_text_of(text, &length);
+    kt_string_builder_reserve(self, length);
+    /* `bytes` is re-read after the reserve: it may point into storage the reserve replaced, when a
+       builder is appended to itself. */
+    bytes = kt_text_of(text, &length);
+    kt_string_builder_append_bytes(self, bytes, length);
+    return self;
+}
+
+/* `appendLine(value)` — the value then a newline, which is what Kotlin's own appends on every
+   target: `StringBuilder.appendLine` is specified as `\n` and not as the platform separator. */
+KRef kt_string_builder_append_line(KRef self, KRef value) {
+    self = kt_string_builder_append(self, value);
+    /* The append stopped on an exception the value's `toString` threw, leaving the builder as it
+       was; the newline stops there too, or the builder the caller catches it around has changed. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
+    kt_string_builder_reserve(self, 1);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
+    builder->byte_length += 1;
+    return self;
+}
+
+/* `appendLine()` with nothing to append: the newline alone, NOT the text `"null"` that
+   `appendLine(null)` would add. */
+KRef kt_string_builder_append_new_line(KRef self) {
+    kt_string_builder_reserve(self, 1);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
+    builder->byte_length += 1;
+    return self;
+}
+
+static KRef kt_string_builder_to_string(KRef self) {
+    const KStringBuilder *builder = (const KStringBuilder *)self;
+    kt_int length = builder->byte_length;
+    /* `self` stays a root in the caller's frame across this allocation. */
+    KByteArray *copied = kt_bytes_new(length);
+    memcpy(kt_bytes_of(copied), kt_bytes_of((KByteArray *)builder->storage), (size_t)length);
+    return kt_string_of((KRef)copied, kt_bytes_of(copied), length);
+}
+
+kt_boolean kt_is_string_builder(KRef value) {
+    return value != NULL && value->header.type == &kt_type_string_builder;
+}
+
+/* ---- boxing -------------------------------------------------------------------------------- */
+
+/* Boxing a SMALL value hands out the same object every time, and a program can see that:
+   `boxBoolean(true) === boxBoolean(true)` is true in Kotlin. The cached range is the one the JVM
+   specifies and Kotlin/Native also caches — every `Byte`, `Short`/`Int`/`Long` in -128..127,
+   `Char` in 0..127, and both `Boolean`s. Outside it a box is a fresh object and identity is
+   unspecified, which is what Kotlin says as well; nothing here promises more than that.
+
+   The cache is static storage, not the heap, and that is deliberate on two counts: these objects
+   must outlive every collection, and the collector ignores them for free — both the conservative
+   root scan and the precise field tracer resolve a candidate address to its heap chunk and drop
+   one that belongs to no chunk. An entry is filled on first use rather than at startup, with a
+   NULL type as the "not yet" marker (static storage starts zeroed), so the runtime pays for only
+   the values a program actually boxes. */
+#define KT_BOX(suffix, type_descriptor, field, carrier, low, high)                                 \
+    static KObject kt_cache_##suffix[(high) - (low) + 1];                                          \
+    KRef kt_box_##suffix(carrier value) {                                                          \
+        /* The WHOLE value picks the slot, never its low word: `Long.MIN_VALUE` truncated to an    \
+           `int` is zero, which put it in zero's slot and handed it back as zero from then on. */  \
+        kt_long slot = (kt_long)value;                                                             \
+        if (slot >= (low) && slot <= (high)) {                                                     \
+            KObject *cached = &kt_cache_##suffix[(int)(slot - (low))];                             \
+            if (cached->header.type == NULL) {                                                     \
+                cached->header.type = &type_descriptor;                                            \
+                cached->as.field = value;                                                          \
+            }                                                                                      \
+            return cached;                                                                         \
+        }                                                                                          \
+        KRef object = kt_new(&type_descriptor);                                                    \
+        object->as.field = value;                                                                  \
+        return object;                                                                             \
+    }
+
+KT_BOX(byte, kt_type_byte, byte_value, kt_byte, -128, 127)
+KT_BOX(short, kt_type_short, short_value, kt_short, -128, 127)
+KT_BOX(int, kt_type_int, int_value, kt_int, -128, 127)
+KT_BOX(long, kt_type_long, long_value, kt_long, -128, 127)
+KT_BOX(char, kt_type_char, char_value, kt_char, 0, 127)
+KT_BOX(boolean, kt_type_boolean, boolean_value, kt_boolean, 0, 1)
+
+#undef KT_BOX
+
+/* No small-value cache for these two: `(int)value` would round, so `0.5` and `0.0` would share a
+   cache slot and a boxed `0.5` would come back `0.0`. */
+KRef kt_box_float(kt_float value) {
+    KRef object = kt_new(&kt_type_float);
+    object->as.float_value = value;
+    return object;
+}
+
+KRef kt_box_double(kt_double value) {
+    KRef object = kt_new(&kt_type_double);
+    object->as.double_value = value;
+    return object;
+}
+
+/* Unboxing a `null` is Kotlin's `NullPointerException` — the one `!!` raises, so with no message.
+   `kt_throw` records it and COMES BACK, so the raise is followed by a return of its own: falling
+   through would read the field of the very null just rejected, and crash before the caller could
+   find the exception. The zero returned is never read: the caller checks the pending slot first. */
+#define KT_UNBOX(suffix, field, type)                                                              \
+    type kt_unbox_##suffix(KRef value) {                                                           \
+        if (value == NULL) {                                                                       \
+            kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));                     \
+            return 0;                                                                              \
+        }                                                                                          \
+        return value->as.field;                                                                    \
+    }
+
+KT_UNBOX(byte, byte_value, kt_byte)
+KT_UNBOX(short, short_value, kt_short)
+KT_UNBOX(int, int_value, kt_int)
+KT_UNBOX(long, long_value, kt_long)
+KT_UNBOX(char, char_value, kt_char)
+KT_UNBOX(boolean, boolean_value, kt_boolean)
+KT_UNBOX(float, float_value, kt_float)
+KT_UNBOX(double, double_value, kt_double)
+
+#undef KT_UNBOX
+
+/* What is in a `Number` box, read through its descriptor. A floating-point source is kept as one
+   rather than folded into the integer, because `Double.toLong()` saturates where a cast would not
+   and `(long)NaN` is not a value C defines at all. */
+typedef struct KNumber {
+    kt_boolean is_real;
+    kt_long integer;
+    kt_double real;
+} KNumber;
+
+static KNumber kt_number_of(KRef value) {
+    KNumber number = {0, 0, 0.0};
+    if (value == NULL) {
+        /* A RETURN after the raise, for the reason the unboxes above have one: `kt_throw` comes
+           back, and the descriptor read below is a read through the null. The zero is never read. */
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return number;
+    }
+    const KType *type = value->header.type;
+    if (type == &kt_type_byte) {
+        number.integer = value->as.byte_value;
+    } else if (type == &kt_type_short) {
+        number.integer = value->as.short_value;
+    } else if (type == &kt_type_int) {
+        number.integer = value->as.int_value;
+    } else if (type == &kt_type_long) {
+        number.integer = value->as.long_value;
+    } else if (type == &kt_type_float) {
+        number.is_real = 1;
+        number.real = value->as.float_value;
+    } else if (type == &kt_type_double) {
+        number.is_real = 1;
+        number.real = value->as.double_value;
+    } else {
+        KT_FAIL("krusty: a kotlin.Number member on a value that is not a number\n");
+    }
+    return number;
+}
+
+/* Kotlin's floating-point to integer conversion: `NaN` is zero and everything outside the target's
+   range clamps to its nearest end. C would make both of those undefined, so neither is a cast. */
+static kt_long kt_saturate_long(kt_double value) {
+    if (value != value) {
+        return 0;
+    }
+    if (value >= 9223372036854775808.0) {
+        return (kt_long)0x7fffffffffffffffLL;
+    }
+    if (value <= -9223372036854775808.0) {
+        return (kt_long)(-0x7fffffffffffffffLL - 1);
+    }
+    return (kt_long)value;
+}
+
+static kt_int kt_saturate_int(kt_double value) {
+    if (value != value) {
+        return 0;
+    }
+    if (value >= 2147483648.0) {
+        return (kt_int)0x7fffffff;
+    }
+    if (value <= -2147483648.0) {
+        return (kt_int)(-0x7fffffff - 1);
+    }
+    return (kt_int)value;
+}
+
+kt_long kt_number_to_long(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? kt_saturate_long(number.real) : number.integer;
+}
+
+kt_int kt_number_to_int(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? kt_saturate_int(number.real) : (kt_int)number.integer;
+}
+
+/* `Double.toShort()` is `toInt().toShort()` in Kotlin, and a wider integer simply truncates —
+   the same answer either way, which is why both go through `toInt` here. */
+kt_short kt_number_to_short(KRef value) { return (kt_short)kt_number_to_int(value); }
+
+kt_byte kt_number_to_byte(KRef value) { return (kt_byte)kt_number_to_int(value); }
+
+kt_float kt_number_to_float(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? (kt_float)number.real : (kt_float)number.integer;
+}
+
+kt_double kt_number_to_double(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? number.real : (kt_double)number.integer;
+}
+
+/* ---- class literals -------------------------------------------------------------------------- */
+
+/* The descriptor is STATIC storage, not a heap object: the collector resolves a candidate address
+   to its chunk and drops one that belongs to none, so this field is neither traced nor needs to be
+   — which is why the type below declares no references. */
+typedef struct KClass {
+    KObjectHeader header;
+    const KType *described;
+} KClass;
+
+static kt_boolean kt_class_equals(KRef self, KRef other);
+static kt_int kt_class_hash_code(KRef self);
+static KRef kt_class_to_string(KRef self);
+
+static const kt_fn kt_class_vtable[] = {(kt_fn)kt_class_equals, (kt_fn)kt_class_hash_code,
+                                        (kt_fn)kt_class_to_string};
+
+const KType kt_type_kclass = {"kotlin.reflect.KClass",
+                              sizeof("kotlin.reflect.KClass") - 1,
+                              sizeof(KClass),
+                              0,
+                              0,
+                              NULL,
+                              &kt_type_any,
+                              kt_class_vtable,
+                              3,
+                              0};
+
+KRef kt_class_literal(const KType *type) {
+    KClass *literal = (KClass *)kt_gc_allocate(&kt_type_kclass, sizeof(KClass));
+    literal->described = type;
+    return (KRef)literal;
+}
+
+KRef kt_class_of(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return kt_class_literal(value->header.type);
+}
+
+/* Equality is the TYPE, not the object. Kotlin's `KClass` is equal by the class it stands for —
+   `x::class == String::class` is the question programs actually ask — and answering it this way is
+   what lets a literal be an ordinary allocation instead of a canonical instance the runtime would
+   have to keep a table of. */
+static kt_boolean kt_class_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_kclass) {
+        return 0;
+    }
+    return ((const KClass *)self)->described == ((const KClass *)other)->described;
+}
+
+static kt_int kt_class_hash_code(KRef self) {
+    /* The descriptor's address, which is stable: it is static storage and the collector never
+       moves anything. Folded to 32 bits the way the object hash already is. */
+    uintptr_t address = (uintptr_t)((const KClass *)self)->described;
+    return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
+}
+
+/* `class kotlin.String`, which is what Kotlin's own `KClass.toString` prints. */
+static KRef kt_class_to_string(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    KRef prefix = kt_string_utf8("class ", 6);
+    KRef name = kt_string_utf8(described->name, (kt_int)described->name_length);
+    return kt_string_plus(prefix, name);
+}
+
+KRef kt_class_qualified_name(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    return kt_string_utf8(described->name, (kt_int)described->name_length);
+}
+
+/* The last segment of the qualified name. A name with no separator is its own simple name, which
+   is what a class in the root package has.
+
+   Both separators count. A package is spelled with dots and NESTING with `$` — `A$Companion` is
+   the companion of `A` — so splitting on dots alone answered the whole nested name where Kotlin
+   answers `Companion`. */
+KRef kt_class_simple_name(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    kt_int start = 0;
+    for (kt_int at = 0; at < (kt_int)described->name_length; at++) {
+        if (described->name[at] == '.' || described->name[at] == '$') {
+            start = at + 1;
+        }
+    }
+    return kt_string_utf8(described->name + start, (kt_int)described->name_length - start);
+}
+
+/* ---- lazy ---------------------------------------------------------------------------------- */
+
+typedef struct KLazy {
+    KObjectHeader header;
+    /* The initializer while it is still needed, NULL once the value has been computed. */
+    KRef initializer;
+    KRef value;
+    kt_boolean computed;
+} KLazy;
+
+static const uint32_t kt_lazy_offsets[] = {offsetof(KLazy, initializer), offsetof(KLazy, value)};
+
+static KRef kt_lazy_to_string(KRef self);
+
+/* `equals` and `hashCode` are identity, as Kotlin's `Lazy` leaves them — it is not a data class,
+   and two separately created lazies are two objects whatever they hold. */
+static const kt_fn kt_lazy_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                       (kt_fn)kt_lazy_to_string};
+
+const KType kt_type_lazy = {"kotlin.Lazy",
+                            sizeof("kotlin.Lazy") - 1,
+                            sizeof(KLazy),
+                            2,
+                            0,
+                            kt_lazy_offsets,
+                            &kt_type_any,
+                            kt_lazy_vtable,
+                            3,
+                            0};
+
+/* `kotlin.Result` is a value class over `Any?`, and its representation is Kotlin's own: a SUCCESS
+   is the value itself, so `Result.success(x)` is `x` and costs nothing, and a FAILURE is this
+   marker holding the exception. That is what lets a `Result<T>` cross a function boundary as an
+   ordinary reference with no wrapper of this runtime's invention.
+
+   A `null` success is representable and distinct from a failure, because a failure is never NULL. */
+typedef struct KResultFailure {
+    KObjectHeader header;
+    KRef exception;
+} KResultFailure;
+
+static const uint32_t kt_result_failure_offsets[] = {offsetof(KResultFailure, exception)};
+
+static const KType kt_type_result_failure = {"kotlin.Result.Failure",
+                                             sizeof("kotlin.Result.Failure") - 1,
+                                             sizeof(KResultFailure),
+                                             1,
+                                             0,
+                                             kt_result_failure_offsets,
+                                             &kt_type_any,
+                                             kt_any_vtable,
+                                             3,
+                                             0};
+
+/* `Result.success(x)` IS `x`. This exists so the call site has a target of the ordinary shape
+   rather than a special case; it costs one call and no allocation. */
+KRef kt_result_success(KRef value) { return value; }
+
+KRef kt_result_failure(KRef exception) {
+    KResultFailure *failure =
+        (KResultFailure *)kt_gc_allocate(&kt_type_result_failure, sizeof(KResultFailure));
+    failure->exception = exception;
+    return (KRef)failure;
+}
+
+kt_boolean kt_result_is_failure(KRef value) {
+    return value != NULL && value->header.type == &kt_type_result_failure;
+}
+
+kt_boolean kt_result_is_success(KRef value) { return !kt_result_is_failure(value); }
+
+KRef kt_result_get_or_null(KRef value) { return kt_result_is_failure(value) ? NULL : value; }
+
+KRef kt_result_exception_or_null(KRef value) {
+    return kt_result_is_failure(value) ? ((const KResultFailure *)value)->exception : NULL;
+}
+
+KRef kt_result_get_or_throw(KRef value) {
+    if (kt_result_is_failure(value)) {
+        kt_throw(((const KResultFailure *)value)->exception);
+    }
+    return value;
+}
+
+/* Kotlin's own rendering: `Success(value)` or `Failure(exception)`.
+
+   Either one renders an object through ITS `toString`, which the program may override and which
+   may throw. That comes back with the exception pending and a placeholder where the text would be,
+   so the rendering stops there and answers no text: going on would build `Success(null)` out of
+   the placeholder -- allocating, and handing back text -- after the call it was built from had
+   already failed. The NULL is never read; the caller finds the exception first. */
+KRef kt_result_to_string(KRef value) {
+    kt_boolean failure = kt_result_is_failure(value);
+    KRef rendered = kt_to_string(failure ? ((const KResultFailure *)value)->exception : value);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    /* `rendered` stays a root in this local across the allocations below. */
+    KRef opening = failure ? kt_string_utf8("Failure(", 8) : kt_string_utf8("Success(", 8);
+    KRef text = kt_string_plus(opening, rendered);
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
+KRef kt_lazy_of(KRef initializer) {
+    KLazy *lazy = (KLazy *)kt_gc_allocate(&kt_type_lazy, sizeof(KLazy));
+    lazy->initializer = initializer;
+    lazy->value = NULL;
+    lazy->computed = false;
+    return (KRef)lazy;
+}
+
+kt_boolean kt_lazy_is_initialized(KRef lazy) { return ((const KLazy *)lazy)->computed; }
+
+/* The value, computing it on the first ask. This is the one place the runtime CALLS back into
+   emitted code: the initializer is a `Function0`, and a function value answers `invoke` in the one
+   vtable slot it declares beyond `kotlin.Any`'s three. */
+KRef kt_lazy_value(KRef lazy) {
+    KLazy *self = (KLazy *)lazy;
+    if (self->computed) {
+        return self->value;
+    }
+    KRef initializer = self->initializer;
+    if (initializer == NULL || initializer->header.type->vtable == NULL ||
+        initializer->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a lazy value has no initializer to run\n");
+    }
+    KRef value =
+        ((KRef(*)(KRef))initializer->header.type->vtable[KT_SLOT_INVOKE])(initializer);
+    /* An initializer that THREW produced no value. The lazy stays uncomputed and keeps its
+       initializer, so the exception propagates and the next read runs it again, as Kotlin's does;
+       caching what the aborted call returned would hand that back from every later read. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    /* Re-read through `lazy`: the call above can collect, and `self` is a root only because it is
+       this local. The collector never moves an object, so the pointer is still good. */
+    self->value = value;
+    self->computed = true;
+    self->initializer = NULL;
+    return value;
+}
+
+/* Kotlin's own: the value once there is one, and a fixed text before that — which is the whole
+   point of `Lazy.toString`, that asking for it must not force the value. */
+static KRef kt_lazy_to_string(KRef self) {
+    const KLazy *lazy = (const KLazy *)self;
+    if (!lazy->computed) {
+        return kt_string_utf8("Lazy value not initialized yet.", 31);
+    }
+    return kt_to_string(lazy->value);
+}
+
+/* ---- Delegates.notNull ------------------------------------------------------------------------
+
+   `var x: T by Delegates.notNull()`. One reference and the rule that reading it before it is
+   written is an error — Kotlin's `NotNullVar`, whose whole content is that check. `null` is not a
+   value it can hold (its `T` is non-null by declaration), so the empty slot needs no flag beside
+   it the way a lazy's `computed` does.
+
+   The message names the PROPERTY, as Kotlin's does. The name is a string the generator hands over,
+   read at the call site from the `KProperty` operand the delegate convention passes: the runtime
+   cannot ask the object for it, since a property reference answers `name` from a table of the
+   emitted code's own. */
+static void kt_raise_uninitialized_property(KRef name);
+static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
+
+typedef struct KNotNullVar {
+    KObjectHeader header;
+    KRef value;
+} KNotNullVar;
+
+static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)};
+
+/* Identity, as Kotlin leaves them: `NotNullVar` is no data class, and `toString` is `Any`'s. */
+static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                           (kt_fn)kt_any_to_string};
+
+const KType kt_type_not_null_var = {"kotlin.properties.NotNullVar",
+                                sizeof("kotlin.properties.NotNullVar") - 1,
+                                sizeof(KNotNullVar),
+                                1,
+                                0,
+                                kt_not_null_var_offsets,
+                                &kt_type_any,
+                                kt_not_null_var_vtable,
+                                3,
+                                0};
+
+KRef kt_not_null_var(void) {
+    KNotNullVar *var = (KNotNullVar *)kt_gc_allocate(&kt_type_not_null_var, sizeof(KNotNullVar));
+    var->value = NULL;
+    return (KRef)var;
+}
+
+/* `Delegates.observable(initial) { property, old, new -> … }`. Kotlin's `ObservableProperty`: the
+   value, and a callback run AFTER each write with the property and both values. The callback is an
+   ordinary function value, invoked through the one slot every function value declares.
+
+   The `KProperty` is not read here, only passed along — which is what lets this runtime carry it
+   without any reflection: whatever object the emitted code built for the delegation, the callback
+   receives that same object. */
+typedef struct KObservable {
+    KObjectHeader header;
+    KRef value;
+    KRef on_change;
+} KObservable;
+
+static const uint32_t kt_observable_offsets[] = {offsetof(KObservable, value),
+                                                 offsetof(KObservable, on_change)};
+
+static const kt_fn kt_observable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                             (kt_fn)kt_any_to_string};
+
+const KType kt_type_observable = {"kotlin.properties.ObservableProperty",
+                                  sizeof("kotlin.properties.ObservableProperty") - 1,
+                                  sizeof(KObservable),
+                                  2,
+                                  0,
+                                  kt_observable_offsets,
+                                  &kt_type_any,
+                                  kt_observable_vtable,
+                                  3,
+                                  0};
+
+KRef kt_observable(KRef initial, KRef on_change) {
+    KObservable *observable =
+        (KObservable *)kt_gc_allocate(&kt_type_observable, sizeof(KObservable));
+    observable->value = initial;
+    observable->on_change = on_change;
+    return (KRef)observable;
+}
+
+/* The two entry points a `ReadWriteProperty` receiver reaches, dispatching on the DESCRIPTOR. No
+   static type separates the delegates this runtime builds — `notNull()` and `observable(…)` are
+   both a `ReadWriteProperty<Any?, T>` at the call site — so the object says which it is, exactly as
+   every other runtime answer here does.
+
+   `get` is handed the property's NAME rather than the property, because the only thing it can need
+   is the text of the error a `notNull` read-before-write raises. `set` is handed the PROPERTY,
+   because an observable passes it to the callback. */
+KRef kt_rw_property_get(KRef self, KRef name) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (self->header.type == &kt_type_observable) {
+        return ((const KObservable *)self)->value;
+    }
+    KRef value = ((const KNotNullVar *)self)->value;
+    if (value == NULL) {
+        kt_raise_uninitialized_property(name);
+        return NULL;
+    }
+    return value;
+}
+
+void kt_rw_property_set(KRef self, KRef property, KRef value) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (self->header.type != &kt_type_observable) {
+        ((KNotNullVar *)self)->value = value;
+        return;
+    }
+    KObservable *observable = (KObservable *)self;
+    KRef old = observable->value;
+    observable->value = value;
+    /* AFTER the write, which is Kotlin's order: a callback reading the property sees the new
+       value. `beforeChange` is `observable`'s own constant true, so there is nothing to veto. */
+    (void)kt_invoke_three(observable->on_change, property, old, value);
+}
+
+/* ---- pairs --------------------------------------------------------------------------------- */
+
+/* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and
+   every one of its members is one of the three `kotlin.Any` declares plus the two components. */
+typedef struct KPair {
+    KObjectHeader header;
+    KRef first;
+    KRef second;
+} KPair;
+
+static const uint32_t kt_pair_offsets[] = {offsetof(KPair, first), offsetof(KPair, second)};
+
+static kt_boolean kt_pair_equals(KRef self, KRef other);
+static kt_int kt_pair_hash_code(KRef self);
+static KRef kt_pair_to_string(KRef self);
+
+static const kt_fn kt_pair_vtable[] = {(kt_fn)kt_pair_equals, (kt_fn)kt_pair_hash_code,
+                                       (kt_fn)kt_pair_to_string};
+
+const KType kt_type_pair = {"kotlin.Pair",
+                            sizeof("kotlin.Pair") - 1,
+                            sizeof(KPair),
+                            2,
+                            0,
+                            kt_pair_offsets,
+                            &kt_type_any,
+                            kt_pair_vtable,
+                            3,
+                            0};
+
+KRef kt_pair_of(KRef first, KRef second) {
+    /* Both components stay in these parameters across the allocation: they are its roots. */
+    KPair *pair = (KPair *)kt_gc_allocate(&kt_type_pair, sizeof(KPair));
+    pair->first = first;
+    pair->second = second;
+    return (KRef)pair;
+}
+
+KRef kt_pair_first(KRef pair) { return ((const KPair *)pair)->first; }
+
+KRef kt_pair_second(KRef pair) { return ((const KPair *)pair)->second; }
+
+/* Each member below asks BOTH components the same question, and a component answers through its
+   own override, which may throw. A throw comes back with the exception pending and a placeholder
+   answer -- a `true`, a zero, a NULL -- that no one may read, so the member returns as soon as the
+   first component's call comes back pending: asking the second would run program code Kotlin never
+   reaches, since the generated member propagates the first exception from where it was thrown.
+   What each returns then is never read either; the caller finds the exception first. */
+
+/* A data class's `equals`: componentwise, and only against another `Pair`. */
+static kt_boolean kt_pair_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    if (other == NULL || other->header.type != &kt_type_pair) {
+        return false;
+    }
+    const KPair *a = (const KPair *)self;
+    const KPair *b = (const KPair *)other;
+    kt_boolean first_equal = kt_equals(a->first, b->first);
+    if (kt_pending_exception() != NULL || !first_equal) {
+        return false;
+    }
+    kt_boolean second_equal = kt_equals(a->second, b->second);
+    return kt_pending_exception() == NULL && second_equal;
+}
+
+/* Kotlin's generated data-class hash: `first.hashCode() * 31 + second.hashCode()`, a null
+   component contributing 0. */
+static kt_int kt_pair_hash_code(KRef self) {
+    const KPair *pair = (const KPair *)self;
+    uint32_t first = (uint32_t)kt_hash_code(pair->first);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    uint32_t second = (uint32_t)kt_hash_code(pair->second);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    return (kt_int)(31u * first + second);
+}
+
+/* `(first, second)` — `Pair` overrides the generated `toString` with this shape. Each component is
+   rendered, and checked, before any text is built from it, so a throw leaves nothing allocated
+   after it. */
+static KRef kt_pair_to_string(KRef self) {
+    const KPair *pair = (const KPair *)self;
+    KRef first = kt_to_string(pair->first);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    /* `self`, and through it both components, stays a root in the caller's frame; each rendered
+       text stays one in its local across the allocations after it. */
+    KRef second = kt_to_string(pair->second);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(kt_string_utf8("(", 1), first);
+    text = kt_string_plus(text, kt_string_utf8(", ", 2));
+    text = kt_string_plus(text, second);
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
