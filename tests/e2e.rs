@@ -1118,6 +1118,10 @@ mod narrowed_this_member_call_e2e;
 mod native_annotation_instances_e2e;
 #[path = "native_annotations_e2e.rs"]
 mod native_annotations_e2e;
+#[path = "native_array_emptiness_e2e.rs"]
+mod native_array_emptiness_e2e;
+#[path = "native_array_snapshots_e2e.rs"]
+mod native_array_snapshots_e2e;
 #[path = "native_assert_e2e.rs"]
 mod native_assert_e2e;
 #[path = "native_bottom_value_e2e.rs"]
@@ -1138,14 +1142,26 @@ mod native_class_literals_e2e;
 mod native_classes_e2e;
 #[path = "native_codegen_e2e.rs"]
 mod native_codegen_e2e;
+#[path = "native_collection_indices_e2e.rs"]
+mod native_collection_indices_e2e;
+#[path = "native_collection_shape_guard_e2e.rs"]
+mod native_collection_shape_guard_e2e;
+#[path = "native_collection_walks_e2e.rs"]
+mod native_collection_walks_e2e;
 #[path = "native_comparable_e2e.rs"]
 mod native_comparable_e2e;
+#[path = "native_comparable_ranges_e2e.rs"]
+mod native_comparable_ranges_e2e;
+#[path = "native_comparator_e2e.rs"]
+mod native_comparator_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
 mod native_const_reference_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_data_class_array_rendering_e2e.rs"]
+mod native_data_class_array_rendering_e2e;
 #[path = "native_delegated_properties_e2e.rs"]
 mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
@@ -1168,6 +1184,8 @@ mod native_experimental_bitwise_e2e;
 mod native_float_identity_e2e;
 #[path = "native_float_predicates_e2e.rs"]
 mod native_float_predicates_e2e;
+#[path = "native_floating_ranges_e2e.rs"]
+mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
 #[path = "native_function_slot_bridge_e2e.rs"]
@@ -1180,22 +1198,40 @@ mod native_function_type_classes_e2e;
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]
 mod native_gc_stress_e2e;
+#[path = "native_implemented_dependency_dispatch_e2e.rs"]
+mod native_implemented_dependency_dispatch_e2e;
 #[path = "native_interface_bridges_e2e.rs"]
 mod native_interface_bridges_e2e;
 #[path = "native_interface_implementations_e2e.rs"]
 mod native_interface_implementations_e2e;
 #[path = "native_lateinit_initialized_e2e.rs"]
 mod native_lateinit_initialized_e2e;
+#[path = "native_list_type_checks_e2e.rs"]
+mod native_list_type_checks_e2e;
+#[path = "native_lists_e2e.rs"]
+mod native_lists_e2e;
+#[path = "native_maps_e2e.rs"]
+mod native_maps_e2e;
 #[path = "native_math_bits_e2e.rs"]
 mod native_math_bits_e2e;
 #[path = "native_not_null_assert_type_e2e.rs"]
 mod native_not_null_assert_type_e2e;
+#[path = "native_not_null_delegate_e2e.rs"]
+mod native_not_null_delegate_e2e;
 #[path = "native_number_subclass_e2e.rs"]
 mod native_number_subclass_e2e;
+#[path = "native_pair_construction_e2e.rs"]
+mod native_pair_construction_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
 #[path = "native_property_reference_e2e.rs"]
 mod native_property_reference_e2e;
+#[path = "native_range_bound_control_e2e.rs"]
+mod native_range_bound_control_e2e;
+#[path = "native_range_contains_e2e.rs"]
+mod native_range_contains_e2e;
+#[path = "native_ranges_e2e.rs"]
+mod native_ranges_e2e;
 #[path = "native_read_only_property_delegate_e2e.rs"]
 mod native_read_only_property_delegate_e2e;
 #[path = "native_receiver_property_e2e.rs"]
@@ -1212,6 +1248,12 @@ mod native_sam_e2e;
 mod native_secondary_constructor_defaults_e2e;
 #[path = "native_secondary_constructors_e2e.rs"]
 mod native_secondary_constructors_e2e;
+#[path = "native_sequence_walks_e2e.rs"]
+mod native_sequence_walks_e2e;
+#[path = "native_sequences_e2e.rs"]
+mod native_sequences_e2e;
+#[path = "native_spread_e2e.rs"]
+mod native_spread_e2e;
 #[path = "native_string_builders_e2e.rs"]
 mod native_string_builders_e2e;
 #[path = "native_string_members_e2e.rs"]
@@ -1230,8 +1272,14 @@ mod native_try_catch_e2e;
 mod native_type_checks_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
+#[path = "native_vararg_constructor_e2e.rs"]
+mod native_vararg_constructor_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]
 mod native_virtual_call_result_e2e;
+#[path = "native_walkable_collection_e2e.rs"]
+mod native_walkable_collection_e2e;
+#[path = "native_walkable_text_e2e.rs"]
+mod native_walkable_text_e2e;
 #[path = "nested_anon_object_capture_e2e.rs"]
 mod nested_anon_object_capture_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]

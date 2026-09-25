@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod arithmetic;
+mod arrays;
 mod boxed;
 mod classes_literal;
 mod defaults;
@@ -21,7 +22,10 @@ mod enums;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
 mod functions;
+mod lists;
+mod maps;
 mod objects;
+mod ranges;
 mod references;
 mod scope;
 mod statics;
@@ -508,6 +512,32 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
+    /// Every class of THIS FILE that could stand behind the dependency type `internal`.
+    ///
+    /// A member asked of such a type is the runtime's answer, and the runtime answers only for the
+    /// objects it makes — so where the file puts a class of its own behind that type, the choice
+    /// has to be made at the call site. This is what it chooses between: a subclass needs no entry
+    /// of its own, because `is` walks the super chain and a subclass's vtable has already replaced
+    /// the slot the dispatch reads.
+    fn implementors_of(&self, internal: crate::types::TypeName) -> Vec<ClassId> {
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface
+                    && std::iter::once(class.superclass)
+                        .chain(class.interfaces.iter())
+                        .chain(
+                            class
+                                .supertypes
+                                .iter()
+                                .copied()
+                                .filter_map(crate::types::Ty::obj_internal),
+                        )
+                        .any(|named| named == internal)
+            })
+            .collect()
+    }
+
     /// Whether a class of this file answers for the dependency type `internal`.
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
         self.implemented_dependencies
@@ -581,6 +611,28 @@ impl<'a> FileLowering<'a> {
         }
     }
 
+    /// The iteration role a receiver typed by a CLASS OF THIS FILE plays, for a class the runtime
+    /// can walk; see [`Self::resolve_walkable_classes`].
+    pub(super) fn walkable_role(&self, ty: Ty) -> Option<super::super::intrinsics::IterationRole> {
+        let internal = ty.non_null().obj_internal()?;
+        self.walkable_classes.get(&internal).copied()
+    }
+
+    /// Whether a class of THIS FILE standing behind `ty` answers for `kotlin.sequences.Sequence`;
+    /// see [`Self::sequence_classes`].
+    pub(super) fn walks_as_a_sequence(&self, ty: Ty) -> bool {
+        ty.non_null()
+            .obj_internal()
+            .is_some_and(|internal| self.sequence_classes.contains(&internal))
+    }
+
+    /// Whether a class of this file could stand behind a receiver of type `ty` AND the runtime has
+    /// no way to walk one; see [`Self::resolve_walkable_classes`].
+    pub(super) fn implements_unwalkable_collection_of(&self, ty: Ty) -> bool {
+        super::super::intrinsics::collection_shape_of(ty)
+            .is_some_and(|shape| self.unwalkable_collections.contains(&shape))
+    }
+
     /// Whether this file declares a class of the given collection SHAPE.
     ///
     /// Asked by a type CHECK rather than by a call: a marker on the runtime's own types answers
@@ -592,6 +644,14 @@ impl<'a> FileLowering<'a> {
         shape: super::super::intrinsics::CollectionShape,
     ) -> bool {
         self.implemented_collections.contains(&shape)
+    }
+
+    /// Whether a class of this file could stand behind a receiver of type `ty` — that is, whether
+    /// `ty`'s collection shape is one this file implements. Anything of another shape, or of no
+    /// shape at all, is the runtime's alone and is answered normally.
+    fn implements_collection_of(&self, ty: Ty) -> bool {
+        super::super::intrinsics::collection_shape_of(ty)
+            .is_some_and(|shape| self.implemented_collections.contains(&shape))
     }
 
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
@@ -1330,6 +1390,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 post_test,
                 label,
             } => self.loop_statement(cond, body, update, post_test, label)?,
+            IrExpr::Checked(IrCheckedOperation::RangeLoop {
+                variable,
+                counter,
+                operation,
+                start,
+                end,
+                body,
+                label,
+            }) => {
+                let range = ranges::CountedRange {
+                    operation,
+                    start,
+                    end,
+                };
+                self.counted_loop(variable, counter, range, body, label)?
+            }
             IrExpr::BottomValue {
                 producer,
                 completion,
@@ -1787,6 +1863,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => self.vararg(array_type, &spreads, &elements),
             IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
             IrExpr::InvokeFunction {
                 func,
@@ -1802,6 +1884,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
+            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
             // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
@@ -1870,6 +1953,90 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            // `x.indices` is `0..size - 1` of the receiver, so it needs the receiver's own size
+            // rather than anything the property declaration says.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.external_getter_is_indices(target) => self.indices(receiver),
+            // `range.first` and its three siblings: a checked read of a dependency property whose
+            // getter the runtime answers, exactly as an explicit call to it would be.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.range_getter(target, receiver).is_some() => {
+                let (owner, name, ret) = self
+                    .range_getter(target, receiver)
+                    .expect("checked by the guard");
+                self.range_member(&owner, &name, receiver, &[], ret)
+                    .expect("a range member, by the guard")
+            }
+            // `p.first`: the same runtime answer an explicit call to the getter would get.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.lazy_getter(target, receiver).is_some()
+                || self.pair_getter(target, receiver).is_some() =>
+            {
+                let name = self
+                    .lazy_getter(target, receiver)
+                    .or_else(|| self.pair_getter(target, receiver))
+                    .expect("checked by the guard");
+                match self.list_member(&name, receiver, &[], any()) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that answers none of it")),
+                }
+            }
+            // `values.size`: the same runtime answer an explicit call to the getter would get,
+            // and reached the same way — by the receiver, not by the property's declaration.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.indexed_value_getter(target, receiver).is_some() => {
+                let name = self
+                    .indexed_value_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = lists::indexed_value_getter_ty(&name);
+                match self.list_member(&name, receiver, &[], answer) {
+                    Some(realized) => realized,
+                    None => Err(format!(
+                        "`{name}` of a receiver that is not an indexed value"
+                    )),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.list_getter(target, receiver).is_some() => {
+                let name = self
+                    .list_getter(target, receiver)
+                    .expect("checked by the guard");
+                match self.list_member(&name, receiver, &[], Ty::Int) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a list")),
+                }
+            }
+            // `m.size`, `m.keys`, `entry.value`: the same runtime answer an explicit call to the
+            // getter would get, and reached the same way — by the receiver.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.map_getter(target, receiver).is_some() => {
+                let name = self
+                    .map_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = maps::map_getter_ty(&name);
+                match self.map_member(&name, receiver, &[], answer) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a map")),
+                }
+            }
             // `::foo.name` — `KCallable.name` of a reference written right here, which is the
             // DECLARATION's own name and therefore known already.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1912,6 +2079,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
             IrExpr::KClassLiteral { classifier, value } => self.class_literal(classifier, value),
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+                operation,
+                start,
+                start_type,
+                end,
+                end_type,
+                result,
+            }) => self.range_construction(operation, start, start_type, end, end_type, result),
+            // `x in a..b`: the checker kept the bounds rather than a range, so nothing is built.
+            IrExpr::Checked(IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+            }) => self.range_contains(operation, value, start, end, negated, counter),
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {
@@ -2289,6 +2473,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 classifier: internal,
                 ..
             } => Ty::Obj(*internal, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
                 self.file.ir.functions[fid as usize].ret
@@ -2310,6 +2497,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             // A function value and a captured-variable holder are both objects.
@@ -2321,7 +2509,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target, receiver, ..
+                target,
+                receiver,
+                result,
+                ..
             }) => {
                 // `cs.length` is an `Int`, and `::foo.name` a `String`: both are the language's
                 // own types, stated here for the same reason `kotlin.Enum`'s two are.
@@ -2339,9 +2530,57 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,
-                    None => return None,
+                    // A pair's components are references; a list's `size` is an `Int`; a range's
+                    // own members answer at their element's width. Which of the three this read is
+                    // depends on the receiver as much as on the getter — a range declares `first`
+                    // too — so the receiverless read is none of them.
+                    None => match receiver {
+                        // `x.indices` is realized as an `IntRange` and as nothing else, whatever
+                        // the receiver is indexable as, so the read IS one. Saying so is what
+                        // lets `b in a.indices` recognize its receiver as a range when `b` is not
+                        // an `Int`: that comparison is the ranges FACADE's, which reads its
+                        // element from the receiver, and a receiver with no type sent the call
+                        // to the dependency-member path to be declined by name.
+                        Some(_) if self.external_getter_is_indices(*target) => {
+                            Ty::obj("kotlin/ranges/IntRange")
+                        }
+                        Some(receiver)
+                            if self.lazy_getter(*target, *receiver).is_some()
+                                || self.pair_getter(*target, *receiver).is_some() =>
+                        {
+                            any()
+                        }
+                        Some(receiver)
+                            if self.indexed_value_getter(*target, *receiver).is_some() =>
+                        {
+                            let name = self
+                                .indexed_value_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            lists::indexed_value_getter_ty(&name)
+                        }
+                        Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
+                        Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
+                            let name = self
+                                .map_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            let answer = maps::map_getter_ty(&name);
+                            // The runtime's answer is only the carrier; the checked result names
+                            // the collection the read IS (`m.keys` is a `Set`). A walk over the
+                            // read itself, `for (k in m.keys)`, finds its iteration role there.
+                            if carrier(*result) == carrier(answer) {
+                                *result
+                            } else {
+                                answer
+                            }
+                        }
+                        Some(receiver) => self.range_getter(*target, *receiver)?.2,
+                        None => return None,
+                    },
                 }
             }
+            // A constructed range is an object of the type the checker gave it, which is what makes
+            // `1..3 == r` recognisable as an equality between references rather than a guess.
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             // A property reference is an object of the reflection type the checker gave it. When
             // the node carries none, the interface every one of them wears answers the two
             // questions asked of this — that it is a reference, and that its members are the
@@ -2637,6 +2876,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             .and_then(|ty| ty.obj_internal())
                         {
                             if self.file.implements_dependency(internal) {
+                                // The choice can still be made HERE: the file knows every class of
+                                // its own that could stand behind that type, so the receiver is
+                                // tested against each and the runtime entry point is the last arm.
+                                if let Some(realized) = self.implemented_member(
+                                    internal, &name, params, receiver, args, *ret,
+                                ) {
+                                    return realized;
+                                }
+                                // A member the runtime answers by WALKING needs no arm of its
+                                // own: it reaches an object's elements through `iterator`,
+                                // `hasNext` and `next`, and a class of this file carries a thunk
+                                // for each of its own in its descriptor — so the walk answers for
+                                // an object of the program as readily as for one the runtime
+                                // made. Asked by MEMBER, not by the receiver's shape: a shape
+                                // says nothing about which member the call is, and
+                                // `CharSequence` is walkable where `value[0]` is no walk.
+                                if let Some(realized) =
+                                    self.walking_member(&name, receiver, args, *ret)
+                                {
+                                    return realized;
+                                }
+                                // A `ReadOnlyProperty` delegate. The runtime builds none, so the
+                                // file's own classes are every object that can stand behind the
+                                // type and the dispatch among them needs no runtime arm — which
+                                // is what `implemented_member` above requires and cannot find.
+                                if super::super::intrinsics::is_read_only_property_name(internal) {
+                                    if let Some(realized) = self.read_only_property_member(
+                                        internal, &name, receiver, args, *ret,
+                                    ) {
+                                        return realized;
+                                    }
+                                }
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
@@ -2675,6 +2946,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // A range object's members are the runtime's, and `contains` is why they
+                        // are not table entries below: that path crosses every argument as a
+                        // reference, which would box the very `Int` the question is about.
+                        if let Some(realized) =
+                            self.range_member(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
                         // shows is answered on purpose rather than by the signed instruction.
@@ -2696,6 +2975,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // are `get`/`set` under another name and reach the same table.
                         if let Some(realized) =
                             self.reference_delegate(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        // A `listOf` result and the iterator it answers with. The PHYSICAL
+                        // parameters go with it: they are what tells `removeAt` from `remove`,
+                        // and the semantic ones cannot — see `lists::list_symbol`.
+                        let physical = realization.callable.physical_params.clone();
+                        if let Some(realized) =
+                            self.list_member_declared(&name, receiver, args, *ret, &physical)
+                        {
+                            return realized;
+                        }
+                        // A map, a set, or one entry of a map. Before the list path would be
+                        // wrong and after it is harmless: the two answer for disjoint receivers,
+                        // and each asks the receiver rather than the owner.
+                        if let Some(realized) = self.map_member(&name, receiver, args, *ret) {
+                            return realized;
+                        }
+                        // `a to b`: an extension of the tuples facade, so its left operand is the
+                        // receiver here rather than an argument.
+                        if let Some(realized) =
+                            self.pair_construction(&owner, &name, receiver, args)
                         {
                             return realized;
                         }
@@ -2780,6 +3081,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             super::super::intrinsics::experimental_bitwise(&owner, &name, params)
                         {
                             return self.experimental_bitwise(op, receiver, args, *ret);
+                        }
+                        // A member of the collections facade over an ARRAY receiver — a snapshot
+                        // of its elements, or one of the `content…` questions. Keyed on the
+                        // RECEIVER, because the facade declares the same names over lists,
+                        // sequences and ranges — the owner cannot say which receiver this is.
+                        if let Some((symbol, carried, answer)) =
+                            super::super::intrinsics::array_member(&owner, &name, params)
+                        {
+                            if self
+                                .type_of(receiver)
+                                .map(Ty::non_null)
+                                .is_some_and(|ty| ty.is_array())
+                            {
+                                let mut operands = vec![self.reference(receiver)?];
+                                for argument in args {
+                                    operands.push(self.reference(*argument)?);
+                                }
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let produced =
+                                    self.runtime_call(symbol, &carried, answer, &operands)?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(answer), *ret);
+                            }
                         }
                         // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
                         // is Kotlin's `ignoreCase`. The default reaches here as a CONSTANT
@@ -2963,6 +3291,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
+                        // A vararg parameter is PHYSICALLY an array however its element type was
+                        // substituted, which is the one fact that separates `listOf`'s two
+                        // declarations; see `list_construction`.
+                        let packs_a_vararg = realization
+                            .callable
+                            .physical_params
+                            .first()
+                            .is_some_and(|ty| ty.non_null().is_reference_array());
+                        if let Some(realized) =
+                            self.list_construction(&owner, &name, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        // `mapOf(…)` / `setOf(…)` and their relatives, read the same way and for
+                        // the same reason: the vararg parameter is what separates the two
+                        // declarations Kotlin gives each name.
+                        if let Some(realized) =
+                            self.map_construction(&owner, &name, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) = self.lazy_construction(&owner, &name, args) {
+                            return realized;
+                        }
                         // `kotlin.test`'s assertions. Their operands cross as REFERENCES rather
                         // than at their own widths: `assertEquals` is generic, so a call with
                         // `Int` arguments arrives typed `Int`, and the comparison Kotlin makes is
@@ -3103,6 +3455,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 };
                 self.convert(produced, Some(Ty::Char), ret)
+            }
+            IrIntrinsic::ArrayGet => {
+                let (Some(receiver), [index]) = (receiver, args) else {
+                    return Err("a malformed array read".to_string());
+                };
+                self.array_get(receiver, *index, ret)
+            }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("a malformed array store".to_string());
+                };
+                self.array_set(receiver, *index, *value)
+            }
+            IrIntrinsic::ArraySize => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed array size".to_string());
+                };
+                self.array_size(receiver)
             }
             // `"$u"`: the frontend names the conversion rather than letting the template reach for
             // `Any.toString()`, because the value it would reach for is the signed number sharing

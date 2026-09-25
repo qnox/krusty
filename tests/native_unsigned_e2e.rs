@@ -201,6 +201,121 @@ fn two_boxed_unsigned_values_compare_by_the_value_they_stand_for() {
     );
 }
 
+/// The four unsigned ARRAYS, each at the top value of its width.
+///
+/// An unsigned array is a value class over the signed array of the same width, so the elements are
+/// the signed array's bits and only the reading of them is unsigned — the same erasure the scalars
+/// above go through, one level out. Every element here is the one a SIGNED read of the same bits
+/// answers as `-1`, so a wrong stride or a signed load cannot be right by accident.
+#[test]
+fn every_unsigned_array_width_reads_back_what_it_stored() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val b = UByteArray(2); b[0] = 255u; b[1] = 7u\n\
+         \x20   val s = UShortArray(2); s[0] = 65535u; s[1] = 7u\n\
+         \x20   val i = UIntArray(2); i[0] = 4294967295u; i[1] = 7u\n\
+         \x20   val l = ULongArray(2); l[0] = 18446744073709551615uL; l[1] = 7u\n\
+         \x20   if (b[0].toString() != \"255\") return \"fail ubyte \" + b[0].toString()\n\
+         \x20   if (s[0].toString() != \"65535\") return \"fail ushort \" + s[0].toString()\n\
+         \x20   if (i[0].toString() != \"4294967295\") return \"fail uint \" + i[0].toString()\n\
+         \x20   if (l[0].toString() != \"18446744073709551615\") return \"fail ulong \" + l[0].toString()\n\
+         \x20   if (b[1].toString() != \"7\" || s[1].toString() != \"7\") return \"fail second\"\n\
+         \x20   if (i[1].toString() != \"7\" || l[1].toString() != \"7\") return \"fail second\"\n\
+         \x20   if (b.size != 2 || s.size != 2 || i.size != 2 || l.size != 2) return \"fail size\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrays",
+        "OK",
+    );
+}
+
+/// A stride is not a name: an unsigned array carries its OWN type, not the signed array's.
+///
+/// `UIntArray` and `IntArray` hold the same bits four at a time, so sharing one runtime descriptor
+/// would make every program above pass — and would answer `is IntArray` with `true`, where the
+/// reference compiler answers `false` because the two are distinct classes. Each unsigned width
+/// therefore gets its own descriptor with the signed one's stride.
+///
+/// NOTE: krusty's JVM backend answers `true` here, which is a separate known defect — it does not
+/// box a value class at the `Any` boundary (`docs/BUILD_AND_NATIVE_PLAN.md`). The native answer is
+/// the reference compiler's.
+#[test]
+fn an_unsigned_array_is_not_the_signed_array_it_is_laid_out_as() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val u: Any = UIntArray(1)\n\
+         \x20   if (u is IntArray) return \"fail: a UIntArray answered as an IntArray\"\n\
+         \x20   if (u !is UIntArray) return \"fail: a UIntArray did not answer as itself\"\n\
+         \x20   val i: Any = IntArray(1)\n\
+         \x20   if (i is UIntArray) return \"fail: an IntArray answered as a UIntArray\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayIdentity",
+        "OK",
+    );
+}
+
+/// Walking an unsigned array through the ITERATOR protocol, paired with a count.
+///
+/// This DECLINED until the declaration contract published an extension's Kotlin name. The
+/// extension is realized as `UArraysKt.withIndex-GBYM_sE` — value-class-mangled, because the JVM
+/// needs two signatures that erase alike to stay distinct — and while only that spelling reached
+/// the call, no table could be written in it. Reading the Kotlin name back out of the spelling is
+/// what this backend used to do, and it was unsound: nothing in a name says the `-` is kotlinc's
+/// rather than part of a Java method's, so a spelling pattern cannot establish declaration origin.
+///
+/// The contract publishes the name now, so this is the walk again, at every width: the count comes
+/// from `IndexedValue` and the element renders through its own `toString`, which is what makes a
+/// `UByte` of 255 render as 255 rather than as the signed number of those bits.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_counted_walk_of_an_unsigned_array_pairs_every_width_with_its_index() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var b = \"\"\n\
+         \x20   for ((i, u) in ubyteArrayOf(1u, 2u, 255u).withIndex()) b += \"$i:$u;\"\n\
+         \x20   if (b != \"0:1;1:2;2:255;\") return \"fail ubyte: $b\"\n\
+         \x20   var s = \"\"\n\
+         \x20   for ((i, u) in ushortArrayOf(1u, 2u, 65535u).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:65535;\") return \"fail ushort: $s\"\n\
+         \x20   var n = \"\"\n\
+         \x20   for ((i, u) in uintArrayOf(1u, 4294967295u).withIndex()) n += \"$i:$u;\"\n\
+         \x20   if (n != \"0:1;1:4294967295;\") return \"fail uint: $n\"\n\
+         \x20   var l = \"\"\n\
+         \x20   for ((i, u) in ulongArrayOf(1uL, 18446744073709551615uL).withIndex()) l += \"$i:$u;\"\n\
+         \x20   if (l != \"0:1;1:18446744073709551615;\") return \"fail ulong: $l\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayCountedWalk",
+        "OK",
+    );
+}
+
+/// The same walk with nothing counting it: `joinToString` asks the array itself for an iterator.
+///
+/// This is the shorter route to the same reader — no `IndexedValue` in between — and it is the one
+/// that renders each element through its own `toString`, so an element read at the right width but
+/// as the SIGNED number of those bits renders as `-1` rather than as the maximum.
+#[test]
+fn an_unsigned_array_renders_each_element_unsigned_when_it_is_walked() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val b = ubyteArrayOf(255u).joinToString()\n\
+         \x20   if (b != \"255\") return \"fail ubyte: $b\"\n\
+         \x20   val s = ushortArrayOf(65535u).joinToString()\n\
+         \x20   if (s != \"65535\") return \"fail ushort: $s\"\n\
+         \x20   val i = uintArrayOf(4294967295u).joinToString()\n\
+         \x20   if (i != \"4294967295\") return \"fail uint: $i\"\n\
+         \x20   val l = ulongArrayOf(18446744073709551615uL).joinToString()\n\
+         \x20   if (l != \"18446744073709551615\") return \"fail ulong: $l\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayJoin",
+        "OK",
+    );
+}
+
 /// A SIGNED value converted to an unsigned type — `42.toUInt()`, `(-1).toUByte()`.
 ///
 /// These are not members of an unsigned type: the receiver is signed, so they live on the facade

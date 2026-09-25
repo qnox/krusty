@@ -4461,6 +4461,10 @@ each one lowering more and declining less:
   object), function types with a fixed `invoke` slot, SAM conversions, callable references to
   functions and properties including bound ones and dependency members, default arguments through
   one wrapper per omission shape, local functions, and the stdlib scope functions.
+- **Collections** (tier 4): arrays of every element width, lists, maps and sets as the runtime's
+  objects, ranges and progressions, iteration over each and over a class of the program that
+  implements `Iterable`/`CharSequence`, `lazy`, `Pair`, and property delegates (`ReadOnlyProperty`,
+  `ReadWriteProperty`, `Delegates.notNull`/`observable`).
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

@@ -32,6 +32,20 @@ fn a_not_null_assertion_yields_a_value_its_consumer_can_name() {
     expect_native_box(source, "NotNullAssertType", "OK");
 }
 
+/// `!!` over a whole expression whose result is a primitive, which is the `kt1018` shape.
+#[test]
+fn a_not_null_assertion_over_an_expression_keeps_its_width() {
+    let source = "class Holder {\n\
+         \x20   fun count(): Int = TITLES?.size!!\n\
+         \x20   companion object {\n\
+         \x20       private val TITLES: Array<Int?> = arrayOfNulls<Int>(10)\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String = if (Holder().count() == 10) \"OK\" else \"fail\"\n";
+    expect_box_ok_with_stdlib(source, "NotNullAssertExpression");
+    expect_native_box(source, "NotNullAssertExpression", "OK");
+}
+
 /// A `lateinit` read yields its operand the same way.
 #[test]
 fn a_lateinit_read_yields_a_value_its_consumer_can_name() {

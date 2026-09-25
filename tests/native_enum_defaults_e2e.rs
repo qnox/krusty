@@ -12,6 +12,25 @@
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
 
+/// Constants omitting one argument, two, and none — the defaults read in declaration order.
+#[test]
+fn an_enum_constant_reaches_its_constructors_defaults() {
+    let source = "enum class Colour(val name2: String = \"?\", val rgb: Int = 7) {\n\
+         \x20   RED(\"red\", 1),\n\
+         \x20   GREEN(\"green\"),\n\
+         \x20   PLAIN\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (Colour.RED.name2 != \"red\" || Colour.RED.rgb != 1) return \"fail RED\"\n\
+         \x20   if (Colour.GREEN.name2 != \"green\" || Colour.GREEN.rgb != 7) return \"fail GREEN\"\n\
+         \x20   if (Colour.PLAIN.name2 != \"?\" || Colour.PLAIN.rgb != 7) return \"fail PLAIN\"\n\
+         \x20   if (Colour.values().size != 3) return \"fail values\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "EnumConstructorDefaults");
+    expect_native_box(source, "EnumConstructorDefaults", "OK");
+}
+
 /// A default that READS an earlier parameter, which is why the wrapper fills the frame in
 /// declaration order rather than evaluating each default on its own.
 #[test]

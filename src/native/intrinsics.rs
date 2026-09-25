@@ -117,6 +117,36 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
+/// not always reach an override at all.
+///
+/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
+/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
+/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
+/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
+/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
+///
+/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
+/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
+/// ARGUMENT, which is why the nullary members are unaffected.
+pub(super) fn has_special_bridge(owner: crate::types::TypeName, name: &str) -> bool {
+    let over_a_map = is_map_type(owner) || is_map_entry_type(owner);
+    let over_a_collection = is_list_type(owner)
+        || is_set_type(owner)
+        || matches!(
+            kotlin_owner(&owner.render()),
+            "kotlin/collections/Collection" | "kotlin/collections/MutableCollection"
+        )
+        || matches!(iteration_role(owner), Some(IterationRole::Iterable));
+    match name {
+        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
+        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
+        "remove" => over_a_map || over_a_collection,
+        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
+        _ => false,
+    }
+}
+
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
 ///
 /// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
@@ -131,6 +161,11 @@ pub(super) fn runtime_functional_interface(
     classifier: crate::types::TypeName,
 ) -> Option<&'static str> {
     (kotlin_owner(&classifier.render()) == "kotlin/Comparator").then_some("compare")
+}
+
+/// Whether a type is the `Comparator` the runtime makes — a function value of two arguments.
+pub(super) fn is_comparator(internal: crate::types::TypeName) -> bool {
+    runtime_functional_interface(internal).is_some()
 }
 
 /// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class
@@ -581,6 +616,36 @@ pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
     }
 }
 
+/// `a until b` — the half-open range builder, which the provider presents as an extension function
+/// of the ranges file facade rather than a member of the range it answers.
+///
+/// Recognized here rather than where ranges are lowered, for the same reason [`declaration_package`]
+/// lives here: the facade is the JVM provider's spelling, not Kotlin's.
+pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "until")
+}
+
+/// Whether a declaration is `downTo` on the ranges facade — the descending counterpart of `until`,
+/// and built the same way: an extension of the facade rather than a member of what it answers.
+pub(super) fn is_range_down_to(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "downTo")
+}
+
+/// Whether a declaration is `step` on the ranges facade. Its receiver is the range or progression
+/// being stepped, so unlike `until` and `downTo` the RECEIVER says which width this is.
+pub(super) fn is_range_step(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "step")
+}
+
+/// Whether a declaration is `reversed` on the ranges facade.
+pub(super) fn is_range_reversed(owner: &str, name: &str, arity: usize) -> bool {
+    declaration_package(kotlin_owner(owner)) == "kotlin/ranges" && name == "reversed" && arity == 0
+}
+
+fn is_ranges_facade(owner: &str, name: &str, arity: usize, wanted: &str) -> bool {
+    declaration_package(kotlin_owner(owner)) == "kotlin/ranges" && name == wanted && arity == 1
+}
+
 /// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
 /// program can have without any reflection metadata existing, because the declaration it names is
 /// written in the same file.
@@ -609,6 +674,27 @@ pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
         kotlin_owner(owner),
         "kotlin/PropertyReferenceDelegatesKt" | "kotlin"
     )
+}
+
+/// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
+/// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
+pub(super) fn is_lazy_facade(owner: &str) -> bool {
+    matches!(kotlin_owner(owner), "kotlin/LazyKt" | "kotlin")
+}
+
+/// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
+/// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
+/// situation again, normalized in the same place.
+pub(super) fn is_tuples_facade(owner: &str) -> bool {
+    matches!(kotlin_owner(owner), "kotlin/TuplesKt" | "kotlin")
+}
+
+/// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
+/// in. They are top-level functions of `kotlin.collections`, so they reach a backend as members of
+/// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and
+/// normalized in the same place.
+pub(super) fn is_collections_facade(owner: &str) -> bool {
+    declaration_package(kotlin_owner(owner)) == "kotlin/collections"
 }
 
 /// How a program iterates a receiver it could only type by an INTERFACE.
@@ -710,6 +796,35 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
     .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
 }
 
+/// Which role a TYPE plays, including the two the runtime walks that are not `Iterable` at all.
+///
+/// Neither an array nor a `CharSequence` is a `kotlin.collections.Iterable`, and Kotlin still lets
+/// a program reach every `Iterable` member on one, through an extension declared for it. The
+/// runtime walks both — an array's element at its own width, a string's by UTF-16 unit — so the
+/// role is what matters at a call site and the interface list is not.
+pub(super) fn iteration_role_of(ty: Ty) -> Option<IterationRole> {
+    let ty = ty.non_null();
+    if ty.is_array() {
+        return Some(IterationRole::Iterable);
+    }
+    let internal = ty.obj_internal()?;
+    // The BUILDER is walkable text too. `for (c in StringBuilder("OK"))` is Kotlin's own, and the
+    // walk is the same one a string takes: the chars iterator's bound is `kt_string_length`, which
+    // answers for either shape — and re-reads it every step, which is what lets a loop that
+    // shortens the builder stop where Kotlin's stops.
+    //
+    // Read through [`kotlin_owner`] rather than by listing both providers' spellings, which is
+    // what that function is for: a jar hands over `java.lang.StringBuilder` for a type Kotlin
+    // calls `kotlin.text.StringBuilder`, and normalizing once beats a list that has to grow.
+    if matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
+    ) {
+        return Some(IterationRole::Iterable);
+    }
+    iteration_role(internal)
+}
+
 /// Whether a type name is a list the native runtime builds.
 pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
     matches!(
@@ -720,6 +835,21 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
             // here: a `Set` is one, and the runtime's set is not laid out as its list.
             | "kotlin/collections/MutableList"
             | "kotlin/collections/ArrayList"
+    )
+}
+
+/// Whether a type name is a collection the runtime builds that is not known to be a LIST: a
+/// `Collection` a set may stand behind as well as a list, or a set itself.
+///
+/// Such a receiver has no list header to read a size from. What every collection the runtime
+/// builds does have is a walk, and how many elements it walks is its size.
+pub(super) fn is_collection_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Collection"
+            | "kotlin/collections/MutableCollection"
+            | "kotlin/collections/Set"
+            | "kotlin/collections/MutableSet"
     )
 }
 
@@ -741,6 +871,28 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
 /// `kotlin.collections.List` and nothing else.
 pub(super) fn is_list_check_type(internal: crate::types::TypeName) -> bool {
     kotlin_owner(&internal.render()) == "kotlin/collections/List"
+}
+
+/// The growable list the runtime provides, if this names one.
+///
+/// `kotlin.collections.ArrayList` is declared in no file krusty compiles, so constructing one takes
+/// the path `Any()` and the throwables already take: the runtime allocates it.
+pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
+}
+
+/// The growable MAP or SET the runtime provides, if this names one, as the runtime's suffix.
+///
+/// Declared in no file krusty compiles, so constructing one takes the path `Any()`, the throwables
+/// and `ArrayList` already take: the runtime allocates it. The ordered and unordered spellings are
+/// one object here — the map this runtime builds is insertion-ordered, and an unordered one leaves
+/// its order unspecified, of which insertion order is one.
+pub(super) fn runtime_table(internal: crate::types::TypeName) -> Option<&'static str> {
+    match kotlin_owner(&internal.render()) {
+        "kotlin/collections/HashMap" | "kotlin/collections/LinkedHashMap" => Some("map"),
+        "kotlin/collections/HashSet" | "kotlin/collections/LinkedHashSet" => Some("set"),
+        _ => None,
+    }
 }
 
 /// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
@@ -894,7 +1046,8 @@ pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<Colle
     if is_list_type(internal) || is_set_type(internal) {
         return Some(CollectionShape::Iterable);
     }
-    // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it.
+    // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it —
+    // [`iteration_role_of`] reaches it from the TYPE instead.
     if matches!(
         kotlin_owner(&internal.render()),
         "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
@@ -905,6 +1058,17 @@ pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<Colle
         IterationRole::Iterable => Some(CollectionShape::Iterable),
         IterationRole::Iterator => Some(CollectionShape::Iterator),
     }
+}
+
+/// The shape a TYPE belongs to. An ARRAY names no collection type and is walkable all the same,
+/// which is why this takes a type where [`collection_shape`] takes a name — the same split
+/// [`iteration_role_of`] makes over [`iteration_role`].
+pub(super) fn collection_shape_of(ty: Ty) -> Option<CollectionShape> {
+    let ty = ty.non_null();
+    if ty.is_array() {
+        return Some(CollectionShape::Iterable);
+    }
+    collection_shape(ty.obj_internal()?)
 }
 
 /// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
@@ -924,6 +1088,23 @@ pub(super) fn is_char_sequence(internal: crate::types::TypeName) -> bool {
 /// constructing one is the runtime's job rather than the generator's.
 pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
     kotlin_owner(&internal.render()) == "kotlin/text/StringBuilder"
+}
+
+/// `x.indices` — the range of an indexable value's positions, which the provider presents as an
+/// extension property of the arrays or text file facade rather than a member.
+///
+/// Answering it needs the receiver's own `size`, so only the caller can decide whether THIS
+/// receiver has one; this says only that the declaration named is that extension property.
+///
+/// `name` is the PROPERTY's, not its accessor's. `indices` is realized five ways — `getIndices`
+/// for text, and one value-class-mangled spelling per unsigned array width — so a table written in
+/// accessor spellings would have to list all five and would still be guessing at the sixth.
+pub(super) fn is_indices(owner: &str, name: &str) -> bool {
+    name == "indices"
+        && matches!(
+            declaration_package(kotlin_owner(owner)),
+            "kotlin/collections" | "kotlin/text"
+        )
 }
 
 /// A dependency member the runtime answers with its arguments carried as VALUES, and the signature
@@ -1241,6 +1422,70 @@ pub(super) fn property_reference_markers(mutable: bool, arity: usize) -> Vec<&'s
         });
     }
     markers
+}
+
+/// Whether a classifier is `kotlin.properties.ReadOnlyProperty`, which this runtime never builds —
+/// so every object behind the type is a class of the file being compiled.
+pub(super) fn is_read_only_property_name(owner: crate::types::TypeName) -> bool {
+    owner.matches("kotlin/properties/ReadOnlyProperty")
+}
+
+/// Whether a classifier is `kotlin.Pair`, which the runtime owns rather than any file declaring.
+pub(super) fn is_pair_name(owner: crate::types::TypeName) -> bool {
+    owner.matches("kotlin/Pair")
+}
+
+/// A member of the collections facade the runtime answers for an ARRAY receiver, as
+/// `(symbol, carried, answer)`.
+///
+/// Every one of these is an extension, and the facade declares the same names over lists, sequences
+/// and ranges — so the owner cannot say which receiver this is and the CALLER asks the receiver.
+/// What an entry names is the runtime function for the array case only.
+///
+/// `toList` and `reversed` answer a LIST of boxes; `reversedArray` answers an array wearing the
+/// receiver's own descriptor, which is the whole of the difference between the last two. The
+/// `content…` three are the questions `Arrays.equals`/`hashCode`/`toString` answer — an array's own
+/// `equals` is identity, and these exist precisely because a program sometimes wants the other one.
+pub(super) fn array_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
+    // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
+    // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    let package = declaration_package(kotlin_owner(owner));
+    if !matches!(
+        package,
+        "kotlin/collections" | "kotlin/collections/unsigned"
+    ) {
+        return None;
+    }
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    Some(match (name, params) {
+        ("toList", []) => ("kt_array_to_list", vec![reference], reference),
+        ("reversed", []) => ("kt_array_reversed", vec![reference], reference),
+        ("reversedArray", []) => ("kt_array_reversed_array", vec![reference], reference),
+        // The operand is declared nullable, and so may the receiver be: `contentEquals` is one of
+        // the few stdlib extensions written over `Array<T>?`, because comparing two arrays that
+        // may be absent is exactly what it is for. The runtime takes both as they come.
+        ("contentEquals", [_]) => (
+            "kt_array_content_equals",
+            vec![reference, reference],
+            Ty::Boolean,
+        ),
+        ("contentHashCode", []) => ("kt_array_content_hash_code", vec![reference], Ty::Int),
+        // The LENGTH is the whole of these two, and it is the same question whichever element
+        // width the array has.
+        ("isEmpty", []) => ("kt_array_is_empty", vec![reference], Ty::Boolean),
+        ("isNotEmpty", []) => ("kt_array_is_not_empty", vec![reference], Ty::Boolean),
+        ("contentToString", []) => (
+            "kt_array_content_to_string",
+            vec![reference],
+            Ty::obj("kotlin/String"),
+        ),
+        _ => return None,
+    })
 }
 
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
@@ -1616,6 +1861,11 @@ mod tests {
             "kotlin/collections/AbstractMutableList"
         );
         assert_eq!(declaration_package("Ungrouped"), "Ungrouped");
+        assert!(!is_collections_facade(
+            "kotlin/collections/AbstractMutableList"
+        ));
+        assert!(is_collections_facade("kotlin/collections"));
+        assert!(is_collections_facade("kotlin/collections/CollectionsKt"));
     }
 
     #[test]
@@ -1639,6 +1889,30 @@ mod tests {
             runtime_function("kotlin/io/ConsoleKt", "println", &[]).as_deref(),
             Some("kt_println_unit")
         );
+    }
+
+    #[test]
+    fn the_half_open_range_builder_is_recognized_on_its_facade() {
+        assert!(is_range_until("kotlin/ranges/RangesKt", "until", 1));
+        assert!(is_range_until("kotlin/ranges/URangesKt", "until", 1));
+        // A member of a real class in the same package is not the facade's extension, and neither
+        // is a same-named function of another package.
+        assert!(!is_range_until("kotlin/ranges/IntRange", "until", 1));
+        assert!(!is_range_until("kotlin/text/StringsKt", "until", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "downTo", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "until", 2));
+    }
+
+    #[test]
+    fn the_indices_extension_is_recognized_on_either_facade() {
+        assert!(is_indices("kotlin/collections/ArraysKt", "indices"));
+        assert!(is_indices("kotlin/text/StringsKt", "indices"));
+        assert!(!is_indices("kotlin/collections/ArraysKt", "size"));
+        assert!(!is_indices("kotlin/collections/AbstractList", "indices"));
+        // The accessor spelling is NOT the key: `indices` is realized as `getIndices` for text and
+        // as a value-class-mangled name per unsigned array width, and none of those is what the
+        // declaration is called.
+        assert!(!is_indices("kotlin/collections/ArraysKt", "getIndices"));
     }
 
     #[test]
@@ -1743,6 +2017,27 @@ mod tests {
             floor_mod("kotlin/NumbersKt", "mod", Ty::Int, &[Ty::Double]),
             None
         );
+    }
+
+    #[test]
+    fn a_collection_is_not_read_as_a_list_and_keeps_its_special_bridges() {
+        let name = crate::types::type_name;
+        assert!(is_list_type(name("kotlin/collections/List")));
+        assert!(!is_list_type(name("kotlin/collections/Collection")));
+        assert!(!is_list_type(name("kotlin/collections/MutableCollection")));
+        assert!(has_special_bridge(
+            name("kotlin/collections/Collection"),
+            "contains"
+        ));
+        assert!(has_special_bridge(
+            name("kotlin/collections/MutableCollection"),
+            "remove"
+        ));
+        assert!(has_special_bridge(name("kotlin/collections/Map"), "remove"));
+        assert!(!has_special_bridge(
+            name("kotlin/collections/Collection"),
+            "get"
+        ));
     }
 
     #[test]
