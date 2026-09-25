@@ -221,3 +221,19 @@ fn an_anonymous_object_constructor_interns_this_before_its_members() {
 fn a_data_object_equals_interns_its_locals_with_its_body() {
     assert_identical("DataObjectLocals", "data object Marker\n", &["Marker"]);
 }
+
+/// A companion `var` hoisted to its outer class keeps a setter on the companion, and that setter
+/// interns its `<set-?>` local's descriptor with its own body, before the next member.
+#[test]
+fn a_hoisted_companion_setter_interns_its_locals_with_its_body() {
+    assert_identical(
+        "HoistedCompanionSetter",
+        "class Holder {\n\
+         \x20   companion object {\n\
+         \x20       var label = \"x\"\n\
+         \x20       fun touch() {}\n\
+         \x20   }\n\
+         }\n",
+        &["Holder$Companion", "Holder"],
+    );
+}

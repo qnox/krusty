@@ -441,6 +441,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                     ]),
                 );
                 ir.fn_source_order.insert(setter, candidate.source_order);
+                // kotlinc writes the setter's `<set-?>` local with the setter, before the next
+                // member, so its table is recorded as the body is emitted.
+                ir.fn_debug_locals.insert(setter);
                 setter
             });
             (getter, setter)
