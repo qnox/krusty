@@ -1094,6 +1094,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_type_reference_e2e.rs"]
+mod metadata_type_reference_e2e;
 #[path = "method_pool_order_e2e.rs"]
 mod method_pool_order_e2e;
 #[path = "missing_return_check_e2e.rs"]

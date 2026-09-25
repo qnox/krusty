@@ -67,9 +67,43 @@ impl Pb {
         self.buf.extend_from_slice(b);
     }
 
-    /// `field: <message>` (wire type 2, length-delimited).
+    /// `field: <message>` (wire type 2, length-delimited). The message is embedded in
+    /// [`Pb::canonical`] order.
     pub fn field_message(&mut self, field: u32, msg: &Pb) {
-        self.field_bytes(field, &msg.buf);
+        self.field_bytes(field, &msg.canonical().buf);
+    }
+
+    /// This message with its fields in field-number order, repeated fields keeping their relative
+    /// order. That is the order protoc-generated `writeTo` serializes, which is how kotlinc writes
+    /// every metadata message; builders append in whatever order their strings must intern.
+    pub fn canonical(&self) -> Pb {
+        let mut fields = Vec::new();
+        let mut at = 0;
+        while at < self.buf.len() {
+            let start = at;
+            let tag = read_varint(&self.buf, &mut at);
+            match tag & 0x7 {
+                0 => {
+                    read_varint(&self.buf, &mut at);
+                }
+                1 => at += 8,
+                2 => {
+                    let length = read_varint(&self.buf, &mut at) as usize;
+                    at += length;
+                }
+                5 => at += 4,
+                wire => unreachable!("the metadata writer never emits wire type {wire}"),
+            }
+            fields.push((tag >> 3, &self.buf[start..at]));
+        }
+        fields.sort_by_key(|(field, _)| *field);
+        Pb {
+            buf: fields
+                .into_iter()
+                .flat_map(|(_, bytes)| bytes)
+                .copied()
+                .collect(),
+        }
     }
 
     /// One element of a `repeated <message>` field (emit the tag+message once per element).
@@ -78,6 +112,20 @@ impl Pb {
     }
     pub fn repeated_varint(&mut self, field: u32, v: u64) {
         self.field_varint(field, v);
+    }
+}
+
+fn read_varint(buf: &[u8], at: &mut usize) -> u64 {
+    let mut value = 0;
+    let mut shift = 0;
+    loop {
+        let byte = buf[*at];
+        *at += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
     }
 }
 
@@ -132,5 +180,21 @@ mod tests {
         p.repeated_varint(4, 3);
         // tag for field 4 varint = (4<<3)|0 = 0x20
         assert_eq!(p.as_bytes(), &[0x20, 0x01, 0x20, 0x02, 0x20, 0x03]);
+    }
+
+    #[test]
+    fn canonical_orders_fields_by_number_and_keeps_repeated_order() {
+        let mut inner = Pb::new();
+        inner.field_varint(6, 1);
+        inner.field_varint(1, 1);
+        let mut outer = Pb::new();
+        outer.repeated_varint(4, 2);
+        outer.field_varint(3, 7);
+        outer.repeated_varint(4, 1);
+        outer.field_message(2, &inner);
+        assert_eq!(
+            outer.canonical().as_bytes(),
+            &[0x12, 0x04, 0x08, 0x01, 0x30, 0x01, 0x18, 0x07, 0x20, 0x02, 0x20, 0x01]
+        );
     }
 }
