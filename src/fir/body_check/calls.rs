@@ -110,7 +110,8 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::RangeDownTo
         | crate::libraries::CompilerIntrinsic::RangeUntil
         | crate::libraries::CompilerIntrinsic::ProgressionStep
-        | crate::libraries::CompilerIntrinsic::ProgressionReversed => return None,
+        | crate::libraries::CompilerIntrinsic::ProgressionReversed
+        | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. } => return None,
     })
 }
 

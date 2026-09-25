@@ -16185,7 +16185,15 @@ impl<'a> Emitter<'a> {
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
         let int_cat = numeric_cmp_int_category(lt, rt);
-        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
+        // An unsigned zero is the carrier's zero: equality with it is a compare-to-zero branch too
+        // (ordering an unsigned value goes through its comparator, never through here).
+        let zero = |e: u32| match self.ir.expr(e) {
+            IrExpr::Const(IrConst::Int(0)) => true,
+            IrExpr::Const(IrConst::UByte(0) | IrConst::UShort(0) | IrConst::UInt(0)) => {
+                matches!(op, Eq | Ne)
+            }
+            _ => false,
+        };
         let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
             Some(op)

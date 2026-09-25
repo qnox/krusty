@@ -4,9 +4,7 @@ use std::rc::Rc;
 
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
 use crate::fir::FirRangeOperation;
-use crate::ir::{
-    Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrProgressionSource, IrTypeOp,
-};
+use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,46 +109,6 @@ pub(super) fn realize(
     }
     for expression in 0..expression_count {
         match ir.exprs[expression].clone() {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                variable,
-                variable_name,
-                counter,
-                source:
-                    IrProgressionSource::Literal {
-                        operation,
-                        start,
-                        end,
-                    },
-                body,
-                label,
-            }) => {
-                let replacement = unsigned_range_loop(
-                    ir,
-                    &runtime,
-                    UnsignedRangeLoop {
-                        variable,
-                        variable_name,
-                        counter,
-                        operation,
-                        start,
-                        end,
-                        body,
-                        label,
-                    },
-                )
-                .ok_or(RangeRealizationFailure::Operation(
-                    RangeOperationFailure {
-                        expression: expression as ExprId,
-                        operation,
-                        start: counter,
-                        end: counter,
-                    },
-                ))?;
-                ir.exprs[expression] = replacement;
-            }
-            // The checker counts an unsigned loop only over a range literal; any other checked
-            // progression stays unrealized and the emitter's `jvm_can_emit` check rejects it.
-            IrExpr::Checked(IrCheckedOperation::RangeLoop { .. }) => {}
             IrExpr::Checked(IrCheckedOperation::RangeContains {
                 operation,
                 value,
@@ -188,7 +146,10 @@ pub(super) fn realize(
                 | IrCheckedOperation::CallableReference { .. }
                 | IrCheckedOperation::PropertyReference { .. },
             )
-            | IrExpr::Checked(IrCheckedOperation::RangeConstruction { .. })
+            // The backend pass above realized every counted loop.
+            | IrExpr::Checked(
+                IrCheckedOperation::RangeConstruction { .. } | IrCheckedOperation::RangeLoop { .. },
+            )
             | IrExpr::CallableReference(_)
             | IrExpr::Const(_)
             | IrExpr::BottomValue { .. }
@@ -246,121 +207,6 @@ pub(super) fn realize(
         }
     }
     Ok(())
-}
-
-struct UnsignedRangeLoop {
-    variable: u32,
-    variable_name: Option<Box<str>>,
-    counter: Ty,
-    operation: FirRangeOperation,
-    start: ExprId,
-    end: ExprId,
-    body: ExprId,
-    label: String,
-}
-
-fn unsigned_range_loop(
-    ir: &mut IrFile,
-    runtime: &JvmLibraries,
-    lp: UnsignedRangeLoop,
-) -> Option<IrExpr> {
-    let UnsignedRangeLoop {
-        variable,
-        variable_name,
-        counter,
-        operation,
-        start,
-        end,
-        body,
-        label,
-    } = lp;
-    let end_slot = ir.next_value_slot();
-    let variable_declaration = ir.add_expr(IrExpr::Variable {
-        index: variable,
-        ty: counter,
-        init: Some(start),
-        named: true,
-    });
-    if let Some(name) = variable_name {
-        ir.value_names.insert(variable_declaration, name.into());
-    }
-    let end_declaration = ir.add_expr(IrExpr::Variable {
-        index: end_slot,
-        ty: counter,
-        init: Some(end),
-        named: false,
-    });
-    let condition = unsigned_compare_slots(
-        ir,
-        runtime,
-        variable,
-        end_slot,
-        match operation {
-            FirRangeOperation::Through => crate::ir::IrBinOp::Le,
-            FirRangeOperation::OpenEnd | FirRangeOperation::Until => crate::ir::IrBinOp::Lt,
-            FirRangeOperation::DownTo => crate::ir::IrBinOp::Ge,
-        },
-        counter,
-    )?;
-    let counter_read = ir.add_expr(IrExpr::GetValue(variable));
-    let one = ir.add_expr(IrExpr::Const(if counter == Ty::ULong {
-        crate::ir::IrConst::Long(1)
-    } else {
-        crate::ir::IrConst::Int(1)
-    }));
-    let updated = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: if operation == FirRangeOperation::DownTo {
-            crate::ir::IrBinOp::Sub
-        } else {
-            crate::ir::IrBinOp::Add
-        },
-        lhs: counter_read,
-        rhs: one,
-    });
-    let updated = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: updated,
-        type_operand: counter,
-    });
-    let write = ir.add_expr(IrExpr::SetValue {
-        var: variable,
-        value: updated,
-    });
-    let update = if matches!(
-        operation,
-        FirRangeOperation::OpenEnd | FirRangeOperation::Until
-    ) {
-        write
-    } else {
-        let current = ir.add_expr(IrExpr::GetValue(variable));
-        let end = ir.add_expr(IrExpr::GetValue(end_slot));
-        let at_end = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Eq,
-            lhs: current,
-            rhs: end,
-        });
-        let stop = ir.add_expr(IrExpr::Break {
-            label: Some(label.clone()),
-        });
-        let guard = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(at_end), stop)],
-        });
-        ir.add_expr(IrExpr::Block {
-            stmts: vec![guard, write],
-            value: None,
-        })
-    };
-    let loop_expression = ir.add_expr(IrExpr::While {
-        cond: condition,
-        body,
-        update: Some(update),
-        post_test: false,
-        label: Some(label),
-    });
-    Some(IrExpr::Block {
-        stmts: vec![variable_declaration, end_declaration, loop_expression],
-        value: None,
-    })
 }
 
 fn unsigned_range_contains(

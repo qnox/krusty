@@ -774,6 +774,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::RangeUntil
                 | crate::libraries::CompilerIntrinsic::ProgressionStep
                 | crate::libraries::CompilerIntrinsic::ProgressionReversed
+                | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | crate::libraries::CompilerIntrinsic::NumericConversion
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | crate::libraries::CompilerIntrinsic::PrimitiveCompare

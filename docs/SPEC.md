@@ -7131,6 +7131,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   over `until`/`..<`, which have no inclusive form, iterate the resulting progression value. An
   inclusive bound that cannot overflow iterates on the JVM as `if (i <= last) do { val x = i; i += step;
   body } while (i <= last)`, the loop variable a copy of the induction variable. (`tests/counted_loop_shape_e2e.rs`.)
+- **Unsigned counted loops share the progression header.** `UInt`/`ULong` ranges, progressions and
+  their `downTo`/`until`/`step`/`reversed` count like the signed ones, with kotlinc's differences:
+  the bounds compare through the stdlib's `uintCompare`/`ulongCompare` over the value class's
+  declared carrier. The provider publishes that declaration in the typed `UnsignedCompare` role
+  after checking its full signature, the checker takes the one declaration that plays it into the
+  progression plan (a second one leaves the loop without a stable target), and the loop header
+  carries it (an ordinary `<` is `Integer.compareUnsigned`). No
+  constant is visible to `canOverflow` or the exclusive-bound rewrite (kotlinc's `constLongValue`
+  reads none), a non-constant `last` is always copied, the loop variable is always a copy of the
+  induction variable, and the stepped last element is the stdlib's unsigned
+  `getProgressionLastElement` overload, called under the JVM name its metadata records. `UInt.rangeTo`/
+  `rangeUntil` and the `ULong` ones realize as range construction like the builtin operators, so
+  `1u..n` is `new UIntRange(1, n, null)`. A `UByte`/`UShort` `downTo`/`until` is iterated, since its
+  zero-extending widening is not a bound coercion. (`tests/counted_loop_shape_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and

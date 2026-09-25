@@ -4,7 +4,7 @@ use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr};
 use crate::types::Ty;
 
 use super::header::{LoopVariables, ProgressionHeader};
-use super::{constant_value, CountedLoop, CounterLoopStyle, Realizer};
+use super::{constant_value, is_unsigned, CountedLoop, CounterLoopStyle, Operand, Realizer};
 
 impl Realizer<'_> {
     /// Declare the induction variable, `last` and `step` in kotlinc's order, then build the loop
@@ -22,10 +22,11 @@ impl Realizer<'_> {
         let first_constant = constant_value(self.ir, header.first.value);
         let can_overflow = header.can_overflow(self.ir);
         let java_like = self.style == CounterLoopStyle::JavaLike && !header.last_is_inclusive;
-        // Only the guarded do-while keeps the loop variable apart from the induction variable; the
-        // other shapes step the induction variable after the body, so it is the loop variable.
-        let separate_loop_variable =
-            self.style == CounterLoopStyle::JavaLike && !can_overflow && !java_like;
+        // The guarded do-while steps the induction variable before the body, so the loop variable is
+        // a copy of it. The other shapes step after the body and use the induction variable as the
+        // loop variable, except over unsigned elements, whose loop variable kotlinc always copies.
+        let steps_first = self.style == CounterLoopStyle::JavaLike && !can_overflow && !java_like;
+        let separate_loop_variable = steps_first || is_unsigned(ty);
         let mut statements = header.prelude.clone();
         let (induction, induction_declaration) = if separate_loop_variable {
             let slot = self.allocate_temporary();
@@ -45,8 +46,15 @@ impl Realizer<'_> {
             );
             (variable, declaration)
         };
+        // The loop reads an unsigned `last` through a representation coercion, so kotlinc copies
+        // anything but a constant.
+        let last_operand = Operand {
+            can_change: header.last.can_change
+                || (is_unsigned(ty) && constant_value(self.ir, header.last.value).is_none()),
+            ..header.last
+        };
         let mut last_statements = Vec::new();
-        let (_, last) = self.loop_temporary(header.last, ty, &mut last_statements);
+        let (_, last) = self.loop_temporary(last_operand, ty, &mut last_statements);
         if header.is_reversed {
             statements.extend(last_statements);
             statements.push(induction_declaration);
@@ -61,10 +69,27 @@ impl Realizer<'_> {
             step,
         };
         let increment = self.increment_induction_variable(&variables, ty);
+        // `val loopVariable = inductionVar` opening the body, when the two are apart.
+        let (loop_variable, loop_variable_declaration) = if separate_loop_variable {
+            let current = self.add(IrExpr::GetValue(induction));
+            let declaration =
+                self.loop_variable_declaration(variable, variable_name.as_deref(), ty, current);
+            (variable, Some(declaration))
+        } else {
+            (induction, None)
+        };
+        let body = match loop_variable_declaration {
+            Some(declaration) if !steps_first => self.add(IrExpr::Block {
+                stmts: vec![declaration, body],
+                value: None,
+            }),
+            _ => body,
+        };
         let loop_expression = if can_overflow {
             // The induction variable can overflow past an inclusive bound, so the loop leaves by
-            // comparing it with `last` before stepping, and the entry test guards the whole loop.
-            let current = self.add(IrExpr::GetValue(induction));
+            // comparing the loop variable with `last` before stepping, and the entry test guards
+            // the whole loop.
+            let current = self.add(IrExpr::GetValue(loop_variable));
             let at_last = self.add(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Eq,
                 lhs: current,
@@ -111,13 +136,9 @@ impl Realizer<'_> {
             })
         } else {
             // `val loopVariable = inductionVar; inductionVar += step; body` while the bound holds.
-            let current = self.add(IrExpr::GetValue(induction));
-            let loop_variable =
-                self.loop_variable_declaration(variable, variable_name.as_deref(), ty, current);
-            let body = self.add(IrExpr::Block {
-                stmts: vec![loop_variable, increment, body],
-                value: None,
-            });
+            let mut stmts: Vec<ExprId> = loop_variable_declaration.into_iter().collect();
+            stmts.extend([increment, body]);
+            let body = self.add(IrExpr::Block { stmts, value: None });
             let condition = header.condition(self, &variables);
             let repeat = self.add(IrExpr::While {
                 cond: condition,
@@ -145,8 +166,8 @@ impl Realizer<'_> {
         first_constant: Option<i64>,
         repeat: ExprId,
     ) -> ExprId {
-        let last_constant =
-            constant_value(self.ir, variables.last).filter(|_| header.ty != Ty::Long);
+        let last_constant = constant_value(self.ir, variables.last)
+            .filter(|_| !matches!(header.ty, Ty::Long | Ty::UInt | Ty::ULong));
         let entered = first_constant
             .zip(last_constant)
             .and_then(|(first, last)| header.holds_between(first, last));

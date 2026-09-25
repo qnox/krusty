@@ -4033,6 +4033,12 @@ impl BodyFirChecker<'_> {
                         operation: Self::range_operation(range.kind),
                         start,
                         end,
+                        unsigned_compare: match Ty::range_value_type(counter.ty(), counter.ty()) {
+                            Some(class) => {
+                                self.unsigned_loop_compare(class, counter, range.start)?
+                            }
+                            None => None,
+                        },
                     },
                     body,
                 }

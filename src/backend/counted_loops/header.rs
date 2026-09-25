@@ -17,7 +17,9 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
-use super::{constant_bound, constant_value, step_constant, CounterLoopStyle, Operand, Realizer};
+use super::{
+    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand, Realizer,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Direction {
@@ -68,6 +70,10 @@ impl ProgressionHeader {
     pub(super) fn can_overflow(&self, ir: &IrFile) -> bool {
         if let Some(can_overflow) = self.can_overflow {
             return can_overflow;
+        }
+        // kotlinc reads constants through `constLongValue`, which sees no unsigned constant.
+        if is_unsigned(self.ty) {
+            return true;
         }
         let (Some(step), Some(last)) = (
             constant_value(ir, self.step.value),
@@ -150,7 +156,17 @@ impl ProgressionHeader {
             Direction::Decreasing => (variables.last, induction),
             Direction::Increasing | Direction::Unknown => (induction, variables.last),
         };
-        realizer.add(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+        let Some(compare) = realizer.unsigned_compare.clone() else {
+            return realizer.add(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        };
+        // `lhs.compareTo(rhs) < 0` (`<= 0`) through the selected unsigned comparison.
+        let compared = realizer.runtime_call(&compare, vec![lhs, rhs]);
+        let zero = realizer.add(IrExpr::Const(IrConst::Int(0)));
+        realizer.add(IrExpr::PrimitiveBinOp {
+            op,
+            lhs: compared,
+            rhs: zero,
+        })
     }
 
     /// The entry condition evaluated between two constant bounds.
@@ -168,9 +184,10 @@ impl ProgressionHeader {
     }
 }
 
-/// The type a progression of `ty` steps by: `Long` for a `Long` progression, `Int` otherwise.
+/// The type a progression of `ty` steps by: `Long` for a `Long` or `ULong` progression, `Int`
+/// otherwise.
 fn step_type(ty: Ty) -> Ty {
-    if ty == Ty::Long {
+    if matches!(ty, Ty::Long | Ty::ULong) {
         Ty::Long
     } else {
         Ty::Int
@@ -252,7 +269,7 @@ impl Realizer<'_> {
             operation,
             FirRangeOperation::Through | FirRangeOperation::DownTo
         );
-        let exclusive = (inclusive && self.style == CounterLoopStyle::JavaLike)
+        let exclusive = (inclusive && self.style == CounterLoopStyle::JavaLike && !is_unsigned(ty))
             .then(|| exclusive_bound(self.ir, last.value, direction, ty))
             .flatten();
         let step_ty = step_type(ty);

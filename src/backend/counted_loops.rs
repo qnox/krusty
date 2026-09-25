@@ -41,8 +41,8 @@ pub(crate) enum CounterLoopStyle {
     JavaLike,
 }
 
-/// Realize every signed/character checked range loop. Unsigned comparisons require target runtime
-/// support and deliberately remain checked for the owning backend to consume.
+/// Realize every checked range loop. An unsigned loop compares through the function resolution
+/// selected for it, called like any other external declaration.
 pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
     let mut next_slot = None;
     for expression in 0..ir.exprs.len() {
@@ -51,20 +51,19 @@ pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
             variable_name,
             counter,
             source,
+            unsigned_compare,
             body,
             label,
         }) = ir.exprs[expression].clone()
         else {
             continue;
         };
-        if matches!(counter, Ty::UInt | Ty::ULong) {
-            continue;
-        }
         let first_generated = ir.exprs.len();
         let mut realizer = Realizer {
             next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
             ir: &mut *ir,
             style,
+            unsigned_compare,
         };
         let replacement = realizer.progression_loop(CountedLoop {
             variable,
@@ -107,11 +106,13 @@ impl Operand {
     }
 }
 
-/// The IR file being rewritten, the target's loop style, and the next free value slot.
+/// The IR file being rewritten, the target's loop style, the next free value slot, and the
+/// comparison the loop being realized orders an unsigned counter with.
 struct Realizer<'a> {
     ir: &'a mut IrFile,
     style: CounterLoopStyle,
     next_slot: u32,
+    unsigned_compare: Option<IrRuntimeFunction>,
 }
 
 impl Realizer<'_> {
@@ -189,6 +190,14 @@ impl Realizer<'_> {
     }
 
     fn range_bound(&mut self, expression: ExprId, target: Ty) -> ExprId {
+        // A constant already of the target type needs no coercion (`ifeq` against `0u`).
+        if matches!(
+            (self.ir.expr(expression), target),
+            (IrExpr::Const(IrConst::UInt(_)), Ty::UInt)
+                | (IrExpr::Const(IrConst::ULong(_)), Ty::ULong)
+        ) {
+            return expression;
+        }
         self.add(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: expression,
@@ -238,6 +247,8 @@ fn integral_value(constant: &IrConst) -> Option<i64> {
         IrConst::Int(value) => Some(i64::from(value)),
         IrConst::Long(value) => Some(value),
         IrConst::Char(value) => Some(i64::from(value)),
+        IrConst::UInt(value) => Some(i64::from(value)),
+        IrConst::ULong(value) => Some(value as i64),
         _ => None,
     }
 }
@@ -260,6 +271,10 @@ fn constant_value(ir: &IrFile, expression: ExprId) -> Option<i64> {
     constant_bound(ir, expression)
         .as_ref()
         .and_then(integral_value)
+}
+
+fn is_unsigned(ty: Ty) -> bool {
+    matches!(ty, Ty::UInt | Ty::ULong)
 }
 
 fn step_constant(step_ty: Ty, value: i64) -> IrConst {

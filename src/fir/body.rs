@@ -1704,18 +1704,21 @@ pub enum FirLoopHeader {
     DoWhile {
         condition: FirExprId,
     },
+    /// `unsigned_compare` is the comparison resolution selected for an unsigned counter.
     Range {
         variable: LocalValueId,
         counter: FirRangeCounterKind,
         operation: FirRangeOperation,
         start: FirExprId,
         end: FirExprId,
+        unsigned_compare: Option<FirRuntimeFunction>,
     },
     /// A counted loop over a progression built by `kotlin.ranges` or held in a value.
     Progression {
         variable: LocalValueId,
         counter: FirRangeCounterKind,
         source: FirProgressionSource,
+        unsigned_compare: Option<FirRuntimeFunction>,
     },
     Iterable {
         variable: LocalValueId,
