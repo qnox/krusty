@@ -15811,11 +15811,17 @@ impl<'a> Emitter<'a> {
                     name,
                     params,
                     ret,
+                    module_target,
                     ..
                 } => {
                     // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
                     let param_tys = jvm_tys(params);
                     let ret = jvm_declared_ty(ret);
+                    let owner_is_interface = super::module_calls::static_owner_is_jvm_interface(
+                        self.ir,
+                        *facade,
+                        *module_target,
+                    );
                     let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
                     if let Err(mismatch) =
@@ -15826,14 +15832,6 @@ impl<'a> Emitter<'a> {
                     }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let desc = method_descriptor(&param_tys, ret);
-                    // A static method declared on an INTERFACE (`@Serializable(with=X) interface I` whose
-                    // synthetic `serializer()` is static) needs an InterfaceMethodref constant, even for
-                    // `invokestatic` (else `IncompatibleClassChangeError`).
-                    let owner_is_interface = self
-                        .ir
-                        .classes
-                        .iter()
-                        .any(|c| c.fq_name_matches(&facade) && c.is_interface);
                     // `-jvm-default=disable` puts the `$default` synthetic on the holder, not on the
                     // interface, so a call site aimed at the interface links to a method that was
                     // never emitted (`NoSuchMethodError` on the first defaulted call).
@@ -16679,11 +16677,9 @@ impl<'a> Emitter<'a> {
                 // The impl method lives on whichever class owns it (a class-member lambda's impl is a
                 // method of the enclosing class, so it can access that class's privates); top-level
                 // lambdas keep theirs on the file facade.
-                let impl_owner = self
-                    .ir
-                    .classes
-                    .iter()
-                    .find(|c| c.methods.contains(impl_fn))
+                let impl_class = self.ir.classes.iter().find(|c| c.methods.contains(impl_fn));
+                let impl_owner_is_interface = impl_class.is_some_and(|c| c.is_interface);
+                let impl_owner = impl_class
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
@@ -16740,11 +16736,7 @@ impl<'a> Emitter<'a> {
                         kotlin_function: sam.is_none(),
                         function_adapter,
                         identity,
-                        owner_is_interface: self
-                            .ir
-                            .classes
-                            .iter()
-                            .any(|c| c.fq_name_matches(&impl_owner) && c.is_interface),
+                        owner_is_interface: impl_owner_is_interface,
                     });
                     if captures.is_empty() {
                         // Nothing captured, so every evaluation yields the same instance — kotlinc
@@ -16779,9 +16771,13 @@ impl<'a> Emitter<'a> {
                 // MethodHandle with its `$lambda$N` refs, the instantiated MethodType), and the
                 // LambdaMetafactory handle only after them — pool order follows that visit.
                 let sam_mt = self.cw.method_type(&sam_desc);
-                let impl_mh = self
-                    .cw
-                    .method_handle_static(&impl_owner, &impl_name, &impl_desc);
+                let impl_ref = if impl_owner_is_interface {
+                    self.cw
+                        .interface_methodref(&impl_owner, &impl_name, &impl_desc)
+                } else {
+                    self.cw.methodref(&impl_owner, &impl_name, &impl_desc)
+                };
+                let impl_mh = self.cw.method_handle_ref(6, impl_ref);
                 let inst_mt = self.cw.method_type(&inst_desc);
                 let meta = self.cw.method_handle_static(
                     "java/lang/invoke/LambdaMetafactory",

@@ -3045,9 +3045,10 @@ pub struct IrModuleCallable {
     /// Kotlin declaration name used for callable-reference identity. A target-specific annotation
     /// may change the emitted method name without changing this semantic spelling.
     pub name: Box<str>,
-    /// Declaring classifier for a member `$default` bridge. Ordinary member calls are already
-    /// virtual/special common-IR calls and therefore never use this record.
+    /// Declaring classifier for a member `$default` bridge, and its source-level kind (a target
+    /// decides what the kind means physically). Ordinary member calls are virtual/special calls.
     pub owner: Option<TypeName>,
+    pub owner_kind: Option<IrClassifierKind>,
     /// Final source declaration flags needed after stable module calls cross into target realization.
     pub flags: crate::fir::DeclarationFlags,
     /// Final declaration signature, including context and extension receiver parameters but never

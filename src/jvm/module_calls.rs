@@ -54,6 +54,29 @@ pub(super) fn owner_is_jvm_interface(property: &IrModuleProperty) -> bool {
     )
 }
 
+/// Whether the owner of a static call is a JVM interface, so that the call is named through an
+/// interface method reference: a class of this file (a plugin's static `serializer()` on an
+/// interface), or the declaring classifier of a module callable (a sibling file's `foo$default`).
+pub(super) fn static_owner_is_jvm_interface(
+    ir: &IrFile,
+    owner: TypeName,
+    target: Option<CallableId>,
+) -> bool {
+    let module_owner_is_interface = target
+        .and_then(|target| ir.referenced_module_callables.get(&target))
+        .is_some_and(|callable| {
+            matches!(
+                callable.owner_kind,
+                Some(IrClassifierKind::Interface | IrClassifierKind::Annotation)
+            )
+        });
+    module_owner_is_interface
+        || ir
+            .classes
+            .iter()
+            .any(|class| class.is_interface && class.fq_name_id() == owner)
+}
+
 pub(super) fn property_getter_name(property: &IrModuleProperty) -> String {
     if property.owner_kind == Some(IrClassifierKind::Annotation) {
         property.name.clone()
