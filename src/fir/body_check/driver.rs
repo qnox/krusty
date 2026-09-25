@@ -761,7 +761,11 @@ fn check_and_dispatch_property_body(
             return Err(CheckedBodyDriverFailure::UnsupportedBodyKind(work.kind));
         }
     }
-    if work.kind == BodyKind::Getter && matches!(property.getter, Some(FunBody::Expr(_))) {
+    // An initializer or delegate expression, like an expression-bodied getter, is the body's
+    // value: its last root is consumed as that value, never discarded as a statement.
+    if matches!(work.kind, BodyKind::Initializer | BodyKind::Delegate)
+        || (work.kind == BodyKind::Getter && matches!(property.getter, Some(FunBody::Expr(_))))
+    {
         body.set_implicit_return();
     }
     session.absorb_checked_body(&body);
