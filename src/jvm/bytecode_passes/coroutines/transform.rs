@@ -332,7 +332,7 @@ pub(super) fn build_state_machine(
     drop_unbox_inline_class_markers(&mut method, &points);
     remove_empty_catch_blocks(&mut method);
     extend_parameter_ranges(&mut method, spec.last_parameter_slot);
-    extend_suspend_lambda_parameter_ranges(&mut method);
+    extend_suspend_lambda_parameter_ranges(&mut method)?;
     drop_markers(&mut method, &[SuspendMarker::SuspendLambdaParameter]);
 
     let line_or_none = |line: &Option<u16>| line.map_or(-1, i32::from);

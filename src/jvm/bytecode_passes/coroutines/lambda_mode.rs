@@ -65,10 +65,18 @@ pub(crate) fn transform_suspend_lambda(
         method.insns.ids().into_iter().rev().find(|&id| {
             is_suspend_marker(&method.insns, id, SuspendMarker::SuspendLambdaParameter)
         });
-    let coroutine_start = last_parameter_marker
-        .and_then(|marker| method.insns.next(marker))
-        .or_else(|| method.insns.first())
-        .ok_or(CoroutineError::Unsupported("an empty suspend lambda body"))?;
+    let coroutine_start = match last_parameter_marker {
+        Some(marker) => method
+            .insns
+            .next(marker)
+            .ok_or(CoroutineError::Unsupported(
+                "a suspend lambda parameter marker that ends the body",
+            ))?,
+        None => method
+            .insns
+            .first()
+            .ok_or(CoroutineError::Unsupported("an empty suspend lambda body"))?,
+    };
 
     let spec = MachineSpec {
         owner,

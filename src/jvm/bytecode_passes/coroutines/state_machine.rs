@@ -11,7 +11,7 @@ use super::markers::{
     suspend_lambda_parameter_slots, SuspendMarker,
 };
 use super::suspension_points::SuspensionPoint;
-use super::{coroutine_suspended, NamedFunction};
+use super::{coroutine_suspended, CoroutineError, NamedFunction};
 use crate::jvm::method_node::{Constant, Insn, LabelId, LocalVariable, Node, TryCatchBlock};
 
 const CONTINUATION: &str = "Lkotlin/coroutines/Continuation;";
@@ -551,22 +551,26 @@ pub(crate) fn extend_parameter_ranges(method: &mut EditableMethod, last_paramete
 /// `extendSuspendLambdaParameterRanges`: a suspend lambda's parameters are read from their fields
 /// on every entry, before the `tableswitch`, so each spans the method from the first label after
 /// the last parameter marker — one entry, moved to the end of the table.
-pub(crate) fn extend_suspend_lambda_parameter_ranges(method: &mut EditableMethod) {
+pub(crate) fn extend_suspend_lambda_parameter_ranges(
+    method: &mut EditableMethod,
+) -> Result<(), CoroutineError> {
     let slots = suspend_lambda_parameter_slots(&method.insns);
     if slots.is_empty() {
-        return;
+        return Ok(());
     }
-    let Some(last_marker) =
+    let last_marker =
         method.insns.ids().into_iter().rev().find(|&id| {
             is_suspend_marker(&method.insns, id, SuspendMarker::SuspendLambdaParameter)
-        })
-    else {
-        return;
+        });
+    let Some(last_marker) = last_marker else {
+        return Ok(());
     };
     let mut cursor = method.insns.next(last_marker);
     let start = loop {
         let Some(id) = cursor else {
-            return;
+            return Err(CoroutineError::Unsupported(
+                "a suspend lambda parameter marker with no label after it",
+            ));
         };
         if let Node::Label(label) = method.insns.node(id) {
             break *label;
@@ -591,4 +595,5 @@ pub(crate) fn extend_suspend_lambda_parameter_ranges(method: &mut EditableMethod
         extended.end = ending_label(method);
         method.method.local_variables.push(extended);
     }
+    Ok(())
 }
