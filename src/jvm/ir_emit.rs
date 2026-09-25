@@ -13711,38 +13711,19 @@ impl<'a> Emitter<'a> {
                             "CoroutineContext intrinsic must be realized by the CPS pass before emit"
                         )
                     }
+                    // kotlinc's string concatenation renders a value-class operand through the
+                    // class's own `toString-impl`, not the `toString()` intrinsic an explicit call
+                    // selects.
                     crate::ir::IrIntrinsic::UnsignedToString { source } => {
                         let receiver = dispatch_receiver.expect("unsigned toString has a receiver");
+                        let (owner, carrier) = native_unsigned_impl_target(*source)
+                            .expect("checked unsigned conversion carries unsigned type");
                         self.emit_value(receiver, code);
-                        let (owner, name, descriptor) = match *source {
-                            Ty::UByte | Ty::UShort => {
-                                code.push_int(
-                                    source
-                                        .unsigned_widen_mask()
-                                        .expect("narrow unsigned value has a mask"),
-                                    self.cw,
-                                );
-                                code.iand();
-                                ("java/lang/Integer", "toString", "(I)Ljava/lang/String;")
-                            }
-                            Ty::UInt => (
-                                "java/lang/Integer",
-                                "toUnsignedString",
-                                "(I)Ljava/lang/String;",
-                            ),
-                            Ty::ULong => (
-                                "java/lang/Long",
-                                "toUnsignedString",
-                                "(J)Ljava/lang/String;",
-                            ),
-                            _ => unreachable!("checked unsigned conversion carries unsigned type"),
-                        };
-                        let method = self.cw.methodref(owner, name, descriptor);
-                        code.invokestatic(
-                            method,
-                            slot_words(source.int_arithmetic_repr()) as i32,
-                            1,
-                        );
+                        let descriptor = method_descriptor(&[carrier], Ty::String);
+                        let method =
+                            self.cw
+                                .methodref(&owner.render(), "toString-impl", &descriptor);
+                        code.invokestatic(method, slot_words(carrier) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::PrimitiveArrayNew { element } => {
                         self.emit_value(args[0], code);
@@ -14122,9 +14103,6 @@ impl<'a> Emitter<'a> {
                         &args,
                         code,
                     ) {
-                        return;
-                    }
-                    if self.emit_unsigned_compare_to_virtual(&owner, &name, recv, &args, code) {
                         return;
                     }
                     // A `@JvmStatic` member of an `object`/companion (`Dispatchers.IO`): an ordinary
@@ -15189,6 +15167,21 @@ impl<'a> Emitter<'a> {
         let ty = self.value_ty(e);
         let semantic = self.ir.logical_types.get(&e).copied().unwrap_or(ty);
         self.emit_value(e, code);
+        // An unsigned operand already rendered by its `toString-impl` is appended at the value
+        // class's static type, like any other value class.
+        if matches!(
+            self.ir.expr(e),
+            IrExpr::Call {
+                callee: Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::UnsignedToString { .. },
+                    ..
+                },
+                ..
+            }
+        ) {
+            self.append_top(Ty::obj("java/lang/Object"), code);
+            return;
+        }
         if !semantic.is_nullable() {
             if let Some((owner, carrier)) = native_unsigned_impl_target(semantic) {
                 let descriptor = method_descriptor(&[carrier], Ty::String);
@@ -15690,60 +15683,6 @@ impl<'a> Emitter<'a> {
         emit_num_conv(arithmetic_ty, source_prim, code);
         emit_num_conv(source_prim, ret, code);
         true
-    }
-
-    fn emit_unsigned_compare_to_virtual(
-        &mut self,
-        owner: &str,
-        name: &str,
-        recv: u32,
-        args: &[u32],
-        code: &mut CodeBuilder,
-    ) -> bool {
-        if name != "compareTo" || args.len() != 1 {
-            return false;
-        }
-        // `UByte`/`UShort` compare like kotlinc does: zero-extend both sides into an `int` and use the
-        // `UInt` comparator (they have no `compareUnsigned` of their own on the JDK side).
-        let (logical, jdk_owner, prim_desc, repr) = match owner {
-            "kotlin/UByte" => (Ty::UByte, "java/lang/Integer", "I", Ty::Int),
-            "kotlin/UShort" => (Ty::UShort, "java/lang/Integer", "I", Ty::Int),
-            "kotlin/UInt" => (Ty::UInt, "java/lang/Integer", "I", Ty::Int),
-            "kotlin/ULong" => (Ty::ULong, "java/lang/Long", "J", Ty::Long),
-            _ => return false,
-        };
-        self.emit_unsigned_operand(recv, logical, repr, code);
-        self.emit_unsigned_operand(args[0], logical, repr, code);
-        let m = self.cw.methodref(
-            jdk_owner,
-            "compareUnsigned",
-            &format!("({prim_desc}{prim_desc})I"),
-        );
-        code.invokestatic(m, (slot_words(repr) * 2) as i32, 1);
-        true
-    }
-
-    fn emit_unsigned_operand(&mut self, expr: u32, logical: Ty, repr: Ty, code: &mut CodeBuilder) {
-        let from = self.value_ty(expr);
-        self.emit_value(expr, code);
-        if from.is_reference() {
-            let Some(owner) = logical.kotlin_class_internal().map(|n| n.render()) else {
-                return;
-            };
-            let desc = format!("(){}", type_descriptor(logical));
-            let cls = self.cw.class_ref(&owner);
-            code.checkcast(cls);
-            let m = self.cw.methodref(&owner, "unbox-impl", &desc);
-            code.invokevirtual(m, 0, slot_words(logical) as i32);
-        } else {
-            emit_num_conv(from, logical.scalar_value_repr().unwrap_or(repr), code);
-        }
-        // A `UByte`/`UShort` now sits on the stack sign-extended from its `byte`/`short`; mask it into
-        // the unsigned value the comparator expects.
-        if let Some(mask) = logical.unsigned_widen_mask() {
-            code.push_int(mask, self.cw);
-            code.iand();
-        }
     }
 
     fn emit_binop(
