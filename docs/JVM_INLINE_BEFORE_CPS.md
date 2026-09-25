@@ -94,12 +94,14 @@ Each step reports box passes, byte-identical files and divergent classes before 
   other rewrites and hands back the spill fields and `@DebugMetadata`; the continuation class is
   written afterwards from them. A function whose suspension points are all tail calls gets no
   continuation class; a failed transformation fails the file.
+* The transformed method then goes through the same optimizer passes as every other method
+  (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
+  removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after
+  `CoroutineTransformerMethodVisitor`. For a function without inline expansions its instructions
+  then match kotlinc's.
 
 Known gaps, both byte differences in the function's own method (the continuation class matches):
 
-* kotlinc's optimizer runs after the transformer (redundant temporaries, dead code, `nop`
-  removal, slot compaction). krusty does not run its rewrites over a transformed body yet; they
-  move to method nodes in the emitter refactor, and then run here.
 * The constants the transformed body adds are interned at the end of the pool, not in kotlinc's
   first-use order.
 * A body the common IR expanded from a same-file inline function has no `$i$f`/`$i$a`
