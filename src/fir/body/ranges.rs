@@ -43,49 +43,17 @@ impl FirRangeCounterKind {
 }
 
 /// A progression value a counted loop iterates by reading its `first`, `last` and `step`
-/// (kotlinc's `DefaultProgressionHandler`). A `*Range` has step 1 and always increases; any other
-/// progression's direction is known only at run time from the sign of its step.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// (kotlinc's `DefaultProgressionHandler`), with the members the resolver selected from the
+/// progression class's declarations. A `*Range` has step 1 and always increases, so it has no
+/// `step` read; any other progression's direction is known only at run time from its step's sign.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirProgressionClass {
     /// The progression's static type, whose members the loop reads.
     pub ty: Ty,
     pub counter: FirRangeCounterKind,
-    pub unit_step: bool,
-}
-
-impl FirProgressionClass {
-    /// The signed progression classes of `kotlin.ranges`. Their constructors are internal, so no
-    /// other class is a subtype of one.
-    pub fn of(ty: Ty) -> Option<Self> {
-        const CLASSES: [(&str, FirRangeCounterKind, bool); 6] = [
-            ("kotlin/ranges/IntRange", FirRangeCounterKind::Int, true),
-            (
-                "kotlin/ranges/IntProgression",
-                FirRangeCounterKind::Int,
-                false,
-            ),
-            ("kotlin/ranges/LongRange", FirRangeCounterKind::Long, true),
-            (
-                "kotlin/ranges/LongProgression",
-                FirRangeCounterKind::Long,
-                false,
-            ),
-            ("kotlin/ranges/CharRange", FirRangeCounterKind::Char, true),
-            (
-                "kotlin/ranges/CharProgression",
-                FirRangeCounterKind::Char,
-                false,
-            ),
-        ];
-        CLASSES
-            .iter()
-            .find(|(class, ..)| Ty::obj(class) == ty)
-            .map(|&(_, counter, unit_step)| Self {
-                ty,
-                counter,
-                unit_step,
-            })
-    }
+    pub first: super::FirPropertyTarget,
+    pub last: super::FirPropertyTarget,
+    pub step: Option<super::FirPropertyTarget>,
 }
 
 /// Where a counted loop's progression comes from, as kotlinc's `HeaderInfoBuilder` handlers see
@@ -101,7 +69,7 @@ pub enum FirProgressionSource {
     },
     /// A progression value read through its `first`, `last` and `step`.
     Value {
-        progression: FirProgressionClass,
+        progression: Box<FirProgressionClass>,
         iterable: super::FirExprId,
     },
     /// `nested step step`.

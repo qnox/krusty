@@ -17,38 +17,48 @@ impl BodyFirChecker<'_> {
         variable_ty: ResolvedTy,
         iterable_source: ExprId,
         iterable: FirExprId,
-    ) -> Option<FirLoopHeader> {
-        let counter = FirRangeCounterKind::of(variable_ty.get()).filter(|counter| {
+    ) -> Result<Option<FirLoopHeader>, BodyCheckFailure> {
+        let Some(counter) = FirRangeCounterKind::of(variable_ty.get()).filter(|counter| {
             matches!(
                 counter,
                 FirRangeCounterKind::Int | FirRangeCounterKind::Long | FirRangeCounterKind::Char
             )
-        })?;
-        let source = self.progression_source(iterable_source, iterable)?;
-        let matches_counter = match &source {
-            FirProgressionSource::Value { progression, .. } => progression.counter == counter,
-            _ => self
-                .body
-                .expr(iterable)
-                .and_then(|expression| FirProgressionClass::of(expression.ty.get().non_null()))
-                .is_some_and(|progression| progression.counter == counter),
+        }) else {
+            return Ok(None);
         };
-        matches_counter.then_some(FirLoopHeader::Progression {
-            variable,
-            counter,
-            source,
-        })
+        let Some(source) = self.progression_source(iterable_source, iterable)? else {
+            return Ok(None);
+        };
+        let progression = match &source {
+            FirProgressionSource::Value { progression, .. } => Some(progression.counter),
+            _ => match self.body.expr(iterable) {
+                Some(expression) => self
+                    .progression_class(expression.ty.get().non_null(), iterable_source)?
+                    .map(|progression| progression.counter),
+                None => None,
+            },
+        };
+        Ok(
+            (progression == Some(counter)).then_some(FirLoopHeader::Progression {
+                variable,
+                counter,
+                source,
+            }),
+        )
     }
 
     fn progression_source(
         &self,
         source: ExprId,
         checked: FirExprId,
-    ) -> Option<FirProgressionSource> {
-        if let Some(built) = self.progression_builder(source, checked) {
-            return Some(built);
+    ) -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
+        if let Some(built) = self.progression_builder(source, checked)? {
+            return Ok(Some(built));
         }
-        match &self.body.expr(checked)?.kind {
+        let Some(expression) = self.body.expr(checked) else {
+            return Ok(None);
+        };
+        match &expression.kind {
             FirExprKind::Range {
                 operation,
                 start,
@@ -59,13 +69,13 @@ impl BodyFirChecker<'_> {
                 .and_then(FirRangeCounterKind::of)
                 .is_some() =>
             {
-                Some(FirProgressionSource::Literal {
+                Ok(Some(FirProgressionSource::Literal {
                     operation: *operation,
                     start: *start,
                     end: *end,
-                })
+                }))
             }
-            _ => self.progression_value(checked),
+            _ => self.progression_value(checked, source),
         }
     }
 
@@ -74,7 +84,48 @@ impl BodyFirChecker<'_> {
         &self,
         source: ExprId,
         checked: FirExprId,
-    ) -> Option<FirProgressionSource> {
+    ) -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
+        let Some((intrinsic, receiver_source, receiver, argument)) =
+            self.progression_builder_call(source, checked)
+        else {
+            return Ok(None);
+        };
+        let nested = || -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
+            Ok(self
+                .progression_source(receiver_source, receiver)?
+                .filter(FirProgressionSource::has_inclusive_last))
+        };
+        Ok(match (intrinsic, argument) {
+            (CompilerIntrinsic::RangeDownTo | CompilerIntrinsic::RangeUntil, Some(end)) => {
+                Some(FirProgressionSource::Literal {
+                    operation: if intrinsic == CompilerIntrinsic::RangeDownTo {
+                        FirRangeOperation::DownTo
+                    } else {
+                        FirRangeOperation::Until
+                    },
+                    start: receiver,
+                    end,
+                })
+            }
+            (CompilerIntrinsic::ProgressionStep, Some(step)) => {
+                nested()?.map(|nested| FirProgressionSource::Step {
+                    nested: Box::new(nested),
+                    step,
+                })
+            }
+            (CompilerIntrinsic::ProgressionReversed, None) => {
+                nested()?.map(|nested| FirProgressionSource::Reversed(Box::new(nested)))
+            }
+            _ => None,
+        })
+    }
+
+    /// The selected builder intrinsic, its receiver (source and checked) and its one argument.
+    fn progression_builder_call(
+        &self,
+        source: ExprId,
+        checked: FirExprId,
+    ) -> Option<(CompilerIntrinsic, ExprId, FirExprId, Option<FirExprId>)> {
         let Some(ResolvedCall::Extension(extension)) = self.info.resolved_calls.get(&source) else {
             return None;
         };
@@ -109,34 +160,11 @@ impl BodyFirChecker<'_> {
                     conversion: None,
                     ..
                 }],
-                [argument_source],
-            ) => Some((*value, *argument_source)),
+                [_],
+            ) => Some(*value),
             _ => return None,
         };
-        let nested = |this: &Self| this.progression_source(*receiver_source, receiver.value);
-        match (intrinsic, argument) {
-            (CompilerIntrinsic::RangeDownTo | CompilerIntrinsic::RangeUntil, Some((end, _))) => {
-                Some(FirProgressionSource::Literal {
-                    operation: if intrinsic == CompilerIntrinsic::RangeDownTo {
-                        FirRangeOperation::DownTo
-                    } else {
-                        FirRangeOperation::Until
-                    },
-                    start: receiver.value,
-                    end,
-                })
-            }
-            (CompilerIntrinsic::ProgressionStep, Some((step, _))) => nested(self)
-                .filter(FirProgressionSource::has_inclusive_last)
-                .map(|nested| FirProgressionSource::Step {
-                    nested: Box::new(nested),
-                    step,
-                }),
-            (CompilerIntrinsic::ProgressionReversed, None) => nested(self)
-                .filter(FirProgressionSource::has_inclusive_last)
-                .map(|nested| FirProgressionSource::Reversed(Box::new(nested))),
-            _ => None,
-        }
+        Some((intrinsic, *receiver_source, receiver.value, argument))
     }
 
     /// `DefaultProgressionHandler`: a value of a progression class is read through its `first`,
@@ -144,31 +172,91 @@ impl BodyFirChecker<'_> {
     /// (`getMostPreciseTypeFromValInitializer`), which sees through implicit conversions and from a
     /// `val` read to its initializer. A smart cast the loop does not need is not applied: every
     /// progression class declares the members the loop reads.
-    fn progression_value(&self, iterable: FirExprId) -> Option<FirProgressionSource> {
-        let progression = FirProgressionClass::of(self.most_precise_type(iterable)?)?;
+    fn progression_value(
+        &self,
+        iterable: FirExprId,
+        source: ExprId,
+    ) -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
+        let Some(class) = self.most_precise_type(iterable) else {
+            return Ok(None);
+        };
+        let Some(progression) = self.progression_class(class, source)? else {
+            return Ok(None);
+        };
         let mut value = iterable;
         while let Some(FirExprKind::ImplicitConversion {
             value: inner,
             conversion,
         }) = self.body.expr(value).map(|expression| &expression.kind)
         {
-            let progression_before = self
-                .body
-                .expr(*inner)
-                .and_then(|inner| FirProgressionClass::of(inner.ty.get().non_null()));
+            let progression_before = self.body.expr(*inner).is_some_and(|inner| {
+                inner
+                    .ty
+                    .get()
+                    .non_null()
+                    .obj_internal()
+                    .and_then(crate::types::wk::progression_class)
+                    .is_some()
+            });
             if !matches!(
                 conversion.kind,
                 FirConversionKind::SmartCast { .. } | FirConversionKind::NullabilityWidening { .. }
-            ) || progression_before.is_none()
+            ) || !progression_before
             {
                 break;
             }
             value = *inner;
         }
-        Some(FirProgressionSource::Value {
-            progression,
+        Ok(Some(FirProgressionSource::Value {
+            progression: Box::new(progression),
             iterable: value,
-        })
+        }))
+    }
+
+    /// The progression class `class` is, with the `first`, `last` and `step` members resolution
+    /// selected from its declarations. A `kotlin.ranges` progression class whose declarations do
+    /// not publish them is a missing stable target, never an iterator loop.
+    fn progression_class(
+        &self,
+        class: Ty,
+        source: ExprId,
+    ) -> Result<Option<FirProgressionClass>, BodyCheckFailure> {
+        let Some(kind) = class
+            .obj_internal()
+            .filter(|_| class.type_args().is_empty())
+            .and_then(crate::types::wk::progression_class)
+        else {
+            return Ok(None);
+        };
+        let span = self.file.expr_span(source);
+        let missing = || self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget);
+        let plan = self.info.progression_plan(class).ok_or_else(missing)?;
+        let counter = FirRangeCounterKind::of(plan.first.ty)
+            .filter(|_| plan.last.ty == plan.first.ty)
+            .ok_or_else(missing)?;
+        let member = |member: crate::resolve::ProgressionMember| {
+            self.property_target_at(
+                span,
+                None,
+                Some(super::properties::ExternalPropertyTarget {
+                    property: member.property,
+                    receiver: Some(class),
+                    parameters: Vec::new(),
+                    result: member.ty,
+                    extension_receiver_parameter: None,
+                }),
+            )
+        };
+        Ok(Some(FirProgressionClass {
+            ty: class,
+            counter,
+            first: member(plan.first)?,
+            last: member(plan.last)?,
+            step: match kind {
+                crate::types::wk::ProgressionClass::Range => None,
+                crate::types::wk::ProgressionClass::Progression => Some(member(plan.step)?),
+            },
+        }))
     }
 
     fn most_precise_type(&self, expression: FirExprId) -> Option<Ty> {

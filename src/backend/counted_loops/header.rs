@@ -3,17 +3,17 @@
 //!   a unit step and a known direction; `until`/`..<` have an exclusive last bound, and on a target
 //!   preferring Java-like counter loops `..`/`downTo` become exclusive when the last bound is a
 //!   constant that can move one step outward without overflowing;
-//! - a progression value (`DefaultProgressionHandler`) is read through its `first`, `last` and
-//!   `step`; a `*Range` has step 1 and increases, any other progression's direction is known only
+//! - a progression value (`DefaultProgressionHandler`) is read through the `first`, `last` and
+//!   `step` members selected from its class; a `*Range` has step 1 and increases, any other progression's direction is known only
 //!   from the sign of its step at run time;
 //! - `step` (`StepHandler`) checks its argument, negates it to follow the nested progression's
 //!   direction, and recomputes `last` with `getProgressionLastElement`;
 //! - `reversed` (`ReversedHandler`) swaps first and last and negates the step.
 
-use crate::fir::{FirProgressionClass, FirRangeOperation};
+use crate::fir::FirRangeOperation;
 use crate::ir::{
-    ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrProgressionMember,
-    IrProgressionSource, IrShortCircuitKind,
+    ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrProgressionSource,
+    IrShortCircuitKind,
 };
 use crate::types::Ty;
 
@@ -212,9 +212,11 @@ impl Realizer<'_> {
                 end,
             } => self.range_literal_header(ty, *operation, *start, *end),
             IrProgressionSource::Value {
-                progression,
-                iterable,
-            } => self.progression_value_header(*progression, *iterable),
+                setup,
+                first,
+                last,
+                step,
+            } => self.progression_value_header(ty, *setup, *first, *last, *step),
             IrProgressionSource::Step { nested, step } => {
                 let nested = self.progression_header(nested, ty);
                 self.stepped_header(nested, *step)
@@ -274,57 +276,40 @@ impl Realizer<'_> {
         }
     }
 
-    /// `DefaultProgressionHandler`: the progression is read once, through a temporary unless it is
-    /// a constant or a local read, and the loop takes its `first`, `last` and `step` from it.
+    /// `DefaultProgressionHandler`: the loop takes its `first`, `last` and `step` from the
+    /// progression's selected members, after the value was stored if it needed a temporary.
     fn progression_value_header(
         &mut self,
-        progression: FirProgressionClass,
-        value: ExprId,
+        ty: Ty,
+        setup: Option<ExprId>,
+        first: ExprId,
+        last: ExprId,
+        step: Option<ExprId>,
     ) -> ProgressionHeader {
-        let ty = progression.counter.ty();
-        let class = progression.ty;
-        let mut prelude = Vec::new();
-        let value = if matches!(self.ir.expr(value), IrExpr::GetValue(_) | IrExpr::Const(_)) {
-            value
-        } else {
-            let value = Operand {
-                value,
-                can_change: true,
-            };
-            self.loop_temporary(value, class, &mut prelude).1
+        let read = |value| Operand {
+            value,
+            can_change: true,
         };
-        let member = |realizer: &mut Self, member| {
-            let progression = realizer.reread(value);
-            Operand {
-                value: realizer.add(IrExpr::Checked(IrCheckedOperation::ProgressionMember {
-                    progression,
-                    class,
-                    member,
-                })),
-                can_change: true,
-            }
-        };
-        let first = member(self, IrProgressionMember::First);
-        let last = member(self, IrProgressionMember::Last);
         let step_ty = step_type(ty);
-        let (step, direction) = if progression.unit_step {
-            let one = self.add(IrExpr::Const(step_constant(step_ty, 1)));
-            (Operand::stable(one), Direction::Increasing)
-        } else {
-            (member(self, IrProgressionMember::Step), Direction::Unknown)
+        let (step, direction) = match step {
+            Some(step) => (read(step), Direction::Unknown),
+            None => {
+                let one = self.add(IrExpr::Const(step_constant(step_ty, 1)));
+                (Operand::stable(one), Direction::Increasing)
+            }
         };
         ProgressionHeader {
             ty,
             step_ty,
             direction,
-            first,
-            last,
+            first: read(first),
+            last: read(last),
             last_is_inclusive: true,
             step,
             is_reversed: false,
             can_overflow: None,
             original_last: None,
-            prelude,
+            prelude: setup.into_iter().collect(),
         }
     }
 

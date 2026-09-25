@@ -5,8 +5,7 @@ use std::rc::Rc;
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
 use crate::fir::FirRangeOperation;
 use crate::ir::{
-    Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrProgressionMember, IrProgressionSource,
-    IrTypeOp,
+    Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrProgressionSource, IrTypeOp,
 };
 use crate::types::Ty;
 
@@ -14,15 +13,14 @@ use crate::types::Ty;
 pub(super) enum RangeRealizationFailure {
     Initialization(crate::libraries::PlatformInitializationError),
     Operation(RangeOperationFailure),
-    Progression(ProgressionMemberFailure),
+    Helper(ProgressionHelperFailure),
 }
 
-/// A progression class without the member a counted loop reads.
+/// A counted-loop helper (`getProgressionLastElement`) the runtime lacks for elements of type `ty`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ProgressionMemberFailure {
+pub(super) struct ProgressionHelperFailure {
     expression: ExprId,
-    class: Ty,
-    member: IrProgressionMember,
+    ty: Ty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,41 +180,6 @@ pub(super) fn realize(
                 ))?;
                 ir.exprs[expression] = replacement;
             }
-            IrExpr::Checked(IrCheckedOperation::ProgressionMember {
-                progression,
-                class,
-                member,
-            }) => {
-                let failure = || {
-                    RangeRealizationFailure::Progression(ProgressionMemberFailure {
-                        expression: expression as ExprId,
-                        class,
-                        member,
-                    })
-                };
-                let owner = class.obj_internal().ok_or_else(failure)?;
-                let info = runtime
-                    .counted_loop_info_for_name(owner)
-                    .ok_or_else(failure)?;
-                let accessor = match member {
-                    IrProgressionMember::First => Some(info.first),
-                    IrProgressionMember::Last => Some(info.last),
-                    IrProgressionMember::Step => info.step.map(|(accessor, _)| accessor),
-                }
-                .ok_or_else(failure)?;
-                let read = IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner,
-                        name: accessor.name,
-                        descriptor: accessor.descriptor,
-                        params: None,
-                        interface: false,
-                    },
-                    dispatch_receiver: Some(progression),
-                    args: Vec::new(),
-                };
-                ir.exprs[expression] = read;
-            }
             IrExpr::Checked(IrCheckedOperation::ProgressionLastElement {
                 first,
                 last,
@@ -224,10 +187,9 @@ pub(super) fn realize(
                 ty,
             }) => {
                 let callable = runtime.progression_last_element_callable(ty).ok_or(
-                    RangeRealizationFailure::Progression(ProgressionMemberFailure {
+                    RangeRealizationFailure::Helper(ProgressionHelperFailure {
                         expression: expression as ExprId,
-                        class: ty,
-                        member: IrProgressionMember::Last,
+                        ty,
                     }),
                 )?;
                 ir.exprs[expression] = IrExpr::Call {

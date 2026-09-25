@@ -19,13 +19,9 @@ use super::common;
 
 fn assert_identical(name: &str, src: &str) {
     let class = format!("{name}Kt");
-    let Some(result) =
-        common::byte_diff_against_kotlinc_cp(name, src, &class, &[common::stdlib_jar()])
-    else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
-    result.unwrap_or_else(|diff| panic!("{class} differs from kotlinc:\n{diff}"));
+    common::byte_diff_against_kotlinc_cp(name, src, &class, &[common::stdlib_jar()])
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc:\n{diff}"));
 }
 
 #[test]
@@ -96,12 +92,9 @@ fn counted_loops_still_iterate_correctly() {
                \x20   for (i in Long.MAX_VALUE - 1..Long.MAX_VALUE) longs += 1L\n\
                \x20   return \"$top $bottom $empty $bound $chars $longs\"\n\
                }\n";
-    let Some(actual) =
+    let actual =
         common::compile_and_run_box(src, "counted_loop_edges", &[common::stdlib_jar()], None)
-    else {
-        eprintln!("skipping: JVM runner unavailable");
-        return;
-    };
+            .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "3 3 0 4 xyzcba 2");
 }
 
@@ -145,12 +138,9 @@ fn progression_values_still_iterate_correctly() {
                \x20   for (c in letters) chars += c\n\
                \x20   return \"$down $up $empty $top $bottom $chars\"\n\
                }\n";
-    let Some(actual) =
+    let actual =
         common::compile_and_run_box(src, "progression_values", &[common::stdlib_jar()], None)
-    else {
-        eprintln!("skipping: JVM runner unavailable");
-        return;
-    };
+            .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "22 15 0 2 3 ace");
 }
 
@@ -205,11 +195,8 @@ fn stepped_and_reversed_progressions_still_iterate_correctly() {
                \x20   for (c in ('a'..'g' step 3).reversed()) chars += c\n\
                \x20   return \"${steps(9, 4)} ${reversedSteps(9, 4)} $failure $order $log $top $chars\"\n\
                }\n";
-    let Some(actual) =
-        common::compile_and_run_box(src, "stepped_progressions", &[common::stdlib_jar()], None)
-    else {
-        eprintln!("skipping: JVM runner unavailable");
-        return;
-    };
+    // `IllegalArgumentException` is a JDK class, so this compile needs the JDK's modules.
+    let actual = common::compile_and_run_with_stdlib(src, "stepped_progressions")
+        .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "159 951 Step must be positive, was: 0. 6 142 3 gda");
 }

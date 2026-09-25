@@ -7054,12 +7054,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration and never by name, as a `downTo`/`until` call, `step`, `reversed()`, a range literal or a
   progression value, and records a `FirProgressionSource`; common IR carries it as the checked
   `RangeLoop`'s `IrProgressionSource`, and the backend pass `src/backend/counted_loops.rs` builds the
-  header and loop shape at the target boundary. A progression value is read once through
-  `getFirst`/`getLast`/`getStep` of its most precise type (through `val` initializers and implicit
-  casts, `irCastIfNeeded`); a `*Range` steps by 1 upwards, any other progression tests the step's sign
-  at run time. `step` (`StepHandler`) throws `IllegalArgumentException("Step must be positive, was: s.")`
+  header and loop shape at the target boundary. Which classifiers are progressions and which
+  `kotlin.ranges` functions build one is the only thing the compiler names itself, in the well-known
+  symbol layer (`src/types/wk.rs`). A progression value's `first`, `last` and `step` are the members the
+  checker selects on its most precise type (through `val` initializers and implicit casts,
+  `irCastIfNeeded`; `src/resolve/for_loop_iteration.rs`), and the counter type is the selected
+  `first`'s type. The value is read once and each member is an ordinary external property read, so the
+  JVM calls the getter metadata names on the receiver's own class (`IntRange.getFirst`, the fake
+  override kotlinc selects, not `IntProgression.getFirst`). A `*Range` steps by 1 upwards, any other
+  progression tests the step's sign at run time. `step` (`StepHandler`) throws `IllegalArgumentException("Step must be positive, was: s.")`
   for a non-positive argument, negates it to follow the nested direction (at run time when that is
-  unknown), and moves `last` with `ProgressionUtilKt.getProgressionLastElement` unless the step is ±1.
+  unknown), and moves `last` with the stdlib's own `kotlin.internal.getProgressionLastElement` overload
+  for the step type unless the step is ±1.
   `reversed()` (`ReversedHandler`) swaps first and last and negates the step; `step` and `reversed()`
   over `until`/`..<`, which have no inclusive form, iterate the resulting progression value. An
   inclusive bound that cannot overflow iterates on the JVM as `if (i <= last) do { val x = i; i += step;

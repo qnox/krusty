@@ -57,7 +57,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
-pub use progression::{IrProgressionMember, IrProgressionSource};
+pub use progression::IrProgressionSource;
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -571,12 +571,6 @@ pub enum IrCheckedOperation {
         end: ExprId,
         negated: bool,
         counter: Ty,
-    },
-    /// `progression.member`, where `class` is the progression's static type.
-    ProgressionMember {
-        progression: ExprId,
-        class: Ty,
-        member: IrProgressionMember,
     },
     /// The last element a stepped progression reaches (`getProgressionLastElement`), over the
     /// step type `ty` (`Int` or `Long`).

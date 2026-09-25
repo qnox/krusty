@@ -297,8 +297,8 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     .then_some(CompilerIntrinsic::TypeOf)
 }
 
-/// The signed `kotlin.ranges` progression builders: `downTo`, `until`, `step` and `reversed` over
-/// `Int`, `Long` and `Char` progressions.
+/// The `kotlin.ranges` progression builders: `downTo` and `until` over integral values, and `step`
+/// and `reversed` over a progression.
 fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.kind != FnKind::Extension
         || facts.context_count != 0
@@ -310,36 +310,37 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
         return None;
     }
     let receiver = facts.receiver?;
-    let class = |ty: Ty, classes: &[&str]| {
-        ty.obj_internal().is_some_and(|name| {
-            ty.type_args().is_empty() && classes.iter().any(|class| name.matches(class))
-        })
+    let class = |ty: Ty, class: crate::types::wk::ProgressionClass| {
+        ty.type_args().is_empty()
+            && ty
+                .obj_internal()
+                .and_then(crate::types::wk::progression_class)
+                == Some(class)
     };
-    const PROGRESSIONS: [&str; 3] = [
-        "kotlin/ranges/IntProgression",
-        "kotlin/ranges/LongProgression",
-        "kotlin/ranges/CharProgression",
-    ];
-    const RANGES: [&str; 3] = [
-        "kotlin/ranges/IntRange",
-        "kotlin/ranges/LongRange",
-        "kotlin/ranges/CharRange",
-    ];
+    use crate::types::wk::ProgressionBuilder;
+    use crate::types::wk::ProgressionClass::{Progression, Range};
     let integral = |ty: Ty| matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long | Ty::Char);
-    match (facts.name, facts.params) {
-        ("downTo", [to]) if facts.is_infix && integral(receiver) && integral(*to) => {
-            class(facts.ret, &PROGRESSIONS).then_some(CompilerIntrinsic::RangeDownTo)
+    match (
+        crate::types::wk::progression_builder(facts.package, facts.name)?,
+        facts.params,
+    ) {
+        (ProgressionBuilder::DownTo, [to])
+            if facts.is_infix && integral(receiver) && integral(*to) =>
+        {
+            class(facts.ret, Progression).then_some(CompilerIntrinsic::RangeDownTo)
         }
-        ("until", [to]) if facts.is_infix && integral(receiver) && integral(*to) => {
-            class(facts.ret, &RANGES).then_some(CompilerIntrinsic::RangeUntil)
+        (ProgressionBuilder::Until, [to])
+            if facts.is_infix && integral(receiver) && integral(*to) =>
+        {
+            class(facts.ret, Range).then_some(CompilerIntrinsic::RangeUntil)
         }
-        ("step", [Ty::Int | Ty::Long])
-            if facts.is_infix && class(receiver, &PROGRESSIONS) && facts.ret == receiver =>
+        (ProgressionBuilder::Step, [Ty::Int | Ty::Long])
+            if facts.is_infix && class(receiver, Progression) && facts.ret == receiver =>
         {
             Some(CompilerIntrinsic::ProgressionStep)
         }
-        ("reversed", [])
-            if !facts.is_infix && class(receiver, &PROGRESSIONS) && facts.ret == receiver =>
+        (ProgressionBuilder::Reversed, [])
+            if !facts.is_infix && class(receiver, Progression) && facts.ret == receiver =>
         {
             Some(CompilerIntrinsic::ProgressionReversed)
         }
@@ -431,7 +432,7 @@ pub(crate) fn function_realization(
         kotlin_test(&facts)
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
-    } else if facts.package.matches("kotlin/ranges") {
+    } else if facts.package == crate::types::wk::kotlin_ranges_package() {
         progression_builder(&facts)
     } else {
         None

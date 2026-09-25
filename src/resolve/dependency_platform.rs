@@ -563,14 +563,6 @@ impl SemanticPlatform for DependencyPlatform {
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
         self.platform.signature_formal_names(signature)
     }
-
-    fn iterable_element_type(&self, internal: &str) -> Option<Ty> {
-        self.platform.iterable_element_type(internal)
-    }
-
-    fn iterable_element_type_name(&self, internal: TypeName) -> Option<Ty> {
-        self.platform.iterable_element_type_name(internal)
-    }
 }
 
 #[cfg(test)]

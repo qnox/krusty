@@ -3,12 +3,12 @@
 use super::*;
 use crate::fir::PropertyId;
 
-struct ExternalPropertyTarget {
-    property: crate::fir::ExternalPropertyId,
-    receiver: Option<Ty>,
-    parameters: Vec<Ty>,
-    result: Ty,
-    extension_receiver_parameter: Option<u32>,
+pub(super) struct ExternalPropertyTarget {
+    pub(super) property: crate::fir::ExternalPropertyId,
+    pub(super) receiver: Option<Ty>,
+    pub(super) parameters: Vec<Ty>,
+    pub(super) result: Ty,
+    pub(super) extension_receiver_parameter: Option<u32>,
 }
 
 type SelectedPropertyRead = (
@@ -1273,7 +1273,7 @@ impl BodyFirChecker<'_> {
         self.property_target_at(self.file.expr_span(expression), declaration, external)
     }
 
-    fn property_target_at(
+    pub(super) fn property_target_at(
         &self,
         span: Option<Span>,
         declaration: Option<DeclarationId>,

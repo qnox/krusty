@@ -572,28 +572,7 @@ pub fn same(a: TypeName, b: TypeName) -> bool {
     a == b
 }
 
-pub mod wk {
-    use super::{type_name, TypeName};
-    use std::sync::OnceLock;
-    macro_rules! names {
-        ($($f:ident => $lit:literal),* $(,)?) => { $(
-            #[inline]
-            pub fn $f() -> TypeName {
-                static S: OnceLock<TypeName> = OnceLock::new();
-                *S.get_or_init(|| type_name($lit))
-            }
-        )* };
-    }
-    names! {
-        kotlin_package => "kotlin",
-        kotlin_coroutines_package => "kotlin/coroutines",
-        kotlin_reflect_package => "kotlin/reflect",
-        continuation => "kotlin/coroutines/Continuation",
-        any => "kotlin/Any",
-        java_object => "java/lang/Object",
-        java_enum => "java/lang/Enum",
-    }
-}
+pub mod wk;
 
 /// Intern a `Ty` to a canonical `&'static Ty` so a wrapped inner type (a `Nullable`/`TyParam` bound)
 /// compares by value — the derived `Eq`/`Hash` follow the reference, so equal inner types must share

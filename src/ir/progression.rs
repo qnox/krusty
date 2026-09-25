@@ -1,14 +1,5 @@
 use super::ExprId;
 
-/// A member of a progression value that a counted loop reads (`first`, `last`, `step`). Common
-/// lowering selects which one; the backend owns the member's physical accessor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrProgressionMember {
-    First,
-    Last,
-    Step,
-}
-
 /// The progression a checked counted loop iterates, as the checker matched it (kotlinc's
 /// `HeaderInfoBuilder`). Operands are lowered expressions; each backend builds its loop header and
 /// control flow from this tree at its own boundary.
@@ -20,11 +11,14 @@ pub enum IrProgressionSource {
         start: ExprId,
         end: ExprId,
     },
-    /// A progression value read through its `first`, `last` and `step`. `iterable` already has
-    /// the progression's static class.
+    /// A progression value read through the `first`, `last` and `step` members selected from its
+    /// class (a `*Range` has no `step` read: it steps by 1). `setup` stores the value in a
+    /// temporary when it is not a plain read; the member reads then read that temporary.
     Value {
-        progression: crate::fir::FirProgressionClass,
-        iterable: ExprId,
+        setup: Option<ExprId>,
+        first: ExprId,
+        last: ExprId,
+        step: Option<ExprId>,
     },
     /// `nested step step`.
     Step {
@@ -49,7 +43,17 @@ impl IrProgressionSource {
                 f(*start);
                 f(*end);
             }
-            Self::Value { iterable, .. } => f(*iterable),
+            Self::Value {
+                setup,
+                first,
+                last,
+                step,
+            } => {
+                setup.iter().for_each(|setup| f(*setup));
+                f(*first);
+                f(*last);
+                step.iter().for_each(|step| f(*step));
+            }
             Self::Step { nested, step } => {
                 nested.visit(f);
                 f(*step);
@@ -65,7 +69,21 @@ impl IrProgressionSource {
                 *start = map(*start);
                 *end = map(*end);
             }
-            Self::Value { iterable, .. } => *iterable = map(*iterable),
+            Self::Value {
+                setup,
+                first,
+                last,
+                step,
+            } => {
+                if let Some(setup) = setup {
+                    *setup = map(*setup);
+                }
+                *first = map(*first);
+                *last = map(*last);
+                if let Some(step) = step {
+                    *step = map(*step);
+                }
+            }
             Self::Step { nested, step } => {
                 nested.map_operands(map);
                 *step = map(*step);

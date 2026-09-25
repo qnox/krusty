@@ -4104,7 +4104,7 @@ impl BodyFirChecker<'_> {
                     element_ty,
                     *iterable,
                     iterable_expression,
-                ) {
+                )? {
                     header
                 } else {
                     self.iterator_loop_header(

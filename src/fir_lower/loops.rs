@@ -1,6 +1,7 @@
 use crate::fir::{
     ControlTargetId, FirBuiltinIterableKind, FirExprId, FirIteratorCall, FirIteratorReceiver,
-    FirLoopHeader, FirProgressionSource, FirRangeCounterKind, LocalValueId, OriginId, ResolvedTy,
+    FirLoopHeader, FirProgressionClass, FirProgressionSource, FirRangeCounterKind, LocalValueId,
+    OriginId, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrProgressionSource};
 use crate::types::Ty;
@@ -170,26 +171,7 @@ impl BodyLowering<'_> {
             FirProgressionSource::Value {
                 progression,
                 iterable,
-            } => {
-                let value = self.expression(*iterable)?;
-                let iterable_ty = self
-                    .body
-                    .expr(*iterable)
-                    .map(|expression| expression.ty.get());
-                let value = if iterable_ty == Some(progression.ty) {
-                    value
-                } else {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::Cast,
-                        arg: value,
-                        type_operand: progression.ty,
-                    })
-                };
-                IrProgressionSource::Value {
-                    progression: *progression,
-                    iterable: value,
-                }
-            }
+            } => self.progression_value(progression, *iterable)?,
             FirProgressionSource::Step { nested, step } => IrProgressionSource::Step {
                 nested: Box::new(self.progression_source(nested)?),
                 step: self.expression(*step)?,
@@ -198,6 +180,90 @@ impl BodyLowering<'_> {
                 IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))
             }
         })
+    }
+
+    /// `DefaultProgressionHandler`: the progression is read once, into a temporary unless it is a
+    /// constant or a local read, and the loop reads the selected `first`, `last` and `step` from
+    /// it.
+    fn progression_value(
+        &mut self,
+        progression: &FirProgressionClass,
+        iterable: FirExprId,
+    ) -> Result<IrProgressionSource, FirLoweringFailure> {
+        let value = self.expression(iterable)?;
+        let iterable_ty = self
+            .body
+            .expr(iterable)
+            .map(|expression| expression.ty.get());
+        let value = if iterable_ty == Some(progression.ty) {
+            value
+        } else {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: value,
+                type_operand: progression.ty,
+            })
+        };
+        let (setup, value) =
+            if matches!(self.ir.expr(value), IrExpr::GetValue(_) | IrExpr::Const(_)) {
+                (None, value)
+            } else {
+                let slot = self.allocate_temporary();
+                let setup = self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty: progression.ty,
+                    init: Some(value),
+                    named: false,
+                });
+                (Some(setup), self.ir.add_expr(IrExpr::GetValue(slot)))
+            };
+        let first = self.progression_member_read(&progression.first, value)?;
+        let last = self.progression_member_read(&progression.last, value)?;
+        let step = progression
+            .step
+            .as_ref()
+            .map(|step| self.progression_member_read(step, value))
+            .transpose()?;
+        Ok(IrProgressionSource::Value {
+            setup,
+            first,
+            last,
+            step,
+        })
+    }
+
+    /// A read of a selected progression member on the stored progression `value` (a leaf read,
+    /// re-read for each member).
+    fn progression_member_read(
+        &mut self,
+        target: &crate::fir::FirPropertyTarget,
+        value: ExprId,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let crate::fir::FirPropertyTarget::External {
+            property,
+            receiver,
+            parameters,
+            result,
+            extension_receiver_parameter,
+            dispatch,
+        } = target
+        else {
+            return Err(FirLoweringFailure::UnsupportedProgressionMember);
+        };
+        let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
+        self.external_property_access(
+            *property,
+            dispatch.clone(),
+            *receiver,
+            parameters,
+            *result,
+            *extension_receiver_parameter,
+            Some(receiver_value),
+            None,
+            &[],
+            false,
+        )
+        .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
     }
 
     #[allow(clippy::too_many_arguments)]
