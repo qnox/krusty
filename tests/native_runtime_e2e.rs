@@ -267,6 +267,16 @@ fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
 }
 
 #[test]
+fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_line_throwing_to_string");
+}
+
+#[test]
+fn a_negative_builder_capacity_throws_negative_array_size_exception() {
+    run_driver("builder_negative_capacity");
+}
+
+#[test]
 fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
     run_driver("builder_from_program_char_sequence");
 }
@@ -284,6 +294,11 @@ fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
 #[test]
 fn a_progression_renders_compares_and_hashes_with_its_step() {
     run_driver("range_progression_members");
+}
+
+#[test]
+fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
+    run_driver("comparable_range_program_type");
 }
 
 #[test]
@@ -438,4 +453,19 @@ fn an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_i
         "Exception in thread \"main\" \nException: kotlin.IllegalStateException thrown from the \
          UncaughtExceptionHandler in thread \"main\"\n",
     );
+}
+
+#[test]
+fn a_default_to_string_whose_hash_code_throws_propagates_it() {
+    run_driver("default_to_string_stops_at_a_raise");
+}
+
+#[test]
+fn a_list_grown_past_the_largest_capacity_is_out_of_memory() {
+    run_driver_expecting_failure("mutable_list_growth_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn an_element_member_that_throws_ends_the_walk_that_called_it() {
+    run_driver("list_stops_on_throwing_element");
 }
