@@ -21,6 +21,7 @@
 mod linker;
 mod prebuilt;
 mod target;
+mod target_contract;
 
 pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
