@@ -48,6 +48,22 @@ pub enum ProgressionClass {
     Progression,
 }
 
+/// Every progression class of `kotlin.ranges`.
+pub fn progression_classes() -> [TypeName; 10] {
+    [
+        int_range(),
+        long_range(),
+        char_range(),
+        uint_range(),
+        ulong_range(),
+        int_progression(),
+        long_progression(),
+        char_progression(),
+        uint_progression(),
+        ulong_progression(),
+    ]
+}
+
 /// The progression class `name` identifies, if any. The element type and the `first`, `last` and
 /// `step` members are the declaration's own and are never implied by this identity.
 pub fn progression_class(name: TypeName) -> Option<ProgressionClass> {

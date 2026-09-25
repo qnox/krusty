@@ -25029,10 +25029,6 @@ impl<'a> Checker<'a> {
         } else {
             ErrorProvenance::None
         };
-        if !is_var {
-            // A counted loop over this `val` iterates its initializer's progression class.
-            self.record_progression_plan(it);
-        }
         let bind = match declared {
             Some(d) => {
                 if !deferred {
@@ -26633,7 +26629,7 @@ impl<'a> Checker<'a> {
         label: Option<String>,
     ) {
         let it = self.expr(scope, iterable);
-        self.record_loop_progression_plans(scope, iterable);
+        self.record_progression_plans();
         // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
         // value-consuming operation, so it selects the non-null lower bound exactly as a member call
         // would; source `Set<E>?` remains nullable and is still rejected.

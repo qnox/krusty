@@ -2,7 +2,7 @@
 //! as ordinary operator calls, and for a `kotlin.ranges` progression the `first`, `last` and `step`
 //! members kotlinc's `ForLoopsLowering` reads instead of iterating.
 
-use crate::ast::{Expr, ExprId, StmtId};
+use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 use crate::symbol_source::SymbolSource;
@@ -130,38 +130,20 @@ impl Checker<'_> {
         Ok(Some(elem))
     }
 
-    /// Select the member plan of every progression class a counted loop over `iterable` may read:
-    /// the iterable's own type and, through the `step`/`reversed` calls it is built from, their
-    /// receivers' types, and a read's declared type. A `val` initializer's class is selected where
-    /// the `val` is declared.
-    pub(super) fn record_loop_progression_plans(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        iterable: ExprId,
-    ) {
-        let mut expression = iterable;
-        loop {
-            self.record_progression_plan(self.expr_types[expression.0 as usize]);
-            // A smart-cast read iterates its binding's declared progression class.
-            if let Expr::Name(name) = self.file.expr(expression) {
-                if let Some(local) = self.lookup(scope, name) {
-                    self.record_progression_plan(local.declared_ty);
-                }
-            }
-            let Expr::Call { callee, .. } = self.file.expr(expression) else {
-                return;
-            };
-            let Expr::Member { receiver, .. } = self.file.expr(*callee) else {
-                return;
-            };
-            expression = *receiver;
+    /// Select the member plan of every well-known progression class, once per checked file. A
+    /// counted loop may read any of them: its iterable's own class, a class `step`/`reversed` is
+    /// applied to, or the most precise class of a `val` it reads, whatever type the iterable
+    /// expression itself was given (`break downTo 1u` is typed `Nothing`).
+    pub(super) fn record_progression_plans(&mut self) {
+        for class in wk::progression_classes() {
+            self.record_progression_plan(Ty::obj_name(class));
         }
     }
 
     /// Select `first`, `last` and `step` on a `kotlin.ranges` progression class, once per class.
     /// A member the class's declarations do not publish leaves the class without a plan, and a
     /// counted loop that needs one is then rejected by the checker rather than iterated.
-    pub(super) fn record_progression_plan(&mut self, ty: Ty) {
+    fn record_progression_plan(&mut self, ty: Ty) {
         let ty = ty.platform_lower_bound().non_null();
         if !ty.type_args().is_empty() || self.progression_plans.contains_key(&ty) {
             return;
