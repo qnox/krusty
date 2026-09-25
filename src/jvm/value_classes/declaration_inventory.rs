@@ -210,15 +210,15 @@ pub(super) fn merge_referenced(
         let Some(underlying) = declared else {
             continue;
         };
-        ir.insert_external_value_class_name(classifier, underlying);
         collect_classifier_names(underlying, &mut pending);
-        // Unsigned integers have target-native carriers and therefore stay out of the ordinary
-        // value-class rewrite map. They are still value classes semantically: publish the checked
-        // declaration above so later JVM naming/forwarding consumes the same identity as every
-        // other metadata-backed value class instead of recovering that fact from a stdlib name.
+        // Unsigned integers are value classes whose carrier is target-native: their checked
+        // declaration reaches callable naming, which kotlinc mangles by value-class identity, but
+        // not the general value-class table or the rewrite map, whose readers would box the carrier.
         if is_native_unsigned(classifier) {
+            ir.insert_callable_boundary_value_class(classifier);
             continue;
         }
+        ir.insert_external_value_class_name(classifier, underlying);
         declarations.insert(
             classifier,
             underlying.scalar_value_repr().unwrap_or(underlying),
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_unsigned_declaration_is_published_without_joining_the_rewrite_map() {
+    fn checked_unsigned_declaration_reaches_callable_naming_only() {
         let uint = crate::types::type_name("kotlin/UInt");
         let mut ir = IrFile::default();
         let mut holder = crate::plugins::synthetic_class("fixture/Holder");
@@ -259,8 +259,8 @@ mod tests {
         let mut declarations = Under::new();
 
         assert!(merge_referenced(&mut ir, &UnsignedFacts, &mut declarations).is_some());
-        assert_eq!(ir.external_value_class_name(uint), Some(&Ty::Int));
-        assert!(ir.is_value_class_name(uint));
+        assert!(ir.names_callable_value_class(uint));
+        assert!(!ir.is_value_class_name(uint));
         assert!(!declarations.contains_key(&uint));
     }
 

@@ -94,3 +94,11 @@ fn stdlib_unsigned_metadata_drives_the_inherited_member_name() {
         before_metadata(&disassembled(&pair.kotlinc))
     );
 }
+
+#[test]
+fn a_call_reaches_the_inherited_unsigned_default() {
+    let source = format!(
+        "{UNSIGNED_SOURCE}\nfun box(): String = if (UnsignedConcrete().rep(1u) == \"rep1\") \"OK\" else \"fail\"\n"
+    );
+    common::expect_box_ok_with_stdlib(&source, "InheritedUnsignedDefault");
+}

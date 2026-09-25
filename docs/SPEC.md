@@ -7047,10 +7047,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is known from this file or another file of the module. A member of this module is forwarded in
   its lowered shape: a value-class parameter or result is its carrier in the descriptor, the debug
   tables, the null guards and the nullability annotations. Which classes are value classes comes
-  from the IR's value-class declarations, never from a class name, so a stdlib unsigned type in
-  such a signature (`kotlin/UInt`, as in `inlineClasses/kt51157`) is not hashed here until its
-  metadata reaches that lookup. Its `DefaultImpls` forwarder has no line number, as kotlinc's has
-  none for any inherited member. Tests: `tests/value_class_inherited_default_names_e2e.rs`.
+  from checked declarations, never from a class name. A stdlib unsigned type (`kotlin/UInt`, as in
+  `inlineClasses/kt51157`) is hashed from its metadata declaration, which is recorded for callable
+  naming only: its carrier is target-native, so it stays out of the value-class table that
+  emission reads and keeps its unboxed slots. Its `DefaultImpls` forwarder has no line number, as
+  kotlinc's has none for any inherited member. Tests:
+  `tests/value_class_inherited_default_names_e2e.rs`, the `declaration_inventory` unit tests.
 
 - **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
   publishes one target-neutral `RangeLoop`; the named backend-boundary pass in
