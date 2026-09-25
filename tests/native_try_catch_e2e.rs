@@ -347,6 +347,26 @@ fn a_lateinit_property_that_overrides_one_is_guarded_too() {
     );
 }
 
+#[test]
+fn a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner() {
+    // The descriptor is erased, the name is not. Kotlin/Native 2.4.20 raises this exception with no
+    // message; krusty renders the target as the JVM backend does, except that a target without file
+    // facades keeps a top-level function in its package: `T of p.generic` where the JVM says
+    // `T of p.ErasedNullCastKt.generic`.
+    expect_native_box(
+        "package p\n\
+         fun <T : Any> generic(a: Any?): T = a as T\n\
+         fun box(): String {\n\
+         \x20   val cast = try { generic<String>(null); \"no throw\" }\n\
+         \x20              catch (e: NullPointerException) { e.message ?: \"none\" }\n\
+         \x20   if (cast != \"null cannot be cast to non-null type T of p.generic\") return cast\n\
+         \x20   return if (generic<String>(\"k\") == \"k\") \"OK\" else \"fail: non-null\"\n\
+         }\n",
+        "ErasedNullCast",
+        "OK",
+    );
+}
+
 // ---- `finally` ---------------------------------------------------------------------------------
 //
 // `finally` runs on EVERY way out of a `try`: normal completion, each handler, an exception nobody
