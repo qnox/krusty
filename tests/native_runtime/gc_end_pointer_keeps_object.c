@@ -44,12 +44,11 @@ __attribute__((noinline)) static void collect(void) {
     for (unsigned i = 0; i < 4096; i++) {
         words[i] = 0;
     }
+    (void)words[0];
     kt_gc_collect();
 }
 
-void kt_program_entry(void) {
-    uintptr_t bottom = 0;
-    kt_runtime_init(&bottom);
+__attribute__((noinline)) static void check_end_pointers(void) {
     volatile uintptr_t small_end = end_of_new_array(SMALL);
     volatile uintptr_t large_end = end_of_new_array(LARGE);
     collect();
@@ -69,5 +68,11 @@ void kt_program_entry(void) {
     if (((const KObjectHeader *)held)->type != &blob_type) {
         KT_SYS_FAIL("a held object was overwritten\n");
     }
+}
+
+void kt_program_entry(void) {
+    uintptr_t bottom = 0;
+    kt_runtime_init(&bottom);
+    check_end_pointers();
     kt_sys_write(1, "OK\n", 3);
 }

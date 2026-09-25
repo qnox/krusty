@@ -1754,7 +1754,11 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
             else {
                 return false;
             };
-            let FirConstructorTarget::Module(target) = call.target else {
+            let FirConstructorTarget::Module {
+                declaration: target,
+                ..
+            } = call.target
+            else {
                 return false;
             };
             let Some(owner) = index.callable(target).and_then(|callable| {
@@ -2404,7 +2408,11 @@ fn enum_entry_without_primary_constructor_targets_selected_secondary_callable() 
             let FirExprKind::ConstructorCall(call) = &body.expr(root).unwrap().kind else {
                 panic!("enum entry body must contain a selected constructor call")
             };
-            let FirConstructorTarget::Module(target) = call.target else {
+            let FirConstructorTarget::Module {
+                declaration: target,
+                ..
+            } = call.target
+            else {
                 panic!("source enum entry must target a module constructor")
             };
             target
@@ -2753,7 +2761,7 @@ fn secondary_constructor_delegation_is_final_in_checked_fir() {
     let FirStatementKind::ConstructorDelegation(call) = &delegation.kind else {
         panic!("constructor delegation must be explicit FIR")
     };
-    assert!(matches!(call.target, FirConstructorTarget::Module(_)));
+    assert!(matches!(call.target, FirConstructorTarget::Module { .. }));
     assert_eq!(
         call.arguments
             .iter()
@@ -2892,7 +2900,7 @@ fn primary_super_delegation_uses_the_selected_module_constructor() {
     else {
         panic!("primary super delegation must be explicit FIR")
     };
-    assert!(matches!(call.target, FirConstructorTarget::Module(_)));
+    assert!(matches!(call.target, FirConstructorTarget::Module { .. }));
     assert_eq!(
         call.arguments
             .iter()

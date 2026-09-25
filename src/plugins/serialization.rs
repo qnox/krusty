@@ -18,9 +18,14 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod external_serializer;
+pub(crate) use external_serializer::generated_external_serializer;
+pub use external_serializer::ExternalSerializer;
 mod generated_classifier;
 mod generated_members;
+mod plugin_release;
 mod property_default;
+mod runtime_abi;
 mod serial_elements;
 mod serialize_body;
 mod transient_initializer;
@@ -34,16 +39,21 @@ use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
 use crate::plugins::{
-    synthetic_class, FrontendCallable, FrontendCallableOwner, FrontendClassContext,
-    FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
+    synthetic_class, FrontendCallable, FrontendClassContext, FrontendExpressionContext, IrPlugin,
+    PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
 use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
-use generated_classifier::generated_serializer_classifier_fact;
+use generated_classifier::{
+    companion_fq, publish_generated_classifier_facts, publish_serializer_accessor_declaration,
+    serializer_fq, serializer_name, SERIALIZER_OBJECT_NAME,
+};
 use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
+pub use plugin_release::PluginRelease;
+pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
@@ -81,59 +91,14 @@ const ENCODE_TO_STRING_DESC: &str =
 const DECODE_FROM_STRING_DESC: &str =
     "(Lkotlinx/serialization/DeserializationStrategy;Ljava/lang/String;)Ljava/lang/Object;";
 
-/// The `kotlinx.serialization` runtime ABI the generated code must match. The synthesized member
-/// shape changed across releases, so the plugin emits *per target version* — exactly as krusty
-/// itself is pinned to a kotlinc version. A mismatch between generated code and the linked runtime
-/// is a runtime linkage error, so this is not cosmetic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SerializationAbi {
-    /// core < 1.6: the per-class write helper is the unmangled `write$Self`.
-    V1_0,
-    /// core >= 1.6 (Kotlin >= 1.8.20): the helper is module-mangled `write$Self$<module>` to avoid
-    /// cross-module name clashes.
-    #[default]
-    V1_6Plus,
-}
-
-impl SerializationAbi {
-    /// Pick the ABI from a `kotlinx-serialization-core` version string (`"1.8.1"`, `"1.5.0"`).
-    /// krusty derives this from the runtime jar on `-classpath`, so the same inputs kotlinc gets
-    /// select the same codegen. `< 1.6` → `V1_0`, else `V1_6Plus`.
-    pub fn from_core_version(version: &str) -> SerializationAbi {
-        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-        let major = parts.next().unwrap_or(0);
-        let minor = parts.next().unwrap_or(0);
-        if (major, minor) < (1, 6) {
-            SerializationAbi::V1_0
-        } else {
-            SerializationAbi::V1_6Plus
-        }
-    }
-
-    /// Detect the ABI from a `-classpath` jar list by finding the `kotlinx-serialization-core[-jvm]`
-    /// jar and reading its version. Returns `None` if the runtime isn't on the classpath (then the
-    /// `@Serializable` annotation itself wouldn't resolve — a user error kotlinc also reports).
-    pub fn from_classpath(cp_jars: &[String]) -> Option<SerializationAbi> {
-        cp_jars
-            .iter()
-            .filter_map(|j| {
-                let name = j.rsplit('/').next().unwrap_or(j);
-                let stem = name.strip_suffix(".jar")?;
-                // kotlinx-serialization-core-jvm-1.8.1  /  kotlinx-serialization-core-1.8.1
-                let rest = stem.strip_prefix("kotlinx-serialization-core")?;
-                let rest = rest.strip_prefix("-jvm").unwrap_or(rest);
-                let ver = rest.strip_prefix('-')?;
-                Some(SerializationAbi::from_core_version(ver))
-            })
-            .next()
-    }
-}
-
 /// The serialization extension, pinned to a target runtime ABI + the compilation's module name
 /// (needed for the >=1.6 `write$Self$<module>` mangling).
 pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
+    /// The compiler plugin jar's release, or `None` when no jar named one (an editor enabling every
+    /// native extension, `-P` without `-Xplugin`): the checkers then use the newest wording.
+    compiler_plugin: Option<PluginRelease>,
     write_self_methods: Mutex<HashMap<TypeName, u32>>,
     /// What each serialized class's `$childSerializers` cache is, published by the pass that builds
     /// it and consumed by every reader. Keyed by the SERIALIZED class, not the `$serializer`.
@@ -145,9 +110,16 @@ impl SerializationPlugin {
         Self {
             abi,
             module: module.into(),
+            compiler_plugin: None,
             write_self_methods: Mutex::new(HashMap::new()),
             child_serializer_caches: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Reproduce the compiler plugin of `release` (see [`PluginRelease`]).
+    pub fn with_compiler_plugin_release(mut self, release: Option<PluginRelease>) -> Self {
+        self.compiler_plugin = release;
+        self
     }
 
     /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
@@ -208,27 +180,6 @@ impl Default for SerializationPlugin {
     fn default() -> Self {
         Self::new(SerializationAbi::default(), "main")
     }
-}
-
-/// The FqName of the synthesized serializer object for a `@Serializable` class. The object is literally
-/// named `$serializer`, so its binary name is `Foo$$serializer` (the outer class + the nesting `$` +
-/// the object name `$serializer`) — matching kotlinc, which krusty previously emitted as `Foo$serializer`.
-fn serializer_fq(class_fq: &str) -> String {
-    serializer_name(type_name(class_fq)).render()
-}
-
-/// The Kotlin name of that object. It begins with `$`, so the JVM spelling `Foo$$serializer` cannot
-/// be split back into it — metadata records this name, not a segment derived from the binary one.
-const SERIALIZER_OBJECT_NAME: &str = "$serializer";
-
-fn serializer_name(classifier: TypeName) -> TypeName {
-    classifier.nested_child(SERIALIZER_OBJECT_NAME)
-}
-
-/// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
-/// the `serializer()` accessor (kotlinc puts it there, not as a static on the class itself).
-fn companion_fq(class_fq: &str) -> String {
-    crate::types::type_name_nested_child(type_name(class_fq), "Companion").render()
 }
 
 fn frontend_serializer_accessor(ir: &IrFile, owner: crate::types::TypeName) -> Option<u32> {
@@ -478,9 +429,12 @@ fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
 }
 
+/// `<classifier>.<field>.serializer(args…)`: the generated accessor on `classifier`'s companion
+/// object `owner`, stored in `classifier`'s static `field`.
 fn call_external_companion_serializer(
     ir: &mut IrFile,
     classifier: TypeName,
+    field: &str,
     owner: TypeName,
     args: Vec<ExprId>,
 ) -> Option<ExprId> {
@@ -490,7 +444,7 @@ fn call_external_companion_serializer(
     let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
         owner: classifier,
         ty: owner,
-        field: "Companion".to_string(),
+        field: field.to_string(),
     });
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
@@ -627,6 +581,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 let Some(call) = call_external_companion_serializer(
                     ir,
                     class_internal,
+                    "Companion",
                     selected_owner,
                     exprs.clone(),
                 ) else {
@@ -1234,61 +1189,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &FrontendClassContext<'_>,
         members: &mut Vec<FrontendCallable>,
     ) {
-        if !ctx
-            .annotations
-            .iter()
-            .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
-        {
-            return;
-        }
-        let serializer = type_name(KSERIALIZER_FQ);
-        let parameters = ctx
-            .type_parameters
-            .type_params()
-            .iter()
-            .zip(ctx.type_parameters.type_param_bounds())
-            .map(|(name, &bound)| Ty::ty_param(name, bound))
-            .collect::<Vec<_>>();
-        let class = Ty::obj_args_name(ctx.classifier, &parameters);
-        let params = parameters
-            .iter()
-            .map(|&parameter| Ty::obj_args_name(serializer, &[parameter]))
-            .collect::<Vec<_>>();
-        let param_names = (0..params.len())
-            .map(|index| format!("typeSerial{index}"))
-            .collect::<Vec<_>>();
-        let ret = Ty::obj_args_name(serializer, &[class]);
-        let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
-            formals: ctx.type_parameters.type_params().clone(),
-            formal_bounds: ctx
-                .type_parameters
-                .type_param_bounds()
-                .iter()
-                .map(|&bound| vec![bound])
-                .collect(),
-            receiver: None,
-            params: params.clone(),
-            ret,
-            return_policy: crate::libraries::GenericReturnPolicy::Exact,
-        });
-        members.push(FrontendCallable {
-            // A named object is already the singleton value through which its generated accessor is
-            // called. Ordinary classes expose the accessor through their companion value.
-            owner: if ctx.kind == crate::libraries::TypeKind::Object {
-                FrontendCallableOwner::Classifier
-            } else {
-                FrontendCallableOwner::Companion
-            },
-            name: "serializer".to_string(),
-            params,
-            param_names,
-            ret,
-            generic_sig,
-            plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
-                plugin: "serialization",
-                operation: "serializer",
-            }),
-        });
+        publish_serializer_accessor_declaration(ctx, members);
     }
 
     fn publish_frontend_generated_classifiers(
@@ -1296,7 +1197,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &FrontendClassContext<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
-        classifiers.extend(generated_serializer_classifier_fact(ctx));
+        publish_generated_classifier_facts(ctx, classifiers);
     }
 
     fn check_frontend_class(
@@ -1304,7 +1205,10 @@ impl IrPlugin for SerializationPlugin {
         ctx: &crate::plugins::FrontendClassCheckContext<'_>,
         diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
     ) {
-        diagnostics.extend(transient_initializer::missing_initializers(ctx));
+        diagnostics.extend(transient_initializer::missing_initializers(
+            ctx,
+            self.compiler_plugin,
+        ));
     }
 
     fn plan_frontend_expressions(
@@ -2898,62 +2802,6 @@ mod tests {
     }
 
     #[test]
-    fn abi_detected_from_classpath_runtime() {
-        // Drop-in: the ABI follows the kotlinx-serialization-core jar on -classpath, not a flag.
-        assert_eq!(
-            SerializationAbi::from_core_version("1.5.0"),
-            SerializationAbi::V1_0
-        );
-        assert_eq!(
-            SerializationAbi::from_core_version("1.6.0"),
-            SerializationAbi::V1_6Plus
-        );
-        assert_eq!(
-            SerializationAbi::from_core_version("1.8.1"),
-            SerializationAbi::V1_6Plus
-        );
-
-        let cp = vec![
-            "/x/kotlin-stdlib.jar".to_string(),
-            "/x/kotlinx-serialization-core-jvm-1.8.1.jar".to_string(),
-        ];
-        assert_eq!(
-            SerializationAbi::from_classpath(&cp),
-            Some(SerializationAbi::V1_6Plus)
-        );
-
-        let old = vec!["/x/kotlinx-serialization-core-1.5.0.jar".to_string()];
-        assert_eq!(
-            SerializationAbi::from_classpath(&old),
-            Some(SerializationAbi::V1_0)
-        );
-
-        // No serialization runtime on the classpath → no ABI (annotation wouldn't resolve either).
-        assert_eq!(
-            SerializationAbi::from_classpath(&["/x/kotlin-stdlib.jar".to_string()]),
-            None
-        );
-
-        // -core, not -json/-protobuf, drives the ABI even when several serialization jars co-exist.
-        let many = vec![
-            "/x/kotlinx-serialization-json-jvm-1.5.0.jar".to_string(),
-            "/x/kotlinx-serialization-protobuf-jvm-1.5.0.jar".to_string(),
-            "/x/kotlinx-serialization-core-jvm-1.8.1.jar".to_string(),
-        ];
-        assert_eq!(
-            SerializationAbi::from_classpath(&many),
-            Some(SerializationAbi::V1_6Plus)
-        );
-
-        // A snapshot version still parses by its leading numeric components.
-        let snap = vec!["/x/kotlinx-serialization-core-jvm-1.8.1-SNAPSHOT.jar".to_string()];
-        assert_eq!(
-            SerializationAbi::from_classpath(&snap),
-            Some(SerializationAbi::V1_6Plus)
-        );
-    }
-
-    #[test]
     fn property_descriptor_uses_shared_jvm_mapping() {
         let ctx = plugin_context();
         assert_eq!(ty_descriptor(&ctx, &Ty::Int).as_deref(), Some("I"));
@@ -3085,8 +2933,11 @@ mod tests {
             data: vec![classifier, type_name("demo/Row$Companion")],
             types: Vec::new(),
         });
-        let ctx = PluginContext::default()
-            .with_external_serializers([(classifier, serializer)].into_iter().collect());
+        let ctx = PluginContext::default().with_external_serializers(
+            [(classifier, ExternalSerializer::Singleton(serializer))]
+                .into_iter()
+                .collect(),
+        );
 
         specialize_expression_placeholders(&mut ir, &ctx);
 

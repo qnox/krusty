@@ -1,0 +1,3 @@
+# Kotlin face	JVM owner	physical name	descriptor
+kotlin/collections/List	java/util/List	getFirst	()Ljava/lang/Object;
+kotlin/collections/List	java/util/List	getLast	()Ljava/lang/Object;

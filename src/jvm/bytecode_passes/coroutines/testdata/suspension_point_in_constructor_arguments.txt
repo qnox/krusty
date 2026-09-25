@@ -1,0 +1,88 @@
+0: aload 1
+1: instanceof CKt$ctor$1
+2: ifeq @18
+3: aload 1
+4: checkcast CKt$ctor$1
+5: astore 7
+6: aload 7
+7: getfield CKt$ctor$1.label:I
+8: ldc -2147483648
+9: iand
+10: ifeq @18
+11: aload 7
+12: dup
+13: getfield CKt$ctor$1.label:I
+14: ldc -2147483648
+15: isub
+16: putfield CKt$ctor$1.label:I
+17: goto @23
+18: new CKt$ctor$1
+19: dup
+20: aload 1
+21: invokespecial CKt$ctor$1.<init>(Lkotlin/coroutines/Continuation;)V
+22: astore 7
+23: aload 7
+24: getfield CKt$ctor$1.result:Ljava/lang/Object;
+25: astore 6
+26: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+27: astore 10
+28: aload 7
+29: getfield CKt$ctor$1.label:I
+30: tableswitch 0..1 [@31, @52] default @74
+31: aload 6
+32: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+33: iload 0
+34: istore 4
+35: iload 0
+36: aload 7
+37: aload 7
+38: iload 0
+39: putfield CKt$ctor$1.I$0:I
+40: aload 7
+41: iload 4
+42: putfield CKt$ctor$1.I$1:I
+43: aload 7
+44: iconst_1
+45: putfield CKt$ctor$1.label:I
+46: invokestatic CKt.one(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
+47: dup
+48: aload 10
+49: if_acmpne @61
+50: aload 10
+51: areturn
+52: aload 7
+53: getfield CKt$ctor$1.I$1:I
+54: istore 4
+55: aload 7
+56: getfield CKt$ctor$1.I$0:I
+57: istore 0
+58: aload 6
+59: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+60: aload 6
+61: astore 5
+62: iload 4
+63: aload 5
+64: checkcast java/lang/Number
+65: invokevirtual java/lang/Number.intValue()I
+66: istore 8
+67: istore 9
+68: new P
+69: dup
+70: iload 9
+71: iload 8
+72: invokespecial P.<init>(II)V
+73: areturn
+74: new java/lang/IllegalStateException
+75: dup
+76: ldc "call to 'resume' before 'invoke' with coroutine"
+77: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+78: athrow
+line 3: 27
+line 3: 33
+line 3: 50
+line 3: 61
+line 3: 74
+local v I 0..79 slot 0
+local $completion Lkotlin/coroutines/Continuation; 0..79 slot 1
+local $continuation Lkotlin/coroutines/Continuation; 23..74 slot 7
+local $result Ljava/lang/Object; 26..74 slot 6

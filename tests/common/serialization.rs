@@ -141,6 +141,95 @@ fn krusty_box_files(sources: &[(&str, &str)], stem: &str) -> String {
         .unwrap_or_else(|| panic!("box() did not run for {stem}"))
 }
 
+/// Compile `lib_src` as a separate module with the reference compiler and its serialization
+/// plugin, the way a published dependency reaches a consumer.
+pub(super) fn reference_dependency(lib_src: &str, stem: &str) -> PathBuf {
+    let work = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{stem}: cannot allocate a scratch directory"))
+        .join(format!("{stem}-serialization-dependency"));
+    std::fs::create_dir_all(&work).expect("create serialization dependency directory");
+    let source = work.join("Lib.kt");
+    std::fs::write(&source, lib_src).expect("write serialization dependency source");
+    let out = work.join("classes");
+    let plugin = common::kotlinc_lib_dir()
+        .unwrap_or_else(|| panic!("{stem}: no reference compiler lib directory"))
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    let classpath = std::env::join_paths(runtime_jars()).expect("join the serialization classpath");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-cp".to_string(),
+        classpath.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ])
+    .unwrap_or_else(|| panic!("{stem}: the reference compiler could not be invoked"));
+    assert_eq!(
+        code, 0,
+        "{stem}: kotlinc rejected the dependency: {diagnostics}"
+    );
+    out
+}
+
+/// [`both_compilers_box`] for a consumer of a separately compiled dependency: `lib_src` is built
+/// once by the reference compiler, and each compiler builds `src` against those class files.
+pub(super) fn both_compilers_box_against_dependency(
+    lib_src: &str,
+    src: &str,
+    stem: &str,
+) -> String {
+    let dependency = reference_dependency(lib_src, stem);
+    let mut jars = vec![dependency];
+    jars.extend(runtime_jars());
+
+    let work = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{stem}: cannot allocate a scratch directory"))
+        .join(format!("{stem}-serialization-consumer"));
+    std::fs::create_dir_all(&work).expect("create serialization consumer directory");
+    let source = work.join("Main.kt");
+    std::fs::write(&source, src).expect("write serialization consumer source");
+    let out = work.join("classes");
+    let plugin = common::kotlinc_lib_dir()
+        .unwrap_or_else(|| panic!("{stem}: no reference compiler lib directory"))
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    let classpath = std::env::join_paths(&jars).expect("join the consumer classpath");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-cp".to_string(),
+        classpath.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ])
+    .unwrap_or_else(|| panic!("{stem}: the reference compiler could not be invoked"));
+    assert_eq!(
+        code, 0,
+        "{stem}: kotlinc rejected the consumer: {diagnostics}"
+    );
+    let mut reference_classpath = vec![out];
+    reference_classpath.extend(jars.iter().cloned());
+    let reference = common::run_box(&[], "MainKt", &reference_classpath)
+        .unwrap_or_else(|| panic!("{stem}: the reference-built box() did not run"));
+
+    let classes = common::compile_in_process(src, stem, &jars, None).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(src, &jars, None);
+        let outcome = common::backend_outcome_in_process(src, stem, &jars, None);
+        panic!(
+            "krusty failed to compile {stem}; diagnostics: {diagnostics:?}; backend: {outcome:?}"
+        )
+    });
+    let box_class =
+        common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class for {stem}"));
+    let actual = common::run_box(&classes, &box_class, &jars)
+        .unwrap_or_else(|| panic!("box() did not run for {stem}"));
+    assert_eq!(actual, reference, "{stem}: krusty disagrees with kotlinc");
+    actual
+}
+
 /// The multi-file form of [`both_compilers_box`]: the file split is itself the discriminator for a
 /// serializer a sibling file declares.
 pub(super) fn both_compilers_box_files(sources: &[(&str, &str)], stem: &str) -> String {

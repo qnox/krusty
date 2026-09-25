@@ -13,6 +13,7 @@ use crate::plugins::registry::NativePlugins;
 mod header_validation;
 mod inline_preparation;
 mod local_class_names;
+mod local_function_names;
 mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
@@ -105,7 +106,7 @@ impl ReparseSource {
         #[cfg(test)]
         self.parse_count.set(self.parse_count.get() + 1);
         let tokens = crate::lexer::lex(&self.text, diags);
-        let mut anonymous_counters = std::collections::HashMap::new();
+        let mut local_name_counters = LocalNameCounters::default();
         crate::parser::visit_declaration_units_with_features(
             &self.text,
             &tokens,
@@ -115,7 +116,7 @@ impl ReparseSource {
                 file.is_common = self.is_common;
                 record_local_class_name_provenance_with_counters(
                     &mut file,
-                    &mut anonymous_counters,
+                    &mut local_name_counters,
                 );
                 visit(file, diags);
             },
@@ -332,8 +333,11 @@ fn report_unmatched_expect_roots(
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
-    for stub in headers.stubs.iter().filter(|stub| {
-        stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
+    let mut unmatched = headers
+        .stubs
+        .iter()
+        .filter(|stub| {
+            stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
             && headers
                 .declarations
                 .anchor(stub.id)
@@ -345,7 +349,13 @@ fn report_unmatched_expect_roots(
             // did not get it wrong.
             && !incompatible.contains(&stub.id)
             && !symbols.is_source_optional_expectation(stub.id)
-    }) {
+        })
+        .collect::<Vec<_>>();
+    // The reference compiler reports a missing `actual` while actualizing IR, which matches every
+    // top-level expect classifier of the module before it links any callable. So its ledger names
+    // each unactualized classifier, in source order, before any unactualized function or property.
+    unmatched.sort_by_key(|stub| stub.kind != crate::fir::DeclarationKind::Classifier);
+    for stub in unmatched {
         let source = stub.source.raw() as usize;
         if let Some(rejected) = rejected_sources.get_mut(source) {
             *rejected = true;
@@ -386,11 +396,10 @@ fn report_unmatched_expect_roots(
             );
             continue;
         };
-        diags.error(
+        diags.error_kind(
             range,
-            format!(
-                "expected {name} has no actual declaration in module <{module_name}> for {target}"
-            ),
+            crate::diag::DiagnosticKind::Actualization,
+            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
         );
     }
 }
@@ -944,6 +953,7 @@ where
             // editor queries while consuming declaration identities from the finalized index.
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
+                || retained_syntax::has_classifier_annotation_arguments(&file)
                 || stubs.iter().any(|stub| {
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
@@ -1205,18 +1215,6 @@ where
             &mut symbols,
         );
     }
-    if !retain_inspection_analysis {
-        // Signature collection, target preparation, and inline-capture projection are the last
-        // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
-        // only when it still owns executable syntax that Pass 1 must turn into checked FIR
-        // (inline/default/const work). The compact headers and signature graph are authoritative for
-        // every declaration fact used by finalization, including enum-entry member signatures.
-        for file in files.iter_mut().take(inferred_end) {
-            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
-                *file = File::default();
-            }
-        }
-    }
     let streamed_index = crate::resolve::finalized_streamed_signature_index(
         &pass1_headers,
         &mut symbols,
@@ -1232,6 +1230,12 @@ where
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        crate::resolve::publish_checked_classifier_annotations(
+            &files[..inferred_end],
+            &index,
+            &mut symbols,
+            diags,
+        );
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
         // An `actual` that actualizes nothing is named by the reference compiler's declaration
         // renderer over its RESOLVED signature, so it is reported only once finalization has
@@ -1322,6 +1326,16 @@ where
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None
     };
+    if !retain_inspection_analysis {
+        // Typed classifier annotations are the final consumers of declaration-only legacy `File`
+        // views. Once folded, retain a parser fragment only when it still owns executable syntax
+        // that Pass 1 must turn into checked FIR (inline/default/const work).
+        for file in files.iter_mut().take(inferred_end) {
+            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
+                *file = File::default();
+            }
+        }
+    }
     if trim_support_bodies {
         for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
             file.release_body_arenas();
@@ -1493,20 +1507,40 @@ pub fn analyze_source_standalone(
 
 /// Record local-class source ownership and ordering without choosing a target spelling.
 pub fn record_local_class_name_provenance(file: &mut crate::ast::File) {
-    let mut counters = std::collections::HashMap::new();
+    let mut counters = LocalNameCounters::default();
     record_local_class_name_provenance_with_counters(file, &mut counters);
+}
+
+/// The naming sequences of one source file, carried across its declaration units: kotlinc's
+/// local-class names and its lifted local-callable names each number one sequence per file.
+#[derive(Default)]
+struct LocalNameCounters {
+    classes: std::collections::HashMap<Vec<String>, u32>,
+    lifted: local_function_names::LiftingCounters,
 }
 
 fn record_local_class_name_provenance_with_counters(
     file: &mut crate::ast::File,
-    counters: &mut std::collections::HashMap<Vec<String>, u32>,
+    counters: &mut LocalNameCounters,
 ) {
-    let invented = local_class_names::invent(file, counters);
+    let lifted = local_function_names::record(file, &mut counters.lifted);
+    file.lambda_lifting_sites.extend(lifted.lambdas);
+    file.local_function_lifting_sites
+        .extend(lifted.local_functions);
+    file.local_delegate_lifting_sites
+        .extend(lifted.local_delegates);
+    let invented = local_class_names::invent(file, &mut counters.classes);
     file.local_class_name_provenance.extend(invented.classes);
     file.anonymous_object_enclosing_functions
         .extend(invented.anonymous_enclosing_functions);
     file.suspend_continuation_ordinals
         .extend(invented.continuations);
+    file.callable_reference_provenance.extend(
+        invented
+            .references
+            .into_iter()
+            .map(|(expression, provenance)| (expression.0, provenance)),
+    );
 }
 
 #[cfg(test)]

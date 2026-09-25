@@ -15,7 +15,8 @@
 //! The writer boundary is deliberately narrow: nothing here decides WHAT to emit. A `ClassWriter`
 //! is taken only to intern, and every function reports failure rather than emitting something
 //! approximate.
-use super::{class_name, instruction_len, name_and_type, pool_operand, utf8, utf8_value, Insn};
+use super::{class_name, name_and_type, pool_operand, utf8, utf8_value, Insn};
+use crate::jvm::bytecode::instruction_len;
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
 
@@ -321,10 +322,28 @@ pub fn references_private_member(
     false
 }
 
+const LDC: u8 = 0x12;
+const LDC_W: u8 = 0x13;
+
+/// An `ldc` of the one-word constant at `index` in the form ASM writes it: `ldc` when the index
+/// fits one byte, `ldc_w` otherwise.
+pub(super) fn narrowest_ldc(index: u16) -> Insn {
+    match u8::try_from(index) {
+        Ok(index) => Insn::Plain {
+            op: LDC,
+            operands: vec![index],
+        },
+        Err(_) => Insn::Plain {
+            op: LDC_W,
+            operands: index.to_be_bytes().to_vec(),
+        },
+    }
+}
+
 /// Relocate every constant-pool reference in a disassembled body into `cw`'s pool (the insn-level
 /// counterpart of [`relocate_code`], so relocation composes with the local/return/reified transforms
 /// before reassembly). `None` on `invokedynamic` or an unsupported one-byte pool operand. An `ldc`
-/// whose relocated index exceeds a byte is widened to the identical-semantics `ldc_w` form.
+/// or `ldc_w` takes the form its relocated index needs ([`narrowest_ldc`]).
 pub fn relocate_insns(
     insns: &mut [Insn],
     src_cp: &[C],
@@ -399,25 +418,20 @@ pub fn relocate_insns(
             (*operands.get(o)? as u16) << 8 | *operands.get(o + 1)? as u16
         };
         let new = relocate_const(src_cp, src_idx, cw)?;
-        if width == 1 {
-            if new > 0xff {
-                // `ldc` (0x12) is the only 1-byte-pool-index op; its relocated index overflowed a byte
-                // (the host class's pool is large — common when splicing a stdlib body like `require`'s
-                // into a big file). Widen to `ldc_w` (0x13), the identical-semantics 2-byte form. The
-                // assembler derives instruction length from the opcode, so the size change is handled
-                // downstream (see `old_offsets`). A non-`ldc` 1-byte op has no wide form → bail.
-                if *op != 0x12 {
-                    return None;
-                }
-                *op = 0x13;
-                *operands = vec![(new >> 8) as u8, (new & 0xff) as u8];
-                continue;
-            }
-            operands[o] = new as u8;
-        } else {
-            operands[o] = (new >> 8) as u8;
-            operands[o + 1] = (new & 0xff) as u8;
+        if matches!(*op, LDC | LDC_W) {
+            // The dependency's pool and the host's differ in size, so the form its `ldc` took says
+            // nothing about the host: write the one ASM (and so kotlinc) picks for the host index.
+            // The assembler derives instruction length from the opcode, so the size change is
+            // handled downstream (see `old_offsets`).
+            *insn = narrowest_ldc(new);
+            continue;
         }
+        if width == 1 {
+            // `ldc` is the only instruction with a one-byte pool index.
+            return None;
+        }
+        operands[o] = (new >> 8) as u8;
+        operands[o + 1] = (new & 0xff) as u8;
     }
     Some(())
 }
@@ -425,6 +439,42 @@ pub fn relocate_insns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dependency body loads a constant with `ldc_w` because its own pool is large; in the host
+    /// the constant lands at a small index, and ASM writes `ldc` there.
+    #[test]
+    fn a_relocated_ldc_takes_the_form_its_host_index_needs() {
+        let src_cp = vec![C::Other, C::Utf8("message".into()), C::String(1)];
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut insns = vec![
+            Insn::Plain {
+                op: LDC_W,
+                operands: vec![0x00, 0x02],
+            },
+            Insn::Plain {
+                op: LDC,
+                operands: vec![0x02],
+            },
+        ];
+        relocate_insns(&mut insns, &src_cp, &[], &mut cw).expect("relocate");
+        let host = cw.const_string("message");
+        assert!(host <= 0xff);
+        assert_eq!(insns, vec![narrowest_ldc(host), narrowest_ldc(host)]);
+        assert_eq!(
+            narrowest_ldc(host),
+            Insn::Plain {
+                op: LDC,
+                operands: vec![host as u8],
+            }
+        );
+        assert_eq!(
+            narrowest_ldc(0x123),
+            Insn::Plain {
+                op: LDC_W,
+                operands: vec![0x01, 0x23],
+            }
+        );
+    }
 
     fn bootstrap_pool(argument: C, argument_utf8: &str) -> Vec<C> {
         vec![

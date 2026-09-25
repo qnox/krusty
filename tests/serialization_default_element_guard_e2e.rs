@@ -15,9 +15,8 @@
 //! Every defaulted property of every `@Serializable` class carries one of these, so the two
 //! compilers' `write$Self` differed on essentially every generated model class in a real project.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// The instruction rows of one method, pool indices erased.
 fn method_body(disassembly: &str, marker: &str) -> Vec<String> {

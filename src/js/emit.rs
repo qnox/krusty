@@ -956,7 +956,7 @@ mod tests {
             fq_name: name.into(),
             is_source_declared: true,
             is_anonymous_object: false,
-            enclosing_function: None,
+            enclosure: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,

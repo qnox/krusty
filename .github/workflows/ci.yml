@@ -1,9 +1,12 @@
 name: ci
 
 # Build the conformance test binary once, run it against every supported Kotlin version, and publish
-# only after every version passes the 55% scanned-corpus conformance gate.
+# only after every version matches its exact box fail/not-applicable manifests.
+# `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
+# match the lists on their own base and still disagree with them once both are on master.
 on:
   pull_request:
+  merge_group:
   push:
     branches: [master]
 
@@ -25,6 +28,13 @@ jobs:
       KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: box outcome manifests only shrink
+        env:
+          BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
+        run: scripts/check-box-lists.sh "$BASE" "$HEAD"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -163,14 +173,6 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
-      - name: enforce >= 55%
-        run: |
-          set -euo pipefail
-          read -r pct passed scanned < pct.txt
-          awk -v passed="$passed" -v scanned="$scanned" \
-            'BEGIN { exit !(scanned > 0 && passed * 100 >= scanned * 55) }' \
-            || { echo "conformance ${{ matrix.version }} = ${pct}% < 55% — blocking" >&2; exit 1; }
-          echo "conformance ${{ matrix.version }} = ${pct}% >= 55% OK"
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
@@ -206,6 +208,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      # build.rs cross-compiles the native runtime for every Linux target, riscv64 included. Apple's
+      # clang ships without the RISC-V backend, so macOS builds use Homebrew's LLVM clang instead.
+      - name: select LLVM clang for the native runtime
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          if ! brew list --versions llvm >/dev/null; then
+            brew install llvm
+          fi
+          clang="$(brew --prefix llvm)/bin/clang"
+          test -x "$clang"
+          "$clang" --print-targets | grep -q riscv64
+          echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
       - name: build
         shell: bash
         run: just build-release "${{ matrix.target.triple }}"

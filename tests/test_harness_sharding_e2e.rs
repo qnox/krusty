@@ -249,6 +249,45 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
     fs::remove_dir_all(temp).expect("remove conformance report test directory");
 }
 
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runner = root.join("scripts").join("conformance-run.sh");
+    let temp = std::env::temp_dir().join(format!(
+        "krusty-conformance-run-failing-shard-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp).expect("create failing-shard test directory");
+    let binary = temp.join("conformance-bin");
+    // Every shard reports; the second one then fails its expected-failure check.
+    fs::write(
+        &binary,
+        "#!/usr/bin/env bash\nprintf 'shard %s\\n' \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n[ \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" != 1 ] || exit 101\n",
+    )
+    .expect("write failing-shard conformance fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+        .expect("make failing-shard conformance fixture executable");
+
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .output()
+        .expect("run failing-shard conformance fixture");
+
+    assert_eq!(output.status.code(), Some(101));
+    assert_eq!(output.stdout, b"50.0 4 8\n");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("failing-shard stderr is UTF-8"),
+        "shard 0\nshard 1\nshard 2\nshard 3\n"
+    );
+    fs::remove_dir_all(temp).expect("remove failing-shard test directory");
+}
+
 #[test]
 fn shard_listing_runs_through_the_deadline_helper() {
     let executable = std::env::current_exe().expect("current e2e test executable");

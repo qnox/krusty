@@ -12,9 +12,7 @@
 //!     nothing loads.
 
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 fn fixture() -> &'static str {
     "sealed interface Origin { data object Owned : Origin; data class ImportedRef(val id: String) : Origin }\n"

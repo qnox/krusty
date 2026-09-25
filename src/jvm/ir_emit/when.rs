@@ -1,8 +1,6 @@
 //! Type joins and JVM integer-switch emission for `when` expressions.
 
-use super::{
-    type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Label, Ty, VerifType,
-};
+use super::{type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Label, Ty};
 
 /// A switch subject, constant cases in source order, and the optional final `else` body.
 pub(super) struct IntSwitchPlan {
@@ -12,20 +10,18 @@ pub(super) struct IntSwitchPlan {
 }
 
 /// The merge contract shared by every emitted case body.
-pub(super) struct Emission<'a> {
+pub(super) struct Emission {
     is_stmt: bool,
     result_ty: Ty,
-    result_stack: &'a [VerifType],
     entry_height: u16,
     end: Label,
     terminal_target: Option<Label>,
 }
 
-impl<'a> Emission<'a> {
+impl Emission {
     pub(super) fn new(
         is_stmt: bool,
         result_ty: Ty,
-        result_stack: &'a [VerifType],
         entry_height: u16,
         end: Label,
         terminal_target: Option<Label>,
@@ -33,7 +29,6 @@ impl<'a> Emission<'a> {
         Self {
             is_stmt,
             result_ty,
-            result_stack,
             entry_height,
             end,
             terminal_target,
@@ -147,7 +142,7 @@ impl Emitter<'_> {
         &mut self,
         expression: u32,
         (guard, null_result, selector): (u32, u32, u32),
-        emission: Emission<'_>,
+        emission: Emission,
         code: &mut CodeBuilder,
     ) {
         let exit = self.safe_call_null_exits.remove(&expression);
@@ -191,11 +186,8 @@ impl Emitter<'_> {
         if matches!(exit, Some((_, false))) {
             return;
         }
-        let mut end_targeted = false;
         if !selector_diverges {
-            self.frame(emission.end, emission.result_stack.to_vec(), code);
             code.goto(emission.end);
-            end_targeted = true;
         }
         self.bind(null_path, code);
         // A chain's inner guards jumped here before its later receiver temporaries were stored.
@@ -203,10 +195,7 @@ impl Emitter<'_> {
             self.unassigned_values.extend(temporaries);
         }
         code.set_stack(emission.entry_height);
-        let null_diverges = emit_arm(self, null_result, code);
-        if end_targeted && !null_diverges {
-            self.frame(emission.end, emission.result_stack.to_vec(), code);
-        }
+        let _ = emit_arm(self, null_result, code);
         self.bind(emission.end, code);
     }
 
@@ -214,7 +203,7 @@ impl Emitter<'_> {
     pub(super) fn emit_int_switch(
         &mut self,
         plan: &IntSwitchPlan,
-        emission: Emission<'_>,
+        emission: Emission,
         code: &mut CodeBuilder,
     ) {
         let default = code.new_label();
@@ -244,40 +233,28 @@ impl Emitter<'_> {
         }
 
         let merge = emission.terminal_target.unwrap_or(emission.end);
-        let mut end_reachable = false;
         for (index, (_, body)) in plan.cases.iter().enumerate() {
-            self.frame(case_labels[index], vec![], code);
             self.bind(case_labels[index], code);
             code.set_stack(emission.entry_height);
             if self.emit_switch_body(*body, &emission, code) {
-                self.frame(merge, emission.result_stack.to_vec(), code);
                 code.goto(merge);
-                end_reachable = true;
             }
         }
-        self.frame(default, vec![], code);
         self.bind(default, code);
         code.set_stack(emission.entry_height);
         match plan.default {
             Some(body) => {
                 if self.emit_switch_body(body, &emission, code) {
                     if emission.terminal_target.is_some() {
-                        self.frame(merge, emission.result_stack.to_vec(), code);
                         code.goto(merge);
                     }
-                    end_reachable = true;
                 }
             }
             None => {
                 if emission.terminal_target.is_some() {
-                    self.frame(merge, emission.result_stack.to_vec(), code);
                     code.goto(merge);
                 }
-                end_reachable = true;
             }
-        }
-        if end_reachable && emission.terminal_target.is_none() {
-            self.frame(emission.end, emission.result_stack.to_vec(), code);
         }
         if emission.terminal_target.is_none() {
             self.bind(emission.end, code);
@@ -285,12 +262,7 @@ impl Emitter<'_> {
     }
 
     /// Emit one case body and report whether it reaches the merge.
-    fn emit_switch_body(
-        &mut self,
-        body: u32,
-        emission: &Emission<'_>,
-        code: &mut CodeBuilder,
-    ) -> bool {
+    fn emit_switch_body(&mut self, body: u32, emission: &Emission, code: &mut CodeBuilder) -> bool {
         if emission.is_stmt {
             self.emit(body, code);
             !self.discarding_diverges(body)

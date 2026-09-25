@@ -356,7 +356,11 @@ fn specialized_generic_constructor_reference_keeps_its_stable_constructor_identi
     else {
         panic!("a specialized source constructor must keep checked constructor FIR")
     };
-    let FirConstructorTarget::Module(target) = target else {
+    let FirConstructorTarget::Module {
+        declaration: target,
+        ..
+    } = target
+    else {
         panic!("a source constructor reference must retain a module identity")
     };
     assert!(index.callable(*target).is_some());

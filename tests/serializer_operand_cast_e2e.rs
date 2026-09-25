@@ -10,9 +10,8 @@
 //! serializer, for the nullable and non-nullable call on each side. It is three bytes plus its
 //! pool entries at every element of every generated serializer, which is why it is worth its own
 //! regression rather than being folded into a larger comparison.
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// A builtin singleton, a generated serializer, and a nullable of each — so a rule that fired only
 /// for one shape cannot pass.

@@ -572,7 +572,11 @@ fn statement_local_alias_publishes_local_class_constructor_signature() {
         matches!(expression.ty.get(), Ty::Obj(_, _)).then_some(call)
     });
     let call = call.expect("checked local-class constructor call");
-    let FirConstructorTarget::Module(target) = call.target else {
+    let FirConstructorTarget::Module {
+        declaration: target,
+        ..
+    } = call.target
+    else {
         panic!("local source constructor must retain a module identity")
     };
     let declaration = index

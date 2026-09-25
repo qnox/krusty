@@ -324,6 +324,12 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
+    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
+        self.source()
+            .generated_serializer_singleton(classifier)
+            .or_else(|| self.platform.generated_serializer_singleton(classifier))
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
         if let Some(merged) = self
             .symbols_memo
@@ -617,6 +623,7 @@ mod tests {
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
             hidden_member_properties: Default::default(),
+            hidden_deprecated_callables: Default::default(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
@@ -626,6 +633,7 @@ mod tests {
             callable_signature: None,
             callable_signatures: Vec::new(),
             companion_object: None,
+            qualified_name: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

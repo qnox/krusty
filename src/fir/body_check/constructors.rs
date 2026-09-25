@@ -325,7 +325,15 @@ impl BodyFirChecker<'_> {
                 None
             };
         Ok(FirExprKind::ConstructorCall(FirConstructorCall {
-            target: FirConstructorTarget::Module(target),
+            target: FirConstructorTarget::Module {
+                declaration: target,
+                annotation: self.module_annotation_construction(
+                    self.file.expr_span(expression).ok_or_else(|| {
+                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                    })?,
+                    target,
+                )?,
+            },
             context_parameter_count,
             outer_parameter,
             outer_receiver,
@@ -476,6 +484,68 @@ impl BodyFirChecker<'_> {
             members: members.into_boxed_slice(),
             defaults: defaults.into_boxed_slice(),
         })
+    }
+
+    fn module_annotation_construction(
+        &self,
+        span: Span,
+        target: crate::fir::CallableId,
+    ) -> Result<Option<Box<FirAnnotationConstruction>>, BodyCheckFailure> {
+        let callable = self.index.callable(target).ok_or_else(|| {
+            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+        })?;
+        let owner = self
+            .index
+            .declaration_anchor(callable.declaration)
+            .and_then(|anchor| anchor.owner)
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+        let is_annotation = self.index.declaration_header(owner).is_some_and(|header| {
+            header
+                .flags
+                .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
+        });
+        if !is_annotation {
+            return Ok(None);
+        }
+        let signature = self.index.signature(callable.declaration).ok_or_else(|| {
+            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+        })?;
+        let defaults = self
+            .index
+            .annotation_constructor_defaults(target)
+            .ok_or_else(|| self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape))?;
+        if defaults.len() != signature.parameters.len() {
+            return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
+        }
+        let mut members = Vec::with_capacity(signature.parameters.len());
+        for (ordinal, parameter) in signature.parameters.iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).map_err(|_| {
+                self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+            })?;
+            self.index
+                .callable_parameter(target, ordinal)
+                .ok_or_else(|| {
+                    self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                })?;
+            let name = self
+                .index
+                .callable_parameter_name(target, ordinal)
+                .ok_or_else(|| {
+                    self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                })?;
+            members.push((name.to_owned(), parameter.get()));
+        }
+        self.checked_annotation_construction(
+            span,
+            ResolvedAnnotationConstruction {
+                members,
+                defaults: defaults.to_vec(),
+            },
+        )
+        .map(Box::new)
+        .map(Some)
     }
 
     fn checked_constructor_arguments(
@@ -761,7 +831,10 @@ fn checked_delegation_target(
     match target {
         ResolvedCtorDelegationTarget::ThisPrimary { .. } => {
             stable_constructor_callable(class, 0, checker.index)
-                .map(|callable| FirConstructorTarget::Module(callable.id))
+                .map(|callable| FirConstructorTarget::Module {
+                    declaration: callable.id,
+                    annotation: None,
+                })
                 .ok_or_else(|| {
                     checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                 })
@@ -771,7 +844,10 @@ fn checked_delegation_target(
                 checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
             })?;
             stable_constructor_callable(class, sibling, checker.index)
-                .map(|callable| FirConstructorTarget::Module(callable.id))
+                .map(|callable| FirConstructorTarget::Module {
+                    declaration: callable.id,
+                    annotation: None,
+                })
                 .ok_or_else(|| {
                     checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                 })
@@ -788,7 +864,10 @@ fn checked_delegation_target(
                 return checker
                     .index
                     .callable_for_declaration(*declaration)
-                    .map(|callable| FirConstructorTarget::Module(callable.id))
+                    .map(|callable| FirConstructorTarget::Module {
+                        declaration: callable.id,
+                        annotation: None,
+                    })
                     .ok_or_else(|| {
                         checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     });
@@ -798,7 +877,10 @@ fn checked_delegation_target(
                     .index
                     .unique_constructor_declaration(*owner, declaration_params)
                     .and_then(|declaration| checker.index.callable_for_declaration(declaration))
-                    .map(|callable| FirConstructorTarget::Module(callable.id))
+                    .map(|callable| FirConstructorTarget::Module {
+                        declaration: callable.id,
+                        annotation: None,
+                    })
                     .ok_or_else(|| {
                         checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     });

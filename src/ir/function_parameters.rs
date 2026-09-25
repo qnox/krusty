@@ -22,12 +22,22 @@ pub enum IrParameterRole {
 /// A compiler-created parameter's semantic job. Targets own any physical spelling and flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrGeneratedParameterRole {
-    Positional { ordinal: u32 },
+    Positional {
+        ordinal: u32,
+    },
     Continuation,
     HolderReceiver,
     ValueClassCarrier,
-    ValueClassEqualsOperand { ordinal: u8 },
-    AccessorValue { ordinal: u32 },
+    ValueClassEqualsOperand {
+        ordinal: u8,
+    },
+    AccessorValue {
+        ordinal: u32,
+    },
+    /// A value parameter of the `invoke` a callable-reference class declares for its target.
+    ReferenceInvokeValue {
+        ordinal: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
