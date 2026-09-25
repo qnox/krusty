@@ -1,4 +1,5 @@
-/* krusty native runtime — generated; do not edit. */
+/* krusty native runtime: the values — built-in types, boxing, strings, collections, exceptions and
+   kotlin.io. Hand-written freestanding C; build.rs compiles it into the runtime for every target. */
 #include "krusty_rt.h"
 #include "krusty_sys.h"
 
