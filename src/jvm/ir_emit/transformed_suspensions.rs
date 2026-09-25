@@ -123,8 +123,18 @@ pub(super) fn request_transform(
                 .expect("a transformed source function retains its declaration line"))
             .min(u16::MAX as u32) as u16,
             completion_slot,
+            dispatch_receiver: dispatch_receiver(ir, fid),
         },
     );
+}
+
+/// The class a member function's continuation captures as `this$0`, by internal name.
+fn dispatch_receiver(ir: &IrFile, fid: u32) -> Option<String> {
+    let function = &ir.functions[fid as usize];
+    function
+        .dispatch_receiver
+        .filter(|_| !function.is_static)
+        .map(|owner| owner.render())
 }
 
 /// What kotlinc's coroutine transformer found, by continuation class, for the classes written so
@@ -132,9 +142,16 @@ pub(super) fn request_transform(
 pub(super) type TransformedCoroutines = RefCell<HashMap<String, CoroutineOutcome>>;
 
 impl EmitRun {
+    /// Write `class`, transforming the coroutines its methods asked for, and keep what they found.
+    pub(super) fn finish_class(&self, class: ClassWriter) -> Vec<u8> {
+        let (bytes, coroutines) = class.finish_with_coroutines();
+        self.record_transformed_coroutines(coroutines);
+        bytes
+    }
+
     /// Keep what the transformation of a finished class found. A body it could not transform
     /// fails the compile: the class written holds no state machine.
-    pub(super) fn record_transformed_coroutines(&self, coroutines: Vec<TransformedCoroutine>) {
+    fn record_transformed_coroutines(&self, coroutines: Vec<TransformedCoroutine>) {
         for coroutine in coroutines {
             if let CoroutineOutcome::Failed(reason) = &coroutine.outcome {
                 self.set_emit_error(format!("{}: {reason}", coroutine.continuation_class));
