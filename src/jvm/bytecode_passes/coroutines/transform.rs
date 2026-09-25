@@ -1,11 +1,13 @@
-//! `CoroutineTransformerMethodVisitor.performTransformations` for a named suspend function.
+//! `CoroutineTransformerMethodVisitor.performTransformations`: the passes both modes share, and the
+//! named-function mode (`isForNamedFunction = true`). The suspend-lambda mode is in
+//! `lambda_mode`.
 
 use std::collections::HashMap;
 
 use super::super::analysis::{computed_max_stack, node_opcode, ControlFlowGraph};
 use super::super::descriptors;
 use super::super::fix_stack::fix_stack;
-use super::super::insn_list::EditableMethod;
+use super::super::insn_list::{EditableMethod, NodeId};
 use super::super::opcodes::*;
 use super::change_boxing::change_boxing;
 use super::markers::{is_fake_continuation_marker, is_suspend_marker, SuspendMarker};
@@ -13,15 +15,17 @@ use super::redundant_locals::eliminate_redundant_locals;
 use super::spilling::{spill_variables, SpillContext};
 use super::state_machine::{
     drop_markers, drop_suspension_markers, drop_unbox_inline_class_markers,
-    extend_parameter_ranges, generate_tableswitch, initialize_fake_inliner_variables, line_of,
-    next_line, prepare_prelude, previous_line, remove_empty_catch_blocks, split_try_catch_blocks,
-    transform_call_and_return_state_label, Machine,
+    extend_parameter_ranges, extend_suspend_lambda_parameter_ranges, generate_tableswitch,
+    initialize_fake_inliner_variables, line_of, next_line, prepare_prelude, previous_line,
+    remove_empty_catch_blocks, split_try_catch_blocks, transform_call_and_return_state_label,
+    Machine,
 };
 use super::suspension_points::{collect_suspension_points, SuspensionPoint};
 use super::tail_calls::{add_coroutine_suspended_checks, all_suspension_points_are_tail_calls};
 use super::uninitialized_stores::process_uninitialized_stores;
 use super::{
-    CoroutineError, DebugMetadata, NamedFunction, StateMachine, StateMachineLayout, Transformed,
+    CoroutineError, DebugMetadata, DeclaredSpillFields, NamedFunction, StateMachine,
+    StateMachineLayout, Transformed,
 };
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
@@ -232,49 +236,49 @@ fn add_line_numbers_for_points_on_the_same_line(
     }
 }
 
-/// Transforms the marked body of a named suspend function the way kotlinc's
-/// `CoroutineTransformerMethodVisitor` does.
-pub(crate) fn transform_named_function(
-    method: MethodNode,
-    function: &NamedFunction,
-) -> Result<Transformed, CoroutineError> {
-    let owner = function.owner;
-    let mut method = EditableMethod::new(method);
-    let is_static = method.method.access & 0x0008 != 0;
-    let completion = function.completion_slot;
-    validate_completion_slot(&method.method, completion)?;
+/// The first half of `performTransformations`, which both modes run on the marked body: fake
+/// continuations become loads of `continuation`, the operand stack is saved around each call, and
+/// the suspension points are collected.
+pub(super) fn prepare_marked_body(
+    method: &mut EditableMethod,
+    owner: &str,
+    continuation: u16,
+) -> Result<Vec<SuspensionPoint>, CoroutineError> {
+    remove_fake_continuation_constructor_call(method)?;
+    replace_returns_unit_markers(method);
+    replace_fake_continuations(method, continuation);
+    fix_stack(method, owner).map_err(CoroutineError::FixStack)?;
+    let points = collect_suspension_points(method);
+    eliminate_redundant_locals(method, owner, &points)?;
+    change_boxing(method);
+    check_monitors(method, &points)?;
+    add_line_numbers_for_points_on_the_same_line(method, &points);
+    Ok(points)
+}
 
-    remove_fake_continuation_constructor_call(&mut method)?;
-    replace_returns_unit_markers(&mut method);
-    replace_fake_continuations(&mut method, completion);
-    fix_stack(&mut method, owner).map_err(CoroutineError::FixStack)?;
-    let mut points = collect_suspension_points(&mut method);
-    eliminate_redundant_locals(&mut method, owner, &points)?;
-    change_boxing(&mut method);
-    check_monitors(&method, &points)?;
-    add_line_numbers_for_points_on_the_same_line(&mut method, &points);
+/// What building the state machine needs beyond the body, in either mode.
+pub(super) struct MachineSpec<'a> {
+    /// The internal name of the class declaring the method.
+    pub owner: &'a str,
+    pub source_file: &'a str,
+    pub machine: Machine<'a>,
+    /// `$completion`'s slot in a named function, which is never spilled.
+    pub completion_slot: Option<u16>,
+    /// `getLastParameterIndex`: the parameters up to this slot span the whole method again.
+    pub last_parameter_slot: u16,
+    pub declared_spill_fields: &'a [DeclaredSpillFields<'a>],
+}
 
-    let coroutine_start = method.insns.first().ok_or(CoroutineError::Unsupported(
-        "an empty suspend function body",
-    ))?;
-
-    if all_suspension_points_are_tail_calls(&method, owner, &points)? {
-        add_coroutine_suspended_checks(&mut method, &points);
-        drop_suspension_markers(&mut method);
-        drop_unbox_inline_class_markers(&mut method, &points);
-        return Ok(Transformed::TailCalls(finish_method(method, owner)?));
-    }
-
-    let data_index = method.method.max_locals;
-    let continuation_index = data_index + 1;
-    method.method.max_locals += 2;
-    let machine = Machine {
-        function,
-        continuation_index,
-        data_index,
-    };
-    prepare_prelude(&mut method, &machine);
-
+/// The second half of `performTransformations`, from `splitTryCatchBlocksContainingSuspensionPoint`
+/// on: spilling, the states, and the `tableswitch` inserted before `coroutine_start`.
+pub(super) fn build_state_machine(
+    mut method: EditableMethod,
+    mut points: Vec<SuspensionPoint>,
+    spec: &MachineSpec,
+    coroutine_start: NodeId,
+) -> Result<StateMachine, CoroutineError> {
+    let owner = spec.owner;
+    let machine = &spec.machine;
     for point in &mut points {
         split_try_catch_blocks(&mut method, point);
     }
@@ -283,11 +287,12 @@ pub(crate) fn transform_named_function(
     let mut layout = StateMachineLayout::default();
     let context = SpillContext {
         owner,
-        continuation_class: function.continuation_class,
-        continuation_index,
-        data_index,
-        completion_slot: Some(completion),
-        is_static,
+        continuation_class: machine.state_class,
+        continuation_index: machine.continuation_index,
+        data_index: machine.data_index,
+        completion_slot: spec.completion_slot,
+        is_static: method.method.access & 0x0008 != 0,
+        declared: spec.declared_spill_fields,
     };
     spill_variables(&mut method, &context, &points, &mut layout)?;
 
@@ -307,7 +312,7 @@ pub(crate) fn transform_named_function(
     for (index, point) in points.iter().enumerate() {
         state_labels.push(transform_call_and_return_state_label(
             &mut method,
-            &machine,
+            machine,
             index as i32 + 1,
             point,
             suspend_marker_var,
@@ -316,7 +321,7 @@ pub(crate) fn transform_named_function(
     }
     generate_tableswitch(
         &mut method,
-        &machine,
+        machine,
         coroutine_start,
         suspend_marker_var,
         &state_labels,
@@ -326,12 +331,13 @@ pub(crate) fn transform_named_function(
     drop_suspension_markers(&mut method);
     drop_unbox_inline_class_markers(&mut method, &points);
     remove_empty_catch_blocks(&mut method);
-    extend_parameter_ranges(&mut method, completion);
+    extend_parameter_ranges(&mut method, spec.last_parameter_slot);
+    extend_suspend_lambda_parameter_ranges(&mut method)?;
     drop_markers(&mut method, &[SuspendMarker::SuspendLambdaParameter]);
 
     let line_or_none = |line: &Option<u16>| line.map_or(-1, i32::from);
     let debug_metadata = DebugMetadata {
-        source_file: function.source_file.to_string(),
+        source_file: spec.source_file.to_string(),
         line_numbers: lines.iter().map(line_or_none).collect(),
         next_line_numbers: next_lines.iter().map(line_or_none).collect(),
         index_to_label: layout
@@ -356,9 +362,56 @@ pub(crate) fn transform_named_function(
         class_name: owner.replace('/', "."),
         version: 2,
     };
-    Ok(Transformed::StateMachine(Box::new(StateMachine {
+    Ok(StateMachine {
         method: finish_method(method, owner)?,
         layout,
         debug_metadata,
-    })))
+    })
+}
+
+/// Transforms the marked body of a named suspend function the way kotlinc's
+/// `CoroutineTransformerMethodVisitor` does.
+pub(crate) fn transform_named_function(
+    method: MethodNode,
+    function: &NamedFunction,
+) -> Result<Transformed, CoroutineError> {
+    let owner = function.owner;
+    let mut method = EditableMethod::new(method);
+    let completion = function.completion_slot;
+    validate_completion_slot(&method.method, completion)?;
+
+    let points = prepare_marked_body(&mut method, owner, completion)?;
+
+    let coroutine_start = method.insns.first().ok_or(CoroutineError::Unsupported(
+        "an empty suspend function body",
+    ))?;
+
+    if all_suspension_points_are_tail_calls(&method, owner, &points)? {
+        add_coroutine_suspended_checks(&mut method, &points);
+        drop_suspension_markers(&mut method);
+        drop_unbox_inline_class_markers(&mut method, &points);
+        return Ok(Transformed::TailCalls(finish_method(method, owner)?));
+    }
+
+    let data_index = method.method.max_locals;
+    let continuation_index = data_index + 1;
+    method.method.max_locals += 2;
+    let machine = Machine {
+        state_class: function.continuation_class,
+        line_number: function.line_number,
+        continuation_index,
+        data_index,
+    };
+    prepare_prelude(&mut method, &machine, function);
+
+    let spec = MachineSpec {
+        owner,
+        source_file: function.source_file,
+        machine,
+        completion_slot: Some(completion),
+        last_parameter_slot: completion,
+        declared_spill_fields: &[],
+    };
+    let machine = build_state_machine(method, points, &spec, coroutine_start)?;
+    Ok(Transformed::StateMachine(Box::new(machine)))
 }

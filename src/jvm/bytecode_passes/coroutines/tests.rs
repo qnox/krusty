@@ -9,7 +9,8 @@
 use super::super::opcodes::*;
 use super::markers::{inline_call_marker, mark, SuspendMarker};
 use super::{
-    transform_named_function, CoroutineError, NamedFunction, SpillField, StateMachine, Transformed,
+    transform_named_function, transform_suspend_lambda, CoroutineError, DeclaredSpillFields,
+    NamedFunction, SpillField, StateMachine, SuspendLambda, Transformed,
 };
 use crate::jvm::method_node::{Constant, Insn, LabelId, LocalVariable, MethodNode, Node};
 
@@ -760,5 +761,359 @@ fn completion_identity_must_match_the_physical_parameter_layout() {
             recorded: 0,
             physical: 1,
         })
+    );
+}
+
+const OBJECT: &str = "Ljava/lang/Object;";
+const CONTINUATION: &str = "kotlin/coroutines/Continuation";
+const INVOKE_SUSPEND: &str = "(Ljava/lang/Object;)Ljava/lang/Object;";
+const LEAF: &str = "(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;";
+
+/// The start of a lambda's `invokeSuspend` as kotlinc's codegen hands it on: each parameter is
+/// read from the field it was stored in, and a `mark(10)` follows its store. Returns the label
+/// after the last marker, where the parameters' entries start.
+fn unspill_lambda_parameters(body: &mut Body, class: &str, parameters: &[(&str, u16)]) -> LabelId {
+    for &(field, slot) in parameters {
+        body.var(ALOAD, 0)
+            .insn(Insn::Field {
+                op: GETFIELD,
+                owner: class.to_string(),
+                name: field.to_string(),
+                desc: "I".to_string(),
+            })
+            .var(ISTORE, slot)
+            .nodes(mark(SuspendMarker::SuspendLambdaParameter));
+    }
+    body.label()
+}
+
+/// `leaf()` called with the lambda itself as the continuation, its `Unit` result dropped.
+fn call_leaf(body: &mut Body) {
+    body.suspend_call(
+        |body| {
+            body.var(ALOAD, 0).insn(Insn::Type {
+                op: CHECKCAST,
+                class: CONTINUATION.to_string(),
+            });
+        },
+        true,
+        "AKt",
+        "leaf",
+        LEAF,
+    )
+    .op(POP);
+}
+
+fn box_int_and_return(body: &mut Body) {
+    body.call(
+        INVOKESTATIC,
+        "java/lang/Integer",
+        "valueOf",
+        "(I)Ljava/lang/Integer;",
+    )
+    .op(ARETURN);
+}
+
+fn lambda_receivers(body: &mut Body, class: &str, start: LabelId, end: LabelId) {
+    body.local("this", &format!("L{class};"), start, end, 0);
+    body.local("$result", OBJECT, start, end, 1);
+}
+
+fn spill_field(name: &str, descriptor: &str) -> SpillField {
+    SpillField {
+        name: name.to_string(),
+        descriptor: descriptor.to_string(),
+    }
+}
+
+/// ```kotlin
+/// suspend fun leaf() {}
+/// fun f(): suspend (Int) -> Int = { x ->
+///     leaf()
+///     x + 1
+/// }
+/// ```
+///
+/// `x` lives in the lambda's `I$0`: it is read before the `tableswitch` on every entry, so it is
+/// spilled at the call but never restored, and its entry spans the whole state machine.
+#[test]
+fn a_lambda_parameter_is_spilled_into_its_own_field_and_not_restored() {
+    const CLASS: &str = "AKt$f$1";
+    let mut body = Body::new(0x0011, "invokeSuspend", INVOKE_SUSPEND, 3);
+    let start = body.label();
+    let x_start = unspill_lambda_parameters(&mut body, CLASS, &[("I$0", 2)]);
+    body.line(4);
+    call_leaf(&mut body);
+    body.line(5);
+    body.var(ILOAD, 2).op(ICONST_1).op(IADD);
+    box_int_and_return(&mut body);
+    let end = body.label();
+    body.local("x", "I", x_start, end, 2);
+    lambda_receivers(&mut body, CLASS, start, end);
+
+    let lambda = SuspendLambda {
+        class: CLASS,
+        source_file: "A.kt",
+        line_number: 3,
+        declared_spill_fields: &[DeclaredSpillFields {
+            descriptor: "I",
+            max_index: 0,
+        }],
+    };
+    let StateMachine {
+        method,
+        layout,
+        debug_metadata,
+    } = transform_suspend_lambda(body.method, &lambda).expect("the body transforms");
+    // kotlinc 2.4.20's `AKt$f$1.invokeSuspend`.
+    assert_eq!(
+        listing(&method),
+        include_str!("testdata/lambda_parameter.txt")
+    );
+    assert_eq!(method.max_locals, 4);
+    assert_eq!(layout.fields, Vec::new());
+    assert_eq!(debug_metadata.source_file, "A.kt");
+    assert_eq!(debug_metadata.line_numbers, vec![4]);
+    assert_eq!(debug_metadata.next_line_numbers, vec![5]);
+    assert_eq!(debug_metadata.index_to_label, vec![0]);
+    assert_eq!(debug_metadata.spilled, vec!["I$0"]);
+    assert_eq!(debug_metadata.local_names, vec!["x"]);
+    assert_eq!(debug_metadata.method_name, "invokeSuspend");
+    assert_eq!(debug_metadata.class_name, CLASS);
+}
+
+/// ```kotlin
+/// fun g(): suspend () -> Int = {
+///     val a = "s".length
+///     leaf()
+///     a
+/// }
+/// ```
+///
+/// Without parameters the machine starts at the body's first instruction, and every spill field
+/// is the machine's own.
+#[test]
+fn a_lambda_without_parameters_spills_into_new_fields() {
+    const CLASS: &str = "AKt$g$1";
+    let mut body = Body::new(0x0011, "invokeSuspend", INVOKE_SUSPEND, 3);
+    let start = body.label();
+    body.line(9);
+    body.op(ICONST_1).var(ISTORE, 2);
+    let a_start = body.line(10);
+    call_leaf(&mut body);
+    body.line(11);
+    body.var(ILOAD, 2);
+    box_int_and_return(&mut body);
+    let end = body.label();
+    body.local("a", "I", a_start, end, 2);
+    lambda_receivers(&mut body, CLASS, start, end);
+
+    let lambda = SuspendLambda {
+        class: CLASS,
+        source_file: "A.kt",
+        line_number: 8,
+        declared_spill_fields: &[],
+    };
+    let StateMachine {
+        method,
+        layout,
+        debug_metadata,
+    } = transform_suspend_lambda(body.method, &lambda).expect("the body transforms");
+    // kotlinc 2.4.20's `AKt$g$1.invokeSuspend`.
+    assert_eq!(
+        listing(&method),
+        include_str!("testdata/lambda_without_parameters.txt")
+    );
+    assert_eq!(layout.fields, vec![spill_field("I$0", "I")]);
+    assert_eq!(debug_metadata.line_numbers, vec![10]);
+    assert_eq!(debug_metadata.next_line_numbers, vec![11]);
+    assert_eq!(debug_metadata.spilled, vec!["I$0"]);
+    assert_eq!(debug_metadata.local_names, vec!["a"]);
+}
+
+/// ```kotlin
+/// fun h(): suspend (Int) -> Int = { x ->
+///     val s = "s" + x
+///     val a = s.length
+///     leaf()
+///     x + a + s.length
+/// }
+/// ```
+///
+/// The class already declares `I$0` for `x` (`initialVarsCountByType`): the machine adds only the
+/// fields past it, after the kinds the class declares.
+#[test]
+fn a_lambda_declares_only_the_spill_fields_past_its_parameters() {
+    const CLASS: &str = "AKt$h$1";
+    let mut body = Body::new(0x0011, "invokeSuspend", INVOKE_SUSPEND, 5);
+    let start = body.label();
+    let x_start = unspill_lambda_parameters(&mut body, CLASS, &[("I$0", 2)]);
+    body.line(15);
+    body.insn(Insn::Type {
+        op: NEW,
+        class: STRING_BUILDER.to_string(),
+    })
+    .op(DUP)
+    .call(INVOKESPECIAL, STRING_BUILDER, "<init>", "()V")
+    .insn(Insn::Int {
+        op: BIPUSH,
+        operand: 115,
+    })
+    .call(
+        INVOKEVIRTUAL,
+        STRING_BUILDER,
+        "append",
+        "(C)Ljava/lang/StringBuilder;",
+    )
+    .var(ILOAD, 2)
+    .call(
+        INVOKEVIRTUAL,
+        STRING_BUILDER,
+        "append",
+        "(I)Ljava/lang/StringBuilder;",
+    )
+    .call(
+        INVOKEVIRTUAL,
+        STRING_BUILDER,
+        "toString",
+        "()Ljava/lang/String;",
+    )
+    .var(ASTORE, 3);
+    let s_start = body.line(16);
+    body.var(ALOAD, 3)
+        .call(INVOKEVIRTUAL, STRING, "length", "()I")
+        .var(ISTORE, 4);
+    let a_start = body.line(17);
+    call_leaf(&mut body);
+    body.line(18);
+    body.var(ILOAD, 2)
+        .var(ILOAD, 4)
+        .op(IADD)
+        .var(ALOAD, 3)
+        .call(INVOKEVIRTUAL, STRING, "length", "()I")
+        .op(IADD);
+    box_int_and_return(&mut body);
+    let end = body.label();
+    body.local("x", "I", x_start, end, 2);
+    body.local("s", "Ljava/lang/String;", s_start, end, 3);
+    body.local("a", "I", a_start, end, 4);
+    lambda_receivers(&mut body, CLASS, start, end);
+
+    let lambda = SuspendLambda {
+        class: CLASS,
+        source_file: "A.kt",
+        line_number: 14,
+        declared_spill_fields: &[DeclaredSpillFields {
+            descriptor: "I",
+            max_index: 0,
+        }],
+    };
+    let StateMachine {
+        method,
+        layout,
+        debug_metadata,
+    } = transform_suspend_lambda(body.method, &lambda).expect("the body transforms");
+    // kotlinc 2.4.20's `AKt$h$1.invokeSuspend`.
+    assert_eq!(
+        listing(&method),
+        include_str!("testdata/lambda_parameter_field_reused.txt")
+    );
+    assert_eq!(
+        layout.fields,
+        vec![spill_field("I$1", "I"), spill_field("L$0", OBJECT)]
+    );
+    assert_eq!(debug_metadata.line_numbers, vec![17]);
+    assert_eq!(debug_metadata.next_line_numbers, vec![18]);
+    assert_eq!(debug_metadata.index_to_label, vec![0, 0, 0]);
+    assert_eq!(debug_metadata.spilled, vec!["L$0", "I$0", "I$1"]);
+    assert_eq!(debug_metadata.local_names, vec!["s", "x", "a"]);
+}
+
+/// ```kotlin
+/// suspend fun leaf() {}
+/// fun use(x: String) {}
+/// fun f(): suspend (String) -> Unit = { s ->
+///     use(s)
+///     leaf()
+/// }
+/// ```
+///
+/// `s` lives in the lambda's `L$0` and is dead at the call, so it is spilled back through
+/// `nullOutSpilledVariable`. Every declared parameter field is spilled at every point, so the
+/// point never nulls a field the class declares.
+#[test]
+fn a_dead_reference_parameter_is_spilled_back_into_its_field() {
+    const CLASS: &str = "AKt$f$1";
+    let mut body = Body::new(0x0011, "invokeSuspend", INVOKE_SUSPEND, 3);
+    let start = body.label();
+    body.var(ALOAD, 0)
+        .insn(Insn::Field {
+            op: GETFIELD,
+            owner: CLASS.to_string(),
+            name: "L$0".to_string(),
+            desc: OBJECT.to_string(),
+        })
+        .insn(Insn::Type {
+            op: CHECKCAST,
+            class: STRING.to_string(),
+        })
+        .var(ASTORE, 2)
+        .nodes(mark(SuspendMarker::SuspendLambdaParameter));
+    let s_start = body.label();
+    body.line(4);
+    body.var(ALOAD, 2)
+        .call(INVOKESTATIC, "AKt", "use", "(Ljava/lang/String;)V");
+    body.line(5);
+    call_leaf(&mut body);
+    body.line(6);
+    body.insn(Insn::Field {
+        op: GETSTATIC,
+        owner: "kotlin/Unit".to_string(),
+        name: "INSTANCE".to_string(),
+        desc: "Lkotlin/Unit;".to_string(),
+    })
+    .op(ARETURN);
+    let end = body.label();
+    body.local("s", "Ljava/lang/String;", s_start, end, 2);
+    lambda_receivers(&mut body, CLASS, start, end);
+
+    let lambda = SuspendLambda {
+        class: CLASS,
+        source_file: "A.kt",
+        line_number: 3,
+        declared_spill_fields: &[DeclaredSpillFields {
+            descriptor: OBJECT,
+            max_index: 0,
+        }],
+    };
+    let StateMachine {
+        method,
+        layout,
+        debug_metadata,
+    } = transform_suspend_lambda(body.method, &lambda).expect("the body transforms");
+    // kotlinc 2.4.20's `AKt$f$1.invokeSuspend`.
+    assert_eq!(
+        listing(&method),
+        include_str!("testdata/lambda_dead_reference_parameter.txt")
+    );
+    assert_eq!(layout.fields, Vec::new());
+    assert_eq!(debug_metadata.spilled, vec!["L$0"]);
+    assert_eq!(debug_metadata.local_names, vec!["s"]);
+}
+
+#[test]
+fn a_lambda_body_must_be_an_instance_invoke_suspend() {
+    let lambda = SuspendLambda {
+        class: "AKt$f$1",
+        source_file: "A.kt",
+        line_number: 3,
+        declared_spill_fields: &[],
+    };
+    let method = Body::new(0x0019, "invokeSuspend", INVOKE_SUSPEND, 1).method;
+    assert_eq!(
+        transform_suspend_lambda(method, &lambda),
+        Err(CoroutineError::Unsupported(
+            "a suspend lambda body that is not an instance `invokeSuspend(Object): Object`"
+        ))
     );
 }
