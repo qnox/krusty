@@ -22,21 +22,8 @@ impl ConstPool {
 
     /// The entry at 1-based pool index `idx` (long/double occupy two slots).
     pub(super) fn entry_at(&self, idx: u16) -> Option<&Const> {
-        if self.wide_count == 0 {
-            return self.entries.get(idx as usize - 1);
-        }
-        let mut slot = 1u16;
-        for constant in &self.entries {
-            if slot == idx {
-                return Some(constant);
-            }
-            slot += if matches!(constant, Const::Long(_) | Const::Double(_)) {
-                2
-            } else {
-                1
-            };
-        }
-        None
+        let entry = *self.slot_entries.get(usize::from(idx).checked_sub(1)?)?;
+        self.entries.get(entry as usize)
     }
 
     /// The internal name of the `CONSTANT_Class` at `idx`.
