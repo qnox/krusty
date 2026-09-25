@@ -199,9 +199,5 @@ fn an_anonymous_object_constructor_interns_this_before_its_members() {
 
 #[test]
 fn a_data_object_equals_interns_its_locals_with_its_body() {
-    assert_identical(
-        "DataObjectLocals",
-        "data object Marker\n",
-        &["Marker"],
-    );
+    assert_identical("DataObjectLocals", "data object Marker\n", &["Marker"]);
 }
