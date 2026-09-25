@@ -213,3 +213,124 @@ fn a_catch_parameter_after_a_throwing_try_body_sits_above_the_result_temporary()
         "SlotReuseTryThrowKt",
     );
 }
+
+/// An inlined `@InlineOnly` body is laid out from the frame size at its call, which the block that
+/// ended before the call has lowered, and a block inside one argument frees only its own slots:
+/// each argument's locals start at that argument's parameter slot, above the arguments stored
+/// before it, and the local after the call takes the slot the block before it left.
+#[test]
+fn an_inline_call_after_a_block_lays_its_arguments_out_from_the_lowered_frame() {
+    same_local_slots(
+        "slotReuseInlineArguments",
+        INLINE_ARGUMENTS,
+        "SlotReuseInlineArgumentsKt",
+    );
+}
+
+#[test]
+fn an_inline_call_after_a_block_runs() {
+    let src = format!(
+        "{INLINE_ARGUMENTS}\
+fun box(): String {{\n\
+    val r = \"${{bounded(true, 4, 20L)}} ${{bounded(false, 4, 20L)}} ${{bounded(true, -2, 9L)}}\"\n\
+    return if (r == \"23 19 -7\") \"OK\" else \"FAIL: $r\"\n\
+}}\n"
+    );
+    assert_eq!(run(&src), "OK");
+}
+
+/// A materialized inline body (`Continuation(context) { }` builds an object from its lambda) is
+/// spliced from the frame size at the call, as kotlinc's is: `k` takes slot 1, which `a` handed
+/// back, and the body's parameters are stored from slot 2 above it, not above the `max_locals`
+/// the block reached.
+#[test]
+fn a_materialized_inline_body_after_a_block_starts_at_the_lowered_frame() {
+    let src = "import kotlin.coroutines.*\n\
+fun materialized(c: Boolean): Continuation<Int> {\n\
+    if (c) {\n\
+        val a = 1\n\
+        val b = 2L\n\
+        println(a + b)\n\
+    }\n\
+    val k = Continuation<Int>(EmptyCoroutineContext) { r -> println(r) }\n\
+    return k\n\
+}\n";
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skip (no scratch directory)");
+        return;
+    };
+    let reference = dir.join("ref");
+    std::fs::create_dir_all(&reference).unwrap();
+    let src_path = dir.join("slotReuseMaterializedInline.kt");
+    std::fs::write(&src_path, src).unwrap();
+    let args = [
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skip (reference toolchain unavailable)");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let classes = common::compile_in_process(
+        src,
+        "slotReuseMaterializedInline",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    )
+    .expect("krusty compiles");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(emitted, _)| emitted == "SlotReuseMaterializedInlineKt")
+        .expect("SlotReuseMaterializedInlineKt was emitted");
+    let emitted = dir.join("SlotReuseMaterializedInlineKt.class");
+    std::fs::write(&emitted, bytes).unwrap();
+    let base = |class: &std::path::Path| {
+        let stores = local_stores(class, "materialized(boolean)");
+        // The block's own stores come first (`a`, `b` and the sum it prints) and `k`'s last; the
+        // spliced body's parameter stores are the ones between.
+        assert_eq!(stores[..3], [1, 2, 4], "{}", class.display());
+        assert_eq!(stores.last(), Some(&1), "{}", class.display());
+        stores[3..stores.len() - 1].iter().copied().min()
+    };
+    let expected = base(&reference.join("SlotReuseMaterializedInlineKt.class"));
+    assert_eq!(expected, Some(2));
+    assert_eq!(base(&emitted), expected);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The slot of every local store in `method`, in instruction order, from `javap -c`.
+fn local_stores(class_file: &std::path::Path, method: &str) -> Vec<u16> {
+    let text = common::javap(&["-c", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
+    text.lines()
+        .skip_while(|line| !line.contains(method))
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with("public "))
+        .filter_map(|line| {
+            let instruction = line.split_whitespace().nth(1)?;
+            let (op, inline_slot) = instruction.split_once('_').unwrap_or((instruction, ""));
+            if !matches!(op, "istore" | "lstore" | "fstore" | "dstore" | "astore") {
+                return None;
+            }
+            match inline_slot {
+                "" => line.split_whitespace().nth(2)?.parse().ok(),
+                slot => slot.parse().ok(),
+            }
+        })
+        .collect()
+}
+
+const INLINE_ARGUMENTS: &str = "fun bounded(c: Boolean, n: Int, m: Long): Long {\n\
+    var r = 0L\n\
+    if (c) {\n\
+        val a = n + 1\n\
+        val b = a.toLong() * 2\n\
+        r = b\n\
+    }\n\
+    r += minOf(if (c) { val y = n * 3L; y + 1 } else m, if (n > 0) { val w = m - 1; w } else r)\n\
+    check(if (c) { val t = n; t > -5 } else true)\n\
+    val after = r\n\
+    return after\n\
+}\n";

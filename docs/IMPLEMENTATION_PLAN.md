@@ -4453,7 +4453,9 @@ shadow with no output change.
   slot stays entered for the method (`FrameMap::keep_for_method`) until 4e deletes the pool.
   A `Nothing`-typed `try` enters its one-slot result temporary after its body, as kotlinc's
   `visitTry` does for every `try` that is not `Unit`, so its catch parameters sit above the slot
-  the body's locals left; a valued `try`'s temporary moves after its body with 4d. In the 2.4.20
+  the body's locals left; a valued `try`'s temporary moves after its body with 4d. Every inline
+  splice (the MethodNode inliner and the materialized-lambda bridge) takes its base from the frame
+  size at the call, which a block that ended before the call has lowered, not from `max_locals`. In the 2.4.20
   box corpus 2,285 of 25,936 classes change and no box outcome moves. Per method, the
   local-variable slots of 220 changed methods now match kotlinc and 769 more are closer, against 2
   that matched and no longer do and 79 further off; one class (`Advanced_when5Kt`) becomes
