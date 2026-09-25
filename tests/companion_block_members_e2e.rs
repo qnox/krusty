@@ -364,3 +364,102 @@ fn compiled_library_block_members_are_statics_of_their_class() {
     .expect("reference kotlinc is provisioned");
     assert_eq!(result, "OK");
 }
+
+#[test]
+fn static_scope_selects_nearest_applicable_associated_function() {
+    // Inside a class, its own block members precede its companion object's members and top-level
+    // functions; a farther classifier's block member is reached when the nearer one does not
+    // apply, and an instance member still precedes every block member.
+    const SRC: &str = "fun f() = \"top\"\n\
+        fun h(x: Int) = \"top-h\"\n\
+        open class Base { companion { fun g(s: String) = \"base-g\"; fun k() = \"base-k\" } }\n\
+        class C : Base() {\n\
+        \x20   companion { fun f() = \"block\"; fun g(i: Int) = \"c-g\"; fun k() = \"c-k\" }\n\
+        \x20   companion object { fun f() = \"obj\"; fun h(x: Int) = \"obj-h\" }\n\
+        \x20   fun t1() = f()\n\
+        \x20   fun t2() = g(\"s\")\n\
+        \x20   fun t3() = k()\n\
+        }\n\
+        class D {\n\
+        \x20   fun f(x: Int = 0) = \"member\"\n\
+        \x20   companion { fun f() = \"block\" }\n\
+        \x20   fun t() = f()\n\
+        }\n\
+        class E { companion { fun h(x: Int) = \"block-h\" } }\n\
+        companion fun E.t() = h(1)\n\
+        fun box(): String {\n\
+        \x20   val r = C().t1() + \",\" + C().t2() + \",\" + C().t3() + \",\" + D().t() + \",\" + E.t()\n\
+        \x20   return if (r == \"block,base-g,c-k,member,block-h\") \"OK\" else r\n\
+        }\n";
+    assert_eq!(run(SRC).expect("static scope precedence"), "OK");
+}
+
+#[test]
+fn associated_declarations_are_not_members_of_instances() {
+    // A companion extension names its classifier, not a value of it: kotlinc rejects `C().f()`.
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class C\n\
+        companion fun C.f() = \"f\"\n\
+        companion val C.q get() = 2\n\
+        fun use() {\n\
+        \x20   C().f()\n\
+        \x20   C().q\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+/// A library block property with a context parameter is read through its class's static getter,
+/// which takes the context argument and nothing else.
+#[test]
+fn library_block_property_takes_its_context_argument() {
+    const LIB: &str = "class Ctx(val s: String)\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       context(c: Ctx) val greeting: String get() = c.s + \"K\"\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "fun <T, R> within(value: T, block: T.() -> R): R = value.block()\n\
+        fun box(): String = within(Ctx(\"O\")) { A.greeting }\n";
+    let result = common::expect_box_run_against_kotlinc(
+        &format!("{LANGUAGE}{LIB}"),
+        &format!("{LANGUAGE}{MAIN}"),
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(result, "OK");
+}
+
+/// An `internal` block property of a kotlinc-built library is invisible outside its module even
+/// though its JVM accessor is public: both compilers reject the read with the same diagnostics,
+/// and a friend module reads it.
+#[test]
+fn library_internal_block_property_is_invisible_outside_its_module() {
+    const LIB: &str = "class A {\n\
+        \x20   companion {\n\
+        \x20       internal val hidden: Int get() = 1\n\
+        \x20       val shown: Int get() = 2\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "fun read(): Int = A.hidden + A.shown\n";
+    let library = common::kotlinc_library(&format!("{LANGUAGE}{LIB}"))
+        .expect("reference kotlinc is provisioned");
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    let main = format!("{LANGUAGE}{MAIN}");
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("Main.kt", &main)],
+        &classpath,
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+    common::expect_identical_rejection(&result, "internal library block property");
+    assert_eq!(
+        common::front_end_diagnostics_with_friend_paths(
+            &main,
+            &classpath,
+            std::slice::from_ref(&library),
+            None,
+        ),
+        Vec::<String>::new()
+    );
+}

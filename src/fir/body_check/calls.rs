@@ -485,18 +485,12 @@ impl BodyFirChecker<'_> {
         if let Some(ResolvedCall::Extension(extension)) =
             self.info.resolved_calls.get(&expression).cloned()
         {
-            // An unqualified companion member or companion extension is reached through its
-            // classifier's associated scope, exactly as `C.name(…)` is: it takes no receiver value.
-            let receiver = if self.is_companion_declaration(extension.stable_declaration) {
-                None
-            } else {
-                Some(self.implicit_receiver(expression)?.ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?)
-            };
+            let receiver = Some(self.implicit_receiver(expression)?.ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?);
             return self.selected_extension_call(expression, arguments, *extension, receiver);
         }
         if self.info.resolved_top_level_call(expression).is_some() {
@@ -790,17 +784,6 @@ impl BodyFirChecker<'_> {
             )?,
             substitutions,
         }))
-    }
-
-    /// Whether a selected source declaration is companion-associated: a `companion { … }` member
-    /// or a `companion fun/val C.name`, whose classifier receiver is a lookup coordinate only.
-    pub(super) fn is_companion_declaration(
-        &self,
-        declaration: Option<crate::fir::DeclarationId>,
-    ) -> bool {
-        declaration
-            .and_then(|declaration| self.index.declaration_header(declaration))
-            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::COMPANION))
     }
 
     pub(super) fn extension_call_target(

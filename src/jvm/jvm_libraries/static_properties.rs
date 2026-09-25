@@ -61,6 +61,7 @@ impl JvmLibraries {
             );
         }
         let mut property = properties.pop()?;
+        property.associated_classifier = Some(internal);
         self.register_external_property(&mut property);
         Some(property)
     }

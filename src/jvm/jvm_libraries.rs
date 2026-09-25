@@ -2023,8 +2023,9 @@ impl JvmLibraries {
                 } else if declaration.is_some_and(|declaration| {
                     declaration.is_companion_block_member() && m.is_static()
                 }) {
-                    // A `companion { … }` block function is a static member of its class, called
-                    // through the classifier like any other classifier callable.
+                    // A `companion { … }` block function is a static member of its class, named
+                    // through the classifier coordinate with no value operand.
+                    member.associated_classifier = Some(internal_name);
                     companion.push(member);
                 } else if declaration.is_some() {
                     members.push(member);
