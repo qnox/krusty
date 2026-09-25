@@ -45,16 +45,18 @@ impl ResolvedSuperCall {
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let physical_owner = member.owner?;
-        let owner = match realization {
+        let (owner, interface) = match realization {
             // A selected class declaration remains the exact non-virtual target even when it was
             // inherited through another class. An interface declaration reached through a class
             // supertype must instead name that direct class in the InterfaceMethodref search path;
             // the normalized declaration kind, not its symbol-source origin, decides the shape.
             crate::libraries::MemberRealization::Dispatch if member.is_interface() => {
-                dispatch_owner
+                (dispatch_owner, interface)
             }
-            crate::libraries::MemberRealization::Dispatch => physical_owner,
-            crate::libraries::MemberRealization::Direct { .. } => physical_owner,
+            // A class declaration is named through a Methodref even when the qualifier is an
+            // interface: `super<I>.hashCode()` calls `Object.hashCode`, which `I` only inherits.
+            crate::libraries::MemberRealization::Dispatch => (physical_owner, false),
+            crate::libraries::MemberRealization::Direct { .. } => (physical_owner, interface),
             crate::libraries::MemberRealization::Intrinsic(_)
             | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
