@@ -30,10 +30,33 @@ pub fn derive_bridges(
         if !ir.classes[cid].is_source_declared && ir.classes[cid].enum_entry_of.is_none() {
             continue;
         }
-        superclass_method_bridges(ir, cid, classpath)?;
-        property_bridges(ir, cid, classpath)?;
+        let first = ir.classes[cid].bridges.len();
+        let mut order = Vec::new();
+        superclass_method_bridges(ir, cid, classpath, &mut order)?;
+        property_bridges(ir, cid, classpath, &mut order)?;
+        declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
     Ok(())
+}
+
+/// kotlinc's bridge lowering walks the class's declarations in order and adds each one's bridges
+/// as it goes, so a property's bridges and a function's interleave by where the overriding members
+/// are declared. `order` holds each bridge's member position; an inherited implementation has none
+/// and keeps its bridges after the class's own, in derivation order.
+fn declaration_order(bridges: &mut [Bridge], order: Vec<u32>) {
+    assert_eq!(
+        bridges.len(),
+        order.len(),
+        "one position per derived bridge"
+    );
+    let mut keyed = order
+        .into_iter()
+        .zip(bridges.iter().cloned())
+        .collect::<Vec<_>>();
+    keyed.sort_by_key(|(position, _)| *position);
+    for (slot, (_, bridge)) in bridges.iter_mut().zip(keyed) {
+        *slot = bridge;
+    }
 }
 
 fn external_method_name(
@@ -59,6 +82,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
     let edges = ir
@@ -213,6 +237,11 @@ fn superclass_method_bridges(
         if parameter_identities.len() != base_params.len() {
             return Err(SkipReason::Bridges);
         }
+        order.push(
+            own_fid
+                .and_then(|function| ir.fn_source_order.get(&function).copied())
+                .unwrap_or(u32::MAX),
+        );
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
@@ -241,6 +270,7 @@ fn property_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
     let edges = ir
@@ -300,10 +330,18 @@ fn property_bridges(
         if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
             continue;
         }
+        let position = implementation_property
+            .filter(|_| declared_here)
+            .map_or(u32::MAX, |property| property.source_order);
+        let pushed_before = ir.classes[cid].bridges.len();
         if let (Some(declared), Some(implementation)) =
             (edge.declared_receiver, edge.implementation_receiver)
         {
             push_member_extension_accessor_bridges(ir, cid, &edge, declared, implementation);
+            order.resize(
+                order.len() + ir.classes[cid].bridges.len() - pushed_before,
+                position,
+            );
             continue;
         }
         let name = edge.name.clone();
@@ -317,6 +355,10 @@ fn property_bridges(
             edge.overridden_mutable && edge.implementation_mutable,
             bridge_getter,
             target_getter,
+        );
+        order.resize(
+            order.len() + ir.classes[cid].bridges.len() - pushed_before,
+            position,
         );
     }
     Ok(())

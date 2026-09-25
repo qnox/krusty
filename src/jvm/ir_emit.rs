@@ -11094,10 +11094,10 @@ fn method_signature_shape(
     ) {
         return suspend_method_sig(formatter, params, ret);
     }
-    if let Some((params, ret)) = ir.member_semantic_sigs.get(&fid) {
+    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid, f) {
         // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
         // and declares nothing — the parameters belong to the class header's own signature.
-        if let Some(sig) = member_semantic_signature(params, *ret) {
+        if let Some(sig) = member_semantic_signature(&params, ret) {
             return Some(sig);
         }
     }
