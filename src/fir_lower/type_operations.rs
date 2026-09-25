@@ -117,7 +117,7 @@ impl BodyLowering<'_> {
         };
         // kotlinc's `irLetS`: a read of an immutable binding is tested and cast in place; any other
         // operand is evaluated once into a temporary.
-        let (declaration, operand_slot) = match self.stable_value_read(operand, value) {
+        let (declaration, operand_slot) = match self.stable_value_read(value) {
             Some(slot) => (None, slot),
             None => {
                 let temporary = self.allocate_temporary();
