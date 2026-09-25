@@ -112,6 +112,31 @@ __attribute__((weak)) KRef kt_object_to_string(KRef value) {
     return ((KRef(*)(KRef))type->vtable[KT_SLOT_TO_STRING])(value);
 }
 
+/* `a == b` and `a.hashCode()` as the real pair answer them: `null` equals only `null` and hashes
+   to 0, and anything else answers through its own vtable slot -- which is where a program's
+   override, and so a throw, comes in. */
+__attribute__((weak)) kt_boolean kt_equals(KRef a, KRef b) {
+    if (a == NULL) {
+        return b == NULL;
+    }
+    const KType *type = type_of(a);
+    if (type->vtable == NULL) {
+        return a == b;
+    }
+    return ((kt_boolean(*)(KRef, KRef))type->vtable[KT_SLOT_EQUALS])(a, b);
+}
+
+__attribute__((weak)) kt_int kt_hash_code(KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    const KType *type = type_of(value);
+    if (type->vtable == NULL) {
+        return kt_any_hash_code(value);
+    }
+    return ((kt_int(*)(KRef))type->vtable[KT_SLOT_HASH_CODE])(value);
+}
+
 /* Whether `text` -- a string or a builder -- holds exactly these BYTES. Two byte-wise prefix tests
    rather than an equality, because the object layout is the runtime's own and `compareTo` decodes
    to UTF-16 units, which would call two different encodings of a character equal. */
