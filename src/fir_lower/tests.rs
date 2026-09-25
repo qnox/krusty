@@ -256,46 +256,88 @@ fn immutable_local_array_loop_reads_the_source_value_slot() {
 }
 
 #[test]
-fn literal_until_bound_and_int_update_need_no_common_ir_temporaries() {
+fn literal_until_loop_stays_checked_until_backend_realization() {
     let ir = lower_single_source(
         "fun sum(): Int { var sum = 0; for (value in 0 until 10) sum += value; return sum }\n",
         "LiteralUntilLoop",
     );
-    let update = ir
+    let loops = ir
         .exprs
         .iter()
-        .find_map(|expression| match expression {
-            IrExpr::While {
-                update: Some(update),
-                ..
-            } => Some(*update),
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(IrCheckedOperation::RangeLoop {
+                variable,
+                variable_name,
+                counter,
+                operation,
+                start,
+                end,
+                body,
+                label,
+            }) => Some((
+                *variable,
+                variable_name.as_deref(),
+                *counter,
+                *operation,
+                *start,
+                *end,
+                *body,
+                label.as_str(),
+            )),
             _ => None,
         })
-        .expect("counted-loop update");
-    let IrExpr::SetValue { value, .. } = ir.expr(update) else {
-        panic!("exclusive counted loop must have a direct update")
+        .collect::<Vec<_>>();
+    assert_eq!(loops.len(), 1);
+    let (variable, name, counter, operation, start, end, body, label) = loops[0];
+    assert_eq!(name, Some("value"));
+    assert_eq!(counter, Ty::Int);
+    assert_eq!(operation, FirRangeOperation::Until);
+    assert!(matches!(ir.expr(start), IrExpr::Const(IrConst::Int(0))));
+    assert!(matches!(ir.expr(end), IrExpr::Const(IrConst::Int(10))));
+    assert_eq!(label, "$fir_control_0_1");
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        panic!("range-loop body must retain its checked statement block")
     };
-    assert!(matches!(
-        ir.expr(*value),
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            ..
-        }
-    ));
-    assert!(!ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Variable {
-                init: Some(value),
-                named: false,
-                ..
-            } if matches!(
-                ir.expr(*value),
-                IrExpr::TypeOp { arg, .. }
-                    if matches!(ir.expr(*arg), IrExpr::Const(IrConst::Int(10)))
-            )
-        )
-    }));
+    assert_eq!(stmts.len(), 1);
+    assert!(matches!(ir.expr(stmts[0]), IrExpr::SetValue { .. }));
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::While { .. }))
+            .count(),
+        0
+    );
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::Variable { index, .. } if *index == variable))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn range_loop_records_an_exact_type_stable_bound_read() {
+    let ir = lower_single_source(
+        "fun sum(limit: Int): Int { var sum = 0; for (value in 0 until limit) sum += value; return sum }\n",
+        "StableRangeBound",
+    );
+    let loops = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(IrCheckedOperation::RangeLoop { end, .. }) => Some(*end),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(loops.len(), 1);
+    let end = loops[0];
+    assert!(matches!(ir.expr(end), IrExpr::GetValue(0)));
+    assert_eq!(
+        ir.binding_read_stability.get(&end),
+        Some(&crate::ir::IrBindingStability::Stable)
+    );
+    assert_eq!(ir.logical_types.get(&end), Some(&Ty::Int));
 }
 
 #[test]

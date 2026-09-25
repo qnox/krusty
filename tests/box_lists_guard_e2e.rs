@@ -4,6 +4,35 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
+
+/// Git exports repository-local variables to hooks. A test repository created by a test that runs
+/// under `pre-push` must not inherit those variables, or `git init` mutates the real repository
+/// instead of the temporary one. Ask Git for the complete local-variable set rather than keeping a
+/// second hand-written list here.
+fn isolated_command(program: &str) -> Command {
+    static LOCAL_GIT_ENVIRONMENT: OnceLock<Vec<String>> = OnceLock::new();
+    let local_environment = LOCAL_GIT_ENVIRONMENT.get_or_init(|| {
+        let output = Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .expect("list repository-local Git environment variables");
+        assert!(
+            output.status.success(),
+            "git rev-parse --local-env-vars failed: {output:?}"
+        );
+        String::from_utf8(output.stdout)
+            .expect("Git environment variable names are UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    });
+    let mut command = Command::new(program);
+    for variable in local_environment {
+        command.env_remove(variable);
+    }
+    command
+}
 
 struct Repo {
     dir: PathBuf,
@@ -21,7 +50,7 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = isolated_command("git")
             .args(args)
             .current_dir(&self.dir)
             .env("GIT_AUTHOR_NAME", "Test")
@@ -54,7 +83,7 @@ impl Repo {
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("scripts")
             .join("check-box-lists.sh");
-        Command::new("bash")
+        isolated_command("bash")
             .arg(script)
             .arg(base)
             .arg(head)
