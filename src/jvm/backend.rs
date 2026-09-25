@@ -467,6 +467,7 @@ pub fn shipping_emit_options(
         // default emits the guards, as kotlinc does.
         param_assertions: true,
         inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
+        value_classes: std::rc::Rc::default(),
     }
 }
 

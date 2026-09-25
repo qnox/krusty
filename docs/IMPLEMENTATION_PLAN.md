@@ -4599,11 +4599,21 @@ regress.
 - ☐ 3. Inline lambdas: each lambda body is emitted to a node, invoke sites are found by kotlinc's
   source analysis (`markPlacesForInlineAndRemoveInlinable`), captured values and `$i$a$` markers,
   non-local returns. Replaces the lambda splice (`try_inline_unified`).
-  - ◐ 3a. kotlinc's `RedundantBoxingMethodTransformer` on the method node
+  - ✓ 3a. kotlinc's `RedundantBoxingMethodTransformer` on the method node
     (`bytecode_passes::redundant_boxing`). A lambda's primitive parameters and result pass through
-    `invoke`'s `Object`s, so kotlinc's inlined bodies only come out unboxed after this pass. It is
-    tested on its own and joins the rewrite pipeline, ahead of the temporaries pass, when the
-    pipeline runs on the method node (emitter stage 3c).
+    `invoke`'s `Object`s, so kotlinc's inlined bodies only come out unboxed after this pass. It runs
+    in the method-node rewrite pipeline after `CapturedVarsOptimization`
+    (`bytecode_passes::captured_vars`), as in kotlinc's optimization order; the value classes whose
+    `box-impl` it may remove come from `ir_emit::value_class_descriptors`.
+  - ◐ 3b. Literal lambdas compiled to a node (`lambda_node.rs`, parameters then captures, the
+    `$i$a$` marker first, closed after the return), invoke sites marked by
+    `FunctionalArgumentInterpreter`, invoke expansion with `LocalVariablesSorter` shifting, argument
+    coercion from `Object`, the result coerced to `Object`, and `fake.kt` lines for `@InlineOnly`
+    hosts. A literal-lambda call's route is planned before it is emitted
+    (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
+    own yet, never one after the other. Still on the splice: lambdas that suspend (until the
+    coroutine transformer runs on inlined bytecode), value-class adapters, non-local returns,
+    materialized lambdas and callee shapes of later stages; callable references are not ported.
 - ☐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.

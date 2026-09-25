@@ -1,9 +1,9 @@
 //! The callee body before it is placed in the caller: kotlinc's `prepareNode`, the fake-variable
 //! cleanup, dead-code removal and `removeClosureAssertions`.
 
-use crate::jvm::method_node::{stack_shapes, Constant, Insn, LabelId, MethodNode, Node};
+use crate::jvm::method_node::{Category, Constant, Insn, LabelId, MethodNode, Node};
 
-use super::InlineError;
+use super::{InlineError, Parameters};
 
 const ICONST_0: u8 = 0x03;
 const ILOAD: u8 = 0x15;
@@ -17,11 +17,18 @@ const INLINE_FUNCTION_MARKER_PREFIX: &str = "$i$f$";
 /// The suffix an inlined local takes (`INLINE_FUN_VAR_SUFFIX`).
 const INLINED_LOCAL_SUFFIX: &str = "$iv";
 
-/// `prepareNode` for a call inlined into ordinary code: an `@InlineOnly` body loses its line numbers
-/// and local variables (nobody steps into it), any other body keeps both, its locals renamed by the
-/// old scheme (`x` → `x$iv`, `this` → `this_$iv`).
-pub(super) fn prepare(callee: &MethodNode, inline_only: bool) -> MethodNode {
+/// `prepareNode` for a call inlined into ordinary code. The values the call's lambdas capture become
+/// parameters after the body's own (`capturedParamsSize` words, which the body's locals move up
+/// by). An `@InlineOnly` body loses its line numbers and local variables (nobody steps into it),
+/// any other body keeps both, its locals renamed by the old scheme (`x` → `x$iv`, `this` →
+/// `this_$iv`).
+pub(super) fn prepare(
+    callee: &MethodNode,
+    inline_only: bool,
+    parameters: &Parameters,
+) -> MethodNode {
     let mut node = callee.clone();
+    add_captured_parameters(&mut node, parameters);
     if inline_only {
         node.nodes
             .retain(|entry| !matches!(entry, Node::Line { .. }));
@@ -40,6 +47,46 @@ pub(super) fn prepare(callee: &MethodNode, inline_only: bool) -> MethodNode {
         local.name = format!("{prefix}{INLINED_LOCAL_SUFFIX}");
     }
     node
+}
+
+/// Shift every local from the first after the real parameters up by the captured values' words,
+/// and declare the captured values as parameters.
+fn add_captured_parameters(node: &mut MethodNode, parameters: &Parameters) {
+    let shift = parameters.captured_size();
+    if shift == 0 {
+        return;
+    }
+    let first = parameters.real_size();
+    let moved = |slot: &mut u16| {
+        if *slot >= first {
+            *slot += shift;
+        }
+    };
+    for entry in &mut node.nodes {
+        if let Node::Insn(Insn::Var { slot, .. } | Insn::Iinc { slot, .. }) = entry {
+            moved(slot);
+        }
+    }
+    for local in &mut node.local_variables {
+        moved(&mut local.slot);
+    }
+    let close = node
+        .desc
+        .find(')')
+        .expect("a method descriptor has a parameter list");
+    let captured: String = parameters
+        .captured
+        .iter()
+        .map(|parameter| match parameter.category {
+            Category::Int => "I",
+            Category::Float => "F",
+            Category::Long => "J",
+            Category::Double => "D",
+            Category::Reference => "Ljava/lang/Object;",
+        })
+        .collect();
+    node.desc.insert_str(close, &captured);
+    node.max_locals += shift;
 }
 
 /// `removeFakeVariablesInitializationIfPresent`: before Kotlin 1.6 every inline function began by
@@ -92,21 +139,6 @@ pub(super) fn remove_fake_variable_initializations(node: &mut MethodNode) {
     remove_empty_try_catch_blocks(node);
 }
 
-/// kotlinc deletes every instruction no path reaches (`markPlacesForInlineAndRemoveInlinable`),
-/// including the line numbers in it, keeps the labels, and then drops the try/catch blocks left
-/// guarding nothing.
-pub(super) fn remove_dead_code(node: &mut MethodNode) -> Result<(), InlineError> {
-    let shapes = stack_shapes(node).map_err(InlineError::Stack)?;
-    let mut index = 0;
-    node.nodes.retain(|entry| {
-        let keep = shapes[index].is_some() || matches!(entry, Node::Label(_));
-        index += 1;
-        keep
-    });
-    remove_empty_try_catch_blocks(node);
-    Ok(())
-}
-
 /// `removeClosureAssertions`: an inlined parameter is never null-checked again. Each
 /// `Intrinsics.checkParameterIsNotNull`/`checkNotNullParameter` call goes with the `aload` and
 /// `ldc` in front of it.
@@ -151,7 +183,7 @@ pub(super) fn remove_closure_assertions(node: &mut MethodNode) -> Result<(), Inl
 }
 
 /// `removeEmptyCatchBlocks`: a try/catch block whose range holds no instruction.
-fn remove_empty_try_catch_blocks(node: &mut MethodNode) {
+pub(super) fn remove_empty_try_catch_blocks(node: &mut MethodNode) {
     let positions = label_positions(node);
     let nodes = &node.nodes;
     node.try_catch_blocks.retain(|block| {
