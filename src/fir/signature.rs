@@ -1846,6 +1846,17 @@ pub struct ResolvedDelegatedProperty {
     pub context_parameters: Box<[ResolvedDelegatedContextParameter]>,
     pub getter: ResolvedDelegatedCall,
     pub setter: Option<ResolvedDelegatedCall>,
+    /// Interface declaration the forwarders realize (the `var` one when a setter is delegated).
+    pub overridden: Box<ResolvedDelegatedPropertyDeclaration>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedDelegatedPropertyDeclaration {
+    pub target: super::ResolvedPropertyOverrideTarget,
+    pub owner: TypeName,
+    /// Unsubstituted declared type, the one the overridden accessors are erased from.
+    pub ty: ResolvedTy,
+    pub interface: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

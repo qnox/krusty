@@ -379,6 +379,31 @@ fn materialize_delegation(
                         })
                     })
                     .transpose()?;
+                // Like a delegated function, a delegated property is an overridable override.
+                ir.open_methods
+                    .extend(std::iter::once(getter).chain(setter));
+                let implementation_owner = ir.classes[class as usize].fq_name;
+                ir.property_overrides
+                    .entry(implementation_owner)
+                    .or_default()
+                    .push(crate::ir::IrPropertyOverride {
+                        // As for a delegated function, the forwarders realize this exact interface
+                        // declaration; `implementation_getter` names their generated body.
+                        implementation: property.overridden.target,
+                        implementation_getter: Some(getter),
+                        implementation_owner,
+                        overridden: property.overridden.target,
+                        overridden_owner: property.overridden.owner,
+                        overridden_is_interface: property.overridden.interface,
+                        name: name.clone(),
+                        declared_type: property.overridden.ty.get(),
+                        applied_type: ty,
+                        implementation_type: ty,
+                        overridden_mutable: setter.is_some(),
+                        implementation_mutable: setter.is_some(),
+                        has_kotlin_superclass_override: false,
+                        depth: 0,
+                    });
                 ir.classes[class as usize].properties.push(IrProperty {
                     name,
                     context_params,
@@ -391,7 +416,7 @@ fn materialize_delegation(
                     storage_ty: None,
                     backing_field: None,
                     is_var: property.setter.is_some(),
-                    is_open: false,
+                    is_open: true,
                     is_private: false,
                     setter_is_private: false,
                     getter: Some(getter),
