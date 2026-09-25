@@ -1,5 +1,5 @@
 //! The constant-pool entries a plain class interns before krusty's emission reaches them, reserved
-//! in kotlinc's visit order: the primary constructor's header and parameter stores, its
+//! in kotlinc's visit order: the primary constructor's header and parameter annotations, its
 //! LocalVariableTable and `$default` header, then a data class's synthesized members.
 
 use super::*;
@@ -10,7 +10,6 @@ pub(super) struct PlainClassPoolSeed<'a, 'symbols> {
     pub(super) bodies: &'a dyn MethodBodies,
     pub(super) class: &'a crate::ir::IrClass,
     pub(super) fq_name: &'a str,
-    pub(super) superclass: &'a str,
     pub(super) ctor_signature: Option<&'a str>,
 }
 
@@ -18,105 +17,36 @@ pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut C
     let PlainClassPoolSeed {
         ir,
         class: c,
-        fq_name,
-        superclass,
         ctor_signature,
         ..
     } = seed;
-    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
-    // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
-    // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
-    let ann_kind = |name: &str, t: Ty| -> u8 { field_nullability_kind(ir, fq_name, name, t) };
     let ctor_desc = primary_ctor_descriptor(c);
-    let fields: Vec<crate::jvm::classfile::SeedField> = c
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| crate::jvm::classfile::SeedField {
-            name: instance_field_jvm_name(ir, c, f),
-            desc: desc(f.ty),
-            ann_kind: ann_kind(&f.name, f.ty),
-            is_ctor_param: i < c.ctor_param_count as usize,
-            visible_ann_types: ctor_param_ann_types(c, i, true),
-            invisible_ann_types: ctor_param_ann_types(c, i, false),
-        })
-        .collect();
-    let ctor_sig = ctor_signature;
-    let (mut super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass);
-    if let Some(defaults) = ir
-        .super_constructor_default_arguments
-        .get(&c.fq_name_id())
-        .filter(|defaults| !defaults.is_empty())
-    {
-        super_param_tys = jvm_tys(&c.super_ctor_params);
-        super_param_tys.extend(std::iter::repeat_n(
-            Ty::Int,
-            constructor_default_masks(defaults, c.super_ctor_params.len()).len(),
-        ));
-        super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-    }
-    let super_ctor_desc = ir
-        .external_super_constructors
-        .get(&c.fq_name_id())
-        .and_then(|target| target.descriptor.clone())
-        .unwrap_or_else(|| crate::jvm::names::method_descriptor(&super_param_tys, Ty::Unit));
-    cw.seed_plain_class_pool(
-        fq_name,
-        superclass,
-        (&ctor_desc, &super_ctor_desc),
-        &fields,
-        &crate::jvm::classfile::MemberSignatures {
-            ctor: ctor_sig,
-        },
-        &{
-            use crate::jvm::classfile::SeedSuperArg;
-            fn collect(ir: &IrFile, expr: crate::ir::ExprId, entries: &mut Vec<SeedSuperArg>) {
-                match ir.expr(init_operand(ir, expr)) {
-                    IrExpr::Const(crate::ir::IrConst::String(s)) => {
-                        entries.push(SeedSuperArg::Str(s.clone()));
-                    }
-                    IrExpr::New {
-                        internal,
-                        args,
-                        ctor_params,
-                        ctor_desc,
-                        ..
-                    } => {
-                        let owner = internal.render();
-                        entries.push(SeedSuperArg::Class(owner.clone()));
-                        for &arg in args {
-                            collect(ir, arg, entries);
-                        }
-                        let desc = if let Some(desc) = ctor_desc {
-                            desc.clone()
-                        } else if let Some(params) = ctor_params {
-                            method_descriptor(&jvm_tys(params), Ty::Unit)
-                        } else {
-                            let class = ir.class_id_by_name(*internal).expect(
-                                "checked construction without explicit parameters must name an IR class",
-                            );
-                            method_descriptor(
-                                &class_ctor_jvm_tys(&ir.classes[class as usize]),
-                                Ty::Unit,
-                            )
-                        };
-                        entries.push(SeedSuperArg::Ctor { owner, desc });
-                    }
-                    IrExpr::Variable {
-                        init: Some(value), ..
-                    } => collect(ir, *value, entries),
-                    _ => {}
+    let parameters: Vec<crate::jvm::classfile::SeedCtorParameter> =
+        primary_ctor_source_parameters(ir, c)
+            .into_iter()
+            .map(|parameter| {
+                let (visible, invisible) = parameter
+                    .annotations
+                    .map(crate::jvm::classfile::split_declaration_annotations)
+                    .unwrap_or_default();
+                let types = |annotations: Vec<crate::ir::AppliedAnnotation>| -> Vec<String> {
+                    annotations
+                        .iter()
+                        .map(|annotation| format!("L{};", annotation.internal))
+                        .collect()
+                };
+                crate::jvm::classfile::SeedCtorParameter {
+                    ann_kind: parameter.nullability,
+                    visible_ann_types: types(visible),
+                    invisible_ann_types: types(invisible),
                 }
-            }
-
-            let mut entries: Vec<SeedSuperArg> = Vec::new();
-            for &statement in &c.super_arg_prelude {
-                collect(ir, statement, &mut entries);
-            }
-            for &arg in &c.super_args {
-                collect(ir, arg, &mut entries);
-            }
-            entries
+            })
+            .collect();
+    cw.seed_plain_class_pool(
+        &ctor_desc,
+        &parameters,
+        &crate::jvm::classfile::MemberSignatures {
+            ctor: ctor_signature,
         },
         &primary_ctor_annotations(c),
     );

@@ -59,6 +59,7 @@ mod non_null_operands;
 mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
+mod primary_constructor_parameters;
 mod property_access;
 mod property_reference_values;
 mod return_emission;
@@ -70,6 +71,9 @@ use annotation_impl::emit_annotation_impl_class;
 mod value_class_signatures;
 use class_pool_seed::{
     seed_data_class_pool, seed_plain_class_pool, seed_plain_constructor_tail, PlainClassPoolSeed,
+};
+use primary_constructor_parameters::{
+    primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::FinallyRegion;
 mod sealed_constructors;
@@ -816,20 +820,6 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .take(c.ctor_param_count as usize)
         .map(|f| crate::jvm::names::type_descriptor(f.ty))
         .collect()
-}
-
-/// The value an initializer STORES, seeing through a value-class construction: the value-class pass
-/// rewrites `val k: K = K("OK")` to `K.constructor-impl("OK")`, whose stored value is still the constant
-/// the `ldc` pushes. Anything else is its own operand.
-fn init_operand(ir: &IrFile, value: crate::ir::ExprId) -> crate::ir::ExprId {
-    match ir.expr(value) {
-        IrExpr::Call {
-            callee: crate::ir::Callee::Static { name, .. },
-            args,
-            ..
-        } if name == "constructor-impl" && args.len() == 1 => args[0],
-        _ => value,
-    }
 }
 
 /// The TYPE PARAMETER a field is declared as (`class Pair<A, B>(val a: A)` → `a` is `A`), or `None` when
@@ -2548,29 +2538,6 @@ fn primary_ctor_annotations(c: &crate::ir::IrClass) -> Vec<crate::ir::AppliedAnn
     visible.into_iter().chain(invisible).collect()
 }
 
-/// The USER annotation type descriptors on the constructor parameter that backs `field_index`, for one
-/// retention. `IrClass::ctor_param_annotations` is indexed by CONSTRUCTOR PARAMETER, and only the
-/// `is_field` parameters back a field — so map through that filter rather than assuming the two
-/// indexings coincide (they don't for an inner class's synthetic outer instance, or a plain
-/// non-property parameter).
-fn ctor_param_ann_types(c: &crate::ir::IrClass, field_index: usize, visible: bool) -> Vec<String> {
-    if c.ctor_param_annotations.is_empty() {
-        return Vec::new();
-    }
-    c.ctor_args
-        .iter()
-        .enumerate()
-        .filter(|(_, arg)| arg.is_field)
-        .nth(field_index)
-        .and_then(|(i, _)| c.ctor_param_annotations.get(i))
-        .map(|annotations| {
-            let (vis, invis) = crate::jvm::classfile::split_declaration_annotations(annotations);
-            let chosen = if visible { vis } else { invis };
-            chosen.iter().map(|a| format!("L{};", a.internal)).collect()
-        })
-        .unwrap_or_default()
-}
-
 /// JVM dispatch owner for a data-class field's reference `hashCode` call. Common IR carries only
 /// the declared Kotlin type; interface dispatch and boxed scalar ownership are representation facts
 /// derived here by the backend. `None` means the classfile seeder can use its primitive/array rule.
@@ -3039,25 +3006,20 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             }
         }
     }
-    // Primary constructor: one parameter annotation slot per property-backed parameter.
-    // Constructor PARAMETERS only — a body property is a field, never an argument, so it must not
-    // contribute a parameter-annotation slot (an all-body-property class has a `()V` ctor). The
-    // prefix takes no slot either: kotlinc sizes the table by the source parameters, so an inner
-    // class's first declared parameter is annotation parameter 0, as in javac's output.
-    let ctor_params: Vec<Option<&str>> = c
-        .fields
+    // Primary constructor: one parameter annotation slot per SOURCE parameter, plain or
+    // property-backed. The prefix takes no slot: kotlinc sizes the table by the source parameters,
+    // so an inner class's first declared parameter is annotation parameter 0, as in javac's output.
+    let source_parameters = primary_ctor_source_parameters(ir, c);
+    let ctor_params: Vec<Option<&str>> = source_parameters
         .iter()
-        .take(c.ctor_param_count as usize)
-        .skip(prefix)
-        .map(|f| ann(&f.name, f.ty))
+        .map(|parameter| match parameter.nullability {
+            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
+            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
+            _ => None,
+        })
         .collect();
-    let ctor_desc = format!("({})V", ctor_field_descs(c));
-    // A value class's synthetic primary and an ordinary primary hidden behind a marker accessor are
-    // private JVM realization details; kotlinc annotates neither them nor their accessors.
-    if ctor_params.iter().any(|p| p.is_some())
-        && !c.is_value
-        && !ir.has_value_param_ctor(&c.fq_name())
-    {
+    let ctor_desc = primary_ctor_descriptor(c);
+    if ctor_params.iter().any(|p| p.is_some()) {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -3080,18 +3042,14 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             cw.set_method_nullability(&setter, &format!("({pd})V"), None, &[Some(a)]);
         }
     }
-    // The USER annotations written on the primary-constructor parameters, per property-backed
-    // parameter (the same slots `ctor_params` above describes).
+    // The USER annotations written on the primary-constructor parameters, per source parameter
+    // (the same slots `ctor_params` above describes).
     if !c.ctor_param_annotations.is_empty() {
-        let user: Vec<crate::ir::DeclarationAnnotations> = c
-            .ctor_args
+        let user: Vec<crate::ir::DeclarationAnnotations> = source_parameters
             .iter()
-            .enumerate()
-            .filter(|(_, arg)| arg.is_field)
-            .take(c.ctor_param_count as usize)
-            .map(|(i, _)| {
-                c.ctor_param_annotations
-                    .get(i)
+            .map(|parameter| {
+                parameter
+                    .annotations
                     .cloned()
                     .unwrap_or_else(|| crate::ir::DeclarationAnnotations::new(Vec::new()))
             })
@@ -5610,7 +5568,6 @@ fn emit_class(
         bodies: env.bodies,
         class: c,
         fq_name: &fq_name,
-        superclass: &superclass,
         ctor_signature: ctor_signature.as_deref(),
     };
     if byte_parity {
@@ -6004,30 +5961,7 @@ fn emit_class(
                 ctor_desc.clone(),
                 u16::try_from(ctor.bytes.len()).expect("a JVM method body fits in u16"),
             ));
-            let ctor_param_fields: Vec<Option<usize>> = if c.ctor_args.is_empty() {
-                (0..param_tys.len()).map(Some).collect()
-            } else if c
-                .ctor_args
-                .iter()
-                .any(|argument| argument.field_index.is_some())
-            {
-                c.ctor_args
-                    .iter()
-                    .map(|argument| argument.field_index.map(|field| field as usize))
-                    .collect()
-            } else {
-                let mut field = 0usize;
-                c.ctor_args
-                    .iter()
-                    .map(|argument| {
-                        argument.is_field.then(|| {
-                            let current = field;
-                            field += 1;
-                            current
-                        })
-                    })
-                    .collect()
-            };
+            let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
             // Store only constructor fields explicitly marked as pre-super. A language-level inner
             // class marks its enclosing-instance field because a superclass argument may read it; an
             // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
@@ -6328,6 +6262,9 @@ fn emit_class(
                 && !c.is_sealed
                 && (ctor_access == 0x0001 || ctor_access == 0x0004)
             {
+                // ASM interns a method's name and descriptor at its header visit, before its body.
+                cw.reserve_method_name("<init>");
+                cw.reserve_descriptor("()V");
                 let mut z = CodeBuilder::new(1);
                 z.aload(0);
                 for &t in &param_tys {

@@ -123,3 +123,15 @@ fn a_default_constructor_body_interns_before_data_members() {
         &["Pair2"],
     );
 }
+
+/// A plain parameter carries its `@NotNull` parameter annotation, interned with the constructor's
+/// header, and its null check runs before the super call.
+#[test]
+fn a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call() {
+    assert_identical(
+        "PlainParameterCheck",
+        "open class Base(val s: String)\n\
+         class Derived(label: String, n: Int) : Base(label + n)\n",
+        &["Base", "Derived"],
+    );
+}
