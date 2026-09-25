@@ -1805,6 +1805,8 @@ mod unimported_cross_package_type_e2e;
 mod unit_as_any_e2e;
 #[path = "unit_cast_e2e.rs"]
 mod unit_cast_e2e;
+#[path = "unit_value_boundaries_e2e.rs"]
+mod unit_value_boundaries_e2e;
 #[path = "unit_value_e2e.rs"]
 mod unit_value_e2e;
 #[path = "unit_vararg_e2e.rs"]

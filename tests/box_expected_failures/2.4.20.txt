@@ -9,11 +9,9 @@ annotations/instances/enumAndKClass.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 argumentOrder/defaults.kt
-argumentOrder/kt17691WithEnabledFeature.kt
 basics/k42000_1.kt
 basics/k42000_crossmodule.kt
 basics/unchecked_cast10.kt
-basics/unit4.kt
 binaryOp/eqNullableDoublesWithTP.kt
 binaryOp/kt11163.kt
 binaryOp/kt11163_properIeee754comparisons.kt
@@ -93,9 +91,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlo
 controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
-controlStructures/tryCatchExpression.kt
-controlStructures/tryCatchFinally.kt
-controlStructures/tryFinally.kt
 controlflow/for_loops_array_nested.kt
 coroutines/accessorForSuspend.kt
 coroutines/controlFlow/breakFinally.kt
@@ -181,10 +176,8 @@ evaluate/intrinsicConst/enumNameWithInit.kt
 exceptions/kt69534.kt
 extensionFunctions/executionOrder.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
-extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
-extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithInline.kt
 fieldRename/delegates.kt
 finally/kt31923_break.kt
@@ -334,13 +327,11 @@ inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 innerNested/superConstructorCall/deepInnerHierarchy.kt
 intrinsics/kt8666.kt
-ir/kt25405.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 kclass/kclass1.kt
 lateinit/innerIsInitialized.kt
-lazyCodegen/when.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt
@@ -386,7 +377,6 @@ properties/classFieldInsideLocalInSetter.kt
 properties/classFieldInsideNested.kt
 properties/classObjectProperties.kt
 properties/complexPropertyInitializer.kt
-properties/const/intermoduleInlineConst.kt
 properties/fieldInsideField.kt
 properties/fieldInsideNested.kt
 properties/lateinit/accessorException.kt
@@ -458,7 +448,6 @@ typeErasure/funWithReifiedTypeParameterInsideNestedClass.kt
 typeErasure/outerClassWithTypeParameterAndInlineFunctionWithReifiedTypeParameter.kt
 typeErasure/outerClassWithTypeParameterWithUpperBoundAndInlineFunctionWithReifiedTypeParameterWithTwoUpperBounds.kt
 unit/kt56723.kt
-unit/nullableUnitInWhen3.kt
 unitConversion/basicUnitConversion.kt
 unitConversion/unitConversionForSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
@@ -470,6 +459,4 @@ unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 unsignedTypes/whenByUnsigned.kt
 vararg/kt10926.kt
-when/noElseExhaustiveUnitExpected.kt
-when/oneUnitBranch.kt
 when/whenSubjectVariable/ieee754EqualityWithSmartCast.kt

@@ -5,8 +5,9 @@ use crate::resolve::ResolvedContextArgument;
 
 impl BodyFirChecker<'_> {
     /// Whether an exact-Unit expression is an effect that still needs the language-level singleton
-    /// at a value boundary. Stored reads and `Unit` itself already produce that value; direct source
-    /// and local calls use their statement-valued Unit convention. This decision is published as a
+    /// at a value boundary. Stored reads and `Unit` itself already produce that value; calls,
+    /// function-value invocations, and Unit `when`/`try` use their statement-valued Unit
+    /// convention. (A Unit `if` converts each branch instead.) This decision is published as a
     /// FIR conversion so common lowering never reconstructs it from call or storage identities.
     pub(super) fn unit_effect_requires_value(&self, value: FirExprId) -> bool {
         let Some(expression) = self.body.expr(value) else {
@@ -16,7 +17,11 @@ impl BodyFirChecker<'_> {
             return false;
         }
         match &expression.kind {
-            FirExprKind::Call(_) | FirExprKind::LocalCall { .. } => true,
+            FirExprKind::Call(_)
+            | FirExprKind::LocalCall { .. }
+            | FirExprKind::FunctionInvoke { .. }
+            | FirExprKind::When { .. }
+            | FirExprKind::Try { .. } => true,
             FirExprKind::ClassStorageSharedWrite { .. }
             | FirExprKind::ConstructorCaptureSharedWrite { .. }
             | FirExprKind::CapturedClassStorageSharedWrite { .. }
