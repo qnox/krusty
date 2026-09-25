@@ -6668,12 +6668,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and ends the program with status 134, this target's code for every abnormal end, where the JVM
   exits with 1. String literals are interned through one runtime-owned table, so their number is not
   bounded by the collector's global-root table.
+  An entry that calls a program's own `equals`, `hashCode` or `toString` — the kotlin.test
+  assertions comparing and rendering their operands, `assertFailsWith` rendering what was thrown,
+  `Throwable(cause)` rendering its cause, a bound reference's `equals`/`hashCode` asking its
+  receiver's, `print`/`println` — checks the pending slot right after that call and returns when it
+  raised, so the program's exception is the one in flight: an assertion does not raise its
+  `AssertionError` over it, `Throwable(cause)` constructs nothing, and `print`/`println` write no
+  byte (not the `null` the renderer falls back to, nor `println`'s newline). The uncaught report
+  empties the slot before it runs the exception's `toString`, since generated code entered with the
+  slot full takes it for its own raise after its first call; a `toString` that raises there is
+  reported as the JVM reports it, `Exception in thread "main" ` and then `Exception: <class> thrown
+  from the UncaughtExceptionHandler in thread "main"` naming the class it raised (Kotlin's name, per
+  the divergence above), with status 134.
   Tests: `tests/native_runtime_e2e.rs` (`integer_arithmetic_and_exceptions_answer_as_kotlin_does`,
   `unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns`,
   `equal_callable_references_hash_on_the_wrapping_ring`,
-  `string_literals_outnumbering_the_global_roots_stay_interned_and_alive`). The uncaught path's exit
-  status is not yet driven: a driver cannot observe its own exit, so it lands with the harness's
-  first test of a program that is meant to fail.
+  `string_literals_outnumbering_the_global_roots_stay_interned_and_alive`,
+  `a_program_member_that_raises_inside_a_runtime_call_keeps_its_exception_in_flight`,
+  `a_print_whose_to_string_raises_writes_nothing`,
+  `the_uncaught_report_runs_to_string_with_nothing_in_flight`,
+  `an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_it`). The last two
+  run the uncaught path to its end and check its status and exact report.
 - **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
   in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
   `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered
@@ -6682,25 +6697,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A collection that holds itself renders `(this Map)` / `(this Collection)` in its place, as
   `AbstractMap`/`AbstractCollection` do. An element member that throws stops the operation there
   and propagates: `put`/`add` insert nothing, `mapOf`/`setOf`, `toString` and `hashCode` ask no
-  later element. `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate
+  later element. The pending slot, not the member's answer, says it threw: an `equals` that raises
+  and answers true is no match, so a lookup asks no later key and `put`/`remove`/`get` overwrite,
+  remove or answer nothing through it; entry, map and set equality stop at it (an entry compares no
+  values, and map equality looks each key up once, so a stateful comparison is not asked twice);
+  and an entry whose value's `toString` throws renders no text. `Any.toString` asks the object's
+  own `hashCode`, and one that throws propagates rather than being rendered.
+  `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate
   that exception, not their own. Known divergences: iterating a map walks its entries snapshot, so
   mutating the map inside the loop raises no `ConcurrentModificationException` (a set's iteration
   does, as on the JVM); and `values` is a `List`, so it compares equal to a list of the same
   elements where the JVM's `values` collection compares by identity.
   Tests: `tests/native_runtime_e2e.rs` (`collection_to_string_self_reference`,
-  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`).
+  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`,
+  `default_to_string_stops_at_a_raise`).
 - **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
   records the exception and comes back, so each runtime raise returns at once and each walk checks
-  for a pending exception after every `next` and every lambda it calls. That covers the lambda's own
-  exception and a `ConcurrentModificationException` from the list it walks. An out-of-bounds
+  for a pending exception after every `next`, every lambda it calls, and every element `equals`,
+  `hashCode` or `toString` it calls. That covers the lambda's own exception, an element member's,
+  and a `ConcurrentModificationException` from the list it walks. An element member that threw is
+  the last call into the program whatever placeholder it returned: a list's `indexOf`,
+  `lastIndexOf`, `contains`, `equals`, `hashCode` and `toString`, `joinToString`, and an array's
+  `contentEquals`, `contentHashCode` and `contentToString` ask no later element, and `remove` whose
+  comparison threw removes nothing. An out-of-bounds
   `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
   was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
   raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
   `xs.addAll(list)` appends the argument's elements as they were when the call began, so
   `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
   more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
-  of memory. `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the
-  string's length.
+  of memory. An `ArrayList` grown past what an `Int` capacity can double to stops the program as
+  out of memory, as the JVM's does, before any element is copied. `IndexedValue.hashCode` wraps
+  like Kotlin's `Int`. A string iterator is linear in the string's length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
@@ -6717,6 +6745,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
   `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
+  range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
+  the range: the builtin one for strings and boxed primitives, and the class's `compareTo` for a
+  program's own `Comparable`. The runtime never rediscovers the order from the bounds' descriptors,
+  which know only the builtin types. `isEmpty` is `start > end`; `contains(v)` asks `v` against
+  `start` and then `end`, as Kotlin's class does. A `compareTo` that raises ends the member there:
+  `contains` makes no second comparison, and neither member answers `true` for a comparison that
+  raised. `equals`, `hashCode` and `toString` stop likewise at the first bound member that raises.
+  Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`).
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
@@ -6993,6 +7030,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reproduces kotlinc's own tables). `max_stack` and `max_locals` are ASM's `COMPUTE_MAXS` over the
   same final body: the deepest stack the dataflow reaches (at least 1 when a block is dead, for its
   `athrow`), and the argument words plus every slot an instruction or a local-variable entry names.
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
+  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
+  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
+  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
+  so its name is Java's.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`).
 
 ## 8. Success criteria for the PoC
 
