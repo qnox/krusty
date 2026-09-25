@@ -2,9 +2,14 @@
 //! method body the way `CoroutineTransformerMethodVisitor` builds it: codegen leaves each suspend
 //! call between `InlineMarker.mark` calls, and [`transform_named_function`] turns the marked body
 //! into a state machine over a continuation object — or, when every suspension point is a tail
-//! call, into a body that needs none.
+//! call, into a body that needs none. `transform_suspend_lambda` is the same transformation for
+//! a suspend lambda's `invokeSuspend`, whose class is its own continuation.
 
 mod change_boxing;
+// The suspend-lambda mode lands ahead of the `SuspendLambda` class emission that will call it;
+// until then only the tests reach it.
+#[cfg(test)]
+mod lambda_mode;
 pub(crate) mod markers;
 mod redundant_locals;
 mod spilled_types;
@@ -15,6 +20,8 @@ mod tail_calls;
 mod transform;
 mod uninitialized_stores;
 
+#[cfg(test)]
+pub(crate) use lambda_mode::{transform_suspend_lambda, SuspendLambda};
 pub(crate) use transform::transform_named_function;
 
 use super::analysis::AnalyzerError;
@@ -68,6 +75,16 @@ pub(crate) struct NamedFunction<'a> {
     /// one (`needDispatchReceiver`, which differs from the method being an instance method for
     /// `DefaultImpls`).
     pub dispatch_receiver: Option<&'a str>,
+}
+
+/// Spill fields of one kind a state class declares before the machine is built: `L$0` through
+/// `L$max_index` for the reference kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeclaredSpillFields<'a> {
+    /// The normalized field descriptor: `Ljava/lang/Object;` for every reference, else the
+    /// primitive's.
+    pub descriptor: &'a str,
+    pub max_index: usize,
 }
 
 /// A field the state machine spills into, which the continuation class must declare.
