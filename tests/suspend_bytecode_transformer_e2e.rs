@@ -18,12 +18,9 @@ suspend fun work(count: Int, ref: String): Int {\n\
 
 #[test]
 fn a_continuation_spilling_an_int_and_a_reference_matches_kotlinc() {
-    let Some(result) =
+    let result =
         common::byte_diff_against_kotlinc("TransformerWork", WORK, "TransformerWorkKt$work$1")
-    else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+            .expect("reference kotlinc is provisioned");
     result.expect("the continuation class is byte-identical to kotlinc's");
 }
 
@@ -35,12 +32,9 @@ suspend fun work(count: Int, ref: String) {\n\
     leaf()\n\
     leaf()\n\
 }\n";
-    let Some(result) =
+    let result =
         common::byte_diff_against_kotlinc("TransformerUnit", src, "TransformerUnitKt$work$1")
-    else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+            .expect("reference kotlinc is provisioned");
     result.expect("the continuation class is byte-identical to kotlinc's");
 }
 
@@ -51,14 +45,12 @@ suspend fun `work-item`(): Int {\n\
     leaf()\n\
     return 1\n\
 }\n";
-    let Some(result) = common::byte_diff_against_kotlinc(
+    let result = common::byte_diff_against_kotlinc(
         "TransformerBacktick",
         src,
         "TransformerBacktickKt$work-item$1",
-    ) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    )
+    .expect("reference kotlinc is provisioned");
     result.expect("the continuation keeps the exact source identifier like kotlinc's");
 }
 
