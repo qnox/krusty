@@ -4300,22 +4300,35 @@ fn emit_pass(
         out
     };
     let mut facade_has_method = false;
-    for (i, f) in ir.functions.iter().enumerate() {
-        if class_member_fids.contains(&(i as u32)) {
-            continue;
-        }
-        if f.dispatch_receiver.is_some() || f.body.is_none() {
-            continue;
-        }
-        // An inline-only lambda impl is never emitted (it's spliced) — don't count it as a facade method,
-        // else an otherwise class-only file emits an empty facade kotlinc omits. A DEAD lambda impl
-        // (inlined at every use — pass-1 discovery) is dropped the same way.
+    let mut deferred_access_bridges = Vec::new();
+    let facade_functions = ir.functions.iter().enumerate().filter_map(|(i, f)| {
+        let i = i as u32;
+        // Inline-only lambda impls (spliced) and dead ones (inlined at every use) are not facade
+        // methods: counting them would emit an empty facade for a class-only file.
+        let emitted = !class_member_fids.contains(&i)
+            && f.dispatch_receiver.is_none()
+            && f.body.is_some()
+            && (!ir.inline_only_fns.contains(&i) || lambdas.rescued.contains(&i))
+            && !lambdas.dead.contains(&i);
+        emitted.then_some(i)
+    });
+    for member in member_schedule::facade_source_ordered_members(ir, facade_functions) {
+        let i = match member {
+            member_schedule::FacadeMember::Function(function) => function as usize,
+            member_schedule::FacadeMember::PropertyAccessors(static_index) => {
+                static_fields::emit_static_accessors(
+                    ir,
+                    facade,
+                    &mut cw,
+                    env,
+                    opts.param_assertions,
+                    static_index,
+                );
+                continue;
+            }
+        };
+        let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
-        if (ir.inline_only_fns.contains(&(i as u32)) && !rescued)
-            || lambdas.dead.contains(&(i as u32))
-        {
-            continue;
-        }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
@@ -4347,28 +4360,7 @@ fn emit_pass(
             );
         }
         if facade_access_bridges.contains(&(i as u32)) {
-            let param_tys = jvm_function_params(ir, i as u32);
-            let ret = jvm_declared_ty(&f.ret);
-            let desc = method_descriptor(&param_tys, ret);
-            let words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
-            let mut g = CodeBuilder::new(words);
-            let mut slot: u16 = 0;
-            for &t in &param_tys {
-                load(t, slot, &mut g);
-                slot += slot_words(t);
-            }
-            let m = cw.methodref(facade, &f.name, &desc);
-            let aw: i32 = words as i32;
-            g.invokestatic(m, aw, slot_words(ret) as i32);
-            emit_return(ret, &mut g);
-            g.ensure_locals(words);
-            g.link();
-            cw.add_method(
-                0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-                &format!("access${}", f.name),
-                &desc,
-                &g,
-            );
+            deferred_access_bridges.push(i as u32);
         }
         // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
@@ -4403,7 +4395,12 @@ fn emit_pass(
             );
         }
     }
-    static_fields::emit_statics(ir, facade, &mut cw, env, opts.param_assertions);
+    // kotlinc's SyntheticAccessorLowering appends each `access$<name>` bridge to the facade after
+    // every declared and lifted member.
+    for function in deferred_access_bridges {
+        access_bridges::emit_facade_function_access_bridge(ir, function, facade, &mut cw);
+    }
+    static_fields::emit_statics(ir, facade, &mut cw, env);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
@@ -5002,10 +4999,17 @@ fn emit_backing_field_write_adaptation(
 /// occupies. Accessors are considered independently: a custom getter still needs its implicit default
 /// setter synthesized, and a custom setter still needs its implicit default getter. A same-named method
 /// with a different return descriptor does not hide the accessor.
+#[derive(Clone, Copy)]
+enum PropertyAccessorSide {
+    Getter,
+    Setter,
+}
+
 fn emit_declared_property_accessor(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     property: &crate::ir::IrProperty,
+    side: PropertyAccessorSide,
     fq_name: &str,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter<'_>,
@@ -5013,7 +5017,7 @@ fn emit_declared_property_accessor(
 ) {
     // A private property reached from outside (an `inline` body spliced into its caller) needs the
     // synthetic accessor kotlinc emits for exactly this: `access$get<X>$p(<owner>)<ty>`.
-    if property.needs_access_bridge {
+    if matches!(side, PropertyAccessorSide::Getter) && property.needs_access_bridge {
         if let Some(field) = property
             .backing_field
             .and_then(|i| c.fields.get(i as usize))
@@ -5142,7 +5146,7 @@ fn emit_declared_property_accessor(
         })
     };
     let getter_desc = format!("(){accessor_desc}");
-    if !occupied(&getter, &getter_desc) {
+    if matches!(side, PropertyAccessorSide::Getter) && !occupied(&getter, &getter_desc) {
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
@@ -5192,7 +5196,7 @@ fn emit_declared_property_accessor(
         let access = if overridable { 0x0001 } else { 0x0011 };
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
     }
-    if property.is_var {
+    if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
         let setter = property
             .setter_jvm_name
             .clone()
@@ -5293,7 +5297,26 @@ fn emit_declared_property_accessors(
         emit.env,
     );
     for property in &c.properties {
-        emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter, param_assertions);
+        emit_declared_property_accessor(
+            ir,
+            c,
+            property,
+            PropertyAccessorSide::Getter,
+            fq_name,
+            cw,
+            formatter,
+            param_assertions,
+        );
+        emit_declared_property_accessor(
+            ir,
+            c,
+            property,
+            PropertyAccessorSide::Setter,
+            fq_name,
+            cw,
+            formatter,
+            param_assertions,
+        );
         // The property's own annotations ride a synthetic marker method, emitted right here so the
         // method table (and the constant pool behind it) matches kotlinc's.
         if let Some(&marker) = ir
@@ -5341,11 +5364,28 @@ fn emit_scheduled_member(
                 ir,
                 c,
                 property,
+                PropertyAccessorSide::Getter,
                 fq_name,
                 cw,
                 signature_formatter,
                 param_assertions,
             );
+            if let Some(getter) = property.getter {
+                emit_scheduled_member(emission, SourceOrderedMember::Function(getter), cw);
+            }
+            emit_declared_property_accessor(
+                ir,
+                c,
+                property,
+                PropertyAccessorSide::Setter,
+                fq_name,
+                cw,
+                signature_formatter,
+                param_assertions,
+            );
+            if let Some(setter) = property.setter {
+                emit_scheduled_member(emission, SourceOrderedMember::Function(setter), cw);
+            }
             // The property's own annotations ride a synthetic marker method, which kotlinc emits
             // directly after that property's accessors — it has no source order of its own.
             if let Some(&marker) = ir
@@ -5864,6 +5904,9 @@ fn emit_class(
     } else {
         c.fields.iter().enumerate().collect()
     };
+    // kotlinc appends captures and the outer instance (the constructor prefix) after declared fields.
+    let prefix = (c.constructor_prefix_count as usize).min(field_order.len());
+    field_order.rotate_left(prefix);
     if is_continuation {
         field_order.sort_by_key(|(_, field)| match field.name.as_str() {
             "result" => 1,

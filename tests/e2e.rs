@@ -186,6 +186,8 @@ mod class_header_newline_e2e;
 mod class_lambda_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
+#[path = "class_member_order_e2e.rs"]
+mod class_member_order_e2e;
 #[path = "class_metadata_roundtrip.rs"]
 mod class_metadata_roundtrip;
 #[path = "class_tparam_cast_e2e.rs"]
