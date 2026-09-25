@@ -1,5 +1,6 @@
 //! JVM class-file reading, writing, and bytecode emission (all JVM-specific code).
 
+mod abstract_method_nullability;
 mod annotation_constructions;
 mod array_representation;
 pub mod backend;

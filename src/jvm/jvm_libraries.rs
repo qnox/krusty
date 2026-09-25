@@ -328,11 +328,21 @@ impl JvmBuiltInsCustomizer {
 /// cases recording the classifier as an erased carrier would be unsound, so neither is handed off.
 /// Value-class identification itself intentionally remains downstream; probing it while a classpath
 /// type is being built can recursively re-enter type resolution on cyclic class graphs.
+///
+/// A declaration returning its own type parameter is recorded as that parameter, as top-level
+/// callables and source declarations are: `fun <T : A?> f(): T` hands back `A`'s carrier, while a
+/// `T : Any?` result is a box read out of an erased slot. Only the declaration can tell them apart.
 fn metadata_declared_nonnull_nonsuspend_return(function: &super::metadata::MetaFn) -> Option<Ty> {
-    function
-        .ret_class
-        .filter(|_| !function.ret_nullable() && !function.is_suspend())
-        .map(Ty::obj_name)
+    if function.ret_nullable() || function.is_suspend() {
+        return None;
+    }
+    function.ret_class.map(Ty::obj_name).or_else(|| {
+        function
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.ret)
+            .filter(|ret| matches!(ret, Ty::TyParam(..)))
+    })
 }
 
 fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {

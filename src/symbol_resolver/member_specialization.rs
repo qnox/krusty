@@ -452,9 +452,12 @@ pub(super) fn specialize_callable(
     callable.source_receiver = callable
         .source_receiver
         .map(|ty| specialize_member_type(source, ty, bindings, TypePosition::Invariant));
-    callable.declared_ret = callable
-        .declared_ret
-        .map(|ty| specialize_member_type(source, ty, bindings, TypePosition::Out));
+    // A declared bare type parameter stays one: bound to a value class it is still a box read out
+    // of an erased slot, and only the unsubstituted declaration says so.
+    callable.declared_ret = callable.declared_ret.map(|ty| match ty {
+        Ty::TyParam(..) => ty,
+        _ => specialize_member_type(source, ty, bindings, TypePosition::Out),
+    });
 }
 
 /// Apply already-solved declaration type arguments to one selected Kotlin property.
