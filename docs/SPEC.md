@@ -4502,6 +4502,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member, so a `data object`'s `equals` interned `other` after `<clinit>`. Recording a data-class
   member now marks it as a debug-locals declaration, so emission writes the table in place. Test:
   `tests/method_pool_order_e2e.rs::a_data_object_equals_interns_its_locals_with_its_body`.
+- **An enum constructor's locals and property annotations intern before `values`.** kotlinc writes
+  the enum constructor's `LocalVariableTable` with the constructor: `this`, `$enum$name`,
+  `$enum$ordinal`, then every declared parameter, plain ones included (`enum class E(value: Int)`
+  has no field `value`, yet interns it there). The declared property getters follow with their
+  nullability annotation from the declared type: `@Nullable` for `val parent: E?`, not the
+  `@NotNull` its erased descriptor suggested. Tests:
+  `tests/method_pool_order_e2e.rs::an_enum_constructor_interns_its_plain_parameter_locals` and
+  `::a_nullable_enum_property_interns_its_annotation_with_the_declared_members`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
