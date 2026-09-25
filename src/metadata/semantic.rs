@@ -126,6 +126,7 @@ pub struct KotlinMember {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,
+    pub return_value_status: crate::types::ReturnValueStatus,
     pub formals: Vec<KotlinTypeParameter>,
     pub ret_nullable: bool,
     pub constant: Option<crate::libraries::LibConst>,

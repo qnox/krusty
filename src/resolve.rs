@@ -4702,6 +4702,7 @@ impl SymbolTable {
             } else {
                 crate::symbol_resolver::direct_supertypes(&*self.libraries, applied)
             };
+            let parents = crate::symbol_resolver::with_implicit_any(owner, parents);
             pending.extend(
                 parents
                     .into_iter()
@@ -30776,6 +30777,7 @@ fun box(): String {
                         getter.external_property_identity =
                             Some(crate::fir::ExternalPropertyId::from_raw(1));
                         let property = crate::libraries::PropertyInfo {
+                            return_value_status: None,
                             name: "prop".to_string(),
                             kind: crate::libraries::PropKind::MemberExtension,
                             receiver: Some(parameter),
@@ -30882,6 +30884,7 @@ fun box(): String {
             .then(|| {
                 let companion = if internal.matches("test/Factory") {
                     let member = |second, descriptor: &str| crate::libraries::LibraryMember {
+                        return_value_status: None,
                         external_identity: None,
                         external_default_provider: None,
                         external_property_identity: None,

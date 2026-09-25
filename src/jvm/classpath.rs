@@ -1392,6 +1392,7 @@ struct BuiltinMember {
     is_operator: bool,
     is_infix: bool,
     is_abstract: bool,
+    return_value_status: crate::types::ReturnValueStatus,
     ret_nullable: bool,
 }
 
@@ -1552,6 +1553,7 @@ impl BuiltinsFile {
                         is_operator: m.is_operator,
                         is_infix: m.is_infix,
                         is_abstract: m.is_abstract,
+                        return_value_status: m.return_value_status,
                         ret_nullable: m.ret_nullable,
                     }
                 })
@@ -3308,6 +3310,7 @@ impl Classpath {
                         annotations: Vec::new(),
                         contract: None,
                         equality_bound: None,
+                        return_value_status: Some(m.return_value_status),
                         default_values: Vec::new(),
                         default_realization: None,
                         constructor_realization: None,

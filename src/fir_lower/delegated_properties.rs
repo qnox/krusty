@@ -376,6 +376,7 @@ pub(super) fn materialize_member_delegate(
         decl_line: 0,
         ty: property.ty,
         visibility: property.visibility,
+        return_value_status: index.property_return_value_status(property_id),
         annotations: Box::new([]),
         initializer: None,
         storage_ty: None,

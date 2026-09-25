@@ -1163,6 +1163,12 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
+            let inherited = index.callable_inherited_status(callable.id);
+            if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
+                self.ir
+                    .fn_return_value_statuses
+                    .insert(function, inherited.return_value);
+            }
             if callable.shape.extension_receiver.is_some() && !companion_associated {
                 self.ir.extension_receiver_fns.insert(function);
             }
@@ -1188,15 +1194,18 @@ impl<'a> CommonIrBodySink<'a> {
             {
                 self.ir.inline_fns.insert(function);
             }
-            if declaration_header
-                .flags
-                .has(crate::fir::DeclarationFlags::OPERATOR)
+            // An override inherits `operator` / `infix` from the declarations it overrides.
+            if inherited.operator
+                || declaration_header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::OPERATOR)
             {
                 self.ir.operator_fns.insert(function);
             }
-            if declaration_header
-                .flags
-                .has(crate::fir::DeclarationFlags::INFIX)
+            if inherited.infix
+                || declaration_header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::INFIX)
             {
                 self.ir.infix_fns.insert(function);
             }

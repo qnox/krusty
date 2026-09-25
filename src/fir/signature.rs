@@ -1628,8 +1628,11 @@ pub struct ResolvedModuleIndex {
     classifier_hierarchies: HashMap<DeclarationId, Box<[ResolvedAppliedClassifier]>>,
     /// Exact property override edges selected while module/dependency declarations are live. These
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
-    property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
-    function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
+    pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
+    pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
+    /// Non-default return-value statuses of module declarations, derived from the frozen edges.
+    pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
+    pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
     type_aliases: HashMap<DeclarationId, ResolvedTypeAliasHeader>,
     signatures: HashMap<DeclarationId, ResolvedSignature>,
     /// Pass-1-resolved contract effects keyed by their stable callable declaration. The wrapper
@@ -2368,72 +2371,6 @@ impl ResolvedModuleIndex {
         );
     }
 
-    pub fn property_overrides(
-        &self,
-        classifier: DeclarationId,
-    ) -> &[super::ResolvedPropertyOverride] {
-        self.property_overrides
-            .get(&classifier)
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn has_property_override_plan(&self, classifier: DeclarationId) -> bool {
-        self.property_overrides.contains_key(&classifier)
-    }
-
-    pub(crate) fn publish_property_overrides(
-        &mut self,
-        owner: DeclarationId,
-        overrides: impl IntoIterator<Item = super::ResolvedPropertyOverride>,
-    ) {
-        assert!(
-            self.classifiers.contains_key(&owner)
-                || self
-                    .declaration_header(owner)
-                    .is_some_and(|header| header.kind == super::DeclarationKind::EnumEntry),
-            "property overrides require a published classifier or enum-entry owner"
-        );
-        let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
-        assert!(
-            self.property_overrides.insert(owner, overrides).is_none(),
-            "a source classifier or enum entry may publish property overrides only once"
-        );
-    }
-
-    pub fn function_overrides(
-        &self,
-        classifier: DeclarationId,
-    ) -> &[super::ResolvedFunctionOverride] {
-        self.function_overrides
-            .get(&classifier)
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn has_function_override_plan(&self, classifier: DeclarationId) -> bool {
-        self.function_overrides.contains_key(&classifier)
-    }
-
-    pub(crate) fn publish_function_overrides(
-        &mut self,
-        owner: DeclarationId,
-        overrides: impl IntoIterator<Item = super::ResolvedFunctionOverride>,
-    ) {
-        assert!(
-            self.classifiers.contains_key(&owner)
-                || self
-                    .declaration_header(owner)
-                    .is_some_and(|header| header.kind == super::DeclarationKind::EnumEntry),
-            "function overrides require a published classifier or enum-entry owner"
-        );
-        let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
-        assert!(
-            self.function_overrides.insert(owner, overrides).is_none(),
-            "a source classifier or enum entry may publish function overrides only once"
-        );
-    }
-
     pub fn type_alias_header(
         &self,
         declaration: DeclarationId,
@@ -2984,6 +2921,8 @@ impl ResolvedModuleIndex {
             && self.callables.is_empty()
             && self.callable_default_providers.is_empty()
             && self.callable_equality_bounds.is_empty()
+            && self.callable_inherited_statuses.is_empty()
+            && self.property_return_value_statuses.is_empty()
             && self.properties.is_empty()
     }
 

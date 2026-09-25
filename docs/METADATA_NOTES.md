@@ -129,6 +129,16 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   Tests: `tests/metadata_property_flags_e2e.rs`, `class_builder` unit test
   `private_setter_records_value_parameter_before_the_property_name`.
 
+- `ReturnValueStatus` lives in `Function.flags` bits 16-17 and `Property.flags` bits 17-18
+  (Unspecified 0, MustUse 1, ExplicitlyIgnorable 2). With the return-value checker disabled, the
+  default of kotlinc 2.4.0-2.4.20 (`FirMustUseReturnValueStatusComponent`), a declaration takes the
+  status of the first declaration it overrides that records one, else Unspecified. The stdlib records
+  MustUse on most API (`Any.toString`, `Continuation.resumeWith`, `List.get`) and ExplicitlyIgnorable
+  on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
+  override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the
+  `operator` (bit 8) and `infix` (bit 9) modifiers when any declaration it overrides has them. Test:
+  `tests/metadata_return_value_status_e2e.rs`.
+
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one
 record per string (no range compression) ⇒ semantically equivalent, not byte-identical, to

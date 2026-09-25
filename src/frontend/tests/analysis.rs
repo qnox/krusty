@@ -72,6 +72,7 @@ impl ExistingLibrary {
                     "marker".to_string(),
                     Callables::Properties(PropertySet {
                         overloads: vec![PropertyInfo {
+                            return_value_status: None,
                             name: "marker".to_string(),
                             kind: PropKind::Member,
                             receiver: Some(receiver),
@@ -232,6 +233,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
             return std::rc::Rc::new(ResolvedSymbols {
                 callables: Callables::Properties(PropertySet {
                     overloads: vec![PropertyInfo {
+                        return_value_status: None,
                         name: name.to_string(),
                         kind: PropKind::TopLevel,
                         receiver: None,
@@ -341,6 +343,7 @@ impl SemanticPlatform for ExistingLibrary {
         (internal.matches("fixture/CollisionEnum") && name == "ANY").then(|| {
             let ty = Ty::obj_name(internal);
             crate::libraries::PropertyInfo {
+                return_value_status: None,
                 name: name.to_string(),
                 kind: crate::libraries::PropKind::TopLevel,
                 receiver: None,

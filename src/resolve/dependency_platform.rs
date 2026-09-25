@@ -677,6 +677,7 @@ mod tests {
             setter
         });
         PropertyInfo {
+            return_value_status: None,
             name: "value".to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),

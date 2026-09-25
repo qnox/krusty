@@ -1534,6 +1534,7 @@ impl IrPlugin for SerializationPlugin {
                 decl_line: 0,
                 ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                 visibility: crate::types::Visibility::Public,
+                return_value_status: Default::default(),
                 annotations: Box::new([]),
                 initializer: None,
                 storage_ty: None,

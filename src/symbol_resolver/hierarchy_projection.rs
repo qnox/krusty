@@ -89,13 +89,25 @@ pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(Typ
             continue;
         }
         hierarchy.push((owner, applied, depth));
+        let parents = with_implicit_any(owner, direct_supertypes(source, applied));
         pending.extend(
-            direct_supertypes(source, applied)
+            parents
                 .into_iter()
                 .filter_map(|parent| Some((parent.kotlin_class_internal()?, parent, depth + 1))),
         );
     }
     hierarchy
+}
+
+/// A classifier's direct supertypes including Kotlin's implicit root: one that declares no
+/// supertype still inherits `kotlin.Any`'s members, and an override of `toString`, `equals` or
+/// `hashCode` overrides that declaration.
+pub(crate) fn with_implicit_any(owner: TypeName, mut parents: Vec<Ty>) -> Vec<Ty> {
+    let any = crate::types::wk::any();
+    if parents.is_empty() && owner != any {
+        parents.push(Ty::obj_name(any));
+    }
+    parents
 }
 
 /// Apply a runtime subtype named without source arguments to the generic arguments already known on

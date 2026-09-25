@@ -1070,6 +1070,7 @@ fn materialize_member_property(
         decl_line: 0,
         ty: property.ty,
         visibility: property.visibility,
+        return_value_status: index.property_return_value_status(property_id),
         annotations: index
             .declaration_annotations(property.declaration)
             .to_vec()

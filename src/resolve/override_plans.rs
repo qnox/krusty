@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod inherited_status;
+
 use super::SymbolTable;
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedAppliedClassifier,
@@ -477,6 +479,9 @@ fn publish_inherited_interface_function_plans(
                     overridden_default_provider: function_default_provider(
                         index, &applied, overridden,
                     ),
+                    overridden_return_value_status: applied.flags.return_value_status,
+                    overridden_operator: applied.flags.operator,
+                    overridden_infix: applied.flags.infix,
                     suspend: implementation.flags.suspend,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
@@ -588,6 +593,7 @@ fn publish_inherited_interface_property_plans(
                     declared_receiver: None,
                     implementation_receiver: None,
                     implementation_mutable: implementation.setter.is_some(),
+                    overridden_return_value_status: applied.return_value_status,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
                 });
@@ -692,6 +698,7 @@ fn append_property_override_edges(
                 implementation_receiver,
                 overridden_mutable: applied.setter.is_some(),
                 implementation_mutable,
+                overridden_return_value_status: applied.return_value_status,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
@@ -922,6 +929,9 @@ fn append_function_override_edges(
                 ),
                 overridden_parameter_defaults: function_default_bitmap(&applied),
                 overridden_default_provider: function_default_provider(index, &applied, overridden),
+                overridden_return_value_status: applied.flags.return_value_status,
+                overridden_operator: applied.flags.operator,
+                overridden_infix: applied.flags.infix,
                 suspend,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
@@ -1301,6 +1311,28 @@ pub(crate) fn publish_checked_local_override_plans(
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &function_edges);
+    // A local classifier's plan is published once, by the first body that checks it (a default
+    // argument's object is checked for each function that carries the default); its statuses go
+    // with that first publication.
+    let unpublished = plans
+        .iter()
+        .map(|(classifier, properties, functions)| {
+            (
+                *classifier,
+                if index.has_property_override_plan(*classifier) {
+                    Vec::new()
+                } else {
+                    properties.clone()
+                },
+                if index.has_function_override_plan(*classifier) {
+                    Vec::new()
+                } else {
+                    functions.clone()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    publish_inherited_statuses(index, &unpublished);
 
     for (classifier, properties, functions) in plans {
         if !index.has_property_override_plan(classifier) {
@@ -1310,6 +1342,27 @@ pub(crate) fn publish_checked_local_override_plans(
             index.publish_function_overrides(classifier, functions);
         }
     }
+}
+
+fn publish_inherited_statuses(
+    index: &mut ResolvedModuleIndex,
+    plans: &[(
+        crate::fir::DeclarationId,
+        Vec<ResolvedPropertyOverride>,
+        Vec<ResolvedFunctionOverride>,
+    )],
+) {
+    let classifiers = plans
+        .iter()
+        .map(
+            |(classifier, properties, functions)| inherited_status::ClassifierEdges {
+                classifier: *classifier,
+                functions,
+                properties,
+            },
+        )
+        .collect::<Vec<_>>();
+    inherited_status::publish_inherited_statuses(index, &classifiers);
 }
 
 /// Freeze every override edge before publishing an inherited default. Declaration and classifier
@@ -1492,6 +1545,7 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &function_edges);
+    publish_inherited_statuses(index, &plans);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);

@@ -178,6 +178,7 @@ impl EmptySymbolSource {
                     "",
                 );
                 let mut property = PropertyInfo {
+                    return_value_status: None,
                     name: name.to_string(),
                     kind: PropKind::Extension,
                     receiver: Some(Ty::Char),
@@ -306,6 +307,7 @@ impl EmptySymbolSource {
             "()Ljava/lang/Object;",
         );
         let mut property = PropertyInfo {
+            return_value_status: None,
             name: name.to_string(),
             kind: PropKind::TopLevel,
             receiver: None,

@@ -6982,6 +6982,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter (the written name, else `value`, or `<set-?>` when delegated), and a delegated property
   records its `x$delegate` field; `lateinit` and delegation are property flags. Measured against kotlinc
   2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_property_flags_e2e.rs`.
+- **Status an override inherits.** An override records the return-value status of the first
+  declaration it overrides that has one (Java declarations have none and are skipped) and is
+  `operator`/`infix` when any declaration it overrides is. Kotlin's `Any` is the implicit supertype
+  of a classifier that declares none, so `toString`/`equals`/`hashCode` overrides have override
+  edges like any other. Measured against kotlinc 2.4.0, 2.4.10 and 2.4.20. Test:
+  `tests/metadata_return_value_status_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part

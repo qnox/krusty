@@ -17,6 +17,12 @@ mod type_encoder;
 /// include the declaration's two-bit MEMBER_KIND after MODALITY, so property-specific bits must not be
 /// copied from the shorter Function/Class prefix. Keeping the raw schema facts here prevents the JVM
 /// decoder, class encoder, and package encoder from drifting into separate numeric interpretations.
+pub(crate) mod function_flags {
+    /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows
+    /// `hasNonStableParameterNames` (bit 15).
+    pub const RETURN_VALUE_STATUS_SHIFT: u32 = 16;
+}
+
 pub(crate) mod property_flags {
     /// Public, final property with a default getter; protobuf omits field 11 at this value.
     pub const DEFAULT: u64 = 518;
@@ -26,6 +32,8 @@ pub(crate) mod property_flags {
     pub const IS_CONST: u64 = 1 << 11;
     pub const HAS_CONSTANT: u64 = 1 << 13;
     pub const MODALITY_OPEN: u64 = 1 << 4;
+    /// Low bit of the 2-bit `ReturnValueStatus` field (bits 17-18).
+    pub const RETURN_VALUE_STATUS_SHIFT: u32 = 17;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
     pub const IS_LATEINIT: u64 = 1 << 12;
     pub const IS_DELEGATED: u64 = 1 << 15;

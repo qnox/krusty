@@ -2046,6 +2046,37 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
     }
 }
 
+/// Kotlin's `ReturnValueStatus` of a callable: whether a caller must use its result. It is a
+/// declaration fact that Kotlin metadata records (`Function.flags` bits 16-17, `Property.flags` bits
+/// 17-18) and that an override inherits from the first declaration it overrides; with the return
+/// value checker disabled (every supported kotlinc's default) inheritance is its only source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum ReturnValueStatus {
+    #[default]
+    Unspecified,
+    MustUse,
+    ExplicitlyIgnorable,
+}
+
+impl ReturnValueStatus {
+    /// The `ProtoBuf.ReturnValueStatus` ordinal a metadata flag word stores.
+    pub fn from_metadata(value: u64) -> ReturnValueStatus {
+        match value {
+            1 => ReturnValueStatus::MustUse,
+            2 => ReturnValueStatus::ExplicitlyIgnorable,
+            _ => ReturnValueStatus::Unspecified,
+        }
+    }
+
+    pub fn metadata_value(self) -> u64 {
+        match self {
+            ReturnValueStatus::Unspecified => 0,
+            ReturnValueStatus::MustUse => 1,
+            ReturnValueStatus::ExplicitlyIgnorable => 2,
+        }
+    }
+}
+
 /// Kotlin declaration visibility — the modifier on a `fun`/`val`/`class` (from source) or the
 /// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
 /// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a

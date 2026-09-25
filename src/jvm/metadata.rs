@@ -513,6 +513,9 @@ struct ParsedFunction {
     is_synthesized: bool,
     is_operator: bool,
     is_infix: bool,
+    /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
+    /// them.
+    return_value_status: crate::types::ReturnValueStatus,
     visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<ParsedJvmSignature>,
@@ -683,6 +686,11 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         }
     }
     let flags = modern_flags.or(legacy_flags).unwrap_or(6);
+    let return_value_status = modern_flags.map_or_else(Default::default, |flags| {
+        crate::types::ReturnValueStatus::from_metadata(
+            (flags >> crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
+        )
+    });
     if contract_body.is_some() {
         crate::trace_compiler!(
             "metadata",
@@ -702,6 +710,7 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_synthesized: (flags >> 6) & 0x3 == 3,
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
+        return_value_status,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1764,6 +1773,7 @@ pub struct MetaFn {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
     pub equality_bound: Option<Ty>,
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Function formals carrying Kotlin's internal `@OnlyInputTypes` inference policy.
     pub only_input_type_formals: Vec<String>,
     /// Annotation class identities declared on this function (from \`Function.annotation\`).
@@ -1956,6 +1966,8 @@ pub struct MetaProp {
     /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
     pub setter_parameter_name: Option<String>,
     pub visibility: crate::types::Visibility,
+    /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
+    pub return_value_status: crate::types::ReturnValueStatus,
     pub is_const: bool,
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
     /// a legacy `$DefaultImpls` method realizes this concrete declaration.
@@ -2883,6 +2895,7 @@ fn decode_functions(
                         generic_sig,
                         contract,
                         equality_bound,
+                        return_value_status: pf.return_value_status,
                         only_input_type_formals: pf
                             .type_params
                             .iter()
@@ -3786,6 +3799,11 @@ fn decode_properties(
             setter,
             setter_parameter_name,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
+            return_value_status: modern_flags.map_or_else(Default::default, |flags| {
+                crate::types::ReturnValueStatus::from_metadata(
+                    (flags >> crate::metadata::property_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
+                )
+            }),
             is_const: flags & is_const_bit != 0,
             is_abstract: (flags >> 4) & 0x3 == 2,
             is_var,
@@ -4093,6 +4111,7 @@ pub struct BuiltinMember {
     /// Semantic declaration modality from the builtins protobuf. A mapped JVM method with the same
     /// descriptor is only the physical realization and cannot replace this Kotlin fact.
     pub is_abstract: bool,
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// The member's OWN type parameters (`<R>` of `fold`), with their declared upper bounds — kept
     /// apart from the class's so a consumer can build a generic signature whose formals shadow
     /// correctly.
