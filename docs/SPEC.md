@@ -4501,6 +4501,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   would shift every following pool entry. Tests:
   `tests/generic_signature_e2e.rs::top_level_property_field_gets_its_generic_signature` and
   `::top_level_property_accessors_get_their_generic_signatures`.
+- **A constructor interns a body property's entries in evaluation order.** kotlinc writes the
+  constructor's body as it evaluates it: `val part: Part = Part()` interns `Part`, its `<init>`
+  `Methodref` and only then the `part` field's name, descriptor and `Fieldref` at the `putfield`,
+  and the constructor's `this` follows the whole body in its `LocalVariableTable`. The pool seeder
+  used to pre-intern every stored field (and a string or value-class constant among the
+  initializers) ahead of the body, which put each field before its own value. It now seeds only the
+  primary-constructor PARAMETER stores, which kotlinc does write first, and leaves a body property to
+  the constructor's emission; `this`, the `$default` marker and the defaults' strings are seeded
+  after the body (`seed_plain_constructor_tail`). A data class's fields follow the same late field
+  visit as any other declared property, so a generic field's `Signature` lands after `this`. Tests:
+  `tests/method_pool_order_e2e.rs::a_property_initializer_interns_its_value_before_its_field` and
+  `::a_data_class_generic_field_signature_follows_its_constructor`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the

@@ -1,11 +1,16 @@
-//! kotlinc interns a method's name and descriptor when it visits the method header, before its body
-//! interns anything (ASM's `visitMethod`). The compiler-generated methods follow the same rule: a
-//! class's `$default` stub, the `$DefaultImpls` holder's forward to the interface's stub, and an
-//! interface's `access$…$jd` bridge each put their own name and descriptor into the constant pool
-//! ahead of the constants and member references their bodies introduce.
+//! kotlinc's constant pool follows the order its writer visits a method: the header first (ASM's
+//! `visitMethod` interns the name and descriptor), then the body in evaluation order, then the
+//! local-variable table.
 //!
-//! Each case asserts that the named class is byte-identical to kotlinc's. The fixtures use neutral
-//! names only.
+//! - The compiler-generated methods follow the header rule: a class's `$default` stub, the
+//!   `$DefaultImpls` holder's forward to the interface's stub, and an interface's `access$…$jd`
+//!   bridge each put their own name and descriptor ahead of what their bodies introduce.
+//! - A constructor stores a body property after evaluating its initializer, so whatever the
+//!   initializer references (a class, a constructor, a lambda) precedes the field's own entries,
+//!   and the constructor's `this` follows them.
+//!
+//! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
+//! neutral names only.
 use super::common;
 
 /// Compile `src` with kotlinc and with krusty and return both builds of each class in `classes`.
@@ -66,5 +71,31 @@ fn a_holder_forward_interns_its_header_before_its_body() {
          \x20   fun turn(by: Int = 1): Int = by\n\
          }\n",
         &["Dial$DefaultImpls", "Dial"],
+    );
+}
+
+#[test]
+fn a_property_initializer_interns_its_value_before_its_field() {
+    assert_identical(
+        "InitializerOrder",
+        "class Part\n\
+         class Holder(val size: Int) {\n\
+         \x20   val part: Part = Part()\n\
+         \x20   val action: () -> Int = { 7 }\n\
+         \x20   val big: Long = 123456789012L\n\
+         }\n",
+        &["Part", "Holder"],
+    );
+}
+
+/// Data-class fields are visited with the other declared fields, after the constructor, so a
+/// generic field's `Signature` follows the constructor's `this`.
+#[test]
+fn a_data_class_generic_field_signature_follows_its_constructor() {
+    assert_identical(
+        "DataFieldSignature",
+        "class Box<T>(val item: T)\n\
+         data class Crate(val box: Box<String>)\n",
+        &["Box", "Crate"],
     );
 }
