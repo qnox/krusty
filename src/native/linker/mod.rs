@@ -23,9 +23,9 @@ use super::target::{Arch, NativeTarget};
 /// Why a link failed. Each names what a user (or the emitter's author) needs to act on.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProgramLinkError {
-    /// krusty was built without a prebuilt runtime for this architecture (no C cross-compiler at
+    /// krusty was built without a prebuilt runtime for this target (no C cross-compiler at
     /// build time), so there is nothing to link against.
-    NoRuntime(Arch),
+    NoRuntime(NativeTarget),
     /// An input object could not be parsed as an ELF relocatable, or is malformed.
     Parse(String),
     /// An input object is a well-formed relocatable for a different machine, word size or byte
@@ -46,9 +46,9 @@ pub enum ProgramLinkError {
 impl std::fmt::Display for ProgramLinkError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoRuntime(arch) => write!(
+            Self::NoRuntime(target) => write!(
                 formatter,
-                "krusty was built without the native runtime for {arch:?} (no C cross-compiler was \
+                "krusty was built without the native runtime for {target} (no C cross-compiler was \
                  available when krusty was built; install clang and rebuild krusty)"
             ),
             Self::Parse(what) => write!(formatter, "cannot read object: {what}"),
@@ -76,8 +76,7 @@ pub fn link_program(
     program_objects: &[&[u8]],
     target: NativeTarget,
 ) -> Result<Vec<u8>, ProgramLinkError> {
-    let runtime =
-        prebuilt::runtime_objects(target.arch).ok_or(ProgramLinkError::NoRuntime(target.arch))?;
+    let runtime = prebuilt::runtime_objects(target).ok_or(ProgramLinkError::NoRuntime(target))?;
     let mut inputs: Vec<&[u8]> = program_objects.to_vec();
     inputs.extend(runtime.iter().map(|(_, bytes)| *bytes));
     elf::link_static(&inputs, target)
@@ -85,7 +84,7 @@ pub fn link_program(
 
 /// Whether this build of krusty can link native programs for `target` at all.
 pub fn can_link(target: NativeTarget) -> bool {
-    prebuilt::runtime_objects(target.arch).is_some()
+    prebuilt::runtime_objects(target).is_some()
 }
 
 #[cfg(test)]
@@ -218,10 +217,11 @@ mod tests {
     fn the_runtime_symbols_are_what_the_runtime_defines() {
         for arch in NativeTarget::ALL.iter().map(|target| target.arch) {
             if !runtime_for(arch) {
-                assert!(runtime_symbols(arch).expect("no runtime").is_empty());
+                assert!(runtime_symbols(linux(arch)).expect("no runtime").is_empty());
                 continue;
             }
-            let names = runtime_symbols(arch).unwrap_or_else(|error| panic!("{arch:?}: {error}"));
+            let names =
+                runtime_symbols(linux(arch)).unwrap_or_else(|error| panic!("{arch:?}: {error}"));
             assert!(names.contains("_start"), "{arch:?}: {names:?}");
             assert!(names.contains("kt_program_returned"), "{arch:?}: {names:?}");
             assert!(!names.contains("kt_program_entry"), "{arch:?}: {names:?}");
@@ -233,8 +233,8 @@ mod tests {
     #[test]
     fn a_missing_runtime_names_its_remedy() {
         assert_eq!(
-            ProgramLinkError::NoRuntime(Arch::Riscv64).to_string(),
-            "krusty was built without the native runtime for Riscv64 (no C cross-compiler was \
+            ProgramLinkError::NoRuntime(linux(Arch::Riscv64)).to_string(),
+            "krusty was built without the native runtime for linux-riscv64 (no C cross-compiler was \
              available when krusty was built; install clang and rebuild krusty)"
         );
     }
