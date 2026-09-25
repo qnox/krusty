@@ -6959,6 +6959,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Corpus: `boxReturnValueOnOverride/overrideGenericWithNullableInlineClassUpperBound*` and
   `inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes*`.
 
+- **A member-extension property overrides and is delegated like any member.** Its accessors are
+  methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part
+  of its override slot: `val String.x` overrides `val T.x` of `G<String>`, not `val Int.x`. Override
+  edges therefore carry each side's declared receiver, and a generic slot gets kotlinc's bridge in
+  the function shape (`getX(Object)` casting to the implementation's receiver; over a value class,
+  unboxing into the mangled `getX-<hash>`). `class D : I by d` forwards every member-extension
+  property the class does not declare, with the property's own type parameters (`val <T> T.id`).
+  A read or write through the interface records the accessor's declared parameters, so a
+  value-class receiver passed to a generic `T` slot is boxed like any other argument. Delegation
+  forwarders are public overrides, so their parameters get `checkNotNullParameter` guards like a
+  source override's; a parameter whose provider publishes no name (a mapped collection
+  interface's Java parameter) gets none rather than an invented spelling. When the value-class ABI
+  replaces a function (a mangled or static `-impl` realization), kotlinc turns its extension
+  receiver into an ordinary parameter, so the guard quotes `$this$<name>` instead of `<this>`.
+  Tests: `tests/member_extension_property_override_e2e.rs` (the erased bridges and the value-class
+  bridge and mangled accessor instruction for instruction against kotlinc; delegated accessors,
+  generic and value-class, reading and writing). Corpus:
+  `inlineClasses/interfaceDelegation/memberExt{Val,Var}DelegationWithInlineClassParameterTypes*`
+  and `delegation/genericProperty`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

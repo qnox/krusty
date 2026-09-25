@@ -615,6 +615,9 @@ pub(super) fn realize(
     realize_super_calls(ir)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
+        // A property accessor call keeps its declaration's parameter vector (contexts, receiver,
+        // value), the same checked fact an ordinary call carries for representation boundaries.
+        let mut accessor_parameters = None;
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
                 callee:
@@ -679,7 +682,7 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    Some(realize_property(
+                    let (call, parameters) = realize_property(
                         property,
                         stems,
                         target,
@@ -687,7 +690,9 @@ pub(super) fn realize(
                         extension_receiver,
                         context_arguments,
                         None,
-                    )?)
+                    )?;
+                    accessor_parameters = Some(parameters);
+                    Some(call)
                 }
             }
             IrExpr::Checked(IrCheckedOperation::PropertyWrite {
@@ -717,7 +722,7 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    Some(realize_property(
+                    let (call, parameters) = realize_property(
                         property,
                         stems,
                         target,
@@ -725,7 +730,9 @@ pub(super) fn realize(
                         extension_receiver,
                         context_arguments,
                         Some(value),
-                    )?)
+                    )?;
+                    accessor_parameters = Some(parameters);
+                    Some(call)
                 }
             }
             IrExpr::SingletonValue { classifier } => {
@@ -754,6 +761,10 @@ pub(super) fn realize(
         };
         if let Some(replacement) = replacement {
             ir.exprs[raw] = replacement;
+        }
+        if let Some(parameters) = accessor_parameters {
+            ir.call_declared_params
+                .insert(raw as ExprId, parameters.into_boxed_slice());
         }
     }
     Ok(())
@@ -849,7 +860,7 @@ fn realize_property(
     extension_receiver: Option<crate::ir::ExprId>,
     context_arguments: Vec<crate::ir::ExprId>,
     value: Option<crate::ir::ExprId>,
-) -> Result<IrExpr, ModuleRealizationTarget> {
+) -> Result<(IrExpr, Vec<crate::types::Ty>), ModuleRealizationTarget> {
     let failure = ModuleRealizationTarget::Property(target);
     if context_arguments.len() != property.context_parameters.len() {
         return Err(failure);
@@ -889,34 +900,40 @@ fn realize_property(
         if property.owner_kind.is_none() {
             return Err(failure);
         }
-        Ok(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: classifier,
-                name: accessor,
-                descriptor: String::new(),
-                params: Some((parameters, ret)),
-                interface: owner_is_jvm_interface(property),
+        Ok((
+            IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: classifier,
+                    name: accessor,
+                    descriptor: String::new(),
+                    params: Some((parameters.clone(), ret)),
+                    interface: owner_is_jvm_interface(property),
+                },
+                dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
+                args: arguments,
             },
-            dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
-            args: arguments,
-        })
+            parameters,
+        ))
     } else {
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
         let facade = facade_for(property.source, stems).ok_or(failure)?;
-        Ok(IrExpr::Call {
-            callee: Callee::CrossFile {
-                facade,
-                name: accessor,
-                params: parameters,
-                ret,
-                module_target: None,
-                module_default_call: false,
+        Ok((
+            IrExpr::Call {
+                callee: Callee::CrossFile {
+                    facade,
+                    name: accessor,
+                    params: parameters.clone(),
+                    ret,
+                    module_target: None,
+                    module_default_call: false,
+                },
+                dispatch_receiver: None,
+                args: arguments,
             },
-            dispatch_receiver: None,
-            args: arguments,
-        })
+            parameters,
+        ))
     }
 }
 

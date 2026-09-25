@@ -1058,6 +1058,8 @@ mod member_extension_lambda_arity_e2e;
 mod member_extension_nested_hof_e2e;
 #[path = "member_extension_property_e2e.rs"]
 mod member_extension_property_e2e;
+#[path = "member_extension_property_override_e2e.rs"]
+mod member_extension_property_override_e2e;
 #[path = "member_generic_nullable_result_e2e.rs"]
 mod member_generic_nullable_result_e2e;
 #[path = "member_infix_inference_e2e.rs"]

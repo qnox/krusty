@@ -288,12 +288,22 @@ fn property_bridges(
             edge.name,
             edge.has_kotlin_superclass_override,
         );
+        let declared_receiver = edge.declared_receiver.map(bridge_erasure);
+        let implementation_receiver = edge.implementation_receiver.map(bridge_erasure);
         if type_descriptor(edge.declared_type) == type_descriptor(edge.implementation_type)
+            && declared_receiver.map(type_descriptor)
+                == implementation_receiver.map(type_descriptor)
             && bridge_getter == target_getter
         {
             continue;
         }
         if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
+            continue;
+        }
+        if let (Some(declared), Some(implementation)) =
+            (edge.declared_receiver, edge.implementation_receiver)
+        {
+            push_member_extension_accessor_bridges(ir, cid, &edge, declared, implementation);
             continue;
         }
         let name = edge.name.clone();
@@ -310,6 +320,63 @@ fn property_bridges(
         );
     }
     Ok(())
+}
+
+/// A member-extension property's accessors are ordinary methods taking the receiver
+/// (`getX(receiver)`, `setX(receiver, value)`), so their bridges have the function shape: the
+/// overridden declaration's erased receiver and type delegating to the implementation's accessors.
+fn push_member_extension_accessor_bridges(
+    ir: &mut IrFile,
+    cid: usize,
+    edge: &crate::ir::IrPropertyOverride,
+    declared_receiver: Ty,
+    implementation_receiver: Ty,
+) {
+    let own = |accessor: Option<u32>| accessor.filter(|f| ir.classes[cid].methods.contains(f));
+    let (getter, setter) = (
+        own(edge.implementation_getter),
+        own(edge.implementation_setter),
+    );
+    let receiver = crate::fir::ResolvedParameterIdentity::ExtensionReceiver;
+    let accessor = |name, target_function, erased_ret, concrete_ret| Bridge {
+        kind: BridgeKind::Function,
+        target_function,
+        parameter_identities: vec![receiver.clone()],
+        name,
+        erased_params: vec![bridge_erasure(declared_receiver)],
+        erased_ret,
+        concrete_params: vec![implementation_receiver],
+        concrete_ret,
+        target_ret: None,
+        type_safe_barrier: false,
+        target_name: None,
+        box_ret: None,
+        unbox_params: Vec::new(),
+    };
+    let mut accessors = vec![accessor(
+        property_getter_name(&edge.name),
+        getter,
+        bridge_erasure(edge.declared_type),
+        edge.implementation_type,
+    )];
+    if edge.overridden_mutable && edge.implementation_mutable {
+        let mut setter = accessor(property_setter_name(&edge.name), setter, Ty::Unit, Ty::Unit);
+        setter
+            .parameter_identities
+            .push(crate::fir::ResolvedParameterIdentity::PropertySetterValue);
+        setter
+            .erased_params
+            .push(bridge_erasure(edge.declared_type));
+        setter.concrete_params.push(edge.implementation_type);
+        accessors.push(setter);
+    }
+    for bridge in accessors {
+        if !ir.classes[cid].bridges.iter().any(|existing| {
+            existing.name == bridge.name && existing.erased_params == bridge.erased_params
+        }) {
+            ir.classes[cid].bridges.push(bridge);
+        }
+    }
 }
 
 /// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded under

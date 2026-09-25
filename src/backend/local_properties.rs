@@ -87,6 +87,23 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
                 ..
             } if context_parameters.is_empty()
         );
+        // A member-extension accessor call keeps its declaration's parameter vector (contexts,
+        // receiver, value), the checked fact an ordinary call carries for representation boundaries.
+        if let (
+            IrLocalPropertyLayout::MemberExtension { .. },
+            IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        params: Some((parameters, _)),
+                        ..
+                    },
+                ..
+            },
+        ) = (&layout, &replacement)
+        {
+            ir.call_declared_params
+                .insert(operation, parameters.clone().into_boxed_slice());
+        }
         ir.exprs[raw] = replacement;
         realized.push(RealizedLocalPropertyAccess {
             operation,

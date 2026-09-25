@@ -461,15 +461,30 @@ fn delegated_function_declaration(
     })
 }
 
+/// The applied shape of one delegated accessor: its context parameters, the member-extension
+/// receiver when there is one, then the value a setter takes.
+#[derive(Clone, Copy)]
+struct PropertyCallShape<'a> {
+    setter: bool,
+    context_parameters: &'a [Ty],
+    extension_receiver: Option<Ty>,
+    property_type: Ty,
+}
+
 fn property_call(
     index: &ResolvedModuleIndex,
     receiver: Ty,
     property: &PropertyInfo,
-    setter: bool,
-    context_parameters: &[Ty],
-    property_type: Ty,
+    shape: PropertyCallShape<'_>,
 ) -> Option<ResolvedDelegatedCall> {
+    let PropertyCallShape {
+        setter,
+        context_parameters,
+        extension_receiver,
+        property_type,
+    } = shape;
     let mut parameters = context_parameters.to_vec();
+    parameters.extend(extension_receiver);
     if setter {
         parameters.push(property_type);
     }
@@ -482,7 +497,12 @@ fn property_call(
     let (target, declared_result) = if let Some(declaration) = property.stable_declaration {
         let property_id = index.property_for_declaration(declaration)?;
         let signature = index.signature(declaration)?;
-        let mut declared_parameters = signature.parameters.to_vec();
+        let header = index.property(property_id)?;
+        let mut declared_parameters = signature
+            .parameters
+            .get(..header.context_parameter_count as usize)?
+            .to_vec();
+        declared_parameters.extend(header.extension_receiver);
         if setter {
             declared_parameters.push(signature.result);
         }
@@ -526,8 +546,162 @@ fn property_call(
         result: ResolvedTy::new(result).ok()?,
         declared_result,
         suspend: false,
-        extension_receiver_parameter: None,
+        extension_receiver_parameter: extension_receiver
+            .and_then(|_| u32::try_from(context_parameters.len()).ok()),
     })
+}
+
+/// A delegated property obligation: an ordinary member, or a member extension on one applied
+/// receiver type. Two member extensions of one name on different receivers are distinct accessors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PropertySlot {
+    Member,
+    MemberExtension(Ty),
+}
+
+fn property_slot(property: &PropertyInfo) -> Option<PropertySlot> {
+    match property.kind {
+        PropKind::Member => Some(PropertySlot::Member),
+        PropKind::MemberExtension => property.receiver.map(PropertySlot::MemberExtension),
+        PropKind::Extension | PropKind::TopLevel => None,
+    }
+}
+
+fn delegated_property(
+    source: &dyn SymbolSource,
+    index: &ResolvedModuleIndex,
+    interface: Ty,
+    slot: PropertySlot,
+    candidates: Vec<&PropertyInfo>,
+) -> Option<ResolvedDelegatedProperty> {
+    let (getter, setter) = effective_property(source, index, interface, candidates)?;
+    let (context_parameters, property_type) =
+        applied_property_signature(source, index, interface, getter)?;
+    if getter.context_param_names.len() != context_parameters.len()
+        || getter.context_parameter_identities.len() != context_parameters.len()
+    {
+        return None;
+    }
+    let extension_receiver = match slot {
+        PropertySlot::Member => None,
+        PropertySlot::MemberExtension(receiver) => Some(receiver),
+    };
+    let declaration = setter.unwrap_or(getter);
+    let declared = super::override_plans::property_declaration(index, declaration)?;
+    let overridden = Box::new(ResolvedDelegatedPropertyDeclaration {
+        target: declared.target,
+        owner: declaration.owner,
+        ty: ResolvedTy::new(declared.ty).ok()?,
+        receiver: match declared.receiver {
+            Some(receiver) => Some(ResolvedTy::new(receiver).ok()?),
+            None => None,
+        },
+        interface: declaration.getter.owner_is_interface,
+    });
+    let accessor_call = |property: &PropertyInfo, setter: bool| {
+        property_call(
+            index,
+            interface,
+            property,
+            PropertyCallShape {
+                setter,
+                context_parameters: &context_parameters,
+                extension_receiver,
+                property_type,
+            },
+        )
+    };
+    Some(ResolvedDelegatedProperty {
+        overridden,
+        name: getter.name.clone().into_boxed_str(),
+        type_parameters: match declared.target {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
+                module_type_parameters(index, declaration.stable_declaration?)?
+            }
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => {
+                delegated_type_parameters(getter.getter.generic_sig.as_deref())?
+            }
+        },
+        ty: ResolvedTy::new(property_type).ok()?,
+        context_parameters: getter
+            .context_param_names
+            .iter()
+            .zip(getter.context_parameter_identities.iter())
+            .zip(&context_parameters)
+            .map(|((name, identity), ty)| {
+                let kind = match identity {
+                    crate::fir::ResolvedParameterIdentity::ContextValue { .. } => {
+                        crate::types::ContextParameterKind::Named
+                    }
+                    crate::fir::ResolvedParameterIdentity::AnonymousContextParameter { .. } => {
+                        crate::types::ContextParameterKind::Anonymous
+                    }
+                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver { .. } => {
+                        crate::types::ContextParameterKind::LegacyReceiver
+                    }
+                    _ => return None,
+                };
+                Some(ResolvedDelegatedContextParameter {
+                    name: name.clone().into_boxed_str(),
+                    kind,
+                    ty: ResolvedTy::new(*ty).ok()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_boxed_slice(),
+        getter: accessor_call(getter, false)?,
+        setter: match setter {
+            Some(property) => Some(accessor_call(property, true)?),
+            None => None,
+        },
+    })
+}
+
+/// A module declaration's own type parameters, from its published type-parameter identities.
+fn module_type_parameters(
+    index: &ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> Option<Box<[ResolvedDelegatedTypeParameter]>> {
+    (0..)
+        .map_while(|ordinal| index.type_parameter(declaration, ordinal))
+        .map(|parameter| {
+            Some(ResolvedDelegatedTypeParameter {
+                name: index.type_parameter_name(parameter)?.into(),
+                semantic_name: index.type_parameter_semantic_name(parameter)?.into(),
+                bounds: index
+                    .type_parameter_header(parameter)?
+                    .bounds
+                    .iter()
+                    .map(|bound| bound.ty)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// A delegated declaration's own type parameters, as its forwarder redeclares them.
+fn delegated_type_parameters(
+    signature: Option<&crate::libraries::GenericSig>,
+) -> Option<Box<[ResolvedDelegatedTypeParameter]>> {
+    let Some(signature) = signature else {
+        return Some(Box::default());
+    };
+    if signature.formals.len() != signature.formal_bounds.len() {
+        return None;
+    }
+    signature
+        .formals
+        .iter()
+        .zip(&signature.formal_bounds)
+        .map(|(semantic_name, bounds)| {
+            Some(ResolvedDelegatedTypeParameter {
+                name: crate::types::type_parameter_source_name(semantic_name).into(),
+                semantic_name: semantic_name.clone().into_boxed_str(),
+                bounds: resolved_types(bounds.iter().copied())?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Vec::into_boxed_slice)
 }
 
 fn delegation_members(
@@ -553,10 +727,12 @@ fn delegation_members(
             })
             .map(function_slot)
             .collect::<HashSet<_>>();
-        let own_property = own_callables
+        let own_property_slots = own_callables
             .properties()
             .iter()
-            .any(|property| property.receiver_rank == 0 && property.kind == PropKind::Member);
+            .filter(|property| property.receiver_rank == 0)
+            .filter_map(property_slot)
+            .collect::<Vec<_>>();
 
         let mut slots: Vec<(FunctionSlot, Vec<&FunctionInfo>)> = Vec::new();
         for function in delegated
@@ -580,28 +756,7 @@ fn delegation_members(
             let function = effective_function(source, index, interface, candidates)?;
             let call = function_call(source, index, interface, function);
             let overridden = delegated_function_declaration(index, function)?;
-            let type_parameters = match function.generic_sig.as_ref() {
-                Some(signature) => {
-                    if signature.formals.len() != signature.formal_bounds.len() {
-                        return None;
-                    }
-                    signature
-                        .formals
-                        .iter()
-                        .zip(&signature.formal_bounds)
-                        .map(|(semantic_name, bounds)| {
-                            Some(ResolvedDelegatedTypeParameter {
-                                name: crate::types::type_parameter_source_name(semantic_name)
-                                    .into(),
-                                semantic_name: semantic_name.clone().into_boxed_str(),
-                                bounds: resolved_types(bounds.iter().copied())?,
-                            })
-                        })
-                        .collect::<Option<Vec<_>>>()
-                        .map(Vec::into_boxed_slice)?
-                }
-                None => Box::default(),
-            };
+            let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {
                     name: function.callable.name.clone().into_boxed_str(),
@@ -612,90 +767,40 @@ fn delegation_members(
             ));
         }
 
-        if own_property {
-            continue;
-        }
-        let property_candidates = delegated
+        let mut property_slots: Vec<(PropertySlot, Vec<&PropertyInfo>)> = Vec::new();
+        for property in delegated
             .properties()
             .iter()
             // Java accessor-derived properties are an additional source facet of the same JVM
             // method, not another interface declaration. The function slot already forwards that
             // exact external identity (`CharSequence.isEmpty`/`length`); emitting a Kotlin property
             // accessor as well would duplicate or rename the physical method.
-            .filter(|property| property.kind == PropKind::Member && !property.accessor_derived)
-            .collect::<Vec<_>>();
-        if property_candidates.is_empty() {
-            continue;
-        }
-        let (getter, setter) = effective_property(source, index, interface, property_candidates)?;
-        let (context_parameters, property_type) =
-            applied_property_signature(source, index, interface, getter)?;
-        if getter.context_param_names.len() != context_parameters.len()
-            || getter.context_parameter_identities.len() != context_parameters.len()
+            .filter(|property| !property.accessor_derived)
         {
-            return None;
+            let Some(slot) = property_slot(property) else {
+                continue;
+            };
+            if let Some((_, candidates)) = property_slots
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == slot)
+            {
+                candidates.push(property);
+            } else {
+                property_slots.push((slot, vec![property]));
+            }
         }
-        let declaration = setter.unwrap_or(getter);
-        let (target, declared_ty) =
-            super::override_plans::property_declaration(index, declaration)?;
-        let overridden = Box::new(ResolvedDelegatedPropertyDeclaration {
-            target,
-            owner: declaration.owner,
-            ty: ResolvedTy::new(declared_ty).ok()?,
-            interface: declaration.getter.owner_is_interface,
-        });
-        members.push(ResolvedDelegatedMember::Property(
-            ResolvedDelegatedProperty {
-                overridden,
-                name: getter.name.clone().into_boxed_str(),
-                ty: ResolvedTy::new(property_type).ok()?,
-                context_parameters: getter
-                    .context_param_names
-                    .iter()
-                    .zip(getter.context_parameter_identities.iter())
-                    .zip(&context_parameters)
-                    .map(|((name, identity), ty)| {
-                        let kind = match identity {
-                            crate::fir::ResolvedParameterIdentity::ContextValue { .. } => {
-                                crate::types::ContextParameterKind::Named
-                            }
-                            crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                                ..
-                            } => crate::types::ContextParameterKind::Anonymous,
-                            crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                                ..
-                            } => crate::types::ContextParameterKind::LegacyReceiver,
-                            _ => return None,
-                        };
-                        Some(ResolvedDelegatedContextParameter {
-                            name: name.clone().into_boxed_str(),
-                            kind,
-                            ty: ResolvedTy::new(*ty).ok()?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .into_boxed_slice(),
-                getter: property_call(
-                    index,
-                    interface,
-                    getter,
-                    false,
-                    &context_parameters,
-                    property_type,
-                )?,
-                setter: match setter {
-                    Some(property) => Some(property_call(
-                        index,
-                        interface,
-                        property,
-                        true,
-                        &context_parameters,
-                        property_type,
-                    )?),
-                    None => None,
-                },
-            },
-        ));
+        for (slot, property_candidates) in property_slots {
+            if own_property_slots.contains(&slot) {
+                continue;
+            }
+            members.push(ResolvedDelegatedMember::Property(delegated_property(
+                source,
+                index,
+                interface,
+                slot,
+                property_candidates,
+            )?));
+        }
     }
     Some(members.into_boxed_slice())
 }

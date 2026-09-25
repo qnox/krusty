@@ -64,6 +64,7 @@ fn lower_property_override_plans(
         .map(|edge| crate::ir::IrPropertyOverride {
             implementation: edge.implementation,
             implementation_getter: None,
+            implementation_setter: None,
             implementation_owner: edge.implementation_owner,
             overridden: edge.overridden,
             overridden_owner: edge.overridden_owner,
@@ -72,6 +73,10 @@ fn lower_property_override_plans(
             declared_type: edge.declared_type.get(),
             applied_type: edge.applied_type.get(),
             implementation_type: edge.implementation_type.get(),
+            declared_receiver: edge.declared_receiver.map(crate::fir::ResolvedTy::get),
+            implementation_receiver: edge
+                .implementation_receiver
+                .map(crate::fir::ResolvedTy::get),
             overridden_mutable: edge.overridden_mutable,
             implementation_mutable: edge.implementation_mutable,
             has_kotlin_superclass_override: edge.has_kotlin_superclass_override,

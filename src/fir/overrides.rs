@@ -59,6 +59,10 @@ pub struct ResolvedPropertyOverride {
     /// Declaration-side type of the implementation before applying the inheriting class's type
     /// arguments. This is the type a representation backend erases for the target accessor.
     pub implementation_type: ResolvedTy,
+    /// A member extension's declared receiver on each side (`val T.x` over `val String.x`); `None`
+    /// for a member property. Like the types, a target backend erases these for its accessors.
+    pub declared_receiver: Option<ResolvedTy>,
+    pub implementation_receiver: Option<ResolvedTy>,
     pub overridden_mutable: bool,
     pub implementation_mutable: bool,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
