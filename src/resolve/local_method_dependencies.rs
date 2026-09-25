@@ -46,6 +46,11 @@ impl Checker<'_> {
             .as_ref()
             .map(|signature| signature.formals.as_slice())
             .unwrap_or_default();
+        let implementation_bounds = implementation
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.as_slice())
+            .unwrap_or_default();
         let implementation_parameters = implementation.semantic_params();
         let source = self.fed_source();
         let matches_override = |candidate: &crate::libraries::FunctionInfo| {
@@ -60,6 +65,11 @@ impl Checker<'_> {
                 .as_ref()
                 .map(|signature| signature.formals.as_slice())
                 .unwrap_or_default();
+            let candidate_bounds = candidate
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formal_bounds.as_slice())
+                .unwrap_or_default();
             crate::symbol_resolver::override_input_shapes_match(
                 &source,
                 crate::symbol_resolver::OverrideInputShape {
@@ -68,6 +78,7 @@ impl Checker<'_> {
                         .semantic_receiver()
                         .filter(|_| candidate.is_extension()),
                     formals: candidate_formals,
+                    formal_bounds: candidate_bounds,
                     context_count: candidate.context_count,
                     suspend: candidate.flags.suspend,
                 },
@@ -77,6 +88,7 @@ impl Checker<'_> {
                         .semantic_receiver()
                         .filter(|_| implementation.is_extension()),
                     formals: implementation_formals,
+                    formal_bounds: implementation_bounds,
                     context_count: implementation.context_count,
                     suspend: implementation.flags.suspend,
                 },
