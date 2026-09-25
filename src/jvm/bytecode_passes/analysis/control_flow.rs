@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{falls_through, jump_targets, Positions};
+use crate::jvm::method_node::LabelPositions;
 use crate::jvm::method_node::{MethodNode, Node};
 
 pub(crate) struct ControlFlowGraph {
@@ -16,7 +16,7 @@ impl ControlFlowGraph {
     /// The graph of `method`. With `follow_exceptions` false, an exception edge still makes its
     /// handler reachable but is not recorded as an edge.
     pub(crate) fn build(method: &MethodNode, follow_exceptions: bool) -> Self {
-        let positions = Positions::of(method);
+        let positions = LabelPositions::of(method);
         let count = method.nodes.len();
         let mut handlers: Vec<Vec<usize>> = vec![Vec::new(); count];
         for block in &method.try_catch_blocks {
@@ -45,10 +45,10 @@ impl ControlFlowGraph {
             match &method.nodes[index] {
                 Node::Label(_) | Node::Line { .. } => edge(index, index + 1, true, &mut queue),
                 Node::Insn(insn) => {
-                    if falls_through(insn) {
+                    if insn.falls_through() {
                         edge(index, index + 1, true, &mut queue);
                     }
-                    for target in jump_targets(insn) {
+                    for target in insn.jump_targets() {
                         edge(index, positions.at(target), true, &mut queue);
                     }
                 }

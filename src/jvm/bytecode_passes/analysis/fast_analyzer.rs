@@ -10,7 +10,8 @@
 use super::super::descriptors;
 use super::super::opcodes::*;
 use super::frame::{At, Frame, Interpreter};
-use super::{falls_through, jump_targets, opcode, Positions};
+use super::opcode;
+use crate::jvm::method_node::LabelPositions;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 /// Why an analysis could not complete: the node it stopped at and what was wrong there.
@@ -80,7 +81,7 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
     if count == 0 {
         return Ok(Vec::new());
     }
-    let positions = Positions::of(method);
+    let positions = LabelPositions::of(method);
     if method
         .nodes
         .iter()
@@ -165,12 +166,12 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
 }
 
 /// Where control goes after `insn`, in the order kotlinc's analyzer queues the edges.
-fn successors(insn: &Insn, index: usize, positions: &Positions) -> Vec<usize> {
+fn successors(insn: &Insn, index: usize, positions: &LabelPositions) -> Vec<usize> {
     let mut targets = Vec::new();
-    if falls_through(insn) {
+    if insn.falls_through() {
         targets.push(index + 1);
     }
-    let labels = jump_targets(insn);
+    let labels = insn.jump_targets();
     match insn {
         // kotlinc visits a table switch's cases reversed, after its default.
         Insn::TableSwitch { .. } => {
@@ -239,11 +240,11 @@ impl<V: super::frame::Value> Worklist<V> {
     }
 }
 /// Jump and switch targets and handler entries: the nodes whose frame is a merge.
-fn merge_nodes(method: &MethodNode, positions: &Positions) -> Vec<bool> {
+fn merge_nodes(method: &MethodNode, positions: &LabelPositions) -> Vec<bool> {
     let mut merge = vec![false; method.nodes.len()];
     for node in &method.nodes {
         if let Node::Insn(insn) = node {
-            for label in jump_targets(insn) {
+            for label in insn.jump_targets() {
                 merge[positions.at(label)] = true;
             }
         }

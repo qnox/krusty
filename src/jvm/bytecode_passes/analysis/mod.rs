@@ -14,10 +14,8 @@ pub(crate) use fast_analyzer::{analyze, analyze_with, AnalyzerError, AnalyzerOpt
 pub(crate) use frame::{At, Frame, Interpreter, Value};
 pub(crate) use liveness::{analyze_liveness, VariableLiveness};
 
-use std::collections::HashMap;
-
 use super::opcodes::*;
-use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
+use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 /// Computes the maximum reachable operand-stack depth in JVM words from the method's final body.
 /// This is representation bookkeeping: transformations do not estimate how much stack the code
@@ -34,31 +32,6 @@ pub(crate) fn computed_max_stack(method: &MethodNode, owner: &str) -> Result<u16
         index: 0,
         message: "operand stack exceeds the classfile limit".to_string(),
     })
-}
-
-/// Where each label of a method stands.
-pub(crate) struct Positions(HashMap<LabelId, usize>);
-
-impl Positions {
-    pub(crate) fn of(method: &MethodNode) -> Self {
-        Positions(
-            method
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(index, node)| match node {
-                    Node::Label(label) => Some((*label, index)),
-                    _ => None,
-                })
-                .collect(),
-        )
-    }
-
-    /// The node index of `label`. A label a method refers to but does not contain is a malformed
-    /// body, which no pass can recover from.
-    pub(crate) fn at(&self, label: LabelId) -> usize {
-        self.0[&label]
-    }
 }
 
 /// ASM's `AbstractInsnNode.getOpcode` of an instruction.
@@ -86,32 +59,6 @@ pub(crate) fn node_opcode(node: &Node) -> Option<u8> {
         Node::Insn(insn) => Some(opcode(insn)),
         _ => None,
     }
-}
-
-/// The labels a jump or switch can transfer to, default first, in the instruction's order.
-pub(crate) fn jump_targets(insn: &Insn) -> Vec<LabelId> {
-    match insn {
-        Insn::Jump { target, .. } => vec![*target],
-        Insn::TableSwitch {
-            default, labels, ..
-        }
-        | Insn::LookupSwitch {
-            default, labels, ..
-        } => std::iter::once(*default)
-            .chain(labels.iter().copied())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Whether control can fall through `insn` to the next node.
-pub(crate) fn falls_through(insn: &Insn) -> bool {
-    let op = opcode(insn);
-    !matches!(insn, Insn::TableSwitch { .. } | Insn::LookupSwitch { .. })
-        && op != GOTO
-        && op != JSR
-        && op != ATHROW
-        && !(IRETURN..=RETURN).contains(&op)
 }
 
 /// kotlinc's `isMeaningful`: an instruction, `nop` included, rather than a label or line number.
