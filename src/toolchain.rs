@@ -14,6 +14,8 @@ use crate::jvm::classpath::Classpath;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod maven_download;
+
 /// Locate a complete kotlin-stdlib jar from the dist or standard local caches, mirroring how a
 /// drop-in `kotlinc` user supplies it via `-classpath`. "Complete" = the jar's facades yield type
 /// aliases when scanned (so `Exception` etc. resolve). `None` if none is found.
@@ -213,7 +215,8 @@ pub fn box_corpus_dir() -> Option<PathBuf> {
 
 /// Locate a dependency jar, downloading it from **Maven Central** into a local cache if not already
 /// present (so `// WITH_STDLIB` assertions etc. actually have their jars). Returns `None` only if the
-/// download fails (offline). Cached under `~/.cache/krusty-deps` (overridable via `KRUSTY_DEPS_CACHE`).
+/// download fails (offline) or the process's download budget is spent (see `maven_download`). Cached
+/// under `~/.cache/krusty-deps` (overridable via `KRUSTY_DEPS_CACHE`).
 pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
         .ok()
@@ -234,13 +237,18 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
         group.replace('.', "/")
     );
     let download = maven_download_path(&file);
-    let status = std::process::Command::new("curl")
-        .args(["-sfL", "--max-time", "60", "-o"])
-        .arg(&download)
-        .arg(&url)
-        .status()
-        .ok()?;
-    if status.success() && download.is_file() {
+    let completed = maven_download::process_budget()
+        .spend(|deadline| {
+            maven_download::download(
+                &url,
+                &download,
+                maven_download::MAVEN_CENTRAL_RETRIES,
+                deadline,
+            )
+            .completed
+        })
+        .unwrap_or(false);
+    if completed {
         publish_maven_download(&download, &file)
     } else {
         let _ = std::fs::remove_file(&download);
