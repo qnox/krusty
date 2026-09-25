@@ -2749,8 +2749,7 @@ pub struct IrFile {
     /// its own set because privacy ALSO changes dispatch (`invokespecial`).
     pub internal_methods: std::collections::HashSet<u32>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
-    /// absent = public. `@Metadata` `Constructor.flags` carries it so a consumer rejects a
-    /// construction the declaration forbids.
+    /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
     /// SOURCE index of a member function's `vararg` parameter (receiver excluded) — class
     /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
@@ -2867,14 +2866,15 @@ pub struct IrFile {
     /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
     /// only where source and physical shapes are ambiguous—for example, both a direct `Result<T>`
     /// parameter and a generic `T` parameter erase to JVM `Object`, but only the latter takes a box.
-    /// Dispatch receivers remain separate; static realizations that consume one prepend its selected
-    /// semantic receiver before publishing this vector.
+    /// Dispatch receivers stay separate; a static realization prepends its selected receiver.
     pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
     /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
     /// argument order. A generic constructor can consume a value-class box through bare `T` even
     /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
     /// consumes this identity-backed fact instead of reinterpreting the descriptor.
     pub(crate) construction_declared_params: std::collections::HashMap<ExprId, Box<[Ty]>>,
+    /// Construction `ExprId` → the selected module constructor.
+    pub(crate) construction_targets: std::collections::HashMap<ExprId, IrConstructorTarget>,
     /// Realized static call `ExprId` → the operand index its extension receiver was placed at. A
     /// JVM inliner reads an extension receiver differently from the parameters after it.
     pub static_extension_receivers: std::collections::HashMap<u32, u32>,
