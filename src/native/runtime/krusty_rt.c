@@ -2794,11 +2794,25 @@ KRef kt_list_last(KRef list) {
     return kt_elements_of(((const KList *)list)->elements)[size - 1];
 }
 
+/* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
+   that asks an iterator for an element or calls back into emitted code -- a lambda, or an element's
+   own `equals`, `hashCode` or `toString` -- looks here before it uses the answer: after a raise the
+   answer is a placeholder that means nothing, and the walk has to end so the exception reaches its
+   caller. Kotlin's own walks are ordinary loops, which a throw leaves at once; one that went on
+   would act on the placeholder and call into the program again for the elements after it. */
+static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
+
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     kt_int length = kt_list_size(list);
     for (kt_int i = 0; i < length; i++) {
-        if (kt_equals(kt_elements_of(elements)[i], value)) {
+        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        /* An `equals` that threw answered nothing, whatever it returned: the search ends there with
+           no index, so `remove` built on it removes nothing, and no later element is compared. */
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return i;
         }
     }
@@ -2808,7 +2822,11 @@ kt_int kt_list_index_of(KRef list, KRef value) {
 kt_int kt_list_last_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
-        if (kt_equals(kt_elements_of(elements)[i], value)) {
+        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return i;
         }
     }
@@ -2849,10 +2867,24 @@ static void kt_mutable_list_reserve(KRef self) {
     if (list->size < capacity) {
         return;
     }
-    kt_int grown = capacity == 0 ? 4 : capacity * 2;
+    /* Sized in 64 bits, as `kt_string_builder_reserve` sizes its growth: doubling a capacity past
+       half the largest `Int` overflows `kt_int`, which is undefined and in practice comes out
+       negative -- a "negative array size" where Kotlin runs out of memory, or a replacement too
+       small for the copy that follows. A list already holding as many elements as an `Int` counts
+       cannot take another; short of that, a doubling too large for an `Int` asks for the one more
+       slot needed, and `kt_array_new` refuses any count whose storage the allocator cannot give.
+       Every refusal is out of memory, and it comes before a byte of the old storage is read. */
+    kt_long needed = (kt_long)list->size + 1;
+    if (needed > 0x7fffffff) {
+        kt_fail_oom();
+    }
+    kt_long grown = capacity == 0 ? 4 : (kt_long)capacity * 2;
+    if (grown > 0x7fffffff) {
+        grown = needed;
+    }
     /* The allocation can collect, and `self` is a root in the caller's frame, so the OLD array
        stays reachable through it until the new one is stored. */
-    KRef replacement = kt_array_new(&kt_type_array, grown);
+    KRef replacement = kt_array_new(&kt_type_array, (kt_int)grown);
     kt_array_copy_into(replacement, 0, list->elements);
     list->elements = replacement;
 }
@@ -2881,13 +2913,6 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
    `Unit` rather than the `Boolean` `add` answers — so it is its own entry point rather than a
    result the caller has to remember to drop. */
 void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
-
-/* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
-   that asks an iterator for an element or calls back into emitted code looks here before it uses
-   the answer: after a raise the answer is a NULL that is no element, and the walk has to end so the
-   exception reaches its caller. Kotlin's own walks are ordinary loops, which a throw leaves at once;
-   one that went on would hand the NULL to the next step and call the program's lambda again. */
-static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
 
 /* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
    per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
@@ -3268,7 +3293,13 @@ kt_boolean kt_array_content_equals(KRef left, KRef right) {
         return false;
     }
     for (kt_int index = 0; index < length; index++) {
-        if (!kt_equals(kt_array_element(left, index), kt_array_element(right, index))) {
+        kt_boolean equal = kt_equals(kt_array_element(left, index), kt_array_element(right, index));
+        /* An element's `equals` that threw ends the comparison whatever it returned, as it ends
+           `kt_list_equals`. */
+        if (kt_raised()) {
+            return false;
+        }
+        if (!equal) {
             return false;
         }
     }
@@ -3287,6 +3318,9 @@ kt_int kt_array_content_hash_code(KRef array) {
     for (kt_int index = 0; index < length; index++) {
         KRef element = kt_array_element(array, index);
         uint32_t hash = element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        if (kt_raised()) {
+            return 0;
+        }
         result = result * 31u + hash;
     }
     return (kt_int)result;
@@ -3305,6 +3339,11 @@ KRef kt_array_content_to_string(KRef array) {
             kt_string_builder_append(builder, kt_string_utf8(", ", 2));
         }
         kt_string_builder_append(builder, kt_array_element(array, index));
+        /* The append leaves the builder alone when the element's `toString` throws, but the walk
+           has to end there too, or the elements after it are rendered. */
+        if (kt_raised()) {
+            return NULL;
+        }
     }
     kt_string_builder_append(builder, kt_string_utf8("]", 1));
     return kt_to_string(builder);
@@ -3457,7 +3496,13 @@ static KRef kt_indexed_value_to_string(KRef self) {
     KRef text = kt_string_utf8("IndexedValue(index=", 19);
     text = kt_string_plus(text, kt_to_string(kt_box_int(indexed->index)));
     text = kt_string_plus(text, kt_string_utf8(", value=", 8));
-    text = kt_string_plus(text, kt_to_string(indexed->value));
+    KRef rendered = kt_to_string(indexed->value);
+    /* A value whose `toString` threw has no text, and `kt_string_plus` would render its NULL answer
+       as `null`; the rendering ends with the exception instead. */
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
     return kt_string_plus(text, kt_string_utf8(")", 1));
 }
 
@@ -3751,8 +3796,14 @@ KRef kt_iterable_join_to_string(KRef iterable) {
             return NULL;
         }
         /* `kt_to_string` and not the element itself: `joinToString` renders each element the way
-           `"$element"` would, through whatever `toString` the element's own type answers with. */
-        joined = kt_string_plus(joined, kt_to_string(element));
+           `"$element"` would, through whatever `toString` the element's own type answers with. A
+           `toString` that threw ends the join where it threw, as Kotlin's loop does: its answer is
+           no text to append, and no later element is rendered. */
+        KRef rendered = kt_to_string(element);
+        if (kt_raised()) {
+            return NULL;
+        }
+        joined = kt_string_plus(joined, rendered);
     }
     return joined;
 }
@@ -4124,7 +4175,12 @@ kt_int kt_iterable_index_of(KRef iterable, KRef value) {
         if (kt_raised()) {
             return -1;
         }
-        if (kt_equals(element, value)) {
+        kt_boolean equal = kt_equals(element, value);
+        /* As in `kt_list_index_of`: an `equals` that threw ends the search with no index. */
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return at;
         }
         at++;
@@ -4301,7 +4357,13 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
     KRef left = ((const KList *)self)->elements;
     KRef right = ((const KList *)other)->elements;
     for (kt_int i = 0; i < size; i++) {
-        if (!kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i])) {
+        kt_boolean equal = kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i]);
+        /* Asked whatever `equal` says: an element's `equals` that threw may still have returned
+           true, and going on would compare the elements after it. */
+        if (kt_raised()) {
+            return false;
+        }
+        if (!equal) {
             return false;
         }
     }
@@ -4315,6 +4377,11 @@ static kt_int kt_list_hash_code(KRef self) {
     uint32_t hash = 1;
     for (kt_int i = 0; i < length; i++) {
         hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
+        /* A `hashCode` that threw ends the fold; the zero is no hash, and the caller finds the
+           exception pending before it reads one. */
+        if (kt_raised()) {
+            return 0;
+        }
     }
     return (kt_int)hash;
 }
@@ -4330,7 +4397,13 @@ static KRef kt_list_to_string(KRef self) {
         if (i > 0) {
             text = kt_string_plus(text, kt_string_utf8(", ", 2));
         }
-        text = kt_string_plus(text, kt_to_string(kt_elements_of(elements)[i]));
+        KRef rendered = kt_to_string(kt_elements_of(elements)[i]);
+        /* A `toString` that threw leaves the rendering there: its answer is no text, and the
+           elements after it are not asked for theirs. */
+        if (kt_raised()) {
+            return NULL;
+        }
+        text = kt_string_plus(text, rendered);
     }
     return kt_string_plus(text, kt_string_utf8("]", 1));
 }
