@@ -91,10 +91,9 @@
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
 1	src/resolve.rs	returning the result of a `let` binding from a block
 1	src/resolve.rs	this `if` has identical blocks
-1	src/resolve.rs	this function has too many arguments (10/7)
-1	src/resolve.rs	this function has too many arguments (11/7)
+2	src/resolve.rs	this function has too many arguments (10/7)
 1	src/resolve.rs	this function has too many arguments (12/7)
-1	src/resolve.rs	this function has too many arguments (15/7)
+1	src/resolve.rs	this function has too many arguments (14/7)
 1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if internal == foo { vec!["prop".to_string()] } else { Default::default() }`
 1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if name == "equals" { vec!["other".into()] } else { Default::default() }`
 1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if views.len() > 1 { views } else { Default::default() }`

@@ -46,14 +46,13 @@ pub(crate) fn publish_checked_classifier_annotations(
             table,
             None,
             diags,
-            false,
+            CaptureDiscovery::Published,
             Some(&selected),
             Some(&no_bodies),
             None,
             None,
             None,
             SourceFragmentMode::ClassifierAnnotations,
-            None,
             None,
         );
         let mut checked = Vec::new();

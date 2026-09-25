@@ -543,16 +543,6 @@ fn check_body_group(
             current = owner;
         }
     }
-    let anonymous_captures = crate::resolve::discover_anonymous_object_captures_in_pass_two_file(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
-        active,
-        &group.bodies,
-        symbols,
-        index,
-    );
     let info = crate::resolve::check_selected_declarations_in_pass_two(
         active_file,
         raw_source as u32,
@@ -563,7 +553,6 @@ fn check_body_group(
         symbols,
         index,
         streamed_cache,
-        &anonymous_captures,
         diags,
     );
     // Capture discovery and the authoritative body check enter the same active lexical headers.
@@ -908,7 +897,6 @@ pub fn check_frontend_only(
                     &mut symbols,
                     &index,
                     &streamed_cache,
-                    &std::collections::HashMap::new(),
                     diags,
                 ));
             });
