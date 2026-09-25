@@ -79,8 +79,9 @@ pub(super) fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
 /// The call-site value of one reified type parameter of a spliced body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::jvm) enum ReifiedArgument {
-    /// A concrete JVM class (internal name): the marker is erased and its type-bearing op repointed.
-    Class(String),
+    /// A concrete JVM class (internal name), and whether the argument is nullable: the marker is
+    /// erased and its type-bearing op repointed.
+    Class { internal: String, nullable: bool },
     /// A reified type parameter of the HOST (its source name, and whether the argument is `T?`). The
     /// host is itself a reified inline body, so the marker stays, renamed to the host's parameter,
     /// and the type-bearing op keeps its erased placeholder until the host's own caller reifies it.
@@ -203,7 +204,16 @@ pub(super) fn reify_markers(
         }
         let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
         let repoint = match reified.classes.get(marker.trim_end_matches('?'))? {
-            ReifiedArgument::Class(class) => ReifiedRepoint::Class(j, class.clone()),
+            // A nullable `instanceof` becomes kotlinc's null-accepting sequence, which needs new
+            // branches; only the symbolic inliner inserts those.
+            ReifiedArgument::Class { nullable, .. }
+                if (*nullable || marker.ends_with('?'))
+                    && matches!(insns[j], Insn::Plain { op: 0xc1, .. }) =>
+            {
+                crate::trace_compiler!("splice", "nullable reified instanceof is not spliceable");
+                return None;
+            }
+            ReifiedArgument::Class { internal, .. } => ReifiedRepoint::Class(j, internal.clone()),
             ReifiedArgument::Forwarded { name, nullable } => {
                 let nullable = *nullable || marker.ends_with('?');
                 ReifiedRepoint::Marker(i - 1, format!("{name}{}", if nullable { "?" } else { "" }))
@@ -281,7 +291,10 @@ mod tests {
         let arguments = ReifiedArguments {
             classes: HashMap::from([(
                 "T".to_owned(),
-                ReifiedArgument::Class("java/lang/String".to_owned()),
+                ReifiedArgument::Class {
+                    internal: "java/lang/String".to_owned(),
+                    nullable: false,
+                },
             )]),
             ..Default::default()
         };

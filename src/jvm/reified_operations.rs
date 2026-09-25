@@ -77,7 +77,10 @@ pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String
             let argument = forwarded(*ty).or_else(|| {
                 let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
                 let internal = super::jvm_class_map::to_jvm_internal(&internal);
-                Some(ReifiedArgument::Class(internal.to_owned()))
+                Some(ReifiedArgument::Class {
+                    internal: internal.to_owned(),
+                    nullable: ty.is_nullable(),
+                })
             })?;
             Some((name.clone(), argument))
         })
@@ -224,11 +227,17 @@ mod tests {
             HashMap::from([
                 (
                     "T".to_owned(),
-                    ReifiedArgument::Class("kotlin/Unit".to_owned())
+                    ReifiedArgument::Class {
+                        internal: "kotlin/Unit".to_owned(),
+                        nullable: false,
+                    }
                 ),
                 (
                     "R".to_owned(),
-                    ReifiedArgument::Class("java/lang/String".to_owned())
+                    ReifiedArgument::Class {
+                        internal: "java/lang/String".to_owned(),
+                        nullable: false,
+                    }
                 ),
             ])
         );

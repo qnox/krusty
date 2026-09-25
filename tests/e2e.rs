@@ -1961,3 +1961,6 @@ mod serializer_metadata_test_support;
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]
 mod unsigned_arrays_e2e;
+
+#[path = "reified_nullable_instance_check_e2e.rs"]
+mod reified_nullable_instance_check_e2e;

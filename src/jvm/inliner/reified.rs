@@ -14,6 +14,7 @@ enum Repoint {
     Class {
         instruction: usize,
         class: String,
+        nullable: bool,
     },
     Forwarded {
         name_instruction: usize,
@@ -84,9 +85,10 @@ pub(super) fn specialize(
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
                 .ok_or(InlineError::MalformedReifiedMarker)?;
             match arguments.classes.get(argument.trim_end_matches('?')) {
-                Some(ReifiedArgument::Class(class)) => Repoint::Class {
+                Some(ReifiedArgument::Class { internal, nullable }) => Repoint::Class {
                     instruction: target,
-                    class: class.clone(),
+                    class: internal.clone(),
+                    nullable: *nullable || argument.ends_with('?'),
                 },
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
@@ -110,11 +112,22 @@ pub(super) fn specialize(
         });
     }
 
+    // Replacements that change the node count are applied last to first, so every recorded index
+    // still names its node when its turn comes.
+    let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
     for marker in &markers {
         match &marker.repoint {
-            Repoint::Class { instruction, class } => {
+            Repoint::Class {
+                instruction,
+                class,
+                nullable,
+            } => {
                 set_type_operand(&mut node.nodes[*instruction], class)?;
                 erase_marker(node, marker);
+                if *nullable && is_instance_of(&node.nodes[*instruction]) {
+                    let check = nullable_instance_check(node, class);
+                    replacements.push((*instruction, check));
+                }
             }
             Repoint::Forwarded {
                 name_instruction,
@@ -123,25 +136,25 @@ pub(super) fn specialize(
                 node.nodes[*name_instruction] =
                     Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
             }
-            Repoint::TypeOf { .. } => erase_marker(node, marker),
+            Repoint::TypeOf {
+                placeholder,
+                argument,
+            } => {
+                erase_marker(node, marker);
+                let realization = arguments
+                    .type_of
+                    .get(argument)
+                    .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
+                replacements.push((
+                    *placeholder,
+                    realization.iter().flat_map(type_of_nodes).collect(),
+                ));
+            }
         }
     }
-    for marker in markers.iter().rev() {
-        let Repoint::TypeOf {
-            placeholder,
-            argument,
-        } = &marker.repoint
-        else {
-            continue;
-        };
-        let realization = arguments
-            .type_of
-            .get(argument)
-            .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
-        node.nodes.splice(
-            *placeholder..=*placeholder,
-            realization.iter().flat_map(type_of_nodes),
-        );
+    replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (at, nodes) in replacements {
+        node.nodes.splice(at..=at, nodes);
     }
     Ok(())
 }
@@ -150,6 +163,36 @@ fn erase_marker(node: &mut MethodNode, marker: &Marker) {
     for at in [marker.operation, marker.name, marker.call] {
         node.nodes[at] = Node::Insn(Insn::Op(0x00));
     }
+}
+
+fn is_instance_of(node: &Node) -> bool {
+    matches!(node, Node::Insn(Insn::Type { op: 0xc1, .. }))
+}
+
+/// kotlinc's `generateIsCheck` for a nullable type: `null` is an instance, so it is accepted
+/// before the `instanceof` sees it.
+fn nullable_instance_check(node: &mut MethodNode, class: &str) -> Vec<Node> {
+    let null = node.new_label();
+    let end = node.new_label();
+    vec![
+        Node::Insn(Insn::Op(0x59)),
+        Node::Insn(Insn::Jump {
+            op: 0xc6,
+            target: null,
+        }),
+        Node::Insn(Insn::Type {
+            op: 0xc1,
+            class: class.to_owned(),
+        }),
+        Node::Insn(Insn::Jump {
+            op: 0xa7,
+            target: end,
+        }),
+        Node::Label(null),
+        Node::Insn(Insn::Op(0x57)),
+        Node::Insn(Insn::Op(0x04)),
+        Node::Label(end),
+    ]
 }
 
 fn pushed_int(node: Option<&Node>) -> Option<i32> {
@@ -304,7 +347,7 @@ mod tests {
     #[test]
     fn concrete_argument_erases_marker_and_repoints_symbolic_type() {
         let mut node = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
-        node.nodes = marker("T?", 3);
+        node.nodes = marker("T", 3);
         node.nodes.push(Node::Insn(Insn::Type {
             op: 0xc1,
             class: "java/lang/Object".into(),
@@ -312,7 +355,10 @@ mod tests {
         let arguments = ReifiedArguments {
             classes: HashMap::from([(
                 "T".to_owned(),
-                ReifiedArgument::Class("java/lang/String".to_owned()),
+                ReifiedArgument::Class {
+                    internal: "java/lang/String".to_owned(),
+                    nullable: false,
+                },
             )]),
             ..Default::default()
         };
@@ -326,6 +372,62 @@ mod tests {
             &node.nodes[3],
             Node::Insn(Insn::Type { op: 0xc1, class }) if class == "java/lang/String"
         ));
+    }
+
+    #[test]
+    fn a_nullable_instance_check_accepts_null_before_the_instanceof() {
+        for (marker_name, nullable) in [("T?", false), ("T", true)] {
+            let mut node = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
+            node.nodes = marker(marker_name, 3);
+            node.nodes.push(Node::Insn(Insn::Type {
+                op: 0xc1,
+                class: "java/lang/Object".into(),
+            }));
+            let arguments = ReifiedArguments {
+                classes: HashMap::from([(
+                    "T".to_owned(),
+                    ReifiedArgument::Class {
+                        internal: "java/lang/String".to_owned(),
+                        nullable,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            specialize(&mut node, &arguments).expect("specializes");
+
+            // The first two labels a fresh method mints are the ones the check introduced.
+            let mut fresh = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
+            let null = fresh.new_label();
+            let end = fresh.new_label();
+            let nop = Node::Insn(Insn::Op(0x00));
+            assert_eq!(
+                node.nodes,
+                vec![
+                    nop.clone(),
+                    nop.clone(),
+                    nop,
+                    Node::Insn(Insn::Op(0x59)),
+                    Node::Insn(Insn::Jump {
+                        op: 0xc6,
+                        target: null,
+                    }),
+                    Node::Insn(Insn::Type {
+                        op: 0xc1,
+                        class: "java/lang/String".into(),
+                    }),
+                    Node::Insn(Insn::Jump {
+                        op: 0xa7,
+                        target: end,
+                    }),
+                    Node::Label(null),
+                    Node::Insn(Insn::Op(0x57)),
+                    Node::Insn(Insn::Op(0x04)),
+                    Node::Label(end),
+                ],
+                "{marker_name} with a nullable={nullable} argument"
+            );
+        }
     }
 
     #[test]
