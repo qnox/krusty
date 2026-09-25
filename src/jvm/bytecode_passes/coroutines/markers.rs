@@ -143,6 +143,22 @@ pub(crate) fn is_fake_continuation_marker(insns: &InsnList, id: NodeId) -> bool 
             .is_some_and(|prev| is_suspend_marker(insns, prev, SuspendMarker::FakeContinuation))
 }
 
+/// `collectSuspendLambdaParameterSlots`: the slots whose store a `mark(10)` follows.
+pub(crate) fn suspend_lambda_parameter_slots(insns: &InsnList) -> Vec<u16> {
+    insns
+        .ids()
+        .into_iter()
+        .filter(|&id| is_suspend_marker(insns, id, SuspendMarker::SuspendLambdaParameter))
+        .filter_map(|id| {
+            let store = insns.prev(id).and_then(|push| insns.prev(push))?;
+            match insns.node(store) {
+                Node::Insn(Insn::Var { slot, .. }) => Some(*slot),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// `JvmAbi.isFakeLocalVariableForInline`: the `$i$f$`/`$i$a$` markers the inliner declares.
 pub(crate) fn is_fake_local_variable_for_inline(name: &str) -> bool {
     name.starts_with("$i$f$") || name.starts_with("$i$a$")
