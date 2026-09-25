@@ -4459,14 +4459,32 @@ shadow with no output change.
   box corpus 2,285 of 25,936 classes change and no box outcome moves. Per method, the
   local-variable slots of 220 changed methods now match kotlinc and 769 more are closer, against 2
   that matched and no longer do and 79 further off; one class (`Advanced_when5Kt`) becomes
-  byte-identical (files 249 -> 250). The methods still off are off for 4d (kotlinc enters a
-  variable before its initializer: `kt27161_int`), 4e (a `finally`'s slots reserved at the `try`:
+  byte-identical (files 249 -> 250). The methods still off were off for 4d (kotlinc enters a
+  variable before its initializer: `kt27161_int`, now matching), 4e (a `finally`'s slots reserved at the `try`:
   `break.kt` `qux`) and 4f (the inline splice base and fake locals: `kt5448`).
-- ☐ 4c–4h. Lowering's scope facts where an IR block is a kotlinc transparent scope (4c; the corpus
-  shows no such block yet — the `try` difference above was the result temporary's placement),
-  variables entered before their initializers (4d), backend temporaries on the stack (4e),
-  inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine locals at
-  `max_locals` (4h).
+- ✅ 4d. A variable's slot is entered before its initializer, as kotlinc's `visitVariable` does, so
+  the initializer's locals and temporaries sit above it; the value stays unassigned until its
+  store, so frames and the `LocalVariableTable` range are as before. A valued `try` enters its
+  result temporary after its body too. The call operands lowering holds in values of its own (an
+  inline expansion's argument, receiver or capture, an argument spilled for evaluation order;
+  `IrFile::call_operand_bindings`) have no kotlinc variable, so their holders are entered after
+  their values, and the materialized-lambda splice starts below its own operands' holders. In the
+  2.4.20 box corpus 1,944 of 25,236 classes change and no box outcome moves; 25 classes become
+  byte-identical and none stops being (files 255 -> 269). Of the 795 methods whose
+  local-variable slots change, 31 now match kotlinc and 131 more are closer, 596 are as close as
+  before, 23 are further off and 13 matched and no longer do. Those 13 and most of the 23 are
+  coincidences 4b's order hid: a statement `try`'s result temporary now takes the slot of a
+  krusty-only body temporary instead of a gap compaction closed, so its catch parameter sits one
+  higher (`catch1`-`catch6`, `notInitialized`: the body stores `appendLine`'s receiver, which
+  kotlinc remaps; 4f); a `finally`'s catch parameter takes the slot reserved at the `try`
+  (`inlinedTryCatchFinally`, `tryCatchReifiedType`; 4e); and a lambda-taking stdlib call in an
+  initializer keeps its spilled receiver below a splice base taken from `max_locals`
+  (`anonymousObjectInForLoopIteratorAndBody`, `kt10926`, the `map` cases; 4f).
+- ☐ 4c. Lowering's scope facts where an IR block is a kotlinc transparent scope: not needed so
+  far, the corpus shows no such block (the `try` difference above was the result temporary's
+  placement).
+- ☐ 4e–4h. Backend temporaries on the stack (4e), inline-call frames (4f), lowering's temporaries
+  matching kotlinc's (4g) and coroutine locals at `max_locals` (4h).
 - ☐ 5–6. kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
