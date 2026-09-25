@@ -398,6 +398,18 @@ pub(super) fn add_deserialization_constructor(
         value: None,
     });
     let super_owner = ir.classes[class_id as usize].superclass;
+    // kotlinc delegates to the superclass's no-argument constructor. A class whose own `super()`
+    // passes no arguments selected exactly that one, so the call reuses its target and reaches a
+    // sealed or private constructor through the accessor. One that passes arguments selected a
+    // different constructor; the plugin does not select the no-argument one for it yet.
+    let super_target = {
+        let class = &ir.classes[class_id as usize];
+        if class.super_args.is_empty() && class.super_ctor_params.is_empty() {
+            class.super_ctor
+        } else {
+            crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY
+        }
+    };
     let owner_start_line = ir.classes[class_id as usize].decl_start_line;
     let ordinal = u32::try_from(ir.classes[class_id as usize].secondary_ctors.len())
         .expect("too many secondary constructors for an IR identity");
@@ -433,7 +445,7 @@ pub(super) fn add_deserialization_constructor(
             delegate: CtorDelegateTarget::Super {
                 owner: super_owner,
                 target_params: vec![],
-                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                target: super_target,
                 default_masks: vec![],
             },
             synthetic: true,
