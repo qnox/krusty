@@ -165,12 +165,14 @@ pub(super) fn predeclare_properties(
             .declaration_name(declaration)
             .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?
             .to_owned();
+        let source_order = declaration_source_order(index, declaration)?;
         assert!(
             ir.checked_properties
                 .insert(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        source_order,
                         decl_line: 0,
                         decl_start_line: 0,
                         initialization_order: header.initialization_order,

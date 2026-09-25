@@ -203,8 +203,9 @@ fn emit_bridge(
         .map_or_else(|| jvm_tys(&b.concrete_params), <[Ty]>::to_vec);
     let er = ir_ty_to_jvm(&b.erased_ret);
     let cr = ir_ty_to_jvm(&b.concrete_ret);
+    // The target is a declaration, so its result is spelled as declared (`Nothing?` is `Void`).
     let tr = static_target.map_or_else(
-        || ir_ty_to_jvm(&b.target_ret.unwrap_or(b.concrete_ret)),
+        || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
         |(_, function)| jvm_declared_ty(&function.ret),
     );
     let erased_desc = method_descriptor(&ep, er);
@@ -327,7 +328,11 @@ fn emit_bridge(
         let carrier = cw.class_ref(&crate::jvm::names::instanceof_internal_name(cr));
         code.checkcast(carrier);
     }
-    if cr.is_reference()
+    // A supertype that spells a value class unboxed takes its carrier out of the result even when
+    // the override returns `Nothing`: kotlinc casts the `Void` and unboxes it like any other.
+    let unboxes_result = return_unboxing.is_some() && tr.is_reference();
+    if !unboxes_result
+        && cr.is_reference()
         && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
         && !er.is_reference()
     {
@@ -348,7 +353,7 @@ fn emit_bridge(
         attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
         return;
     }
-    if b.concrete_ret == Ty::Nothing {
+    if b.concrete_ret == Ty::Nothing && !unboxes_result {
         // Kotlin `Nothing` methods must not fall through. If the concrete descriptor still leaves a
         // physical carrier value, discard it before throwing so the assertion path starts with a clean
         // stack for every bridge return representation.
@@ -382,7 +387,7 @@ fn emit_bridge(
             ),
         );
         code.invokestatic(bi, slot_words(cr) as i32, 1);
-    } else if let Some(plan) = return_unboxing.filter(|_| cr.is_reference()) {
+    } else if let Some(plan) = return_unboxing.filter(|_| unboxes_result) {
         // The supertype declares a VALUE CLASS in its UNBOXED form, so this bridge returns that
         // class's carrier and the carrier comes out of the class's own `unbox-impl` — whether
         // the carrier is a scalar (`()I`) or a REFERENCE (`()Ljava/lang/String;`). Keying on the

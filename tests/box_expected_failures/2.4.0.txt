@@ -275,7 +275,6 @@ inlineClasses/kt34902.kt
 inlineClasses/kt51254.kt
 inlineClasses/kt57973.kt
 inlineClasses/kt70461.kt
-inlineClasses/overrideReturnNothing.kt
 inlineClasses/result/directCall2.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/secondaryConstructorsWithBody.kt

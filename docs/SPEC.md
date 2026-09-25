@@ -7016,6 +7016,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/value_class_interface_entry_e2e.rs` (the box's member order and each entry in full
   against kotlinc; a generic function's signature; delegated calls and a generic bridge at run
   time). Corpus: `inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypes*`.
+- **A `Nothing` override of a value-class member is reached through mangled bridges.** The
+  supertype's accessor or function returning a value class is named with the value-class hash
+  (`getP-<hash>`, `f-<hash>`), whether it spells the value class boxed (`X?`) or as its carrier
+  (`X`). An override returning `Nothing` or `Nothing?` keeps its plain name and a `Void` result,
+  so its class declares a bridge under the supertype's mangled name for an accessor as for a
+  function. The bridge calls the override, casts the `Void` to the value class and, where the
+  supertype spells the carrier, unboxes it; it never throws on the override's behalf. A class's
+  bridges follow its members in declaration order, a property's interleaved with a function's.
+  The abstract accessor of a value-class property signs its carrier, so it carries no `Signature`
+  beyond its descriptor. Tests: `tests/value_class_nothing_override_bridges_e2e.rs` (both classes'
+  members in full against kotlinc; the calls through the interface at run time). Corpus:
+  `inlineClasses/overrideReturnNothing`.
 
 - **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
   publishes one target-neutral `RangeLoop`; the named backend-boundary pass in

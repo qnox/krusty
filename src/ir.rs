@@ -324,16 +324,15 @@ pub struct IrCheckedConstructorBody {
 #[derive(Clone, Debug)]
 pub struct IrCheckedProperty {
     pub declaration: crate::fir::DeclarationId,
+    /// The declaration's stable source position, the key its accessors take in `fn_source_order`.
+    pub source_order: u32,
     /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
     /// output metadata, not a source locator: property realization copies it to the common-IR
     /// declarations it creates after the syntax unit has already been dropped.
     pub decl_line: u32,
     /// For a PRIMARY-CONSTRUCTOR property, the line its declaration starts on with its annotations
-    /// included; 0 for every other property and whenever the syntax unit carried no line.
-    ///
-    /// Accepted on the same terms as [`Self::decl_line`], and kept beside it rather than folded
-    /// into it because the two describe different members: the constructor's store of the property
-    /// maps here, its accessors map to `decl_line`.
+    /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
+    /// store of the property maps here, its accessors to `decl_line`.
     pub decl_start_line: u32,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
