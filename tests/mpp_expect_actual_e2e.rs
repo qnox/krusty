@@ -327,3 +327,54 @@ actual class A : Base()
 fun box(): String = common()
 "#);
 }
+
+/// A member the `actual` class declares hides only the inherited member it overrides: a different
+/// overload of the same name and arity stays in the member scope and actualizes its `expect`.
+/// Differential: the reference compiler accepts the split source set, and krusty compiles and runs
+/// it.
+#[test]
+fn inherited_overload_beside_a_declared_one_actualizes_its_expect() {
+    const COMMON: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+        expect class A() {\n\
+        \x20   fun choose(value: Int): String\n\
+        }\n\
+        fun common(): String = A().choose(1)\n";
+    const PLATFORM: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+        open class Base {\n\
+        \x20   fun choose(value: Int): String = \"OK\"\n\
+        }\n\
+        actual class A : Base() {\n\
+        \x20   fun choose(value: String): String = value\n\
+        }\n\
+        fun box(): String = common()\n";
+    let dir = common::scratch_dir().expect("scratch dir");
+    let common_path = dir.join("Common.kt");
+    let platform_path = dir.join("Platform.kt");
+    std::fs::write(&common_path, COMMON).expect("write the common fragment");
+    std::fs::write(&platform_path, PLATFORM).expect("write the platform fragment");
+    let reference_out = dir.join("reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (code, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        (code, reference.as_str()),
+        (0, ""),
+        "the reference compiler accepts the split source set"
+    );
+    let got = common::compile_and_run_files_with_stdlib(&[
+        ("Common.kt", COMMON),
+        ("Platform.kt", PLATFORM),
+    ])
+    .expect("krusty compiles and runs the split source set");
+    assert_eq!(got, "OK");
+}

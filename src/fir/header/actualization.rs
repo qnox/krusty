@@ -912,6 +912,48 @@ pub fn actualization(
         (matching.len() == 1).then(|| matching[0])
     }
 
+    /// Whether `nearer`, a member of a classifier or of a nearer supertype, overrides `inherited`:
+    /// the same kind with the same complete input signature. Type parameters pair positionally,
+    /// because an override may name its own differently.
+    fn overrides(
+        headers: &StreamedHeaderModule,
+        nearer: DeclarationId,
+        inherited: DeclarationId,
+        actualized_aliases: &[ActualizedAlias],
+        bindings: &ActualizationTypeBindings,
+    ) -> bool {
+        let kind = |id: DeclarationId| {
+            headers
+                .stubs
+                .iter()
+                .find(|stub| stub.id == id)
+                .map(|stub| stub.kind)
+        };
+        match (kind(nearer), kind(inherited)) {
+            (Some(DeclarationKind::Function), Some(DeclarationKind::Function)) => {
+                callable_parameter_shapes_match(
+                    headers,
+                    nearer,
+                    inherited,
+                    actualized_aliases,
+                    bindings,
+                    TypeParameterScope::Positional,
+                )
+            }
+            (Some(DeclarationKind::Property), Some(DeclarationKind::Property)) => {
+                property_input_shapes_match(
+                    headers,
+                    nearer,
+                    inherited,
+                    actualized_aliases,
+                    bindings,
+                    TypeParameterScope::Positional,
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn path(headers: &StreamedHeaderModule, range: LookupNameRange, separator: &str) -> String {
         headers
             .scopes
@@ -1135,8 +1177,9 @@ pub fn actualization(
         >::new();
         // The actual classifier's member scope: what it declares, then what it inherits. kotlinc
         // matches an `expect` member against that whole scope, so a member the actual class
-        // inherits from a (non-expect) supertype actualizes it as a fake override. A declared
-        // member hides an inherited one with the same key, as an override does.
+        // inherits from a (non-expect) supertype actualizes it as a fake override. A nearer
+        // member hides an inherited one only when it overrides it, with the same complete
+        // signature; a different overload under the same coarse key stays in the scope.
         for (depth, owner) in actual_member_owners(headers, bindings, pair.actual)
             .into_iter()
             .enumerate()
@@ -1158,7 +1201,16 @@ pub fn actualization(
                 }
             }
             for (key, children) in owner_children {
-                actual_children.entry(key).or_insert(children);
+                let visible = actual_children.entry(key).or_default();
+                let inherited = children
+                    .into_iter()
+                    .filter(|child| {
+                        !visible.iter().any(|nearer| {
+                            overrides(headers, *nearer, *child, &actualized_aliases, bindings)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                visible.extend(inherited);
             }
         }
         let mut owed = Vec::new();
