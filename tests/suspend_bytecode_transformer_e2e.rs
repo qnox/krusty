@@ -3,8 +3,8 @@
 //!
 //! The emitter marks each suspension point as kotlinc's codegen does and the transformer rewrites
 //! the method when its class is written. The continuation class it describes (spill fields, then
-//! `result` and `label`, and the `@DebugMetadata` arrays) is byte-identical to kotlinc's; the
-//! function's own method is not yet, because kotlinc's optimizer does not run after the transform.
+//! `result` and `label`, and the `@DebugMetadata` arrays) is byte-identical to kotlinc's, and so
+//! are the function's own instructions once kotlinc's optimizer has run over the transformed body.
 
 use super::common;
 
@@ -25,6 +25,24 @@ fn a_continuation_spilling_an_int_and_a_reference_matches_kotlinc() {
         return;
     };
     result.expect("the continuation class is byte-identical to kotlinc's");
+}
+
+#[test]
+fn the_transformed_function_s_instructions_match_kotlinc() {
+    // The optimizer runs after the transform, as kotlinc chains `OptimizationMethodVisitor` after
+    // `CoroutineTransformerMethodVisitor`: it drops the transformer's leftover temporaries and
+    // compacts the spill slots.
+    match common::method_code_diff_against_kotlinc(
+        "TransformerWorkCode",
+        &[],
+        WORK,
+        "TransformerWorkCodeKt",
+        "public static final java.lang.Object work(",
+    ) {
+        None => eprintln!("skipping: reference kotlinc unavailable"),
+        Some(Ok(())) => {}
+        Some(Err(difference)) => panic!("{difference}"),
+    }
 }
 
 #[test]
