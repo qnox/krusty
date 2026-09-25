@@ -83,6 +83,14 @@ pub(super) fn source_ordered_members<'a>(
             .methods
             .iter()
             .copied()
+            // A property's custom accessors are part of that property's one source-owned member
+            // unit. Emitting them as independent entries lets an implicit peer overtake them when
+            // both carry the same source order (`custom get`, implicit `set`).
+            .filter(|function| {
+                !class.properties.iter().any(|property| {
+                    property.getter == Some(*function) || property.setter == Some(*function)
+                })
+            })
             .filter(|function| !ir.serialization_cache_methods.contains(function))
             .map(SourceOrderedMember::Function),
     );

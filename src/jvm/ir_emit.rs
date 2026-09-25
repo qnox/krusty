@@ -4999,10 +4999,17 @@ fn emit_backing_field_write_adaptation(
 /// occupies. Accessors are considered independently: a custom getter still needs its implicit default
 /// setter synthesized, and a custom setter still needs its implicit default getter. A same-named method
 /// with a different return descriptor does not hide the accessor.
+#[derive(Clone, Copy)]
+enum PropertyAccessorSide {
+    Getter,
+    Setter,
+}
+
 fn emit_declared_property_accessor(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     property: &crate::ir::IrProperty,
+    side: PropertyAccessorSide,
     fq_name: &str,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter<'_>,
@@ -5010,7 +5017,7 @@ fn emit_declared_property_accessor(
 ) {
     // A private property reached from outside (an `inline` body spliced into its caller) needs the
     // synthetic accessor kotlinc emits for exactly this: `access$get<X>$p(<owner>)<ty>`.
-    if property.needs_access_bridge {
+    if matches!(side, PropertyAccessorSide::Getter) && property.needs_access_bridge {
         if let Some(field) = property
             .backing_field
             .and_then(|i| c.fields.get(i as usize))
@@ -5139,7 +5146,7 @@ fn emit_declared_property_accessor(
         })
     };
     let getter_desc = format!("(){accessor_desc}");
-    if !occupied(&getter, &getter_desc) {
+    if matches!(side, PropertyAccessorSide::Getter) && !occupied(&getter, &getter_desc) {
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
@@ -5189,7 +5196,7 @@ fn emit_declared_property_accessor(
         let access = if overridable { 0x0001 } else { 0x0011 };
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
     }
-    if property.is_var {
+    if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
         let setter = property
             .setter_jvm_name
             .clone()
@@ -5290,7 +5297,26 @@ fn emit_declared_property_accessors(
         emit.env,
     );
     for property in &c.properties {
-        emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter, param_assertions);
+        emit_declared_property_accessor(
+            ir,
+            c,
+            property,
+            PropertyAccessorSide::Getter,
+            fq_name,
+            cw,
+            formatter,
+            param_assertions,
+        );
+        emit_declared_property_accessor(
+            ir,
+            c,
+            property,
+            PropertyAccessorSide::Setter,
+            fq_name,
+            cw,
+            formatter,
+            param_assertions,
+        );
         // The property's own annotations ride a synthetic marker method, emitted right here so the
         // method table (and the constant pool behind it) matches kotlinc's.
         if let Some(&marker) = ir
@@ -5338,11 +5364,28 @@ fn emit_scheduled_member(
                 ir,
                 c,
                 property,
+                PropertyAccessorSide::Getter,
                 fq_name,
                 cw,
                 signature_formatter,
                 param_assertions,
             );
+            if let Some(getter) = property.getter {
+                emit_scheduled_member(emission, SourceOrderedMember::Function(getter), cw);
+            }
+            emit_declared_property_accessor(
+                ir,
+                c,
+                property,
+                PropertyAccessorSide::Setter,
+                fq_name,
+                cw,
+                signature_formatter,
+                param_assertions,
+            );
+            if let Some(setter) = property.setter {
+                emit_scheduled_member(emission, SourceOrderedMember::Function(setter), cw);
+            }
             // The property's own annotations ride a synthetic marker method, which kotlinc emits
             // directly after that property's accessors — it has no source order of its own.
             if let Some(&marker) = ir

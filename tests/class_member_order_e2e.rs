@@ -106,6 +106,18 @@ fn a_facade_places_property_accessors_at_their_source_position() {
 }
 
 #[test]
+fn a_custom_getter_stays_before_its_implicit_setter() {
+    assert_same_member_order(
+        "MixedAccessorOrder",
+        "class Meter {\n\
+         \x20   var reading: Int = 1\n\
+         \x20       get() = field + 1\n\
+         \x20   fun marker(): Int = reading\n\
+         }\n",
+    );
+}
+
+#[test]
 fn lifted_local_functions_finish_postfix_before_lambdas() {
     assert_same_member_order(
         "LiftedOrder",
