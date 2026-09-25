@@ -243,6 +243,7 @@ impl BodyLowering<'_> {
                         init: Some(*operand),
                         named: true,
                     });
+                    self.ir.call_operand_bindings.insert(declaration);
                     if let Some(parameter) = parameter_names.get(index) {
                         if let Some(source_name) = parameter.source_name.clone() {
                             self.ir.value_names.insert(declaration, source_name);
@@ -597,6 +598,7 @@ impl BodyLowering<'_> {
                     init: Some(value),
                     named: true,
                 });
+                self.ir.call_operand_bindings.insert(declaration);
                 self.ir.set_debug_local_provenance(
                     declaration,
                     IrDebugLocalProvenance::InlineLambdaReceiver {
@@ -624,6 +626,7 @@ impl BodyLowering<'_> {
                             init: Some(value),
                             named: source_name.is_some(),
                         });
+                        self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
                         }

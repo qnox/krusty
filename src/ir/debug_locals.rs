@@ -2,7 +2,24 @@
 
 use crate::types::TypeName;
 
-use super::FunId;
+use super::{ExprId, FunId, IrFile};
+
+impl IrFile {
+    pub(crate) fn set_debug_local_provenance(
+        &mut self,
+        declaration: ExprId,
+        provenance: IrDebugLocalProvenance,
+    ) {
+        self.debug_local_provenance.insert(declaration, provenance);
+    }
+
+    pub(crate) fn debug_local_provenance(
+        &self,
+        declaration: ExprId,
+    ) -> Option<IrDebugLocalProvenance> {
+        self.debug_local_provenance.get(&declaration).copied()
+    }
+}
 
 /// Backend-neutral origin of a debug-visible local materialized while expanding an inline body.
 /// Common lowering retains the source name separately in `IrFile::value_names` and records only

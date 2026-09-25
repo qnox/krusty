@@ -551,6 +551,9 @@ impl BodyLowering<'_> {
             }));
             formal_slots.push(slot);
         }
+        self.ir
+            .call_operand_bindings
+            .extend(capture_declarations.iter().copied());
         statements.splice(
             declaration_position..declaration_position,
             capture_declarations,
@@ -1866,12 +1869,14 @@ impl BodyLowering<'_> {
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
         let temporary = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
+        let declaration = self.ir.add_expr(IrExpr::Variable {
             index: temporary,
             ty,
             init: Some(value),
             named: false,
-        }));
+        });
+        self.ir.call_operand_bindings.insert(declaration);
+        statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         // This read is generated while normalizing checked argument evaluation order, so it has no
         // source FIR node of its own. Preserve the already-specialized semantic operand type anyway:

@@ -13706,9 +13706,6 @@ impl<'a> Emitter<'a> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => {
-                // Emit the initializer BEFORE allocating the slot, so the variable's slot isn't
-                // claimed in StackMapTable frames recorded inside a branchy initializer (where the
-                // verifier still sees it as `top`).
                 // A mutable captured local is represented explicitly by a `RefNew` initializer.
                 // Its source type remains `ty`, while the local SLOT stores the backend's holder.
                 // Representation selection belongs here; common lowering never names `Ref$IntRef`.
@@ -13740,7 +13737,14 @@ impl<'a> Emitter<'a> {
                     .copied()
                     .filter(|(_, ejt)| *ejt == jt || (is_ref(*ejt) && is_ref(jt)))
                     .map(|(s, _)| s);
-                if let Some(i) = init {
+                // The slot is entered BEFORE the initializer, as kotlinc's `visitVariable` does, so
+                // the initializer's own locals and temporaries sit above it. A call operand's holder
+                // is entered after its value, which kotlinc keeps on the stack or stores then.
+                let holds_operand = self.ir.call_operand_bindings.contains(&e);
+                let entered = reuse.or_else(|| {
+                    (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
+                });
+                let slot = if let Some(i) = init {
                     self.emit_value(i, code);
                     let source = self.value_ty(i);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
@@ -13749,50 +13753,34 @@ impl<'a> Emitter<'a> {
                     // declaration's, before the store (after an inlined call, both are written).
                     debug_lines::mark_expression_start(self.ir, i, code);
                     debug_lines::mark_statement(self.ir, e, code);
-                    let slot =
-                        reuse.unwrap_or_else(|| self.frame.enter(FrameKey::Value(index), jt));
-                    self.slots.insert(index, (slot, jt));
+                    let slot = entered
+                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
                     self.unassigned_values.remove(&index);
                     store(jt, slot, code);
-                    // A source local becomes visible after its initializing store.
-                    if let Some(name) = self
-                        .record_locals
-                        .then(|| super::debug_local_names::name(self.ir, e))
-                        .flatten()
-                    {
-                        if code.bytes.len() <= u16::MAX as usize {
-                            self.open_locals.push((
-                                self.block_depth,
-                                slot,
-                                code.bytes.len() as u16,
-                                name,
-                                local_variable_desc(jt),
-                            ));
-                        }
-                    }
+                    slot
                 } else {
-                    let slot =
-                        reuse.unwrap_or_else(|| self.frame.enter(FrameKey::Value(index), jt));
-                    self.slots.insert(index, (slot, jt));
                     self.unassigned_values.insert(index);
-                    // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
-                    // Its declaration emits no store, so open the debug range at the declaration's
-                    // current bytecode position; the later checked assignment only initializes the
-                    // already-live slot.
-                    if let Some(name) = self
-                        .record_locals
-                        .then(|| super::debug_local_names::name(self.ir, e))
-                        .flatten()
-                    {
-                        if code.bytes.len() <= u16::MAX as usize {
-                            self.open_locals.push((
-                                self.block_depth,
-                                slot,
-                                code.bytes.len() as u16,
-                                name,
-                                local_variable_desc(jt),
-                            ));
-                        }
+                    entered.unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand))
+                };
+                // A re-declared value takes its type from this declaration once it is initialized.
+                self.slots.insert(index, (slot, jt));
+                // A source local becomes visible after its initializing store. An uninitialized
+                // one (`lateinit var`) still has a lexical lifetime: its declaration emits no
+                // store, so its debug range opens here, and the later checked assignment only
+                // initializes the already-live slot.
+                if let Some(name) = self
+                    .record_locals
+                    .then(|| super::debug_local_names::name(self.ir, e))
+                    .flatten()
+                {
+                    if code.bytes.len() <= u16::MAX as usize {
+                        self.open_locals.push((
+                            self.block_depth,
+                            slot,
+                            code.bytes.len() as u16,
+                            name,
+                            local_variable_desc(jt),
+                        ));
                     }
                 }
             }
