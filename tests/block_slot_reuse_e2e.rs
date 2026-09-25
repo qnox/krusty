@@ -29,12 +29,7 @@ fn local_variable_rows(class_file: &std::path::Path) -> Vec<String> {
 }
 
 /// Compile `src` with kotlinc and krusty and require the same local-variable slots.
-fn same_local_slots(
-    name: &str,
-    src: &str,
-    class: &str,
-    extra_classpath: &[std::path::PathBuf],
-) {
+fn same_local_slots(name: &str, src: &str, class: &str, extra_classpath: &[std::path::PathBuf]) {
     same_local_slots_of(name, src, class, extra_classpath, |_| true);
 }
 
@@ -366,7 +361,8 @@ package slotfixture\n\
 @kotlin.internal.InlineOnly\n\
 inline fun lesser(a: Long, b: Long): Long = if (a < b) a else b\n\
 @kotlin.internal.InlineOnly\n\
-inline fun assertFlag(value: Boolean) { if (!value) throw IllegalStateException(\"flag\") }\n";
+inline fun assertFlag(value: Boolean) { if (!value) throw IllegalStateException(\"flag\") }\n\
+inline fun transform(value: Int, action: (Int) -> Int): Int = action(value)\n";
 
 const INLINE_ARGUMENTS: &str = "import slotfixture.assertFlag\n\
 import slotfixture.lesser\n\
@@ -484,7 +480,7 @@ fn a_valued_try_with_a_throwing_body_enters_its_result_temporary_after_it() {
 #[test]
 fn branchy_initializers_verify_with_the_variable_entered_first() {
     let src = "fun parse(s: String?): Int {\n\
-    val total: Long = run {\n\
+    val total: Long = try {\n\
         var acc = 0L\n\
         var i = 0\n\
         while (i < 3) {\n\
@@ -492,10 +488,12 @@ fn branchy_initializers_verify_with_the_variable_entered_first() {
             i++\n\
         }\n\
         acc\n\
+    } catch (e: IllegalStateException) {\n\
+        -100L\n\
     }\n\
     val kind = when {\n\
         total > 0 -> { val half = total / 2; \"pos$half\" }\n\
-        total < 0 -> s?.length?.let { \"neg$it\" } ?: \"neg\"\n\
+        total < 0 -> if (s != null) \"neg${s.length}\" else \"neg\"\n\
         else -> \"zero\"\n\
     }\n\
     val d = if (kind.length > 3) { val w = kind.length * 1.5; w } else 0.0\n\
@@ -523,21 +521,23 @@ fun box(): String {\n\
 }
 
 /// An inline call in an initializer is spliced from the frame size at the call, which already
-/// holds the variable: `r` takes slot 2 and `map`'s inlined locals start at 3 above it. Only the
+/// holds the variable: `r` takes slot 1 and `transform`'s inlined locals start above it. Only the
 /// inlined `$iv` locals and `r` are compared; `k` still sits above the released argument
 /// temporaries, and the lambda's `$i$a$` marker is named differently.
 #[test]
 fn an_inline_call_in_an_initializer_is_spliced_above_the_variable() {
+    let library = common::kotlinc_library(INLINE_LIBRARY)
+        .expect("reference compiler must build the inline-slot fixture");
     same_local_slots_of(
         "slotOrderInlineInit",
-        "fun collectionInit(n: Int): Int {\n\
-    val xs = listOf(1, 2, n)\n\
-    val r = xs.map { it * 2 }.sum()\n\
+        "import slotfixture.transform\n\
+fun transformedInit(n: Int): Int {\n\
+    val r = transform(n) { value -> value * 2 }\n\
     val k = r + 1\n\
     return k\n\
 }\n",
         "SlotOrderInlineInitKt",
-        &[],
+        &[library],
         |local| local == "r" || local.ends_with("$iv"),
     );
 }
