@@ -3,6 +3,10 @@
 //! Declaration forms differ structurally in checked FIR, but they all feed one backend-independent
 //! contract. Keeping that union here prevents consumers such as `when` lowering and JVM emission
 //! from growing subtly different definitions of an immutable binding.
+//!
+//! Common lowering uses these facts to decide the semantic snapshot/reuse shape (hold a value in a
+//! recorded temporary, or re-read a stable binding). The JVM backend's bytecode temporaries pass
+//! owns removing physical store/load pairs; it consumes the lowered shape and never re-decides it.
 
 use std::collections::HashMap;
 
@@ -89,5 +93,22 @@ pub(super) fn inventory(body: &FirBody) -> HashMap<crate::fir::LocalValueId, IrB
 impl BodyLowering<'_> {
     pub(super) fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
         self.binding_stability.get(&value) == Some(&IrBindingStability::Mutable)
+    }
+
+    /// The value slot `lowered` reads when it is a plain read of a binding published as stable
+    /// (see [`crate::ir::IrFile::binding_read_stability`]). Such a read is already its own snapshot:
+    /// kotlinc's `irLetS` binds an immutable `IrGetValue` without a temporary, and
+    /// `JvmOptimizationLowering` removes an `IR_TEMPORARY_VARIABLE` initialized from one. Anything
+    /// else (a mutable binding, a shared cell, a conversion, an implicit receiver) is not such a read.
+    pub(super) fn stable_value_read(&self, lowered: crate::ir::ExprId) -> Option<u32> {
+        match self.ir.expr(lowered) {
+            crate::ir::IrExpr::GetValue(slot)
+                if self.ir.binding_read_stability.get(&lowered)
+                    == Some(&IrBindingStability::Stable) =>
+            {
+                Some(*slot)
+            }
+            _ => None,
+        }
     }
 }

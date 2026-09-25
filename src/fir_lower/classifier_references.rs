@@ -10,6 +10,15 @@ use crate::types::{Ty, TypeName};
 use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
+/// A language-defined classifier callable a reference names: what the checker resolved the
+/// reference's target to, and the parameter and result types it is called with.
+pub(super) struct ClassifierCallable<'a> {
+    pub(super) classifier: TypeName,
+    pub(super) operation: FirClassifierCallable,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+}
+
 fn unsupported_constructor_reference(
     target: &crate::fir::FirConstructorTarget,
 ) -> FirLoweringFailure {
@@ -346,17 +355,15 @@ impl BodyLowering<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_classifier_callable_reference(
         &mut self,
-        classifier: TypeName,
-        operation: FirClassifierCallable,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
+        callable: ClassifierCallable<'_>,
         binding: FirCallableReferenceBinding,
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let (classifier, parameters, result) =
+            (callable.classifier, callable.parameters, callable.result);
         let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
         if binding != FirCallableReferenceBinding::Static {
             return Err(failed());
@@ -401,7 +408,52 @@ impl BodyLowering<'_> {
                 })
                 .collect()
         };
-        let call = match (operation, arguments.as_slice()) {
+        // The adapter numbers its own values: its parameters first, then any temporary its body
+        // declares (the array constructor's index and array).
+        let enclosing_temporary = self.next_temporary;
+        self.next_temporary = u32::try_from(reference.params.len()).map_err(|_| failed())?;
+        let call = self.classifier_callable_adapter_call(callable, &arguments);
+        self.next_temporary = enclosing_temporary;
+        let call = call?;
+        let body = self.callable_reference_adapter_body(call, result.get(), reference.ret);
+        let function = self.ir.add_fun(IrFunction {
+            name: format!(
+                "$fir_classifier_ref_{}_{}",
+                self.body.owner().raw(),
+                self.ir.functions.len()
+            ),
+            params: reference.params.clone(),
+            ret: crate::types::stored_value_ty(reference.ret),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        self.ir.private_methods.insert(function);
+        self.ir.lambda_own_params_from.insert(function, 0);
+        Ok(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: function,
+            arity,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        }))
+    }
+
+    /// The call an adapter for `operation` makes, over the adapter's own parameter reads.
+    fn classifier_callable_adapter_call(
+        &mut self,
+        callable: ClassifierCallable<'_>,
+        arguments: &[ExprId],
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let ClassifierCallable {
+            classifier,
+            operation,
+            parameters,
+            result,
+        } = callable;
+        let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
+        Ok(match (operation, arguments) {
             (FirClassifierCallable::EnumValues, []) => {
                 self.ir.add_expr(IrExpr::EnumValues { classifier })
             }
@@ -433,29 +485,6 @@ impl BodyLowering<'_> {
                 .sam_function_value_adapter(&conversion, *function)
                 .ok_or_else(failed)?,
             _ => return Err(failed()),
-        };
-        let body = self.callable_reference_adapter_body(call, result.get(), reference.ret);
-        let function = self.ir.add_fun(IrFunction {
-            name: format!(
-                "$fir_classifier_ref_{}_{}",
-                self.body.owner().raw(),
-                self.ir.functions.len()
-            ),
-            params: reference.params.clone(),
-            ret: crate::types::stored_value_ty(reference.ret),
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        self.ir.private_methods.insert(function);
-        self.ir.lambda_own_params_from.insert(function, 0);
-        Ok(self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: function,
-            arity,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: None,
-        }))
+        })
     }
 }

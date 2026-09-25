@@ -539,6 +539,14 @@ impl BodyLowering<'_> {
     }
 
     pub(super) fn splice_inline_lambda_invocation(&mut self, invocation: ExprId) -> Option<()> {
+        self.splice_inline_lambda(invocation, LambdaParameterBinding::Declared)
+    }
+
+    pub(super) fn splice_inline_lambda(
+        &mut self,
+        invocation: ExprId,
+        binding: LambdaParameterBinding,
+    ) -> Option<()> {
         let IrExpr::InvokeFunction {
             func,
             args,
@@ -616,8 +624,10 @@ impl BodyLowering<'_> {
                             .and_then(|identity| identity.source_name.clone())
                     })
                     .flatten();
-                match (self.ir.expr(value), &source_name) {
-                    (IrExpr::GetValue(slot), None) => *slot,
+                match (self.ir.expr(value), &source_name, binding) {
+                    (IrExpr::GetValue(slot), None, _)
+                    | (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
+                    (_, _, LambdaParameterBinding::Remapped) => return None,
                     _ => {
                         let slot = self.allocate_temporary();
                         let declaration = self.ir.add_expr(IrExpr::Variable {
@@ -655,6 +665,18 @@ impl BodyLowering<'_> {
         };
         Some(())
     }
+}
+
+/// How a spliced lambda's parameters meet the arguments of its invocation.
+#[derive(Clone, Copy)]
+pub(super) enum LambdaParameterBinding {
+    /// A named parameter becomes a local of the splice holding its argument, as at an inline
+    /// function's call site.
+    Declared,
+    /// Every argument is a read of a value the parameter simply becomes, with no local of its own:
+    /// kotlinc's `IrInlinable.inline`, which remaps the lambda's parameters onto the variables it
+    /// is given. An argument that is not such a read cannot be spliced this way.
+    Remapped,
 }
 
 fn mark_subtree(ir: &crate::ir::IrFile, root: ExprId, marked: &mut HashSet<ExprId>) {

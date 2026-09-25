@@ -4513,9 +4513,27 @@ shadow with no output change.
 
   In 4d the first three matched only because the reserved parked slot lined up. `break.kt` `qux`
   still has `j` one slot high, now from the same `appendLine` receiver store (4f).
-- ☐ 4f–4h. Inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine
-  locals at `max_locals` (4h). Also open: a value-position `try` whose branches disagree with a
-  primitive among them is still typed `Unit` (kotlinc: their join, so `fun f() = try { risky() }
+- ✅ 4g. Lowering declares kotlinc's temporaries (SPEC: "Lowering declares the temporaries
+  kotlinc's IR lowerings declare"). A `when` subject is always held, as `tmp_subject`; a
+  destructuring container and a safe-cast operand that are stable immutable reads declare
+  nothing (`removeUnnecessaryTemporaryVariables`, `irLetS`); the array constructor declares the
+  index, size, array, function value and element index in `ArrayConstructorLowering`'s order and
+  binds a lambda's parameter to the element index; a `::Array` adapter numbers its temporaries
+  after its parameters. Stability comes from the published `binding_read_stability`. A survey of
+  the 4e corpus ranked the non-inline, non-coroutine local-variable mismatches: `for`-loop
+  temporaries dominate (about 580 of 640 slot-only methods, mostly krusty's iterator local and
+  kotlinc's progression first/last/step locals) and belong to the `for`-loop port, then the
+  destructuring container (about 70 methods), `try` operand spills (about 20, a backend matter),
+  the array constructor, the `when` subject and the safe cast. In the 2.4.20 box corpus 408 of
+  25,236 classes change against 4e, no box outcome moves, and 8 more files are byte-identical
+  (302 to 310). Of the 290 methods whose locals change, 89 now match kotlinc, 118 are closer, 39
+  are as close as before, 26 are further off and 18 have no kotlinc counterpart (lambdas kotlinc
+  inlines); none that matched stops matching. The further ones are `withIndex`, progression and
+  extension-`componentN` loops, where the removed container copy had lined up with a loop
+  temporary kotlinc's `ForLoopsLowering` declares, and stdlib inline array constructors
+  (`UIntArray(n) { … }`) whose lambda parameter kotlinc keeps as an inlined local (4f).
+- ☐ 4f, 4h. Inline-call frames (4f) and coroutine locals at `max_locals` (4h). Also open: a value-position
+  `try` whose branches disagree with a primitive among them is still typed `Unit` (kotlinc: their join, so `fun f() = try { risky() }
   catch (e: E) { note() }` returns the boxed body value where krusty returns `kotlin.Unit`), the
   bytecode rewrite keeps a method as emitted when a debug local's range empties (kotlinc drops the
   local, e.g. a catch parameter whose body was a discarded constant), and a `try` operand's stack

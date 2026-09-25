@@ -115,16 +115,24 @@ impl BodyLowering<'_> {
         } else {
             target.nullable_boxed().unwrap_or(target)
         };
-        let temporary = self.allocate_temporary();
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty: storage_type,
-            init: Some(value),
-            named: false,
-        });
-        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        // kotlinc's `irLetS`: a read of an immutable binding is tested and cast in place; any other
+        // operand is evaluated once into a temporary.
+        let (declaration, operand_slot) = match self.stable_value_read(value) {
+            Some(slot) => (None, slot),
+            None => {
+                let temporary = self.allocate_temporary();
+                let declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: storage_type,
+                    init: Some(value),
+                    named: false,
+                });
+                (Some(declaration), temporary)
+            }
+        };
+        let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
         let matches = self.instance_check(false, read, runtime_target);
-        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: read,
@@ -134,10 +142,13 @@ impl BodyLowering<'_> {
         let result = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(matches), cast), (None, null)],
         });
-        Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![declaration],
-            value: Some(result),
-        }))
+        Ok(match declaration {
+            Some(declaration) => self.ir.add_expr(IrExpr::Block {
+                stmts: vec![declaration],
+                value: Some(result),
+            }),
+            None => result,
+        })
     }
 }
 

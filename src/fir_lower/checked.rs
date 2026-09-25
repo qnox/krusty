@@ -11,6 +11,19 @@ use crate::ir::{
 use super::source_calls::{ModuleConstructorRequest, SameFileExtensionReceiverMode};
 use super::{BodyLowering, FirLoweringFailure};
 
+/// A checked callable reference as FIR records it: the resolved target, how it binds its
+/// receivers, and the function type it is used at.
+pub(super) struct CheckedCallableReference<'a> {
+    pub(super) target: crate::fir::FirCallableReferenceTarget,
+    pub(super) binding: crate::fir::FirCallableReferenceBinding,
+    pub(super) dispatch_receiver: Option<FirReceiver>,
+    pub(super) extension_receiver: Option<FirReceiver>,
+    pub(super) substitutions: &'a [FirTypeSubstitution],
+    pub(super) adaptation: Option<&'a crate::fir::FirReferenceAdaptation>,
+    pub(super) reference_ty: crate::types::Ty,
+    pub(super) reflective: bool,
+}
+
 impl BodyLowering<'_> {
     fn constructor_capture_argument(
         &mut self,
@@ -124,18 +137,20 @@ impl BodyLowering<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_callable_reference(
         &mut self,
-        target: crate::fir::FirCallableReferenceTarget,
-        binding: crate::fir::FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        substitutions: &[FirTypeSubstitution],
-        adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference_ty: crate::types::Ty,
-        reflective: bool,
+        reference: CheckedCallableReference<'_>,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let CheckedCallableReference {
+            target,
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+            substitutions,
+            adaptation,
+            reference_ty,
+            reflective,
+        } = reference;
         if let crate::fir::FirCallableReferenceTarget::Constructor {
             target,
             classifier,
@@ -170,10 +185,12 @@ impl BodyLowering<'_> {
                 ));
             }
             return self.checked_classifier_callable_reference(
-                *classifier,
-                operation.clone(),
-                parameters,
-                *result,
+                super::classifier_references::ClassifierCallable {
+                    classifier: *classifier,
+                    operation: operation.clone(),
+                    parameters,
+                    result: *result,
+                },
                 binding,
                 adaptation,
                 reference_ty,
