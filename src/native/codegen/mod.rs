@@ -91,7 +91,7 @@ impl Backend for CraneliftBackend {
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
         if state.runtime_symbols.is_none() {
-            match super::linker::runtime_symbols(self.target.arch) {
+            match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
                 Err(error) => {
                     diags.error(
