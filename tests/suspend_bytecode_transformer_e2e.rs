@@ -88,3 +88,28 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "TransformerResume");
 }
+
+#[test]
+fn a_suspend_lambda_keeps_its_own_continuation_beside_the_enclosing_function_s_classes() {
+    // The lambda records `box` as its enclosing source name. Its continuation keeps the name it
+    // was lifted under, so it does not take the `box$N` of a callable reference's class.
+    let src = "import kotlin.coroutines.*\n\
+suspend fun value(): String = \"O\"\n\
+suspend fun k(): String = \"K\"\n\
+fun run(c: suspend () -> String): String {\n\
+    var r = \"none\"\n\
+    c.startCoroutine(object : Continuation<String> {\n\
+        override val context: CoroutineContext = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) { r = result.getOrThrow() }\n\
+    })\n\
+    return r\n\
+}\n\
+fun box(): String {\n\
+    val first = run {\n\
+        value()\n\
+        value()\n\
+    }\n\
+    return first + run(::k) + run(::k).drop(1)\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "TransformerLambdaNames");
+}
