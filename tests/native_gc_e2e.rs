@@ -758,7 +758,7 @@ fn the_runtime_ships_the_collector_with_every_program() {
     // for every target this build carries, independent of whether a C compiler is present here.
     let mut carried = 0;
     for &target in NativeTarget::ALL {
-        let Some(objects) = krusty::native::runtime_objects(target.arch) else {
+        let Some(objects) = krusty::native::runtime_objects(target) else {
             continue;
         };
         carried += 1;
