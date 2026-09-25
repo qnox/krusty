@@ -16,8 +16,8 @@ use super::common;
 
 /// Compile `src` with kotlinc and with krusty; for each class kotlinc emits, the `javap -p -s`
 /// member lines of both, in emission order.
-fn member_lists(stem: &str, src: &str) -> Option<Vec<(String, Vec<String>, Vec<String>)>> {
-    let dir = common::scratch_dir()?;
+fn member_lists(stem: &str, src: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let dir = common::scratch_dir().expect("scratch directory");
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
@@ -28,7 +28,8 @@ fn member_lists(stem: &str, src: &str) -> Option<Vec<(String, Vec<String>, Vec<S
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         source.to_string_lossy().into_owned(),
-    ])?;
+    ])
+    .expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let classes =
         common::compile_in_process_metadata_cp_module_target(src, stem, &[], "main", None)
@@ -76,15 +77,11 @@ fn member_lists(stem: &str, src: &str) -> Option<Vec<(String, Vec<String>, Vec<S
         lists.push((class.clone(), members(&reference_dir), members(&krusty_dir)));
     }
     let _ = std::fs::remove_dir_all(&dir);
-    Some(lists)
+    lists
 }
 
 fn assert_same_member_order(stem: &str, src: &str) {
-    let Some(lists) = member_lists(stem, src) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
-    for (class, reference, krusty) in lists {
+    for (class, reference, krusty) in member_lists(stem, src) {
         assert_eq!(krusty, reference, "member order of {class}");
     }
 }
