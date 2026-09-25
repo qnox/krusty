@@ -875,3 +875,31 @@ fun loop(xs: List<C>): String {\n\
         |local| !local.starts_with('$'),
     );
 }
+
+/// A `when` subject is always kotlinc's `tmp_subject`, even when it reads a parameter or an
+/// immutable local. The temporaries pass then drops the store where the subject is read once (a
+/// `tableswitch`, a single comparison) and keeps it where it is read again (`s` in `strings`), so
+/// `y` and `r` keep kotlinc's slots and the whole class matches.
+#[test]
+fn a_when_subject_reading_an_immutable_binding_is_held_like_kotlinc() {
+    byte_identical(
+        "slotTempWhenSubject",
+        "fun switch(x: Int): String {\n\
+    val r = when (x) { 1 -> \"a\"; 2 -> \"b\"; else -> \"c\" }\n\
+    val k = r.length\n\
+    return r + k\n\
+}\n\
+fun single(p: Int): Int {\n\
+    val x = p + 1\n\
+    val r = when (x) { 1 -> 5; else -> 3 }\n\
+    return r\n\
+}\n\
+fun strings(s: String): Int {\n\
+    val y = 1\n\
+    val r = when (s) { \"a\" -> 1; \"b\" -> 2; else -> 3 }\n\
+    return r + y\n\
+}\n\
+fun types(a: Any): Int = when (a) { is String -> a.length; is Int -> a; else -> 0 }\n",
+        "SlotTempWhenSubjectKt",
+    );
+}

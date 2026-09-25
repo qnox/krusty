@@ -87,3 +87,27 @@ fn destructuring_a_mutable_binding_or_a_call_keeps_its_container() {
         1
     );
 }
+
+/// Every `when` subject is kotlinc's `tmp_subject`, a read of a parameter or an immutable local
+/// included: `JvmOptimizationLowering` keeps a subject temporary initialized from a variable.
+#[test]
+fn a_when_subject_is_held_even_when_it_reads_an_immutable_binding() {
+    let ir = lower_single_source(
+        "fun parameter(x: String): Int = when (x) { \"a\" -> 1; \"b\" -> 2; else -> 3 }\n",
+        "WhenSubjectParameter",
+    );
+    assert_eq!(temporaries_initialized_by(&ir, is_value_read), 1);
+
+    let ir = lower_single_source(
+        "fun local(p: Int): Int { val x = p + 1; return when (x) { 1 -> 5; 7 -> 8; else -> 3 } }\n",
+        "WhenSubjectLocal",
+    );
+    let subject = named_slot(&ir, "x");
+    assert_eq!(
+        temporaries_initialized_by(
+            &ir,
+            |init| matches!(init, IrExpr::GetValue(slot) if *slot == subject)
+        ),
+        1
+    );
+}

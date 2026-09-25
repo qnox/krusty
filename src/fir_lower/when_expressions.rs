@@ -1,7 +1,7 @@
 //! Lower checked `when` decisions into common IR.
 //!
 //! The checker publishes one FIR identity for a subject and every predicate use. This boundary
-//! materializes an unstable subject once and redirects those uses to its snapshot.
+//! materializes the subject once, as kotlinc's `tmp_subject`, and redirects those uses to it.
 
 use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition};
 use crate::ir::{ExprId, IrBinOp, IrExpr};
@@ -26,12 +26,11 @@ impl BodyLowering<'_> {
                 let subject_ty = subject_expression.ty.get();
                 let value = self.expression(subject)?;
 
-                // An immutable local is already a stable snapshot. Any other subject, including a
-                // mutable local, needs a dedicated value because conditions may have side effects.
-                if let Some(slot) = self.stable_value_read(subject, value) {
-                    return Ok::<_, FirLoweringFailure>(slot);
-                }
-
+                // Every subject gets its own value, a read of an immutable local included: kotlinc's
+                // FIR-to-IR declares `tmp_subject` for any subject expression, and
+                // `JvmOptimizationLowering` deliberately keeps one initialized from a variable read
+                // (`dontTouchTemporaryVals`). Whether its store survives is then the bytecode
+                // temporaries pass's decision, exactly as in kotlinc.
                 let temporary = self.allocate_temporary();
                 prefix.push(self.ir.add_expr(IrExpr::Variable {
                     index: temporary,
