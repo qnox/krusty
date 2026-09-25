@@ -39,14 +39,17 @@ fn assert_field_types_match_kotlinc(stem: &str, src: &str, class: &str) {
     assert_eq!(field_types(&built.krusty), reference, "{class} field types");
 }
 
-const LOCAL_CLASS_PROPERTY: &str = "class Outer(val outerProp: String) {\n\
+const LOCAL_CLASS_PROPERTY: &str = "interface Valued {\n\
+     \x20   fun value(): String\n\
+     }\n\
+     class Outer(val outerProp: String) {\n\
      \x20   fun foo(arg: String): String {\n\
      \x20       class Local {\n\
-     \x20           val obj = object {\n\
-     \x20               override fun toString() = outerProp + arg\n\
+     \x20           val obj = object : Valued {\n\
+     \x20               override fun value() = outerProp + arg\n\
      \x20           }\n\
      \x20       }\n\
-     \x20       return Local().obj.toString()\n\
+     \x20       return Local().obj.value()\n\
      \x20   }\n\
      }\n\
      fun box(): String = Outer(\"O\").foo(\"K\")\n";
@@ -72,6 +75,7 @@ fn a_companion_object_reads_each_capture_from_its_own_field() {
         "interface Nat<T> {\n\
          \x20   val nil: T\n\
          \x20   fun T.next(): T\n\
+         \x20   fun twice(): T = nil.next().next()\n\
          \x20   companion object {\n\
          \x20       operator fun <T> invoke(nil: T, next: T.() -> T): Nat<T> =\n\
          \x20           object : Nat<T> {\n\
@@ -81,23 +85,33 @@ fn a_companion_object_reads_each_capture_from_its_own_field() {
          \x20   }\n\
          }\n\
          fun box(): String {\n\
-         \x20   val count = Nat(0) { this + 1 }\n\
-         \x20   val two = with(count) { nil.next().next() }\n\
+         \x20   val two = Nat(0) { this + 1 }.twice()\n\
          \x20   return if (two == 2) \"OK\" else \"fail: $two\"\n\
          }\n",
         "CompanionObjectCaptures",
     );
 }
 
-const BUILDER_OBJECTS: &str = "fun strings() {\n\
-     \x20   buildList {\n\
+const BUILDER_OBJECTS: &str = "class Sink<T> {\n\
+     \x20   var last: Any? = null\n\
+     \x20   fun add(item: T) {\n\
+     \x20       last = item\n\
+     \x20   }\n\
+     }\n\
+     fun <T> build(block: Sink<T>.() -> Unit): Sink<T> {\n\
+     \x20   val sink = Sink<T>()\n\
+     \x20   sink.block()\n\
+     \x20   return sink\n\
+     }\n\
+     fun strings() {\n\
+     \x20   build {\n\
      \x20       object {\n\
      \x20           fun foo() = add(\"\")\n\
      \x20       }\n\
      \x20   }\n\
      }\n\
      fun ints() {\n\
-     \x20   buildList {\n\
+     \x20   build {\n\
      \x20       object {\n\
      \x20           var x: Int\n\
      \x20               get() = 1\n\
@@ -113,7 +127,7 @@ const BUILDER_OBJECTS: &str = "fun strings() {\n\
      \x20   return \"OK\"\n\
      }\n";
 
-/// A builder lambda's object is reached before and after the builder's element type is inferred.
+/// A builder lambda's object is reached before and after the builder's type argument is inferred.
 /// Its captured receiver has the inferred type, not the builder's type parameter.
 #[test]
 fn an_object_in_a_builder_lambda_captures_the_inferred_receiver() {
