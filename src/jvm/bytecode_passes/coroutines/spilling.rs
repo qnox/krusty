@@ -170,9 +170,11 @@ pub(crate) fn spill_variables(
         }
     }
 
-    // `initialSpilledVariablesCount`: kotlinc takes the declared reference kind's highest index as
-    // the count a point without a preceding point is compared against.
-    let initial_references = context.declared_max(OBJECT).unwrap_or(0);
+    // `initialSpilledVariablesCount`: the reference fields the class declares, which a point
+    // without a preceding point is compared against. kotlinc seeds it with the highest declared
+    // index instead; the two never differ in output, because every declared parameter field is
+    // spilled at every point, so no point spills fewer references than the class declares.
+    let initial_references = context.declared_max(OBJECT).map_or(0, |max| max + 1);
     let cleanups = variables_to_clean_up(method, points, &references, initial_references);
     layout.spilled_locals = points
         .iter()
