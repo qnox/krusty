@@ -16,6 +16,12 @@
 //!   whose first method is abstract interns that method's `Signature` and annotation names before
 //!   the `Code` of a later default body.
 //!
+//! - An inherited interface forwarder interns its header, nullability annotations included, before
+//!   its `invokespecial` body.
+//! - An anonymous object's constructor interns its `this` local before the members that follow it.
+//! - A sealed class's nested subclasses intern with its `InnerClasses` table, after `@Metadata`,
+//!   not ahead of its constructor.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -149,5 +155,41 @@ fn an_abstract_first_method_interns_its_attribute_names_before_code() {
          \x20   fun first(label: String): T = take(label)\n\
          }\n",
         &["Source"],
+    );
+}
+
+#[test]
+fn an_inherited_forwarder_interns_its_annotations_before_its_body() {
+    assert_identical(
+        "InheritedForwarder",
+        "interface Greeter {\n\
+         \x20   fun greet(name: String): String = name\n\
+         }\n\
+         class Plain : Greeter\n",
+        &["Plain"],
+    );
+}
+
+#[test]
+fn a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes() {
+    assert_identical(
+        "SealedRows",
+        "sealed class Shape {\n\
+         \x20   class Round : Shape()\n\
+         \x20   class Square : Shape()\n\
+         }\n",
+        &["Shape"],
+    );
+}
+
+#[test]
+fn an_anonymous_object_constructor_interns_this_before_its_members() {
+    assert_identical(
+        "AnonymousThis",
+        "interface Greeter {\n\
+         \x20   fun greet(name: String): String = name\n\
+         }\n\
+         fun make(): Greeter = object : Greeter {}\n",
+        &["AnonymousThisKt$make$1"],
     );
 }

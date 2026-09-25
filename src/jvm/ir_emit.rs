@@ -3328,8 +3328,10 @@ fn sorted_sealed_subclass_ids(c: &IrClass) -> Vec<TypeName> {
 fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit_permitted: bool) {
     use crate::jvm::classfile::InnerClassSpec;
     // The IR records subtype relationships for EVERY class; only a SEALED classifier turns them
-    // into PermittedSubclasses + eager nest entries (a plain interface with an anonymous
-    // implementor was seeding that implementor's class constant into its own pool).
+    // into PermittedSubclasses + nest entries (a plain interface with an anonymous implementor was
+    // seeding that implementor's class constant into its own pool). A nested subclass's entry
+    // interns where the `InnerClasses` table is written, after `@Metadata`, unless the class body
+    // names it first.
     if !c.is_sealed {
         return;
     }
@@ -3341,7 +3343,6 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
     for &sub in &subs {
         if sub != self_identity && sub.same_or_nested_within(self_identity) {
             let rendered = sub.render();
-            cw.seed_class(&rendered);
             cw.add_inner_class(InnerClassSpec {
                 inner: rendered,
                 outer: Some(self_identity.render()),
@@ -5559,9 +5560,11 @@ fn emit_class(
             }
         })
         .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
+    // An anonymous object carries kotlinc's minimal record (see the metadata assembly below) and
+    // the same debug tables, so it is seeded like any class with a computed record.
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
-        && build_class_metadata(ir, c, opts).is_some();
+        && (c.is_anonymous_object || build_class_metadata(ir, c, opts).is_some());
     let pool_seed = || PlainClassPoolSeed {
         formatter: &signature_formatter,
         ir,
@@ -9280,6 +9283,23 @@ fn emit_default_impls_forwarders(
             "an inherited forwarder needs every declaration parameter identity"
         );
         let desc = method_descriptor(param_tys, ret);
+        let ann = |ty: Ty| {
+            if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(&ty).is_reference() {
+                None
+            } else if ty.is_nullable() {
+                Some("Lorg/jetbrains/annotations/Nullable;")
+            } else {
+                Some("Lorg/jetbrains/annotations/NotNull;")
+            }
+        };
+        let parameter_annotations = semantic_params.iter().copied().map(ann).collect::<Vec<_>>();
+        // The header — name, descriptor, then the return's and parameters' nullability types —
+        // interns before the body, as ASM's `visitMethod` and annotation visits precede the code.
+        let header_annotations = std::iter::once(ann(semantic_ret))
+            .chain(parameter_annotations.iter().copied())
+            .flatten()
+            .collect::<Vec<_>>();
+        cw.reserve_method_pool(name, &desc, None, &header_annotations);
         let mut code = CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
         code.aload(0);
         let mut slot = 1u16;
@@ -9332,16 +9352,6 @@ fn emit_default_impls_forwarders(
             (c.decl_line != 0).then_some((0, c.decl_line)),
             &locals,
         );
-        let ann = |ty: Ty| {
-            if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(&ty).is_reference() {
-                None
-            } else if ty.is_nullable() {
-                Some("Lorg/jetbrains/annotations/Nullable;")
-            } else {
-                Some("Lorg/jetbrains/annotations/NotNull;")
-            }
-        };
-        let parameter_annotations = semantic_params.iter().copied().map(ann).collect::<Vec<_>>();
         cw.set_method_nullability(name, &desc, ann(semantic_ret), &parameter_annotations);
         // Only a holder call makes the class REFERENCE the nested holder; an `invokespecial`
         // forwarder names the interface alone, and kotlinc records no `InnerClasses` entry for it.
