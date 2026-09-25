@@ -587,11 +587,18 @@ void kt_rw_property_set(KRef self, KRef property, KRef value);
 /* ---- comparable ranges ------------------------------------------------------------------------
 
    `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS and each comparison is the value's own, through `kt_compare_any`. Not a
-   progression either: `Comparable` names no successor, so there is no step and no walk. */
+   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
+   chose that operation where it built the range, knowing the element type, so the runtime never
+   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
+   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
+   either: `Comparable` names no successor, so there is no step and no walk. */
 extern const KType kt_type_comparable_range;
 
-KRef kt_comparable_range(KRef start, KRef end);
+/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
+   leaves the exception pending and its answer means nothing. */
+typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
+
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
 kt_boolean kt_comparable_range_contains(KRef range, KRef value);
 kt_boolean kt_comparable_range_is_empty(KRef range);
 KRef kt_comparable_range_start(KRef range);
@@ -764,7 +771,8 @@ KRef kt_to_string(KRef value);
    answer for either shape. */
 extern const KType kt_type_string_builder;
 
-/* `StringBuilder()` and `StringBuilder(capacity)`. The capacity is a hint. */
+/* `StringBuilder()` and `StringBuilder(capacity)`. A capacity is a hint; a negative one throws
+   `NegativeArraySizeException` with the capacity as its message, as the JVM's builder does. */
 KRef kt_string_builder_new(void);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
@@ -776,7 +784,8 @@ KRef kt_string_builder_with_text(KRef text);
 KRef kt_string_builder_append(KRef self, KRef value);
 
 /* `sb.appendLine(value)` and `sb.appendLine()`. The line separator is `\n` on every target, which
-   is what Kotlin specifies rather than the platform's. */
+   is what Kotlin specifies rather than the platform's. When the value's `toString` throws, neither
+   the value nor the newline is added. */
 KRef kt_string_builder_append_line(KRef self, KRef value);
 KRef kt_string_builder_append_new_line(KRef self);
 
@@ -862,6 +871,10 @@ extern const KType kt_type_number_format_exception;
 extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
+/* A `RuntimeException` Kotlin declares no alias for, so its name is Java's:
+   `java.lang.NegativeArraySizeException`. It is what a negative `StringBuilder` capacity throws on
+   the JVM, whose builder allocates its storage as an array of that size. */
+extern const KType kt_type_negative_array_size_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);

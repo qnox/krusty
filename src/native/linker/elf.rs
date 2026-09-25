@@ -583,15 +583,43 @@ impl Reloc {
     }
 }
 
-fn out_of_range(what: &str, value: i64, p: u64) -> ProgramLinkError {
-    ProgramLinkError::RelocationOutOfRange(format!("{what}: value {value:#x} at {p:#x}"))
+fn out_of_range(what: &str, value: i128, p: u64) -> ProgramLinkError {
+    let sign = if value < 0 { "-" } else { "" };
+    ProgramLinkError::RelocationOutOfRange(format!(
+        "{what}: value {sign}{:#x} at {p:#x}",
+        value.unsigned_abs()
+    ))
 }
 
 /// Does `value` fit in a signed field of `bits` bits?
-fn fits_signed(value: i64, bits: u32) -> bool {
-    let min = -(1i64 << (bits - 1));
-    let max = (1i64 << (bits - 1)) - 1;
+fn fits_signed(value: i128, bits: u32) -> bool {
+    let min = -(1i128 << (bits - 1));
+    let max = (1i128 << (bits - 1)) - 1;
     (min..=max).contains(&value)
+}
+
+/// `S + A` and `S + A - P`, exactly. Every relocation expression is computed here, in a domain
+/// wide enough that no input can wrap it: `S` and `P` are 64-bit addresses and `A` any 64-bit
+/// addend, so a sum or difference of them needs 66 bits. Computed in 64 bits, an extreme addend
+/// wraps an out-of-range value back into a field's range, and the check that should refuse it
+/// passes it with the wrong patch. Every range check below runs on these values, and a field is
+/// narrowed to its width only after its check.
+fn expressions(r: &Reloc) -> (i128, i128) {
+    let s_plus_a = i128::from(r.s) + i128::from(r.a);
+    (s_plus_a, s_plus_a - i128::from(r.p))
+}
+
+/// A 64-bit field holds any value 64 bits can spell, whether it is read as signed or unsigned.
+fn set_word64(
+    image: &mut [u8],
+    r: &Reloc,
+    value: i128,
+    what: &str,
+) -> Result<(), ProgramLinkError> {
+    if !(i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(&value) {
+        return Err(out_of_range(what, value, r.p));
+    }
+    r.set64(image, value as u64)
 }
 
 /// Apply every relocation of one object for `arch`.
@@ -608,11 +636,10 @@ fn relocate(arch: Arch, image: &mut [u8], relocations: &[Reloc]) -> Result<(), P
 }
 
 fn relocate_x86_64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError> {
-    let s_plus_a = (r.s as i64).wrapping_add(r.a);
-    let pc_relative = s_plus_a.wrapping_sub(r.p as i64);
+    let (s_plus_a, pc_relative) = expressions(r);
     match r.r_type {
         // R_X86_64_64
-        1 => r.set64(image, s_plus_a as u64),
+        1 => set_word64(image, r, s_plus_a, "64"),
         // R_X86_64_PC32, R_X86_64_PLT32: a static link has no PLT, so both are PC-relative to S.
         2 | 4 => {
             if !fits_signed(pc_relative, 32) {
@@ -647,7 +674,7 @@ fn relocate_x86_64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError> 
 fn aarch64_lo12(
     image: &mut [u8],
     r: &Reloc,
-    x: i64,
+    x: i128,
     shift: u32,
     what: &str,
 ) -> Result<(), ProgramLinkError> {
@@ -667,11 +694,10 @@ fn aarch64_lo12(
 /// AArch64: every kind clang's freestanding objects and Cranelift's non-PIC output use. Fields are
 /// patched into fixed 32-bit instructions per the ELF-for-AArch64 supplement.
 fn relocate_aarch64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError> {
-    let x = (r.s as i64).wrapping_add(r.a);
-    let rel = x.wrapping_sub(r.p as i64);
+    let (x, rel) = expressions(r);
     match r.r_type {
         // R_AARCH64_ABS64
-        257 => r.set64(image, x as u64),
+        257 => set_word64(image, r, x, "ABS64"),
         // R_AARCH64_PREL32 (`.eh_frame` and friends)
         261 => {
             if !fits_signed(rel, 32) {
@@ -681,7 +707,7 @@ fn relocate_aarch64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError>
         }
         // R_AARCH64_ADR_PREL_PG_HI21: page delta into ADRP's immhi:immlo.
         275 => {
-            let page_delta = ((x as u64 & !0xfff) as i64).wrapping_sub((r.p & !0xfff) as i64);
+            let page_delta = (x & !0xfff) - i128::from(r.p & !0xfff);
             if !fits_signed(page_delta, 33) {
                 return Err(out_of_range("ADR_PREL_PG_HI21", page_delta, r.p));
             }
@@ -717,8 +743,8 @@ fn relocate_aarch64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError>
 /// Does `value` split into a `hi20`/`lo12` pair? `hi20` is `(value + 0x800) >> 12`, so it is that
 /// sum, not `value`, that has to fit 32 signed bits: a value within 0x800 below 2 GiB would
 /// otherwise wrap `hi20` to a negative page.
-fn fits_hi_lo(value: i64) -> bool {
-    fits_signed(value.wrapping_add(0x800), 32)
+fn fits_hi_lo(value: i128) -> bool {
+    fits_signed(value + 0x800, 32)
 }
 
 /// RISC-V: two passes, because a `PCREL_LO12_*` relocation names the `auipc` it pairs with rather
@@ -726,14 +752,13 @@ fn fits_hi_lo(value: i64) -> bool {
 /// this linker performs no relaxation, so every instruction stays where the assembler put it.
 fn relocate_riscv64(image: &mut [u8], relocations: &[Reloc]) -> Result<(), ProgramLinkError> {
     // Value `X = S + A - P` of every PCREL_HI20, keyed by the address of its `auipc`.
-    let mut hi20_at: HashMap<u64, i64> = HashMap::new();
+    let mut hi20_at: HashMap<u64, i128> = HashMap::new();
     let mut deferred = Vec::new();
     for r in relocations {
-        let x = (r.s as i64).wrapping_add(r.a);
-        let rel = x.wrapping_sub(r.p as i64);
+        let (x, rel) = expressions(r);
         match r.r_type {
             // R_RISCV_64 / R_RISCV_32
-            2 => r.set64(image, x as u64)?,
+            2 => set_word64(image, r, x, "64")?,
             1 => {
                 if u32::try_from(x).is_err() && !fits_signed(x, 32) {
                     return Err(out_of_range("32", x, r.p));
@@ -852,8 +877,8 @@ fn relocate_riscv64(image: &mut [u8], relocations: &[Reloc]) -> Result<(), Progr
 /// Split a 32-bit value into RISC-V's `hi20`/`lo12` pair, where `lo12` is sign-extended and `hi20`
 /// is adjusted so that `(hi20 << 12) + sext(lo12) == value`. A `LO12` alone has no range to check,
 /// so `value` may be anything; only its low 32 bits matter.
-fn split_hi_lo(value: i64) -> (u32, u32) {
-    let hi = (value.wrapping_add(0x800) >> 12) as u32 & 0xf_ffff;
+fn split_hi_lo(value: i128) -> (u32, u32) {
+    let hi = ((value + 0x800) >> 12) as u32 & 0xf_ffff;
     let lo = (value as u32).wrapping_sub(hi << 12) & 0xfff;
     (hi, lo)
 }
@@ -1145,13 +1170,16 @@ mod tests {
 
     // ---- values that do not fit ------------------------------------------------------------------
 
-    fn assert_out_of_range(result: Result<Vec<u8>, ProgramLinkError>, what: &str) {
+    /// The link fails with exactly `expected`: its kind and its whole message.
+    fn assert_link_error(result: Result<Vec<u8>, ProgramLinkError>, expected: ProgramLinkError) {
         match result {
-            Err(ProgramLinkError::RelocationOutOfRange(said)) => {
-                assert!(said.contains(what), "{said}")
-            }
-            other => panic!("expected {what} to be out of range, got {other:?}"),
+            Err(error) => assert_eq!(error, expected),
+            Ok(_) => panic!("expected {expected:?}, but the link succeeded"),
         }
+    }
+
+    fn out_of_range(what: &str) -> ProgramLinkError {
+        ProgramLinkError::RelocationOutOfRange(what.to_string())
     }
 
     #[test]
@@ -1159,7 +1187,10 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0xe8, 0, 0, 0, 0]);
         let here = object.local(".Lhere", text, 0);
         object.reloc(text, 1, here, 0x1_0000_0000, 2);
-        assert_out_of_range(link(Arch::X86_64, &[&object]), "PC32");
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            out_of_range("PC32: value 0xffffffff at 0x4000b1"),
+        );
     }
 
     #[test]
@@ -1168,21 +1199,35 @@ mod tests {
         let text = object.text_words(&[0x9400_0000]);
         let start = object.define("_start", text, 0);
         object.reloc(text, 0, start, 0x800_0000, 283);
-        assert_out_of_range(link(Arch::Aarch64, &[&object]), "CALL26");
+        assert_link_error(
+            link(Arch::Aarch64, &[&object]),
+            out_of_range("CALL26: value 0x8000000 at 0x4000b0"),
+        );
     }
 
     /// `ldr x0, [x1, :lo12:var]` can only encode a multiple of 8: an address that is not is refused
     /// (as `ld.lld` does) rather than truncated to the doubleword below it.
     #[test]
     fn an_aarch64_load_from_a_misaligned_address_is_refused() {
-        for (r_type, misaligned_by) in [(284, 1), (285, 2), (286, 4), (299, 8)] {
+        for (r_type, misaligned_by, what, alignment) in [
+            (284, 1, "LDST16_ABS_LO12_NC", 2),
+            (285, 2, "LDST32_ABS_LO12_NC", 4),
+            (286, 4, "LDST64_ABS_LO12_NC", 8),
+            (299, 8, "LDST128_ABS_LO12_NC", 16),
+        ] {
             let mut object = Obj::new(Arch::Aarch64);
             let text = object.text_words(&[0xf940_0020]);
             let data = object.section(".data", SectionKind::Data, &[0; 32], 16);
             object.define("_start", text, 0);
             let var = object.define("var", data, 0);
             object.reloc(text, 0, var, misaligned_by, r_type);
-            assert_out_of_range(link(Arch::Aarch64, &[&object]), "aligned");
+            assert_link_error(
+                link(Arch::Aarch64, &[&object]),
+                out_of_range(&format!(
+                    "{what}: target is not {alignment}-byte aligned: value {:#x} at 0x4000b0",
+                    0x40_1000 + misaligned_by
+                )),
+            );
         }
     }
 
@@ -1192,7 +1237,10 @@ mod tests {
         let text = object.text_words(&[0x0000_00ef]);
         let start = object.define("_start", text, 0);
         object.reloc(text, 0, start, 0x10_0000, 17);
-        assert_out_of_range(link(Arch::Riscv64, &[&object]), "JAL");
+        assert_link_error(
+            link(Arch::Riscv64, &[&object]),
+            out_of_range("JAL: value 0x100000 at 0x4000b0"),
+        );
     }
 
     /// `hi20` is `(value + 0x800) >> 12`, so a value within 0x800 below 2 GiB fits 32 bits but not
@@ -1210,26 +1258,191 @@ mod tests {
                 _ => 0x7fff_ff00,
             };
             object.reloc(text, 0, start, addend, r_type);
-            assert_out_of_range(link(Arch::Riscv64, &[&object]), what);
+            assert_link_error(
+                link(Arch::Riscv64, &[&object]),
+                out_of_range(&format!("{what}: value 0x7fffff00 at {TEXT:#x}")),
+            );
         }
+    }
+
+    // ---- extreme addends ---------------------------------------------------------------------------
+    //
+    // `S` is a 64-bit address and `A` any 64-bit addend, so `S + A` and `S + A - P` need 66 bits.
+    // Computed in 64, a value 2^64 away from one that fits wraps onto it and passes the range
+    // check with the wrong patch. Each case below is one of those: an absolute symbol at `2^63`
+    // with `A = i64::MAX` is `2^64 - 1`, which 64-bit wrapping reads as `-1`, and one at
+    // `2^63 + 1 + P + 0x10` with the same addend is `S + A - P = 2^64 + 0x10`, read as `0x10`. The
+    // others are the other end: `A = i64::MIN` whose exact value does fit is still accepted.
+
+    /// Where a relocation `S + A - P` must land 2^64 past `0x10`: `S` for a site at `p`.
+    fn wraps_to_0x10_from(p: u64) -> u64 {
+        (1u64 << 63) + 1 + p + 0x10
+    }
+
+    const TWO_TO_THE_64_PLUS_0X10: &str = "0x10000000000000010";
+    const TWO_TO_THE_64_MINUS_1: &str = "0xffffffffffffffff";
+
+    /// `u64::MAX + i64::MAX`: past what a 64-bit field holds read either way. Wrapped in 64 bits
+    /// it is `i64::MAX - 1`, which the field would take.
+    const PAST_64_BITS: &str = "0x17ffffffffffffffe";
+
+    /// The absolute symbol and the value its `S + A` renders as for a field `width` bytes wide:
+    /// `2^63` for a narrower one, where `2^64 - 1` is already out of range, and `u64::MAX` for a
+    /// 64-bit one.
+    fn beyond_the_field(width: u64) -> (u64, &'static str) {
+        if width == 8 {
+            (u64::MAX, PAST_64_BITS)
+        } else {
+            (1 << 63, TWO_TO_THE_64_MINUS_1)
+        }
+    }
+
+    #[test]
+    fn an_x86_64_value_2_to_the_64_away_from_fitting_is_out_of_range() {
+        let p = TEXT + 1;
+        let (mut object, text) = x86_64_start(&[0xe8, 0, 0, 0, 0]);
+        let far = object.absolute("far", wraps_to_0x10_from(p));
+        object.reloc(text, 1, far, i64::MAX, 2); // R_X86_64_PC32
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            out_of_range(&format!("PC32: value {TWO_TO_THE_64_PLUS_0X10} at {p:#x}")),
+        );
+
+        for (r_type, what, width) in [(11, "32S", 4), (1, "64", 8)] {
+            let (mut object, _) = x86_64_start(&[0xc3]);
+            let data = object.section(".data", SectionKind::Data, &[0; 8], 8);
+            let (value, rendered) = beyond_the_field(width);
+            let far = object.absolute("far", value);
+            object.reloc(data, 8 - width, far, i64::MAX, r_type);
+            assert_link_error(
+                link(Arch::X86_64, &[&object]),
+                out_of_range(&format!(
+                    "{what}: value {rendered} at {:#x}",
+                    0x40_1000 + 8 - width
+                )),
+            );
+        }
+    }
+
+    #[test]
+    fn an_x86_64_extreme_negative_addend_that_fits_is_applied() {
+        let (mut object, _) = x86_64_start(&[0xc3]);
+        let data = object.section(".data", SectionKind::Data, &[0; 16], 8);
+        let origin = object.absolute("origin", 0x10);
+        let below = object.absolute("below", (1 << 63) - 0x10);
+        object.reloc(data, 0, origin, i64::MIN, 1); // R_X86_64_64: 0x10 - 2^63
+        object.reloc(data, 8, below, i64::MIN, 11); // R_X86_64_32S: -0x10
+        let bytes = linked(Arch::X86_64, &[&object]);
+        let image = Image(&bytes);
+        assert_eq!(image.u64(0x40_1000), 0x8000_0000_0000_0010);
+        assert_eq!(image.u32(0x40_1008), 0xffff_fff0);
+    }
+
+    #[test]
+    fn an_aarch64_value_2_to_the_64_away_from_fitting_is_out_of_range() {
+        let mut object = Obj::new(Arch::Aarch64);
+        let text = object.text_words(&[0x9400_0000]);
+        object.define("_start", text, 0);
+        let far = object.absolute("far", wraps_to_0x10_from(TEXT));
+        object.reloc(text, 0, far, i64::MAX, 283); // R_AARCH64_CALL26
+        assert_link_error(
+            link(Arch::Aarch64, &[&object]),
+            out_of_range(&format!(
+                "CALL26: value {TWO_TO_THE_64_PLUS_0X10} at {TEXT:#x}"
+            )),
+        );
+
+        let mut object = Obj::new(Arch::Aarch64);
+        let text = object.text_words(&[0xd65f_03c0]);
+        object.define("_start", text, 0);
+        let data = object.section(".data", SectionKind::Data, &[0; 8], 8);
+        let top = object.absolute("top", u64::MAX);
+        object.reloc(data, 0, top, i64::MAX, 257); // R_AARCH64_ABS64
+        assert_link_error(
+            link(Arch::Aarch64, &[&object]),
+            out_of_range(&format!("ABS64: value {PAST_64_BITS} at 0x401000")),
+        );
+    }
+
+    #[test]
+    fn an_aarch64_extreme_negative_addend_that_fits_is_applied() {
+        let mut object = Obj::new(Arch::Aarch64);
+        let text = object.text_words(&[0xd65f_03c0]);
+        object.define("_start", text, 0);
+        let data = object.section(".data", SectionKind::Data, &[0; 8], 8);
+        let origin = object.absolute("origin", 0x10);
+        object.reloc(data, 0, origin, i64::MIN, 257); // R_AARCH64_ABS64: 0x10 - 2^63
+        let bytes = linked(Arch::Aarch64, &[&object]);
+        assert_eq!(Image(&bytes).u64(0x40_1000), 0x8000_0000_0000_0010);
+    }
+
+    #[test]
+    fn a_riscv64_value_2_to_the_64_away_from_fitting_is_out_of_range() {
+        let mut object = Obj::new(Arch::Riscv64);
+        let text = object.text_words(&[0x0000_00ef]);
+        object.define("_start", text, 0);
+        let far = object.absolute("far", wraps_to_0x10_from(TEXT));
+        object.reloc(text, 0, far, i64::MAX, 17); // R_RISCV_JAL
+        assert_link_error(
+            link(Arch::Riscv64, &[&object]),
+            out_of_range(&format!(
+                "JAL: value {TWO_TO_THE_64_PLUS_0X10} at {TEXT:#x}"
+            )),
+        );
+
+        let mut object = Obj::new(Arch::Riscv64);
+        let text = object.text_words(&[0x0000_0537, 0x0000_8067]);
+        object.define("_start", text, 0);
+        let half = object.absolute("half", 1 << 63);
+        object.reloc(text, 0, half, i64::MAX, 26); // R_RISCV_HI20
+        assert_link_error(
+            link(Arch::Riscv64, &[&object]),
+            out_of_range(&format!("HI20: value {TWO_TO_THE_64_MINUS_1} at {TEXT:#x}")),
+        );
+
+        for (r_type, what, width) in [(1, "32", 4), (2, "64", 8)] {
+            let mut object = Obj::new(Arch::Riscv64);
+            let text = object.text_words(&[0x0000_8067]);
+            object.define("_start", text, 0);
+            let data = object.section(".data", SectionKind::Data, &[0; 8], 8);
+            let (value, rendered) = beyond_the_field(width);
+            let far = object.absolute("far", value);
+            object.reloc(data, 8 - width, far, i64::MAX, r_type);
+            assert_link_error(
+                link(Arch::Riscv64, &[&object]),
+                out_of_range(&format!(
+                    "{what}: value {rendered} at {:#x}",
+                    0x40_1000 + 8 - width
+                )),
+            );
+        }
+    }
+
+    #[test]
+    fn a_riscv64_extreme_negative_addend_that_fits_is_applied() {
+        let mut object = Obj::new(Arch::Riscv64);
+        let text = object.text_words(&[0x0000_8067]);
+        object.define("_start", text, 0);
+        let data = object.section(".data", SectionKind::Data, &[0; 8], 8);
+        let origin = object.absolute("origin", 0x10);
+        object.reloc(data, 0, origin, i64::MIN, 2); // R_RISCV_64: 0x10 - 2^63
+        let bytes = linked(Arch::Riscv64, &[&object]);
+        assert_eq!(Image(&bytes).u64(0x40_1000), 0x8000_0000_0000_0010);
     }
 
     // ---- malformed input is an error, never a panic or a stray write -----------------------------
 
-    fn assert_parse_error(result: Result<Vec<u8>, ProgramLinkError>, what: &str) {
-        match result {
-            Err(ProgramLinkError::Parse(said)) => assert!(said.contains(what), "{said}"),
-            other => panic!("expected a parse error naming {what:?}, got {other:?}"),
-        }
+    fn parse_error(what: &str) -> ProgramLinkError {
+        ProgramLinkError::Parse(what.to_string())
     }
 
     #[test]
     fn an_input_that_is_not_an_object_is_a_parse_error() {
         let garbage: &[u8] = b"not an object file at all";
-        assert!(matches!(
+        assert_link_error(
             link_static(&[garbage], linux(Arch::X86_64)),
-            Err(ProgramLinkError::Parse(_))
-        ));
+            parse_error("input 0 is not an ELF object"),
+        );
     }
 
     #[test]
@@ -1237,7 +1450,10 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0xc3]);
         let start = object.define("start_again", text, 0);
         object.reloc(text, 0xff_ffff, start, 0, 2);
-        assert_parse_error(link(Arch::X86_64, &[&object]), "past the end");
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            parse_error("input 0: a relocation at 0xffffff is past the end of `.text` (0x1 bytes)"),
+        );
     }
 
     /// A field that starts inside its section but ends past it would otherwise overwrite whatever
@@ -1253,7 +1469,10 @@ mod tests {
             neighbour.define("next", text, 0);
             (neighbour, text)
         };
-        assert_parse_error(link(Arch::X86_64, &[&object, &neighbour]), "past the end");
+        assert_link_error(
+            link(Arch::X86_64, &[&object, &neighbour]),
+            parse_error("relocation type 2 at 0x4000b2 reaches past the end of its section"),
+        );
     }
 
     /// `.bss` has no bytes in the file, so there is nothing a relocation in it could patch.
@@ -1263,7 +1482,10 @@ mod tests {
         let bss = object.uninitialized(".bss", SectionKind::UninitializedData, 16, 8);
         let var = object.define("var", bss, 0);
         object.reloc(bss, 0, var, 0, 1);
-        assert_parse_error(link(Arch::X86_64, &[&object]), "no bytes");
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            parse_error("input 0 relocates `.bss`, which has no bytes to patch"),
+        );
     }
 
     #[test]
@@ -1271,16 +1493,16 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0xe8, 0, 0, 0, 0]);
         let beyond = object.define("beyond", text, 0x1000);
         object.reloc(text, 1, beyond, -4, 4);
-        assert_parse_error(link(Arch::X86_64, &[&object]), "beyond");
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            parse_error("`beyond` of input 0 lies past the end of its section"),
+        );
     }
 
     // ---- objects for another machine --------------------------------------------------------------
 
-    fn assert_foreign(result: Result<Vec<u8>, ProgramLinkError>, what: &str) {
-        match result {
-            Err(ProgramLinkError::ForeignObject(said)) => assert!(said.contains(what), "{said}"),
-            other => panic!("expected a foreign object naming {what:?}, got {other:?}"),
-        }
+    fn foreign(what: &str) -> ProgramLinkError {
+        ProgramLinkError::ForeignObject(what.to_string())
     }
 
     /// An x86_64 object handed to a riscv64 link is named as such — even one whose only
@@ -1290,7 +1512,10 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0; 8]);
         let start = object.define("start_again", text, 0);
         object.reloc(text, 0, start, 0, 1); // R_X86_64_64, which is R_RISCV_32 by number
-        assert_foreign(link(Arch::Riscv64, &[&object]), "machine 62");
+        assert_link_error(
+            link(Arch::Riscv64, &[&object]),
+            foreign("input 0 is code for ELF machine 62, not Riscv64 (machine 243)"),
+        );
     }
 
     #[test]
@@ -1298,7 +1523,10 @@ mod tests {
         let mut object = Obj::of(Architecture::I386, Endianness::Little);
         let text = object.section(".text", SectionKind::Text, &[0xc3], 1);
         object.define("_start", text, 0);
-        assert_foreign(link(Arch::X86_64, &[&object]), "32-bit");
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            foreign("input 0 is a 32-bit ELF object; X86_64 links 64-bit ones"),
+        );
     }
 
     #[test]
@@ -1306,7 +1534,10 @@ mod tests {
         let mut object = Obj::of(Architecture::Aarch64, Endianness::Big);
         let text = object.section(".text", SectionKind::Text, &[0xd6, 0x5f, 0x03, 0xc0], 4);
         object.define("_start", text, 0);
-        assert_foreign(link(Arch::Aarch64, &[&object]), "big-endian");
+        assert_link_error(
+            link(Arch::Aarch64, &[&object]),
+            foreign("input 0 is big-endian; Aarch64 is little-endian"),
+        );
     }
 
     // ---- symbol binding and shapes ----------------------------------------------------------------
@@ -1352,20 +1583,20 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0xe8, 0, 0, 0, 0]);
         let missing = object.undefined("missing");
         object.reloc(text, 1, missing, -4, 4);
-        match link(Arch::X86_64, &[&object]) {
-            Err(ProgramLinkError::UndefinedSymbol(name)) => assert_eq!(name, "missing"),
-            other => panic!("expected `missing` to be undefined, got {other:?}"),
-        }
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            ProgramLinkError::UndefinedSymbol("missing".to_string()),
+        );
     }
 
     #[test]
     fn two_strong_definitions_are_a_duplicate() {
         let (first, _) = x86_64_start(&[0xc3]);
         let (second, _) = x86_64_start(&[0xc3]);
-        match link(Arch::X86_64, &[&first, &second]) {
-            Err(ProgramLinkError::DuplicateSymbol(name)) => assert_eq!(name, "_start"),
-            other => panic!("expected `_start` to be a duplicate, got {other:?}"),
-        }
+        assert_link_error(
+            link(Arch::X86_64, &[&first, &second]),
+            ProgramLinkError::DuplicateSymbol("_start".to_string()),
+        );
     }
 
     /// An `SHN_ABS` symbol's value is its address.
@@ -1412,12 +1643,13 @@ mod tests {
             flags: SymbolFlags::None,
         });
         object.reloc(text, 2, counter, -4, 2);
-        match link(Arch::X86_64, &[&object]) {
-            Err(ProgramLinkError::Unsupported(said)) => {
-                assert!(said.contains("thread-local"), "{said}")
-            }
-            other => panic!("expected thread-local storage to be unsupported, got {other:?}"),
-        }
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            ProgramLinkError::Unsupported(
+                "thread-local storage (section `.tbss` of input 0) is not supported by krusty's linker"
+                    .to_string(),
+            ),
+        );
     }
 
     #[test]
@@ -1425,9 +1657,13 @@ mod tests {
         let (mut object, text) = x86_64_start(&[0x8b, 0x05, 0, 0, 0, 0]);
         let tentative = object.common("tentative", 8, 8);
         object.reloc(text, 2, tentative, -4, 2);
-        match link(Arch::X86_64, &[&object]) {
-            Err(ProgramLinkError::Unsupported(said)) => assert!(said.contains("common"), "{said}"),
-            other => panic!("expected a common symbol to be unsupported, got {other:?}"),
-        }
+        assert_link_error(
+            link(Arch::X86_64, &[&object]),
+            ProgramLinkError::Unsupported(
+                "`tentative` is a common symbol (a tentative C definition), which krusty's linker \
+                 does not allocate; compile with -fno-common"
+                    .to_string(),
+            ),
+        );
     }
 }
