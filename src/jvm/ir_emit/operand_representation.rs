@@ -70,6 +70,9 @@ impl Emitter<'_> {
             "value_classes",
             "descriptor operand source={source:?} semantic={semantic:?} jvm={source_jvm:?} physical={physical:?}"
         );
+        if self.materialize_unit(source_jvm, physical, code) {
+            return;
+        }
         // A checked value-class value can reach a physical carrier slot as its BOX object (for
         // example, an element read from `Collection<Item>` inside an inlined `all` lambda). Primitive
         // wrapper unboxing is not applicable: `Item` is not `Integer`, even when its carrier is `int`.
@@ -129,6 +132,9 @@ impl Emitter<'_> {
         target: Ty,
         code: &mut CodeBuilder,
     ) {
+        if self.materialize_unit(source, ir_ty_to_jvm(&target), code) {
+            return;
+        }
         match self.reference_coercion(source, target) {
             ReferenceCoercion::Unchanged => {}
             ReferenceCoercion::Cast(internal) => {
@@ -137,6 +143,18 @@ impl Emitter<'_> {
             }
             ReferenceCoercion::Carried => self.narrow_on_stack(source, target, code),
         }
+    }
+
+    /// A Unit-valued operation leaves nothing on the stack (`V`). A reference consumer receives the
+    /// `kotlin/Unit` singleton, as kotlinc's `StackValue.coerce` from `VOID_TYPE` does. Answers
+    /// whether it pushed it.
+    fn materialize_unit(&mut self, source: Ty, physical: Ty, code: &mut CodeBuilder) -> bool {
+        if source != Ty::Unit || !physical.is_reference() {
+            return false;
+        }
+        let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+        true
     }
 
     /// What `coerce_reference_on_stack` does to a `source` value consumed as `target`, so a
