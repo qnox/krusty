@@ -287,6 +287,11 @@ fn a_progression_renders_compares_and_hashes_with_its_step() {
 }
 
 #[test]
+fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
+    run_driver("comparable_range_program_type");
+}
+
+#[test]
 fn an_empty_unsigned_until_is_the_declared_empty_range() {
     run_driver("range_unsigned_until_empty");
 }

@@ -587,11 +587,18 @@ void kt_rw_property_set(KRef self, KRef property, KRef value);
 /* ---- comparable ranges ------------------------------------------------------------------------
 
    `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS and each comparison is the value's own, through `kt_compare_any`. Not a
-   progression either: `Comparable` names no successor, so there is no step and no walk. */
+   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
+   chose that operation where it built the range, knowing the element type, so the runtime never
+   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
+   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
+   either: `Comparable` names no successor, so there is no step and no walk. */
 extern const KType kt_type_comparable_range;
 
-KRef kt_comparable_range(KRef start, KRef end);
+/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
+   leaves the exception pending and its answer means nothing. */
+typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
+
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
 kt_boolean kt_comparable_range_contains(KRef range, KRef value);
 kt_boolean kt_comparable_range_is_empty(KRef range);
 KRef kt_comparable_range_start(KRef range);

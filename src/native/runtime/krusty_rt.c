@@ -2449,8 +2449,12 @@ static KRef kt_floating_range_to_string(KRef self) {
 
    `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
    machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
-   `ClosedRange<T>`; it holds the two bounds as OBJECTS and asks each one how it compares, which is
-   exactly what `kt_compare_any` does here.
+   `ClosedRange<T>`; it holds the two bounds as OBJECTS and orders them by `T`'s `compareTo`, which
+   the range carries: the generator picked it where the range was built (see the header).
+
+   A program's `compareTo`, `equals`, `hashCode` and `toString` are the program's code, and any of
+   them may raise. Each member stops at the first one that does and answers nothing further, as
+   Kotlin's own members do: the exception propagates out of them before anything else runs.
 
    No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
    there is nothing to step by. A pair of bounds and the question `value in it`. */
@@ -2458,6 +2462,7 @@ typedef struct KComparableRange {
     KObjectHeader header;
     KRef start;
     KRef end;
+    kt_compare_fn compare;
 } KComparableRange;
 
 static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
@@ -2482,25 +2487,33 @@ const KType kt_type_comparable_range = {
     .vtable_length = 3,
 };
 
-KRef kt_comparable_range(KRef start, KRef end) {
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {
     KComparableRange *range =
         (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
     range->start = start;
     range->end = end;
+    range->compare = compare;
     return (KRef)range;
 }
 
 /* `start > end`, which is Kotlin's own `isEmpty` for this class. */
 kt_boolean kt_comparable_range_is_empty(KRef range) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(self->start, self->end) > 0;
+    kt_int order = self->compare(self->start, self->end);
+    return kt_pending_exception() == NULL && order > 0;
 }
 
 /* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
-   asks the same way round, which matters for a `compareTo` that is not symmetric. */
+   asks the same way round, which matters for a `compareTo` that is not symmetric. A first
+   comparison that raises is the answer: the second never runs. */
 kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(value, self->start) >= 0 && kt_compare_any(value, self->end) <= 0;
+    kt_int from_start = self->compare(value, self->start);
+    if (kt_pending_exception() != NULL || from_start < 0) {
+        return false;
+    }
+    kt_int to_end = self->compare(value, self->end);
+    return kt_pending_exception() == NULL && to_end <= 0;
 }
 
 KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
@@ -2514,27 +2527,56 @@ static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_comparable_range) {
         return false;
     }
-    if (kt_comparable_range_is_empty(self) && kt_comparable_range_is_empty(other)) {
+    kt_boolean self_empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    kt_boolean other_empty = kt_comparable_range_is_empty(other);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    if (self_empty && other_empty) {
         return true;
     }
     const KComparableRange *a = (const KComparableRange *)self;
     const KComparableRange *b = (const KComparableRange *)other;
-    return kt_equals(a->start, b->start) && kt_equals(a->end, b->end);
+    kt_boolean starts = kt_equals(a->start, b->start);
+    if (kt_pending_exception() != NULL || !starts) {
+        return false;
+    }
+    kt_boolean ends = kt_equals(a->end, b->end);
+    return kt_pending_exception() == NULL && ends;
 }
 
 static kt_int kt_comparable_range_hash_code(KRef self) {
-    if (kt_comparable_range_is_empty(self)) {
+    kt_boolean empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    if (empty) {
         return -1;
     }
     const KComparableRange *range = (const KComparableRange *)self;
-    return (kt_int)(31u * (uint32_t)kt_hash_code(range->start) +
-                    (uint32_t)kt_hash_code(range->end));
+    kt_int start = kt_hash_code(range->start);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    kt_int end = kt_hash_code(range->end);
+    return (kt_int)(31u * (uint32_t)start + (uint32_t)end);
 }
 
 static KRef kt_comparable_range_to_string(KRef self) {
     const KComparableRange *range = (const KComparableRange *)self;
-    KRef text = kt_string_plus(kt_to_string(range->start), kt_string_utf8("..", 2));
-    return kt_string_plus(text, kt_to_string(range->end));
+    KRef start = kt_to_string(range->start);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(start, kt_string_utf8("..", 2));
+    KRef end = kt_to_string(range->end);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    return kt_string_plus(text, end);
 }
 
 
