@@ -26,6 +26,9 @@ pub(crate) struct CoroutineRequest {
     pub line_number: u16,
     /// The physical slot of the `$completion` parameter, as the emitter assigned it.
     pub completion_slot: u16,
+    /// The internal name of the dispatch receiver the continuation's constructor takes, for a
+    /// member function.
+    pub dispatch_receiver: Option<String>,
 }
 
 /// What the transformation of one function found.
@@ -122,7 +125,7 @@ impl ClassWriter {
             source_file: &source_file,
             line_number: request.line_number,
             completion_slot: request.completion_slot,
-            dispatch_receiver: None,
+            dispatch_receiver: request.dispatch_receiver.as_deref(),
         };
         let (node, outcome) =
             match transform_named_function(node, &function).map_err(|error| describe(&error))? {
