@@ -76,10 +76,33 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_, '_>, cw: 
                 primary_ctor_parameter_descs(c)
             )
         });
-    // The constructor's LocalVariableTable after `this`: every named parameter, property-backed or
-    // plain, as the constructor's debug table lists them.
-    let parameter_locals: Vec<(String, String)> = c
-        .ctor_args
+    let parameter_locals = constructor_parameter_locals(c);
+    cw.seed_plain_constructor_tail(fq_name, &parameter_locals, default_marker_desc.as_deref());
+}
+
+/// Seed an enum constructor's LocalVariableTable strings, which kotlinc interns with the constructor,
+/// before `values`: `this`, the two synthetic `Enum` parameters, then every declared parameter.
+pub(super) fn seed_enum_constructor_locals(
+    c: &crate::ir::IrClass,
+    self_desc: &str,
+    cw: &mut ClassWriter,
+) {
+    let synthetic = [
+        ("this".to_string(), self_desc.to_string()),
+        ("$enum$name".to_string(), "Ljava/lang/String;".to_string()),
+        ("$enum$ordinal".to_string(), "I".to_string()),
+    ];
+    for (name, desc) in synthetic.into_iter().chain(constructor_parameter_locals(c)) {
+        cw.reserve_method_name(&name);
+        cw.reserve_descriptor(&desc);
+    }
+}
+
+/// The constructor's LocalVariableTable rows after its receiver and synthetic prefix: every named
+/// parameter, property-backed or plain (`enum class E(value: Int)` has no field `value`, but its
+/// constructor still lists it).
+fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)> {
+    c.ctor_args
         .iter()
         .zip(crate::jvm::parameter_names::constructor_local_variables(
             &c.ctor_args,
@@ -87,8 +110,7 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_, '_>, cw: 
         .filter_map(|(argument, name)| {
             Some((name?, crate::jvm::names::type_descriptor(argument.ty)))
         })
-        .collect();
-    cw.seed_plain_constructor_tail(fq_name, &parameter_locals, default_marker_desc.as_deref());
+        .collect()
 }
 
 /// Seed a data class's synthesized members once its constructors are written: the primary, its
