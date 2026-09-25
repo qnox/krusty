@@ -610,7 +610,7 @@ pub(super) fn synth_value_members(
             }
             let crate::ir::CtorDelegateTarget::This {
                 target_params,
-                to_primary: _,
+                target: _,
                 default_masks,
             } = &sc.delegate
             else {

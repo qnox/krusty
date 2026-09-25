@@ -307,7 +307,7 @@ fn blank_class(fq: &str) -> IrClass {
         super_arg_prelude: Vec::new(),
         super_args: Vec::new(),
         super_ctor_params: Vec::new(),
-        super_ctor_is_primary: true,
+        super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
         enum_entries: Vec::new(),
         enum_entry_of: None,
         prop_ref: None,

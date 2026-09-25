@@ -5,7 +5,7 @@ use super::{
     constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
 };
-use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
+use crate::ir::{IrClass, IrConstructorTarget, IrFile, IrSecondaryCtor};
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
 use crate::types::Ty;
 
@@ -124,36 +124,38 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
-            let (target_class, mut target_jvm_tys, target_is_primary, default_masks): (
+            let (target_class, mut target_jvm_tys, target, default_masks): (
                 String,
                 Vec<Ty>,
-                bool,
+                IrConstructorTarget,
                 &[i32],
             ) = match &sc.delegate {
                 CtorDelegateTarget::This {
                     target_params,
-                    to_primary,
+                    target,
                     default_masks,
-                    ..
                 } => (
                     fq_name.to_string(),
                     jvm_tys(target_params),
-                    *to_primary,
+                    *target,
                     default_masks,
                 ),
                 CtorDelegateTarget::Super {
                     owner,
                     target_params,
-                    to_primary,
+                    target,
                     default_masks,
                 } => {
                     let owner =
                         crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
-                    (owner, jvm_tys(target_params), *to_primary, default_masks)
+                    (owner, jvm_tys(target_params), *target, default_masks)
                 }
-                CtorDelegateTarget::ImplicitEnumBase => {
-                    ("java/lang/Enum".to_string(), Vec::new(), true, &[])
-                }
+                CtorDelegateTarget::ImplicitEnumBase => (
+                    "java/lang/Enum".to_string(),
+                    Vec::new(),
+                    IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                    &[],
+                ),
             };
             let delegates_to_this = matches!(sc.delegate, CtorDelegateTarget::This { .. });
             let forwards_owner_prefix =
@@ -242,16 +244,13 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // A delegation target whose primary ctor takes a value-class param has a PRIVATE primary —
             // reach it through the `(…args, DefaultConstructorMarker)` accessor, from a subclass's
-            // `super(…)` and from the class's own `this(…)` alike.
-            let targets_hidden_primary =
-                target_is_primary && e.ir.has_value_param_ctor(&target_class);
-            let target_sealed = target_is_primary
-                && target_class != fq_name
-                && e.ir
-                    .classes
-                    .iter()
-                    .any(|o| o.fq_name_matches(&target_class) && o.is_sealed);
-            if emitted_default_masks.is_empty() && (targets_hidden_primary || target_sealed) {
+            // `super(…)` and from the class's own `this(…)` alike. A sealed class's constructors
+            // are all reached that way.
+            let targets_hidden_primary = target.primary && e.ir.has_value_param_ctor(&target_class);
+            if emitted_default_masks.is_empty()
+                && (targets_hidden_primary
+                    || super::sealed_constructors::reached_through_accessor(target))
+            {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
@@ -316,9 +315,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         sctor.ensure_locals(sec_max);
         sctor.link();
-        // A SEALED class's secondary ctor is private too, with its own PUBLIC
-        // `(…args, DefaultConstructorMarker)` accessor (kotlinc: EVERY sealed ctor pairs with one).
-        // A VALUE-CLASS-parametered secondary ctor gets the same private+marker ABI (kotlinc's).
+        // A SEALED class hides its secondary ctor behind a PUBLIC `(…args, DefaultConstructorMarker)`
+        // accessor that `sealed_constructors` emits after the members. A VALUE-CLASS-parametered
+        // secondary ctor gets the same private+marker ABI (kotlinc's), its accessor right here.
         // An owner that carries a synthetic constructor prefix is an ENUM, whose constructors are
         // implicitly private in Kotlin and private in kotlinc's output. Emitting one public would
         // expose a way to construct an enum instance that the source never granted.
@@ -335,10 +334,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 entry.subclass.is_some()
                     && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
             });
-        let semantically_private = c.is_sealed
-            || sc.vc_params
-            || !owner_prefix_tys.is_empty()
-            || declared_access == 0x0002;
+        let semantically_private =
+            super::sealed_constructors::hides_secondary(ir, c, secondary_ordinal)
+                || sc.vc_params
+                || !owner_prefix_tys.is_empty()
+                || declared_access == 0x0002;
         let sc_access = (if enum_entry_subclass_target {
             // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
             // nestmate attributes yet, so use the same package-private synthetic bridge contract
@@ -501,14 +501,15 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &sc_source_tys,
                 &sc.defaults,
                 Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
-                sc.vc_params,
+                sc.vc_params
+                    || super::sealed_constructors::hides_secondary(ir, c, secondary_ordinal),
                 sc.annotations.deprecated(),
                 stub_access,
                 cw,
                 env,
             );
         }
-        if c.is_sealed || sc.vc_params {
+        if sc.vc_params && !c.is_sealed {
             let parameter_identities =
                 crate::jvm::method_parameters::secondary_constructor_identities(
                     c,
