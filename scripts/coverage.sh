@@ -48,6 +48,13 @@ coverage_cargo=(cargo "+${coverage_toolchain}")
 test_timeout="${KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS:-120}"
 e2e_timeout="${KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS:-300}"
 source scripts/test-deadline.sh
+source scripts/libtest-shards.sh
+# The e2e binary is the coverage workload, and one process of it outgrew the e2e deadline once the
+# native code generator's tests joined it. It is divided rather than given a longer deadline: whole
+# top-level modules are balanced into shards as run-tests.sh balances them, and each shard runs
+# alone under the e2e deadline and must run exactly the tests its plan assigned.
+e2e_shards="${KRUSTY_COVERAGE_E2E_SHARDS:-4}"
+libtest_require_positive_shard_count "$e2e_shards" "coverage: KRUSTY_COVERAGE_E2E_SHARDS"
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
 # suites (which need the stdlib jar / JVM runtime) don't silently skip and undercount coverage.
@@ -97,9 +104,14 @@ mapfile -t bins < <(
 
 # Keep the lib/bin unit-test executables and every integration binary except the excluded suites.
 run=()
+e2e_bin=""
 for b in "${bins[@]}"; do
   name="$(basename "$b" | sed 's/-[0-9a-f]*$//')"
   is_excluded "$name" && continue
+  if [ "$name" = e2e ]; then
+    e2e_bin="$b"
+    continue
+  fi
   run+=("$b")
 done
 echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-threads=$test_threads, timeout=${test_timeout}s, e2e-timeout=${e2e_timeout}s), conformance binary excluded" >&2
@@ -110,12 +122,9 @@ echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-t
 # large binary, so forcing it to 1 serializes almost the entire coverage workload; using a small
 # default preserves full coverage while avoiding the memory pressure seen with unbounded parallelism.
 run_coverage_test_binary() {
-  local binary="$1" status_root="$2" threads="$3" seconds="$4" e2e_seconds="$5"
+  local binary="$1" status_root="$2" threads="$3" seconds="$4"
   local name="$(basename "$binary")"
   local result="$status_root/$name"
-  if [[ "$name" == e2e-* ]]; then
-    seconds="$e2e_seconds"
-  fi
   mkdir -p "$result"
   if run_with_deadline "$seconds" "$binary" --quiet --test-threads="$threads" \
       >"$result/output.log" 2>&1; then
@@ -134,7 +143,53 @@ export -f run_coverage_test_binary
 
 status_dir="$(mktemp -d)"
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
-  bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout" "$e2e_timeout"
+  bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout"
+
+# The e2e shards, one at a time: the binary is internally parallel and each shard owns the cores.
+if [ -n "$e2e_bin" ]; then
+  plan_dir="$(mktemp -d)"
+  libtest_write_shard_plan \
+    "$e2e_bin" "$e2e_shards" "$plan_dir/e2e.list" "$plan_dir/e2e.plan" "$test_timeout"
+  for ((shard = 0; shard < e2e_shards; shard++)); do
+    label="e2e-shard-$((shard + 1))-of-$e2e_shards"
+    result="$status_dir/$label"
+    mkdir -p "$result"
+    expected="$(libtest_shard_expected_tests "$plan_dir/e2e.plan" "$shard")"
+    if [ "$expected" -eq 0 ]; then
+      printf '1\n' >"$result/status"
+      echo "coverage: $label was assigned no tests" >"$result/output.log"
+      continue
+    fi
+    if ! libtest_shard_skip_patterns \
+      "$plan_dir/e2e.plan" "$plan_dir/e2e.list" "$shard" >"$plan_dir/skips-$shard"; then
+      printf '1\n' >"$result/status"
+      echo "coverage: could not build safe filters for $label" >"$result/output.log"
+      continue
+    fi
+    skip_args=()
+    while IFS= read -r pattern; do
+      skip_args+=(--skip "$pattern")
+    done <"$plan_dir/skips-$shard"
+    echo "coverage: $label: $expected tests" >&2
+    if run_with_deadline "$e2e_timeout" "$e2e_bin" --quiet --test-threads="$test_threads" \
+        "${skip_args[@]}" >"$result/output.log" 2>&1; then
+      selected="$(libtest_selected_tests "$result/output.log" || echo 0)"
+      if [ "$selected" = "$expected" ]; then
+        rm -rf "$result"
+      else
+        printf '1\n' >"$result/status"
+        echo "coverage: $label ran $selected tests; its plan assigned $expected" >>"$result/output.log"
+      fi
+    else
+      status="$?"
+      printf '%s\n' "$status" >"$result/status"
+      if [ "$status" -eq 124 ]; then
+        printf 'coverage: TIMEOUT after %ss: %s\n' "$e2e_timeout" "$label" >>"$result/output.log"
+      fi
+    fi
+  done
+  rm -rf "$plan_dir"
+fi
 if compgen -G "$status_dir/*" >/dev/null; then
   echo "coverage: FAIL — test binaries reported failures:" >&2
   for result in "$status_dir"/*; do

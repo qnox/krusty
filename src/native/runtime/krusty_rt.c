@@ -5438,15 +5438,18 @@ KRef kt_cast(KRef object, const KType *type) {
     return object;
 }
 
+/* `null as String` is a NullPointerException NAMING the target type, not a ClassCastException —
+   `null` is not an instance of anything, so there is no class to report as the source. kotlinc's
+   exact wording, and its exact type. */
+static void kt_fail_null_cast(const char *target, kt_int target_length) {
+    KRef message = kt_string_plus(kt_string_utf8("null cannot be cast to non-null type ", 37),
+                                  kt_string_utf8(target, target_length));
+    kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, message));
+}
+
 KRef kt_cast_non_null(KRef object, const KType *type) {
     if (object == NULL) {
-        // `null as String` is a NullPointerException NAMING the target type, not a
-        // ClassCastException — `null` is not an instance of anything, so there is no class to
-        // report as the source. kotlinc's exact wording, and its exact type.
-        KRef message =
-            kt_string_plus(kt_string_utf8("null cannot be cast to non-null type ", 37),
-                           kt_string_utf8(type->name, type->name_length));
-        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, message));
+        kt_fail_null_cast(type->name, type->name_length);
         return object;
     }
     if (!kt_is_instance(object, type)) {
@@ -5457,6 +5460,15 @@ KRef kt_cast_non_null(KRef object, const KType *type) {
 
 KRef kt_safe_cast(KRef object, const KType *type) {
     return kt_is_instance(object, type) ? object : NULL;
+}
+
+/* A non-null cast whose target has no descriptor to test against, an erased type parameter: only
+   the null is checked, and the message names the target as the generator rendered it. */
+KRef kt_cast_non_null_erased(KRef object, const char *target, kt_int target_length) {
+    if (object == NULL) {
+        kt_fail_null_cast(target, target_length);
+    }
+    return object;
 }
 
 /* `x!!` on a null: Kotlin's `NullPointerException`, with NO message — which is what kotlinc emits

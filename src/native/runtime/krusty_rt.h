@@ -644,6 +644,9 @@ kt_boolean kt_is_instance(KRef object, const KType *type);
    runtime has exceptions. */
 KRef kt_cast(KRef object, const KType *type);
 KRef kt_cast_non_null(KRef object, const KType *type);
+/* A non-null cast to an erased type parameter: `null` fails with the rendered `target` in the
+   message, and anything else passes, since no descriptor is left to test against. */
+KRef kt_cast_non_null_erased(KRef object, const char *target, kt_int target_length);
 KRef kt_safe_cast(KRef object, const KType *type);
 
 /* `x!!` — yields `x`, or fails when it is null. Kotlin throws a NullPointerException here; with no

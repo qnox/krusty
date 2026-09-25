@@ -253,9 +253,15 @@ fn an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc() {
         "false true false | false true",
         "the reference compiler boxes the value class at the `Any` boundary"
     );
+    // The native backend gives each unsigned array a descriptor of its own, so there it answers
+    // what kotlinc answers; the divergence is the JVM backend's alone, and both are asserted.
     assert_eq!(
-        common::expect_box_run_with_stdlib(src, "UnsignedArrayErasureDivergence"),
+        common::expect_box_run_with_stdlib_diverging(
+            src,
+            "UnsignedArrayErasureDivergence",
+            "false true false | false true",
+        ),
         "true true false | true true",
-        "krusty does not box there yet — a known defect, not an accepted answer"
+        "krusty's JVM backend does not box there yet — a known defect, not an accepted answer"
     );
 }

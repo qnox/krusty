@@ -4424,6 +4424,37 @@ deliberately much less than a general linker; each limit below is a decision, no
   `src/native/linker/mod.rs` links against the real prebuilt runtime on every architecture and runs
   the result on an x86_64 Linux host; a build without the runtime skips them, except under `CI`.
 
+### Native code generator — Cranelift, the spine  ◐
+
+`src/native/codegen/` lowers checked common IR to a relocatable object per file with Cranelift,
+which `native::link_program` joins with the prebuilt runtime. It covers a subset of Kotlin and
+DECLINES the rest by name — `krusty: the native backend does not support <construct> yet` — so a
+construct is either lowered correctly or refused, never guessed. The generator lands in tiers,
+each one lowering more and declining less:
+
+- **The spine** (this tier): top-level functions, locals, control flow (`if`/`when`/loops with
+  labels, `break`/`continue`), arithmetic with Kotlin's semantics where the machine's differ (see
+  `lower/arithmetic.rs`), strings and templates, boxing of primitives, the unsigned integers as
+  scalars of their own, `is`/`as`/`as?` against the types the runtime names, and exceptions.
+- **Carriers.** A type is carried as a machine scalar, as a `KRef` (every reference, including
+  `Int?`, which must hold `null`), or as nothing (`Unit` in return position). A change between
+  carriers is one `convert`, and an expression whose type the lowering cannot state declines
+  rather than being guessed at.
+- **Exceptions** travel through the runtime's one pending slot: a `throw` records and returns, and
+  every call site loads the slot and branches. `try`/`catch`/`finally` are ordinary control flow
+  over that check, which is correct under Cranelift's SSA on every architecture. A `try`'s value
+  is typed by its checked result.
+- **Symbols** avoid the runtime's own: `runtime_symbols` is read once per build, and a program
+  name that would collide gets a numbered suffix.
+- **What the spine declines:** a class and a top-level property (both lowered from tier 2 on), and an entry `main(args)`, which every tier declines.
+- **Dependency calls** are realized through the provider's identity (`SymbolSource::external_callable`):
+  the runtime answers a fixed table of stdlib members (`native/intrinsics.rs`), and any other
+  dependency member declines.
+- Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
+  `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
+  skip and a wrong answer a failure. Every architecture is linked on one host
+  (`one_host_links_a_static_executable_for_every_supported_architecture`).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
