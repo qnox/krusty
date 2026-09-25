@@ -157,10 +157,16 @@ fn eligible_points(
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
-    // An open member's machine lives in its `$suspendImpl`, a later step.
+    // A member of a final class: an overridable one's machine lives in its `$suspendImpl`, and an
+    // interface body's in its own static, both later steps.
     let final_member = !function.is_static
-        && function.dispatch_receiver.is_some()
-        && !ir.open_methods.contains(&fid);
+        && !ir.open_methods.contains(&fid)
+        && function.dispatch_receiver.is_some_and(|owner| {
+            ir.classes.iter().any(|class| {
+                class.fq_name_id() == owner
+                    && !(class.is_open || class.is_abstract || class.is_sealed || class.is_interface)
+            })
+        });
     if !route.context.null_out_dead_spills
         || !(top_level || final_member)
         || ir.private_methods.contains(&fid)
