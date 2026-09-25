@@ -97,16 +97,16 @@ impl DownloadBudget {
     }
 
     /// Run `fetch` with the deadline the remaining budget allows, then charge the time it took.
-    /// Returns `None` without calling `fetch` once the budget is spent.
+    /// Returns `None` without calling `fetch` once the budget is spent. The budget stays locked for
+    /// the whole fetch, so concurrent callers take turns and each sees what the previous one left.
     pub(super) fn spend<T>(&self, fetch: impl FnOnce(Instant) -> T) -> Option<T> {
-        let start = Instant::now();
-        let remaining = *self.remaining.lock().unwrap_or_else(|e| e.into_inner());
+        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
         if remaining.is_zero() {
             return None;
         }
-        let result = fetch(start + remaining);
-        let mut left = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
-        *left = left.saturating_sub(start.elapsed());
+        let start = Instant::now();
+        let result = fetch(start + *remaining);
+        *remaining = remaining.saturating_sub(start.elapsed());
         Some(result)
     }
 }
@@ -268,5 +268,42 @@ mod tests {
         );
         assert_eq!(second, None::<DownloadOutcome>);
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_callers_share_one_budget() {
+        let budget = DownloadBudget::new(Duration::from_millis(300));
+        let barrier = std::sync::Barrier::new(2);
+        let fetches = AtomicU32::new(0);
+        let start = Instant::now();
+
+        let outcomes: Vec<Option<()>> = std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        budget.spend(|deadline| {
+                            fetches.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                        })
+                    })
+                })
+                .collect();
+            callers
+                .into_iter()
+                .map(|caller| caller.join().expect("caller thread"))
+                .collect()
+        });
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_some()).count(),
+            1
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(600),
+            "two callers took {:?} of a 300ms budget",
+            start.elapsed()
+        );
     }
 }
