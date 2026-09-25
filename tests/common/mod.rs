@@ -1,6 +1,9 @@
 //! Shared test helpers.
 
 mod kotlin_metadata;
+mod kotlinc_lib;
+pub mod language_directives;
+use kotlinc_lib::kotlinc_lib_out;
 pub mod source_set_compile;
 
 pub use source_set_compile::compile_in_process_files;
@@ -2087,33 +2090,6 @@ pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
     Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
-}
-
-/// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
-/// classpath dir. `None` = toolchain unavailable; kotlinc REJECTING the sources panics — the
-/// fixture is invalid Kotlin, which must never read as a skip.
-#[allow(dead_code)]
-fn kotlinc_lib_out(sources: &[(&str, &str)]) -> Option<PathBuf> {
-    let stdlib = stdlib_jar();
-    let work = scratch_dir()?;
-    let out = work.join("libout");
-    std::fs::create_dir_all(&out).ok()?;
-    let mut args = vec![
-        "-d".into(),
-        out.to_string_lossy().into_owned(),
-        "-cp".into(),
-        stdlib.to_string_lossy().into_owned(),
-    ];
-    for (name, src) in sources {
-        let path = work.join(name);
-        std::fs::write(&path, src).ok()?;
-        args.push(path.to_string_lossy().into_owned());
-    }
-    match kotlinc_compile(&args) {
-        Some((0, _)) => Some(out),
-        Some((code, err)) => panic!("kotlinc(lib) failed ({code}): {err}"),
-        None => None,
-    }
 }
 
 /// Builder-style fixture for JVM-backed e2e tests that DECLARES its environment requirements and

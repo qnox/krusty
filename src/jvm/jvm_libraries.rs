@@ -605,7 +605,9 @@ impl JvmLibraries {
         }
         if let Some(class) = self.cp.find_name(internal) {
             for property in metadata::class_properties(&class) {
-                push(property.name.clone());
+                if !property.is_companion_block_member {
+                    push(property.name.clone());
+                }
             }
             // A Java field is surfaced to Kotlin as a property declaration. A Kotlin scalar's JVM
             // wrapper is only its backend carrier, however: `Character.value` is not a property of
@@ -2119,6 +2121,12 @@ impl JvmLibraries {
                         == Some(crate::types::type_name("kotlin/enums/EnumEntries"))
                 {
                     enum_entries_accessor = Some(member);
+                } else if declaration.is_some_and(|declaration| {
+                    declaration.is_companion_block_member() && m.is_static()
+                }) {
+                    // A `companion { … }` block function is a static member of its class, called
+                    // through the classifier like any other classifier callable.
+                    companion.push(member);
                 } else if declaration.is_some() {
                     members.push(member);
                 } else if m.is_static() {
@@ -3666,6 +3674,104 @@ impl JvmLibraries {
         Some(property)
     }
 
+    /// A `companion { … }` block property of `internal`, declared by its class `@Metadata`: a static
+    /// member of the class realized by public static accessors on the class itself (its backing
+    /// field is private), read and written with no receiver.
+    fn companion_block_property(&self, internal: TypeName, name: &str) -> Option<PropertyInfo> {
+        let class = self.cp.find_name(internal)?;
+        let declaration = super::metadata::class_properties(&class)
+            .iter()
+            .find(|property| property.is_companion_block_member && property.name == name)?;
+        let static_accessor = |signature: &super::metadata::MetaJvmMethodSig| {
+            class.methods.iter().any(|method| {
+                method.is_static()
+                    && method.is_public()
+                    && method.name == signature.name
+                    && method.descriptor == signature.desc
+            })
+        };
+        let getter_signature = declaration
+            .getter
+            .clone()
+            .filter(|signature| static_accessor(signature))?;
+        let (getter_params, physical_ret) = parse_method_desc(&getter_signature.desc)?;
+        if !getter_params.is_empty() {
+            return None;
+        }
+        let generic = declaration.generic_sig.as_ref();
+        let ty = generic.map_or_else(
+            || {
+                let ty = declaration
+                    .ret_class
+                    .map_or(physical_ret, kotlin_type_name_to_ty);
+                if declaration.ret_nullable {
+                    Ty::nullable(ty)
+                } else {
+                    ty
+                }
+            },
+            |signature| signature.ret,
+        );
+        let getter = LibraryCallable::library(
+            internal,
+            getter_signature.name,
+            Vec::new(),
+            ty,
+            physical_ret,
+            getter_signature.desc,
+        );
+        let setter = declaration
+            .setter
+            .clone()
+            .filter(|signature| static_accessor(signature))
+            .and_then(|signature| {
+                let (params, ret) = parse_method_desc(&signature.desc)?;
+                if params.len() != 1 || ret != Ty::Unit {
+                    return None;
+                }
+                let mut setter = LibraryCallable::library(
+                    internal,
+                    signature.name,
+                    params,
+                    Ty::Unit,
+                    ret,
+                    signature.desc,
+                );
+                setter.params = vec![ty];
+                Some(setter)
+            });
+        let mut property = PropertyInfo {
+            name: name.to_string(),
+            kind: PropKind::TopLevel,
+            receiver: None,
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
+            getter,
+            setter,
+            setter_visibility: declaration.visibility,
+            setter_parameter_name: declaration.setter_parameter_name.clone(),
+            is_const: declaration.is_const,
+            implicit_integer_coercion: false,
+            compile_time_constant: None,
+            visibility: declaration.visibility,
+            owner: internal,
+            receiver_rank: 0,
+            source_key: None,
+            stable_declaration: None,
+            getter_declaration: None,
+            setter_declaration: None,
+            source_member: None,
+            accessor_derived: false,
+            read_stability: crate::libraries::PropertyReadStability::Unstable,
+            return_value_status: Some(declaration.return_value_status),
+        };
+        self.register_external_property(&mut property);
+        Some(property)
+    }
+
     fn register_external_callables(
         &self,
         callables: crate::libraries::Callables,
@@ -3790,7 +3896,8 @@ impl JvmLibraries {
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
-                if mp.name != name {
+                // A `companion { … }` block property is a classifier member, not an instance one.
+                if mp.name != name || mp.is_companion_block_member {
                     continue;
                 }
                 crate::trace_compiler!(
@@ -5785,6 +5892,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         internal: TypeName,
         name: &str,
     ) -> Option<crate::libraries::PropertyInfo> {
+        if let Some(property) = self.companion_block_property(internal, name) {
+            return Some(property);
+        }
         self.associated_property_for_static_field(
             self.classifier_static_field_name(internal, name)?,
         )

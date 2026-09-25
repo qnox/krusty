@@ -516,6 +516,9 @@ struct ParsedFunction {
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
     /// them.
     return_value_status: crate::types::ReturnValueStatus,
+    /// `Function.flags` companion bit: a `companion { … }` block member, or a written
+    /// `companion fun C.f()` when a receiver is present.
+    is_companion: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<ParsedJvmSignature>,
@@ -711,6 +714,9 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
+        // The companion bit exists only in the modern flag layout.
+        is_companion: modern_flags
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_COMPANION != 0),
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1670,6 +1676,7 @@ impl MfnFlags {
     const DEPRECATED_HIDDEN: u16 = 1 << 7;
     const IS_ABSTRACT: u16 = 1 << 8;
     const IS_FINAL: u16 = 1 << 9;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1724,6 +1731,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_final(self, on: bool) -> Self {
         self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
     }
 }
 
@@ -1819,6 +1830,12 @@ impl MetaFn {
     #[inline]
     pub fn has_reified_type_params(&self) -> bool {
         self.flags.has(MfnFlags::HAS_REIFIED_TYPE_PARAMS)
+    }
+    /// A `companion { … }` block member: a static member of the class that declares the block, called
+    /// through the classifier with no receiver.
+    #[inline]
+    pub fn is_companion_block_member(&self) -> bool {
+        self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -1976,6 +1993,9 @@ pub struct MetaProp {
     pub is_var: bool,
     /// This exact property is the value class's underlying storage declaration, joined by wire id.
     pub is_inline_underlying: bool,
+    /// A `companion { … }` block property: a static member of the class that declares the block,
+    /// read and written through its static accessors with no receiver.
+    pub is_companion_block_member: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
@@ -2886,6 +2906,7 @@ fn decode_functions(
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)
                             .with_is_infix(pf.is_infix)
+                            .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),
@@ -3810,6 +3831,10 @@ fn decode_properties(
             is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
             receiver_class,
             is_extension: receiver_body.is_some(),
+            is_companion_block_member: receiver_body.is_none()
+                && modern_flags.is_some_and(|flags| {
+                    flags & crate::metadata::property_flags::IS_COMPANION != 0
+                }),
         });
     }
     Ok(out)
