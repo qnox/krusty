@@ -4472,6 +4472,37 @@ each one lowering more and declining less:
   it too, so the list only shrinks. A corpus case is prepared for its target
   (`conformance::prepare_test_source(src, TestTarget::Native)`): `OPTIONAL_JVM_INLINE_ANNOTATION`
   expands to nothing off the JVM, as Kotlin's own runner does.
+- **Value classes and `Result`** (tier 6), through the value-class semantics every backend
+  shares (`crate::value_classes`):
+  - **The inventory** (`native/value_classes.rs`): one exact inventory per file. It holds every
+    classifier the IR references, walked by the shared `IrFile::referenced_classifiers` (the JVM's
+    inventory starts from the same walk), plus every classifier their declared underlying types
+    reach. Each one's underlying type comes from the checked classifier facts
+    (`CheckedIrFile.classifiers`), local and dependency alike. It is refused when two publications
+    disagree, when a class the IR marks as a value class has no checked declaration, and when the
+    declaration graph reaches itself. The unsigned integers and the specialized primitive arrays
+    stay built-ins, as on the JVM.
+  - **The policy**: this target's `RepresentationPolicy`.
+    - A non-null `V` is carried as its underlying value.
+    - A `V?` is too, when that value is a reference that cannot itself be `null`.
+    - Anywhere else — a nullable scalar underlying value, a nullable underlying type, and any
+      position typed `Any`, a type parameter or an interface — `V` is carried as a BOX of `V`'s
+      own type.
+    - Every carrier decision (`FileLowering::carrier`, `classes::c_kind`) reads the projected
+      type.
+  - **Boundaries**: `convert` boxes and unboxes `V` itself at a representation boundary, never
+    the value inside. A cast to `V` unboxes what passed the check, and `!!` answers the value.
+  - **Members**: `V`'s own members take the value as `this`. Its box's vtable reaches them
+    through unboxing bridges (`Slot::ValueBridge`), and `equals`, `hashCode` and `toString` are
+    answered by the value (`Slot::ValueMember`).
+  - **Construction**: runs the constructor on a box, so `init` blocks run once when the value is
+    made, and then reads the value out.
+  - **Storage**: the box stores the value at the declared underlying type
+    (`classes::field_storage_ty`), which a generic value class's IR field spells as its type
+    parameter. The field is found by the property the declaration names, never by position.
+  - **`Result`** is carried as its declared `Any?`: a success is the value and a failure the
+    runtime's marker. Its members are recognized by classifier identity (`lower/results.rs`).
+    Boxing a value class this file does not declare declines.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

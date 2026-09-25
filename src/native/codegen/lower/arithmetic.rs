@@ -76,7 +76,7 @@ impl BodyLowering<'_, '_, '_> {
         let Some(ty) = ty else {
             return Ok(value);
         };
-        if carrier(ty) != Carrier::Ref {
+        if self.carrier(ty) != Carrier::Ref {
             return Ok(value);
         }
         let Some(scalar) = scalar_bound(ty) else {
@@ -212,7 +212,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Whether an operand is `null`, as a `Boolean`. A scalar one never is, and says so with a
     /// constant rather than a comparison against a pointer it is not.
     fn is_null_operand(&mut self, value: Value, ty: Option<Ty>) -> Value {
-        if ty.map(carrier) != Some(Carrier::Ref) {
+        if ty.map(|ty| self.carrier(ty)) != Some(Carrier::Ref) {
             return self.builder.ins().iconst(types::I8, 0);
         }
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -230,15 +230,54 @@ impl BodyLowering<'_, '_, '_> {
         let rhs_ty = self.type_of(rhs);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
+            // Two occurrences of one value class, both carried as the value: Kotlin's `==` on
+            // them is the class's `equals`, which compares the values by THEIR type's `equals` —
+            // so `NaN` equals itself and the two zeroes differ, as they do in a box.
+            let unboxed = |ty: Option<Ty>| {
+                ty.filter(|ty| !ty.is_nullable())
+                    .and_then(|ty| self.file.values.unboxed(ty))
+            };
+            if let (Some(left), Some(right)) = (unboxed(lhs_ty), unboxed(rhs_ty)) {
+                // A class that declares its own `equals` answers by it, through its box below.
+                if left == right && !self.declares_its_own_equals(left) {
+                    let class = Ty::Obj(left, &[]);
+                    let Some(lhs) = self.coerce(lhs, class)? else {
+                        return Ok(None);
+                    };
+                    let Some(rhs) = self.coerce(rhs, class)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let equal = self.values_equal(lhs, rhs, class)?;
+                    return Ok(Some(if op == IrBinOp::Ne {
+                        let one = self.builder.ins().iconst(types::I8, 1);
+                        self.builder.ins().bxor(equal, one)
+                    } else {
+                        equal
+                    }));
+                }
+            }
             let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
             // `Unit` counts as a reference here: it is a VALUE in Kotlin, the runtime owns the one
             // instance of it, and `reference` materializes that singleton for an operand that
             // produces no machine value. `println("x") == Unit` is true, and comparing the two
             // through the ordinary reference path is what says so.
-            let reference_operand =
-                |ty: Option<Ty>| matches!(ty.map(carrier), Some(Carrier::Ref | Carrier::Void));
-            let on_references = reference_operand(lhs_ty) || reference_operand(rhs_ty);
+            let reference_operand = |ty: Option<Ty>| {
+                matches!(
+                    ty.map(|ty| self.carrier(ty)),
+                    Some(Carrier::Ref | Carrier::Void)
+                )
+            };
+            // A value class answering `equals` itself is asked through its box, whatever it holds.
+            let own_equals = [lhs_ty, rhs_ty]
+                .into_iter()
+                .filter_map(|ty| ty.and_then(|ty| self.file.values.unboxed(ty)))
+                .any(|class| self.declares_its_own_equals(class));
+            let on_references =
+                reference_operand(lhs_ty) || reference_operand(rhs_ty) || own_equals;
             if against_null {
                 // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
                 let left = self.reference(lhs)?;
@@ -305,8 +344,9 @@ impl BodyLowering<'_, '_, '_> {
             // equality on primitives is `==`, with a deprecation warning); boxing each side and
             // comparing the boxes' addresses would say `0L !== 0L`. Floating-point identity has
             // its own rules (`-0.0`, `NaN`) that nothing here implements yet, so it is declined.
-            let both_scalars = matches!(lhs_ty.map(carrier), Some(Carrier::Scalar(..)))
-                && matches!(rhs_ty.map(carrier), Some(Carrier::Scalar(..)));
+            let both_scalars =
+                matches!(lhs_ty.map(|ty| self.carrier(ty)), Some(Carrier::Scalar(..)))
+                    && matches!(rhs_ty.map(|ty| self.carrier(ty)), Some(Carrier::Scalar(..)));
             if both_scalars {
                 let Some(left) = self.expression(lhs)? else {
                     return Err("a `Unit` operand".to_string());
@@ -490,11 +530,13 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        Ok(Some(if carrier(ty).clif().is_some_and(Type::is_float) {
-            self.builder.ins().fneg(value)
-        } else {
-            self.builder.ins().ineg(value)
-        }))
+        Ok(Some(
+            if self.carrier(ty).clif().is_some_and(Type::is_float) {
+                self.builder.ins().fneg(value)
+            } else {
+                self.builder.ins().ineg(value)
+            },
+        ))
     }
 
     /// `isNaN`, `isInfinite`, `isFinite` — each one comparison on the unboxed value.
@@ -539,10 +581,28 @@ impl BodyLowering<'_, '_, '_> {
     }
 }
 
+impl BodyLowering<'_, '_, '_> {
+    /// Whether a value class of this file declares its own `equals`, which its box's first vtable
+    /// entry records: the synthesized answer by the value is there only where it does not.
+    fn declares_its_own_equals(&self, classifier: TypeName) -> bool {
+        self.file
+            .ir
+            .class_id_by_name(classifier)
+            .is_some_and(|class| {
+                !matches!(
+                    self.file.model.layout(class).vtable.first(),
+                    Some(model::Slot::ValueMember { .. })
+                )
+            })
+    }
+}
+
 pub(super) fn scalar_bound(ty: Ty) -> Option<Ty> {
     let mut at = ty.non_null();
     for _ in 0..16 {
-        if carrier(at) != Carrier::Ref {
+        // The MACHINE rule, not the projected one: a value class is no operand of a built-in
+        // operator, whatever it wraps.
+        if machine_carrier(at) != Carrier::Ref {
             return Some(at);
         }
         match at {

@@ -124,7 +124,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        if carrier(width).clif().is_none() {
+        if self.carrier(width).clif().is_none() {
             return Err(format!("an unsigned `{name}` on a non-scalar"));
         }
         let answer = match (name, operands.as_slice()) {
@@ -248,7 +248,7 @@ impl BodyLowering<'_, '_, '_> {
 
 /// The wider of an unsigned member's two operands, when the second is unsigned too.
 fn wider(element: Ty, other: Option<Ty>) -> Ty {
-    let bits = |ty: Ty| carrier(ty).clif().map_or(0, |clif| clif.bits());
+    let bits = |ty: Ty| machine_carrier(ty).clif().map_or(0, |clif| clif.bits());
     match other {
         Some(other) if other.non_null().is_unsigned() && bits(other.non_null()) > bits(element) => {
             other.non_null()

@@ -6805,6 +6805,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference it is handed Kotlin's `Unit` object rather than `null`.
   Tests: `tests/native_read_only_property_delegate_e2e.rs`
   (`a_unit_answering_delegate_reads_as_the_unit_object`).
+- **Native value classes: carried as the value, boxed as themselves.** A non-null occurrence is
+  its underlying value. A nullable one is too, where the value's own `null` can mean the outer one
+  (a non-null reference underneath); otherwise it is a box of the class's own type, as is every
+  occurrence in a position typed `Any`, a type parameter or an interface. Crossing between the two
+  boxes or unboxes the VALUE CLASS, so `is V`, `toString` (`V(x=1)`), `equals` and `hashCode` answer
+  as Kotlin's do, and `==` on two unboxed values compares by the underlying type's `equals`
+  (`NaN == NaN`, `0.0 != -0.0`). An `init` block runs when the value is made and never when it is
+  boxed. `Result` is its declared `Any?`: a success is the value, a failure a marker holding the
+  exception. Tests: `tests/native_value_classes_e2e.rs`, and
+  `native::value_classes::tests` for the inventory and the policy.
 - **Native: a local classifier is named as Kotlin/Native names it.** The frontend gives a local or
   anonymous classifier an opaque identity plus its naming provenance (lexical owner, source
   segments, ordinal), and each target spells the name from that. The walk is shared

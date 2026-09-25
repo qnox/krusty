@@ -41,6 +41,7 @@ mod default_arguments;
 mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
+mod referenced_classifiers;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
@@ -54,6 +55,7 @@ pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondar
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use referenced_classifiers::collect_classifiers;
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;

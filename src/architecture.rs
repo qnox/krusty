@@ -429,6 +429,11 @@ mod tests {
         // key for the member.
         assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "names", "types"]);
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+        // `value_classes` is the traversal every backend shares; what this file adds is the policy.
+        assert_allowed_crate_modules(
+            "src/native/value_classes.rs",
+            &["ir", "types", "value_classes"],
+        );
     }
 
     #[test]
