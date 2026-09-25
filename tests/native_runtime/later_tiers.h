@@ -34,7 +34,18 @@ __attribute__((weak)) void kt_clear_pending(void) { kt_pending = NULL; }
 __attribute__((weak)) const KType kt_type_null_pointer_exception = {
     .name = "kotlin.NullPointerException",
     .name_length = sizeof("kotlin.NullPointerException") - 1,
-    .instance_size = sizeof(KObjectHeader),
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
+};
+
+__attribute__((weak)) const KType kt_type_negative_array_size_exception = {
+    .name = "java.lang.NegativeArraySizeException",
+    .name_length = sizeof("java.lang.NegativeArraySizeException") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
     .super = &kt_type_any,
 };
 
