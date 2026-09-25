@@ -10,6 +10,15 @@ use crate::types::{Ty, TypeName};
 use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
+/// A language-defined classifier callable a reference names: what the checker resolved the
+/// reference's target to, and the parameter and result types it is called with.
+pub(super) struct ClassifierCallable<'a> {
+    pub(super) classifier: TypeName,
+    pub(super) operation: FirClassifierCallable,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+}
+
 fn unsupported_constructor_reference(
     target: &crate::fir::FirConstructorTarget,
 ) -> FirLoweringFailure {
@@ -338,17 +347,15 @@ impl BodyLowering<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_classifier_callable_reference(
         &mut self,
-        classifier: TypeName,
-        operation: FirClassifierCallable,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
+        callable: ClassifierCallable<'_>,
         binding: FirCallableReferenceBinding,
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let (classifier, parameters, result) =
+            (callable.classifier, callable.parameters, callable.result);
         let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
         if binding != FirCallableReferenceBinding::Static {
             return Err(failed());
@@ -397,9 +404,7 @@ impl BodyLowering<'_> {
         // declares (the array constructor's index and array).
         let enclosing_temporary = self.next_temporary;
         self.next_temporary = u32::try_from(reference.params.len()).map_err(|_| failed())?;
-        let call = self.classifier_callable_adapter_call(
-            classifier, operation, parameters, result, &arguments,
-        );
+        let call = self.classifier_callable_adapter_call(callable, &arguments);
         self.next_temporary = enclosing_temporary;
         let call = call?;
         let body = self.callable_reference_adapter_body(call, result.get(), reference.ret);
@@ -430,12 +435,15 @@ impl BodyLowering<'_> {
     /// The call an adapter for `operation` makes, over the adapter's own parameter reads.
     fn classifier_callable_adapter_call(
         &mut self,
-        classifier: TypeName,
-        operation: FirClassifierCallable,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
+        callable: ClassifierCallable<'_>,
         arguments: &[ExprId],
     ) -> Result<ExprId, FirLoweringFailure> {
+        let ClassifierCallable {
+            classifier,
+            operation,
+            parameters,
+            result,
+        } = callable;
         let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
         Ok(match (operation, arguments) {
             (FirClassifierCallable::EnumValues, []) => {
