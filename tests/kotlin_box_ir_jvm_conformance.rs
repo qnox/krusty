@@ -396,8 +396,10 @@ fn compile_multifile(
     if src.contains("// WITH_COROUTINES") {
         blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
     }
-    if blocks.is_empty() || (blocks.len() < 2 && java_blocks.is_empty()) {
-        return None; // not actually multi-file (and nothing for javac either)
+    // A lone `// FILE: main.kt` block still names the file (and so its facade class), exactly as
+    // kotlinc's test infra compiles it; only a source with no Kotlin at all is rejected here.
+    if blocks.is_empty() {
+        return None;
     }
 
     // Compile the Java blocks first (in-process javac, persistent JVM — no per-test spawn); krusty
@@ -1122,6 +1124,19 @@ fn scratch_directory_classpaths_are_not_retained() {
     assert!(classpath_paths_are_cacheable(
         &[manifest.join("Cargo.toml")]
     ));
+}
+
+#[test]
+fn a_single_file_marker_compiles_under_its_declared_stem() {
+    let classes = compile_multifile(
+        "// FILE: declared.kt\nfun box(): String = \"OK\"\n",
+        "fallback",
+        &[],
+        None,
+    )
+    .expect("a named Kotlin block is a complete compilation unit");
+
+    assert_eq!(find_box_class(&classes).as_deref(), Some("DeclaredKt"));
 }
 
 #[test]
