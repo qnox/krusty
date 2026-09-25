@@ -164,7 +164,10 @@ fn eligible_points(
         && function.dispatch_receiver.is_some_and(|owner| {
             ir.classes.iter().any(|class| {
                 class.fq_name_id() == owner
-                    && !(class.is_open || class.is_abstract || class.is_sealed || class.is_interface)
+                    && !(class.is_open
+                        || class.is_abstract
+                        || class.is_sealed
+                        || class.is_interface)
             })
         });
     if !route.context.null_out_dead_spills
