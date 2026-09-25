@@ -6145,6 +6145,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
   `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
   `a_function_type_is_not_a_function_of_an_unrelated_result`).
+- **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
+  what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
+  slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
+  that raises must return right after (a null `UInt?` unboxed used to fall through and dereference
+  the null). Integer `/` and `%` by zero record `ArithmeticException: / by zero`; `MIN_VALUE / -1`
+  wraps; `mod` takes the divisor's sign; shift counts are masked to 5/6 bits; unsigned `/`, `%` and
+  `toString` read their operands unsigned; a callable reference hashes as `31 * target +
+  receiver.hashCode()` on the wrapping ring. Two DIVERGENCES from the JVM backend, both deliberate:
+  a runtime exception names Kotlin's class (`kotlin.ArithmeticException: / by zero`, and
+  `assertFailsWith` reads `Expected an exception of class kotlin.IllegalStateException …`) where the
+  JVM names `java.lang.…`; and an uncaught exception prints `Exception in thread "main" <toString>`
+  and ends the program with status 134, this target's code for every abnormal end, where the JVM
+  exits with 1. String literals are interned through one runtime-owned table, so their number is not
+  bounded by the collector's global-root table.
+  An entry that calls a program's own `equals`, `hashCode` or `toString` — the kotlin.test
+  assertions comparing and rendering their operands, `assertFailsWith` rendering what was thrown,
+  `Throwable(cause)` rendering its cause, a bound reference's `equals`/`hashCode` asking its
+  receiver's, `print`/`println` — checks the pending slot right after that call and returns when it
+  raised, so the program's exception is the one in flight: an assertion does not raise its
+  `AssertionError` over it, `Throwable(cause)` constructs nothing, and `print`/`println` write no
+  byte (not the `null` the renderer falls back to, nor `println`'s newline). The uncaught report
+  empties the slot before it runs the exception's `toString`, since generated code entered with the
+  slot full takes it for its own raise after its first call; a `toString` that raises there is
+  reported as the JVM reports it, `Exception in thread "main" ` and then `Exception: <class> thrown
+  from the UncaughtExceptionHandler in thread "main"` naming the class it raised (Kotlin's name, per
+  the divergence above), with status 134.
+  Tests: `tests/native_runtime_e2e.rs` (`integer_arithmetic_and_exceptions_answer_as_kotlin_does`,
+  `unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns`,
+  `equal_callable_references_hash_on_the_wrapping_ring`,
+  `string_literals_outnumbering_the_global_roots_stay_interned_and_alive`,
+  `a_program_member_that_raises_inside_a_runtime_call_keeps_its_exception_in_flight`,
+  `a_print_whose_to_string_raises_writes_nothing`,
+  `the_uncaught_report_runs_to_string_with_nothing_in_flight`,
+  `an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_it`). The last two
+  run the uncaught path to its end and check its status and exact report.
 - **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
   in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
   `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered
