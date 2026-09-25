@@ -5,7 +5,6 @@
 use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
-use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 
 use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
@@ -169,7 +168,7 @@ impl Checker<'_> {
         } else {
             first.ty
         };
-        let Some(last_element) = self.progression_last_element(element) else {
+        let Some(last_element) = self.progression_last_element(element, step.ty) else {
             return;
         };
         self.progression_plans.insert(
@@ -184,31 +183,45 @@ impl Checker<'_> {
         );
     }
 
-    /// The `kotlin.internal.getProgressionLastElement` overload from and to `element`. Its step
-    /// parameter's type is the declaration's.
-    fn progression_last_element(&self, element: Ty) -> Option<RuntimeFunction> {
-        let symbols = self.fed_source().symbols(
-            crate::symbol_source::SymbolNamespace::Package(wk::kotlin_internal_package()),
+    /// The `kotlin.internal.getProgressionLastElement` overload a counted loop calls with
+    /// `(first, last, step)` of `element`, `element` and the progression's `step` type, selected by
+    /// the ordinary top-level overload selector. It must return `element`.
+    fn progression_last_element(&self, element: Ty, step: Ty) -> Option<RuntimeFunction> {
+        let function = self.select_runtime_function(
+            wk::kotlin_internal_package(),
             wk::PROGRESSION_LAST_ELEMENT,
-        );
-        let (functions, _) = symbols.callables.clone().into_parts();
-        functions
-            .overloads
-            .into_iter()
-            .filter(|function| function.kind == crate::libraries::FnKind::TopLevel)
-            .find_map(|function| {
-                let callable = function.callable;
-                let [first, last, _] = callable.params.as_slice() else {
-                    return None;
-                };
-                if *first != element || *last != element || callable.ret != element {
-                    return None;
-                }
-                Some(RuntimeFunction {
-                    function: callable.external_identity?,
-                    parameters: callable.params.into_boxed_slice(),
-                    result: callable.ret,
-                })
-            })
+            &[element, element, step],
+        )?;
+        (function.result == element).then_some(function)
+    }
+
+    /// Selects the stdlib function `name` of `package` a compiler-inserted call with `arguments`
+    /// reaches, through the same candidate collection and overload selection as a source call to
+    /// it. The call is kotlinc's own, so the declaration's visibility (`@PublishedApi internal`)
+    /// does not restrict it; an ambiguous or inapplicable family selects nothing.
+    fn select_runtime_function(
+        &self,
+        package: crate::types::TypeName,
+        name: &str,
+        arguments: &[Ty],
+    ) -> Option<RuntimeFunction> {
+        let scope = [package];
+        let resolver = self.resolver_in_scope(&scope);
+        let arguments = arguments
+            .iter()
+            .map(|argument| crate::symbol_resolver::CallArgKind::Typed(*argument))
+            .collect::<Vec<_>>();
+        let (selected, _) = resolver.select_top_level_function_candidates_ignoring_visibility(
+            name,
+            resolver.top_level_candidates(name),
+            &arguments,
+            &[],
+        )?;
+        let callable = selected.callable;
+        Some(RuntimeFunction {
+            function: callable.external_identity?,
+            parameters: callable.params.into_boxed_slice(),
+            result: callable.ret,
+        })
     }
 }
