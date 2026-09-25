@@ -195,89 +195,15 @@ impl Emitter<'_> {
     }
 
     /// A cast target as kotlinc's IR renderer spells it in
-    /// `null cannot be cast to non-null type …`.
+    /// `null cannot be cast to non-null type …`. A top-level function is a member of its facade.
     fn rendered_cast_target(&self, ty: Ty) -> String {
-        let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
-            let rendered: Vec<String> = arguments
-                .map(|argument| self.rendered_cast_target(argument))
-                .collect();
-            if rendered.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", rendered.join(", "))
-            }
-        };
-        match ty {
-            Ty::Unit => "kotlin.Unit".to_string(),
-            Ty::Nothing => "kotlin.Nothing".to_string(),
-            Ty::Null => "kotlin.Nothing?".to_string(),
-            Ty::Error => "<error>".to_string(),
-            Ty::Pending => "<pending>".to_string(),
-            Ty::Obj(name, types) => format!(
-                "{}{}",
-                name.render().replace(['/', '$'], "."),
-                arguments(&mut types.iter().copied())
-            ),
-            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_target(*inner)),
-            Ty::PlatformNullable(inner) => self.rendered_cast_target(*inner),
-            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_target(*inner)),
-            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_target(*inner)),
-            Ty::StarProjection(_) => "*".to_string(),
-            Ty::TyParam(name, _) => self.rendered_type_parameter(name),
-            Ty::Fun(signature) => format!(
-                "{}{}{}",
-                if signature.suspend {
-                    "kotlin.coroutines.SuspendFunction"
-                } else {
-                    "kotlin.Function"
-                },
-                signature.params.len(),
-                arguments(&mut signature.params.iter().copied().chain([signature.ret]))
-            ),
-        }
-    }
-
-    /// Render one declaration-owned type parameter through its recorded semantic identity. The
-    /// opaque identity is only compared; its coordinates are never parsed back into an owner.
-    fn rendered_type_parameter(&self, identity: &str) -> String {
-        let source = crate::types::type_parameter_source_name(identity);
-        if let Some((&function, _)) = self
-            .ir
-            .signatures
-            .iter()
-            .filter(|(_, signature)| {
-                signature
-                    .type_params
-                    .iter()
-                    .any(|parameter| parameter.semantic_name == identity)
-            })
-            .min_by_key(|(function, _)| *function)
-        {
-            let declaration = &self.ir.functions[function as usize];
-            let owner = declaration.dispatch_receiver.unwrap_or_else(|| {
+        self.ir.rendered_cast_target(ty, &|function| {
+            Some(
                 self.ir
                     .foreign_template_facade(function)
-                    .unwrap_or_else(|| crate::types::type_name(&self.facade))
-            });
-            let name = self
-                .ir
-                .vc_declared_sigs
-                .get(&function)
-                .map_or(declaration.name.as_str(), |(name, _, _)| name.as_str());
-            return format!(
-                "{source} of {}.{name}",
-                owner.render().replace(['/', '$'], ".")
-            );
-        }
-        if let Some((owner, _)) = self.ir.class_signatures().find(|(_, signature)| {
-            signature
-                .type_params
-                .iter()
-                .any(|parameter| parameter.semantic_name == identity)
-        }) {
-            return format!("{source} of {}", owner.render().replace(['/', '$'], "."));
-        }
-        source.to_string()
+                    .unwrap_or_else(|| crate::types::type_name(&self.facade)),
+            )
+        })
     }
 
     fn emit_implicit_coercion(
