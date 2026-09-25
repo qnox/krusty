@@ -60,6 +60,16 @@ pub(crate) trait Interpreter {
     ) -> Result<(), AnalyzerError>;
     fn merge(&mut self, first: &Self::V, second: &Self::V) -> Self::V;
 
+    /// The meet of a local's values where two edges join: [`Interpreter::merge`] unless the
+    /// analysis's frame class tells locals from stack values (kotlinc's `BoxingFrame`).
+    fn merge_local(&mut self, first: &Self::V, second: &Self::V) -> Self::V {
+        self.merge(first, second)
+    }
+    /// The meet of an operand-stack value's values where two edges join.
+    fn merge_stack(&mut self, first: &Self::V, second: &Self::V) -> Self::V {
+        self.merge(first, second)
+    }
+
     fn new_empty_value(&mut self) -> Self::V {
         self.new_value(None)
             .expect("an interpreter's uninitialized value exists")
@@ -141,13 +151,15 @@ impl<V: Value> Frame<V> {
             return Err("incompatible stack heights".to_string());
         }
         let mut changed = false;
-        for (mine, theirs) in self
-            .locals
-            .iter_mut()
-            .chain(self.stack.iter_mut())
-            .zip(other.locals.iter().chain(other.stack.iter()))
-        {
-            let met = interpreter.merge(mine, theirs);
+        for (mine, theirs) in self.locals.iter_mut().zip(&other.locals) {
+            let met = interpreter.merge_local(mine, theirs);
+            if met != *mine {
+                *mine = met;
+                changed = true;
+            }
+        }
+        for (mine, theirs) in self.stack.iter_mut().zip(&other.stack) {
+            let met = interpreter.merge_stack(mine, theirs);
             if met != *mine {
                 *mine = met;
                 changed = true;
