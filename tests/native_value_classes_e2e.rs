@@ -42,11 +42,15 @@ fn a_value_class_answers_by_the_value_it_wraps() {
     every_backend_agrees_with_kotlinc("ValueClassAnswers", source);
 }
 
-/// Into `Any`, a type parameter and a collection, and back: each crossing boxes as `V`, not as
-/// the value inside, and a box read back out is the value again.
+/// Into `Any`, a type parameter and generic storage, and back: each crossing boxes as `V`, not as
+/// the value inside, and a box read back out is the value again. The storage is the program's own
+/// generic classes, so nothing but the representation is under test: a stdlib collection would
+/// reach this target's collection paths instead.
 #[test]
 fn a_value_class_is_boxed_as_itself_where_its_type_is_not_known() {
     let source = "@JvmInline value class Count(val n: Int)\n\
+         class Cell<T>(val value: T)\n\
+         data class Two<T>(val first: T, val second: T)\n\
          fun <T> identity(value: T): T = value\n\
          fun describe(value: Any): String = when (value) {\n\
          \x20   is Count -> \"count ${value.n}\"\n\
@@ -61,9 +65,10 @@ fn a_value_class_is_boxed_as_itself_where_its_type_is_not_known() {
          \x20   if (back.n != 4) return \"fail 3\"\n\
          \x20   val cast = any as Count\n\
          \x20   if (cast.n != 3) return \"fail 4\"\n\
-         \x20   val list = listOf(Count(1), Count(2))\n\
-         \x20   if (list[1].n != 2) return \"fail 5\"\n\
-         \x20   if (list != listOf(Count(1), Count(2))) return \"fail 6\"\n\
+         \x20   val cell = Cell(Count(2))\n\
+         \x20   if (cell.value.n != 2) return \"fail 5\"\n\
+         \x20   if (Two(Count(1), Count(2)) != Two(Count(1), Count(2))) return \"fail 6\"\n\
+         \x20   if (Two(Count(1), Count(2)) == Two(Count(1), Count(3))) return \"fail 6b\"\n\
          \x20   if ((any as? Count)?.n != 3) return \"fail 7\"\n\
          \x20   if ((\"x\" as Any as? Count) != null) return \"fail 8\"\n\
          \x20   return \"OK\"\n\
@@ -93,7 +98,8 @@ fn a_nullable_value_class_keeps_its_null_apart() {
 }
 
 /// A value class implementing an interface is dispatched through its box, and its own member,
-/// which takes the value as `this`, is reached through the bridge that unboxes.
+/// which takes the value as `this`, is reached through the bridge that unboxes. The call through
+/// the interface is the program's own function, not a stdlib aggregate.
 #[test]
 fn a_value_class_implements_an_interface_through_its_box() {
     let source = "interface Shape { fun area(): Int }\n\
@@ -101,9 +107,9 @@ fn a_value_class_implements_an_interface_through_its_box() {
          \x20   override fun area(): Int = side * side\n\
          \x20   override fun toString(): String = \"Square $side\"\n\
          }\n\
-         fun total(shapes: List<Shape>): Int = shapes.sumOf { it.area() }\n\
+         fun total(a: Shape, b: Shape): Int = a.area() + b.area()\n\
          fun box(): String {\n\
-         \x20   if (total(listOf(Square(2), Square(3))) != 13) return \"fail 1\"\n\
+         \x20   if (total(Square(2), Square(3)) != 13) return \"fail 1\"\n\
          \x20   val shape: Shape = Square(4)\n\
          \x20   if (shape.area() != 16) return \"fail 2\"\n\
          \x20   if (shape.toString() != \"Square 4\") return \"fail 3: $shape\"\n\
