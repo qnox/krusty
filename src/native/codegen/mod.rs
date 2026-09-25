@@ -30,14 +30,19 @@ use super::target::NativeTarget;
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
+/// What a `box()` program prints before its answer. The answer is every byte after the LAST
+/// occurrence, so output the program printed first cannot be mistaken for it, and an answer that
+/// spans lines is read whole. The NULs keep ordinary program output from spelling it.
+pub const BOX_RESULT_FRAME: &str = "\u{0}krusty box result\u{0}";
+
 /// Which top-level function a program starts in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Entry {
     /// Kotlin's `fun main()`.
     Main,
-    /// A `codegen/box` conformance case: `fun box(): String`, whose result the entry prints — so
-    /// the case's verdict (`OK`, or what went wrong) is the program's output, with no `main` written
-    /// into the corpus.
+    /// A `codegen/box` conformance case: `fun box(): String`, whose result the entry prints after
+    /// [`BOX_RESULT_FRAME`] — so the case's verdict (`OK`, or what went wrong) is the program's
+    /// output, with no `main` written into the corpus.
     Box,
 }
 

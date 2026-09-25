@@ -21,7 +21,7 @@ use super::prebuilt;
 use super::target::{Arch, NativeTarget};
 
 /// Why a link failed. Each names what a user (or the emitter's author) needs to act on.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProgramLinkError {
     /// krusty was built without a prebuilt runtime for this architecture (no C cross-compiler at
     /// build time), so there is nothing to link against.
@@ -112,7 +112,7 @@ mod tests {
     /// and names the one symbol a program is expected to supply.
     #[test]
     fn the_runtime_alone_is_missing_only_the_program_entry() {
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in NativeTarget::ALL.iter().map(|target| target.arch) {
             if !runtime_for(arch) {
                 continue;
             }
@@ -216,7 +216,7 @@ mod tests {
     /// among them, and the symbol a PROGRAM supplies is not.
     #[test]
     fn the_runtime_symbols_are_what_the_runtime_defines() {
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in NativeTarget::ALL.iter().map(|target| target.arch) {
             if !runtime_for(arch) {
                 assert!(runtime_symbols(arch).expect("no runtime").is_empty());
                 continue;
@@ -232,8 +232,10 @@ mod tests {
     /// rebuild krusty rather than to change the program.
     #[test]
     fn a_missing_runtime_names_its_remedy() {
-        let said = ProgramLinkError::NoRuntime(Arch::Riscv64).to_string();
-        assert!(said.contains("Riscv64"), "{said}");
-        assert!(said.contains("clang"), "{said}");
+        assert_eq!(
+            ProgramLinkError::NoRuntime(Arch::Riscv64).to_string(),
+            "krusty was built without the native runtime for Riscv64 (no C cross-compiler was \
+             available when krusty was built; install clang and rebuild krusty)"
+        );
     }
 }

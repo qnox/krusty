@@ -57,7 +57,7 @@ use crate::types::{Ty, TypeName};
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
 use super::super::target::NativeTarget;
-use super::{Entry, PROGRAM_ENTRY};
+use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 
 /// The construct a lowering declined, phrased for a diagnostic.
 pub type Unsupported = String;
@@ -274,7 +274,7 @@ pub fn lower_file(
                 }
             };
         if is_entry {
-            lowering.define_program_entry(index, statics_init)?;
+            lowering.define_program_entry(index, entry, statics_init)?;
             defines_entry = true;
         }
     }
@@ -973,9 +973,15 @@ impl<'a> FileLowering<'a> {
     /// collector, runs the entry function — printing its result when it has one, which is how a
     /// `box()` case reports its verdict — and exits through the kernel; it never returns to
     /// `_start`.
+    ///
+    /// A `box()` answer is printed after [`BOX_RESULT_FRAME`], with nothing after it: the answer is
+    /// every byte that follows the frame's last occurrence. Its last LINE would not do, because the
+    /// program's own output comes before it and an answer may span lines: `"FAIL\nOK"` is a wrong
+    /// answer whose last line is `OK`.
     fn define_program_entry(
         &mut self,
         main_index: usize,
+        entry: Entry,
         statics_init: Option<FuncId>,
     ) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
@@ -987,8 +993,17 @@ impl<'a> FileLowering<'a> {
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
         let uncaught = self.import("kt_check_uncaught", &[], Ty::Unit)?;
         let prints_result = self.carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
-        let println = if prints_result {
+        let println = if prints_result && entry == Entry::Main {
             Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
+        } else {
+            None
+        };
+        let framed = if prints_result && entry == Entry::Box {
+            Some((
+                self.string_data(BOX_RESULT_FRAME.as_bytes())?,
+                self.import("kt_string_utf8", &[Ty::obj("kotlin/Any"), Ty::Int], any())?,
+                self.import("kt_print_any", &[any()], Ty::Unit)?,
+            ))
         } else {
             None
         };
@@ -1034,6 +1049,20 @@ impl<'a> FileLowering<'a> {
                 let result = builder.inst_results(call)[0];
                 let println_ref = self.module.declare_func_in_func(println, builder.func);
                 builder.ins().call(println_ref, &[result]);
+            }
+            if let Some((frame, utf8, print)) = framed {
+                let result = builder.inst_results(call)[0];
+                let global = self.module.declare_data_in_func(frame, builder.func);
+                let bytes = builder.ins().symbol_value(types::I64, global);
+                let length = builder
+                    .ins()
+                    .iconst(types::I32, BOX_RESULT_FRAME.len() as i64);
+                let utf8_ref = self.module.declare_func_in_func(utf8, builder.func);
+                let made = builder.ins().call(utf8_ref, &[bytes, length]);
+                let marker = builder.inst_results(made)[0];
+                let print_ref = self.module.declare_func_in_func(print, builder.func);
+                builder.ins().call(print_ref, &[marker]);
+                builder.ins().call(print_ref, &[result]);
             }
             let zero = builder.ins().iconst(types::I32, 0);
             let exit_ref = self.module.declare_func_in_func(exit, builder.func);

@@ -1070,14 +1070,27 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
     return self->as.string.bytes;
 }
 
+/* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
+   one is not read as zero: Kotlin/JVM's builder allocates its storage as `new byte[capacity]`, so
+   `StringBuilder(-1)` throws that allocation's `NegativeArraySizeException`, whose message is the
+   capacity in decimal, and makes no builder. The same is raised here before the builder is
+   allocated, and the NULL returned is never read: the call site tests for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
+    if (capacity < 0) {
+        /* An `Int` is at most eleven bytes in decimal, the sign included: `-2147483648`. */
+        KByteArray *digits = kt_bytes_new(11);
+        kt_int length = kt_render_long(capacity, kt_bytes_of(digits));
+        KRef message = kt_string_of((KRef)digits, kt_bytes_of(digits), length);
+        kt_throw(kt_throwable_new(&kt_type_negative_array_size_exception, message));
+        return NULL;
+    }
     KStringBuilder *builder =
         (KStringBuilder *)kt_gc_allocate(&kt_type_string_builder, sizeof(KStringBuilder));
     builder->byte_length = 0;
     /* Stored before the array is allocated, so a collection triggered by that allocation never
        traces an uninitialized field. */
     builder->storage = NULL;
-    builder->storage = (KRef)kt_bytes_new(capacity > 0 ? capacity : 0);
+    builder->storage = (KRef)kt_bytes_new(capacity);
     return (KRef)builder;
 }
 
@@ -1235,6 +1248,11 @@ KRef kt_string_builder_append(KRef self, KRef value) {
    target: `StringBuilder.appendLine` is specified as `\n` and not as the platform separator. */
 KRef kt_string_builder_append_line(KRef self, KRef value) {
     self = kt_string_builder_append(self, value);
+    /* The append stopped on an exception the value's `toString` threw, leaving the builder as it
+       was; the newline stops there too, or the builder the caller catches it around has changed. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
     kt_string_builder_reserve(self, 1);
     KStringBuilder *builder = (KStringBuilder *)self;
     kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
@@ -2450,8 +2468,12 @@ static KRef kt_floating_range_to_string(KRef self) {
 
    `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
    machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
-   `ClosedRange<T>`; it holds the two bounds as OBJECTS and asks each one how it compares, which is
-   exactly what `kt_compare_any` does here.
+   `ClosedRange<T>`; it holds the two bounds as OBJECTS and orders them by `T`'s `compareTo`, which
+   the range carries: the generator picked it where the range was built (see the header).
+
+   A program's `compareTo`, `equals`, `hashCode` and `toString` are the program's code, and any of
+   them may raise. Each member stops at the first one that does and answers nothing further, as
+   Kotlin's own members do: the exception propagates out of them before anything else runs.
 
    No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
    there is nothing to step by. A pair of bounds and the question `value in it`. */
@@ -2459,6 +2481,7 @@ typedef struct KComparableRange {
     KObjectHeader header;
     KRef start;
     KRef end;
+    kt_compare_fn compare;
 } KComparableRange;
 
 static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
@@ -2483,25 +2506,33 @@ const KType kt_type_comparable_range = {
     .vtable_length = 3,
 };
 
-KRef kt_comparable_range(KRef start, KRef end) {
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {
     KComparableRange *range =
         (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
     range->start = start;
     range->end = end;
+    range->compare = compare;
     return (KRef)range;
 }
 
 /* `start > end`, which is Kotlin's own `isEmpty` for this class. */
 kt_boolean kt_comparable_range_is_empty(KRef range) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(self->start, self->end) > 0;
+    kt_int order = self->compare(self->start, self->end);
+    return kt_pending_exception() == NULL && order > 0;
 }
 
 /* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
-   asks the same way round, which matters for a `compareTo` that is not symmetric. */
+   asks the same way round, which matters for a `compareTo` that is not symmetric. A first
+   comparison that raises is the answer: the second never runs. */
 kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
     const KComparableRange *self = (const KComparableRange *)range;
-    return kt_compare_any(value, self->start) >= 0 && kt_compare_any(value, self->end) <= 0;
+    kt_int from_start = self->compare(value, self->start);
+    if (kt_pending_exception() != NULL || from_start < 0) {
+        return false;
+    }
+    kt_int to_end = self->compare(value, self->end);
+    return kt_pending_exception() == NULL && to_end <= 0;
 }
 
 KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
@@ -2515,27 +2546,56 @@ static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_comparable_range) {
         return false;
     }
-    if (kt_comparable_range_is_empty(self) && kt_comparable_range_is_empty(other)) {
+    kt_boolean self_empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    kt_boolean other_empty = kt_comparable_range_is_empty(other);
+    if (kt_pending_exception() != NULL) {
+        return false;
+    }
+    if (self_empty && other_empty) {
         return true;
     }
     const KComparableRange *a = (const KComparableRange *)self;
     const KComparableRange *b = (const KComparableRange *)other;
-    return kt_equals(a->start, b->start) && kt_equals(a->end, b->end);
+    kt_boolean starts = kt_equals(a->start, b->start);
+    if (kt_pending_exception() != NULL || !starts) {
+        return false;
+    }
+    kt_boolean ends = kt_equals(a->end, b->end);
+    return kt_pending_exception() == NULL && ends;
 }
 
 static kt_int kt_comparable_range_hash_code(KRef self) {
-    if (kt_comparable_range_is_empty(self)) {
+    kt_boolean empty = kt_comparable_range_is_empty(self);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    if (empty) {
         return -1;
     }
     const KComparableRange *range = (const KComparableRange *)self;
-    return (kt_int)(31u * (uint32_t)kt_hash_code(range->start) +
-                    (uint32_t)kt_hash_code(range->end));
+    kt_int start = kt_hash_code(range->start);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    kt_int end = kt_hash_code(range->end);
+    return (kt_int)(31u * (uint32_t)start + (uint32_t)end);
 }
 
 static KRef kt_comparable_range_to_string(KRef self) {
     const KComparableRange *range = (const KComparableRange *)self;
-    KRef text = kt_string_plus(kt_to_string(range->start), kt_string_utf8("..", 2));
-    return kt_string_plus(text, kt_to_string(range->end));
+    KRef start = kt_to_string(range->start);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(start, kt_string_utf8("..", 2));
+    KRef end = kt_to_string(range->end);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    return kt_string_plus(text, end);
 }
 
 
@@ -2795,11 +2855,25 @@ KRef kt_list_last(KRef list) {
     return kt_elements_of(((const KList *)list)->elements)[size - 1];
 }
 
+/* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
+   that asks an iterator for an element or calls back into emitted code -- a lambda, or an element's
+   own `equals`, `hashCode` or `toString` -- looks here before it uses the answer: after a raise the
+   answer is a placeholder that means nothing, and the walk has to end so the exception reaches its
+   caller. Kotlin's own walks are ordinary loops, which a throw leaves at once; one that went on
+   would act on the placeholder and call into the program again for the elements after it. */
+static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
+
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     kt_int length = kt_list_size(list);
     for (kt_int i = 0; i < length; i++) {
-        if (kt_equals(kt_elements_of(elements)[i], value)) {
+        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        /* An `equals` that threw answered nothing, whatever it returned: the search ends there with
+           no index, so `remove` built on it removes nothing, and no later element is compared. */
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return i;
         }
     }
@@ -2809,7 +2883,11 @@ kt_int kt_list_index_of(KRef list, KRef value) {
 kt_int kt_list_last_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
-        if (kt_equals(kt_elements_of(elements)[i], value)) {
+        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return i;
         }
     }
@@ -2850,10 +2928,24 @@ static void kt_mutable_list_reserve(KRef self) {
     if (list->size < capacity) {
         return;
     }
-    kt_int grown = capacity == 0 ? 4 : capacity * 2;
+    /* Sized in 64 bits, as `kt_string_builder_reserve` sizes its growth: doubling a capacity past
+       half the largest `Int` overflows `kt_int`, which is undefined and in practice comes out
+       negative -- a "negative array size" where Kotlin runs out of memory, or a replacement too
+       small for the copy that follows. A list already holding as many elements as an `Int` counts
+       cannot take another; short of that, a doubling too large for an `Int` asks for the one more
+       slot needed, and `kt_array_new` refuses any count whose storage the allocator cannot give.
+       Every refusal is out of memory, and it comes before a byte of the old storage is read. */
+    kt_long needed = (kt_long)list->size + 1;
+    if (needed > 0x7fffffff) {
+        kt_fail_oom();
+    }
+    kt_long grown = capacity == 0 ? 4 : (kt_long)capacity * 2;
+    if (grown > 0x7fffffff) {
+        grown = needed;
+    }
     /* The allocation can collect, and `self` is a root in the caller's frame, so the OLD array
        stays reachable through it until the new one is stored. */
-    KRef replacement = kt_array_new(&kt_type_array, grown);
+    KRef replacement = kt_array_new(&kt_type_array, (kt_int)grown);
     kt_array_copy_into(replacement, 0, list->elements);
     list->elements = replacement;
 }
@@ -2882,13 +2974,6 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
    `Unit` rather than the `Boolean` `add` answers — so it is its own entry point rather than a
    result the caller has to remember to drop. */
 void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
-
-/* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
-   that asks an iterator for an element or calls back into emitted code looks here before it uses
-   the answer: after a raise the answer is a NULL that is no element, and the walk has to end so the
-   exception reaches its caller. Kotlin's own walks are ordinary loops, which a throw leaves at once;
-   one that went on would hand the NULL to the next step and call the program's lambda again. */
-static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
 
 /* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
    per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
@@ -3269,7 +3354,13 @@ kt_boolean kt_array_content_equals(KRef left, KRef right) {
         return false;
     }
     for (kt_int index = 0; index < length; index++) {
-        if (!kt_equals(kt_array_element(left, index), kt_array_element(right, index))) {
+        kt_boolean equal = kt_equals(kt_array_element(left, index), kt_array_element(right, index));
+        /* An element's `equals` that threw ends the comparison whatever it returned, as it ends
+           `kt_list_equals`. */
+        if (kt_raised()) {
+            return false;
+        }
+        if (!equal) {
             return false;
         }
     }
@@ -3288,6 +3379,9 @@ kt_int kt_array_content_hash_code(KRef array) {
     for (kt_int index = 0; index < length; index++) {
         KRef element = kt_array_element(array, index);
         uint32_t hash = element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        if (kt_raised()) {
+            return 0;
+        }
         result = result * 31u + hash;
     }
     return (kt_int)result;
@@ -3306,6 +3400,11 @@ KRef kt_array_content_to_string(KRef array) {
             kt_string_builder_append(builder, kt_string_utf8(", ", 2));
         }
         kt_string_builder_append(builder, kt_array_element(array, index));
+        /* The append leaves the builder alone when the element's `toString` throws, but the walk
+           has to end there too, or the elements after it are rendered. */
+        if (kt_raised()) {
+            return NULL;
+        }
     }
     kt_string_builder_append(builder, kt_string_utf8("]", 1));
     return kt_to_string(builder);
@@ -3458,7 +3557,13 @@ static KRef kt_indexed_value_to_string(KRef self) {
     KRef text = kt_string_utf8("IndexedValue(index=", 19);
     text = kt_string_plus(text, kt_to_string(kt_box_int(indexed->index)));
     text = kt_string_plus(text, kt_string_utf8(", value=", 8));
-    text = kt_string_plus(text, kt_to_string(indexed->value));
+    KRef rendered = kt_to_string(indexed->value);
+    /* A value whose `toString` threw has no text, and `kt_string_plus` would render its NULL answer
+       as `null`; the rendering ends with the exception instead. */
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
     return kt_string_plus(text, kt_string_utf8(")", 1));
 }
 
@@ -3752,8 +3857,14 @@ KRef kt_iterable_join_to_string(KRef iterable) {
             return NULL;
         }
         /* `kt_to_string` and not the element itself: `joinToString` renders each element the way
-           `"$element"` would, through whatever `toString` the element's own type answers with. */
-        joined = kt_string_plus(joined, kt_to_string(element));
+           `"$element"` would, through whatever `toString` the element's own type answers with. A
+           `toString` that threw ends the join where it threw, as Kotlin's loop does: its answer is
+           no text to append, and no later element is rendered. */
+        KRef rendered = kt_to_string(element);
+        if (kt_raised()) {
+            return NULL;
+        }
+        joined = kt_string_plus(joined, rendered);
     }
     return joined;
 }
@@ -4125,7 +4236,12 @@ kt_int kt_iterable_index_of(KRef iterable, KRef value) {
         if (kt_raised()) {
             return -1;
         }
-        if (kt_equals(element, value)) {
+        kt_boolean equal = kt_equals(element, value);
+        /* As in `kt_list_index_of`: an `equals` that threw ends the search with no index. */
+        if (kt_raised()) {
+            return -1;
+        }
+        if (equal) {
             return at;
         }
         at++;
@@ -4302,7 +4418,13 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
     KRef left = ((const KList *)self)->elements;
     KRef right = ((const KList *)other)->elements;
     for (kt_int i = 0; i < size; i++) {
-        if (!kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i])) {
+        kt_boolean equal = kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i]);
+        /* Asked whatever `equal` says: an element's `equals` that threw may still have returned
+           true, and going on would compare the elements after it. */
+        if (kt_raised()) {
+            return false;
+        }
+        if (!equal) {
             return false;
         }
     }
@@ -4316,6 +4438,11 @@ static kt_int kt_list_hash_code(KRef self) {
     uint32_t hash = 1;
     for (kt_int i = 0; i < length; i++) {
         hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
+        /* A `hashCode` that threw ends the fold; the zero is no hash, and the caller finds the
+           exception pending before it reads one. */
+        if (kt_raised()) {
+            return 0;
+        }
     }
     return (kt_int)hash;
 }
@@ -4331,7 +4458,13 @@ static KRef kt_list_to_string(KRef self) {
         if (i > 0) {
             text = kt_string_plus(text, kt_string_utf8(", ", 2));
         }
-        text = kt_string_plus(text, kt_to_string(kt_elements_of(elements)[i]));
+        KRef rendered = kt_to_string(kt_elements_of(elements)[i]);
+        /* A `toString` that threw leaves the rendering there: its answer is no text, and the
+           elements after it are not asked for theirs. */
+        if (kt_raised()) {
+            return NULL;
+        }
+        text = kt_string_plus(text, rendered);
     }
     return kt_string_plus(text, kt_string_utf8("]", 1));
 }
@@ -4446,17 +4579,41 @@ kt_int kt_map_size(KRef self) { return kt_list_size(((const KMap *)self)->keys);
 
 kt_boolean kt_map_is_empty(KRef self) { return kt_map_size(self) == 0; }
 
-/* Where a key sits, or -1. By `equals`, as Kotlin's own lookup is: two strings with the same text
-   are one key, and so are two boxes holding the same number. */
+/* Where `value` sits in one of a map's two lists, or -1. By `equals`, as Kotlin's own lookup is:
+   two strings with the same text are one key, and so are two boxes holding the same number.
+
+   A comparison that THREW ends the search with -1, whatever it answered. The pending slot is
+   checked after every one rather than only after a false answer, because a program's `equals` is
+   free to record an exception and return true: taken at its word, that answer would have `put`
+   overwrite, `remove` delete and `get` hand back the entry the failed comparison pointed at, and a
+   false one would have the search go on asking the elements after it. Kotlin's lookup does
+   neither; the throw leaves it. */
+static kt_int kt_map_search(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int length = kt_list_size(list);
+    for (kt_int at = 0; at < length; at++) {
+        kt_boolean same = kt_equals(kt_elements_of(elements)[at], value);
+        if (kt_pending_exception() != NULL) {
+            return -1;
+        }
+        if (same) {
+            return at;
+        }
+    }
+    return -1;
+}
+
+/* Where a key sits, or -1 -- which is also the answer when its search threw, so every caller that
+   acts on a found key acts only on one no exception stands behind. */
 static kt_int kt_map_index_of(KRef self, KRef key) {
-    return kt_list_index_of(((const KMap *)self)->keys, key);
+    return kt_map_search(((const KMap *)self)->keys, key);
 }
 
 kt_boolean kt_map_contains_key(KRef self, KRef key) { return kt_map_index_of(self, key) >= 0; }
 
 kt_boolean kt_map_contains_value(KRef self, KRef value) {
     const KMap *map = (const KMap *)self;
-    return map->values != NULL && kt_list_contains(map->values, value);
+    return map->values != NULL && kt_map_search(map->values, value) >= 0;
 }
 
 /* `m[k]`. Kotlin answers NULL for an absent key, which is why `Map.get` is declared nullable and
@@ -4472,6 +4629,11 @@ KRef kt_map_get(KRef self, KRef key) {
 
 KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback) {
     kt_int at = kt_map_index_of(self, key);
+    /* A search that threw found nothing, and it is no absent key either: the caller takes the
+       exception, not the fallback. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     return at < 0 ? fallback : kt_list_get(((const KMap *)self)->values, at);
 }
 
@@ -4630,14 +4792,21 @@ KRef kt_map_entry_key(KRef entry) { return ((const KMapEntry *)entry)->key; }
 
 KRef kt_map_entry_value(KRef entry) { return ((const KMapEntry *)entry)->value; }
 
-/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves. */
+/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves.
+
+   A key comparison that THREW ends the call before the values are compared, whatever it answered:
+   `&&` alone stops only on false, and a program's `equals` may record an exception and return
+   true. */
 static kt_boolean kt_map_entry_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_map_entry) {
         return false;
     }
     const KMapEntry *a = (const KMapEntry *)self;
     const KMapEntry *b = (const KMapEntry *)other;
-    return kt_equals(a->key, b->key) && kt_equals(a->value, b->value);
+    if (!kt_equals(a->key, b->key) || kt_pending_exception() != NULL) {
+        return false;
+    }
+    return kt_equals(a->value, b->value);
 }
 
 /* A half whose `hashCode` or `toString` throws ends the call there and the other half is not
@@ -4652,35 +4821,50 @@ static kt_int kt_map_entry_hash_code(KRef self) {
     return key ^ value;
 }
 
+/* Either half's `toString` that throws answers NULL with the exception pending, as the map's own
+   rendering does; the value's failed answer is never joined into a text. */
 static KRef kt_map_entry_to_string(KRef self) {
     const KMapEntry *entry = (const KMapEntry *)self;
     KRef key = kt_to_string(entry->key);
     if (kt_pending_exception() != NULL) {
         return NULL;
     }
+    KRef value = kt_to_string(entry->value);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     KRef text = kt_string_plus(key, kt_string_utf8("=", 1));
-    return kt_string_plus(text, kt_to_string(entry->value));
+    return kt_string_plus(text, value);
 }
 
 /* Two maps are equal when they hold the same entries, whatever ORDER they hold them in — Kotlin's
    `Map.equals` says nothing about order and a `LinkedHashMap` equals a `HashMap` of the same
    entries. The hash is the sum of the entry hashes, which is order-independent for the same
-   reason. */
+   reason.
+
+   Each key is looked up in the other map ONCE, and the value compared against what that one search
+   found. Asking twice -- `containsKey`, then `get` -- ran a stateful key comparison a second time,
+   and a second answer that threw left `get`'s NULL to be compared as though it were the value. A
+   comparison that threw ends the walk whatever it answered, key or value: a true answer after a
+   throw is no match to go on from. */
 static kt_boolean kt_map_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_map) {
         return false;
     }
     const KMap *a = (const KMap *)self;
+    const KMap *b = (const KMap *)other;
     if (kt_map_size(self) != kt_map_size(other)) {
         return false;
     }
     kt_int size = kt_list_size(a->keys);
     for (kt_int at = 0; at < size; at++) {
-        KRef key = kt_list_get(a->keys, at);
-        if (!kt_map_contains_key(other, key)) {
+        /* -1 when the search threw, so a raise stops here before any value is asked. */
+        kt_int found = kt_map_index_of(other, kt_list_get(a->keys, at));
+        if (found < 0) {
             return false;
         }
-        if (!kt_equals(kt_list_get(a->values, at), kt_map_get(other, key))) {
+        kt_boolean same = kt_equals(kt_list_get(a->values, at), kt_list_get(b->values, found));
+        if (!same || kt_pending_exception() != NULL) {
             return false;
         }
     }
@@ -4765,6 +4949,8 @@ static kt_boolean kt_set_equals(KRef self, KRef other) {
     KRef keys = ((const KMap *)self)->keys;
     kt_int size = kt_list_size(keys);
     for (kt_int at = 0; at < size; at++) {
+        /* A search that threw answers false and leaves the exception pending; the elements after
+           it are not looked for. */
         if (!kt_set_contains(other, kt_list_get(keys, at))) {
             return false;
         }
@@ -4865,10 +5051,16 @@ kt_int kt_any_hash_code(KRef self) {
     return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
 }
 
-/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. */
+/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. The hash is asked through the
+   object's own `hashCode`, as `Any.toString` asks it, so a class that overrides only `hashCode`
+   reaches its override here -- and one that throws ends the rendering with NULL and the exception
+   pending, before the text is built. */
 KRef kt_any_to_string(KRef self) {
     const KType *type = self->header.type;
     uint32_t hash = (uint32_t)kt_hash_code(self);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     char digits[8];
     kt_int digit_count = 0;
     do {
@@ -5784,6 +5976,9 @@ KT_THROWABLE_TYPE(kt_type_concurrent_modification_exception,
                   "kotlin.ConcurrentModificationException", &kt_type_runtime_exception)
 KT_THROWABLE_TYPE(kt_type_uninitialized_property_access_exception,
                   "kotlin.UninitializedPropertyAccessException", &kt_type_runtime_exception)
+/* `StringBuilder(-1)`'s exception. Kotlin has no alias for it, so it keeps Java's name. */
+KT_THROWABLE_TYPE(kt_type_negative_array_size_exception, "java.lang.NegativeArraySizeException",
+                  &kt_type_runtime_exception)
 
 KRef kt_throwable_new(const KType *type, KRef message) {
     /* `message` stays in this parameter across the allocation: it is its root.
@@ -5810,9 +6005,17 @@ KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause) {
 /* `Throwable(cause)`, the one-argument form whose operand is the CAUSE rather than the message.
    Kotlin fills the message from the cause — `cause?.toString()` — so the two one-argument
    constructors differ in more than which field they fill, and a caller cannot rewrite one as the
-   other. The rendering happens BEFORE the allocation, so nothing half-built is live across it. */
+   other. The rendering happens BEFORE the allocation, so nothing half-built is live across it.
+
+   The cause's `toString` is the program's to override, and one that raises ends the constructor
+   call there, as it does in Kotlin: nothing is constructed, and the caller's check finds the
+   program's exception rather than a throwable built around the `null` the rendering came back
+   with. */
 KRef kt_throwable_new_from_cause(const KType *type, KRef cause) {
     KRef message = cause == NULL ? NULL : kt_to_string(cause);
+    if (kt_raised()) {
+        return NULL;
+    }
     return kt_throwable_new_with_cause(type, message, cause);
 }
 
@@ -5865,7 +6068,14 @@ KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot) {
     return *slot;
 }
 
-/* ---- kotlin.test ---------------------------------------------------------------------------- */
+/* ---- kotlin.test ----------------------------------------------------------------------------
+
+   An assertion compares and renders its operands with THEIR `equals` and `toString`, which a
+   program overrides, and one of those may raise. The raise is what the caller has to see: Kotlin's
+   assertion never gets as far as its own `AssertionError`. `kt_throw` records into one slot, so
+   raising that error after the operand's would overwrite it, and a `catch` for the operand's
+   exception would miss. Each assertion therefore asks `kt_raised` after every call that reaches the
+   program and returns at once when one did. */
 
 /* Kotlin's own wording, which is what a failing assertion has to report: the caller's message
    first when there is one, then what was expected and what arrived. */
@@ -5891,23 +6101,45 @@ void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
                                kt_string_utf8("Expected an exception of class ", 31));
     text = kt_string_plus(text, kt_string_utf8(expected->name, (kt_int)expected->name_length));
     text = kt_string_plus(text, kt_string_utf8(" to be thrown, but was ", 23));
-    text = kt_string_plus(text, was == NULL ? kt_string_utf8("completed successfully.", 23)
-                                            : kt_to_string(was));
-    kt_assert_fail(text);
+    KRef outcome = was == NULL ? kt_string_utf8("completed successfully.", 23) : kt_to_string(was);
+    if (kt_raised()) {
+        return;
+    }
+    kt_assert_fail(kt_string_plus(text, outcome));
+}
+
+/* The report `assertEquals` and `assertSame` share: `Expected <expected>, actual <actual>` and then
+   `tail`, or NULL when rendering an operand raised. Built in pieces because rendering either
+   operand may itself allocate, and the text so far has to stay reachable across that — the same
+   reason `kt_list_to_string` is a loop over `kt_string_plus` rather than a render into one
+   buffer. Each operand is rendered on its own before it joins the text, so a raise is seen before
+   anything is built from what the rendering came back with. */
+static KRef kt_assert_expected_actual(KRef expected, KRef actual, KRef message, KRef tail) {
+    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
+    KRef rendered = kt_to_string(expected);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
+    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
+    rendered = kt_to_string(actual);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
+    return kt_string_plus(text, tail);
 }
 
 void kt_assert_equals(KRef expected, KRef actual, KRef message) {
-    if (kt_equals(expected, actual)) {
+    kt_boolean equal = kt_equals(expected, actual);
+    if (equal || kt_raised()) {
         return;
     }
-    /* Built in pieces because rendering either operand may itself allocate, and the text so far
-       has to stay reachable across that — the same reason `kt_list_to_string` is a loop over
-       `kt_string_plus` rather than a render into one buffer. */
-    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
-    text = kt_string_plus(text, kt_to_string(expected));
-    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
-    text = kt_string_plus(text, kt_to_string(actual));
-    kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
+    KRef text = kt_assert_expected_actual(expected, actual, message, kt_string_utf8(">.", 2));
+    if (text == NULL) {
+        return;
+    }
+    kt_assert_fail(text);
 }
 
 /* `assertSame`/`assertNotSame`: IDENTITY, which is the whole of what separates them from
@@ -5920,11 +6152,12 @@ void kt_assert_same(KRef expected, KRef actual, KRef message) {
     if (expected == actual) {
         return;
     }
-    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
-    text = kt_string_plus(text, kt_to_string(expected));
-    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
-    text = kt_string_plus(text, kt_to_string(actual));
-    kt_assert_fail(kt_string_plus(text, kt_string_utf8("> is not same.", 14)));
+    KRef text =
+        kt_assert_expected_actual(expected, actual, message, kt_string_utf8("> is not same.", 14));
+    if (text == NULL) {
+        return;
+    }
+    kt_assert_fail(text);
 }
 
 void kt_assert_not_same(KRef illegal, KRef actual, KRef message) {
@@ -5932,7 +6165,11 @@ void kt_assert_not_same(KRef illegal, KRef actual, KRef message) {
         return;
     }
     KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Illegal value: <", 16));
-    text = kt_string_plus(text, kt_to_string(actual));
+    KRef rendered = kt_to_string(actual);
+    if (kt_raised()) {
+        return;
+    }
+    text = kt_string_plus(text, rendered);
     kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
 }
 
@@ -5987,7 +6224,13 @@ kt_int kt_reference_hash_code(KRef self) {
     uint32_t hash = (uint32_t)(uintptr_t)self->header.type->reference_target;
     KRef receiver = kt_reference_receiver(self);
     if (receiver != NULL) {
-        hash = 31u * hash + (uint32_t)kt_hash_code(receiver);
+        /* The receiver's `hashCode` is the program's, and one that raised answered nothing to
+           combine: the caller's check propagates the raise and never reads this answer. */
+        kt_int receiver_hash = kt_hash_code(receiver);
+        if (kt_raised()) {
+            return 0;
+        }
+        hash = 31u * hash + (uint32_t)receiver_hash;
     }
     return (kt_int)hash;
 }
@@ -6036,15 +6279,35 @@ void kt_clear_pending(void) { kt_pending = NULL; }
 
 /* Nothing handled it. Kotlin ends the program, reporting the exception on stderr; 134 is the code
    this target uses for every abnormal end. Called once, where the generated entry has run the
-   program's `main` and is about to treat its answer as an answer. */
+   program's `main` and is about to treat its answer as an answer.
+
+   The report renders the exception with its own `toString`, which the program may override, so the
+   slot is EMPTIED first: generated code checks the slot after every call it makes, and a
+   `toString` entered with the uncaught exception still there would take it for its own raise after
+   its first call and come back with nothing. The exception stays reachable from `uncaught`, a
+   local, across whatever the rendering allocates.
+
+   A `toString` that raises leaves no text to print and no caller to propagate to. The JVM's
+   answer, which this one copies, is the report's opening and then a line naming the class of the
+   exception the `toString` raised; the class is read from its descriptor, which runs no program
+   code. */
 void kt_check_uncaught(void) {
     if (kt_pending == NULL) {
         return;
     }
+    KRef uncaught = kt_pending;
+    kt_clear_pending();
+    kt_write(2, "Exception in thread \"main\" ", 27);
     kt_int length = 0;
     KRef storage = NULL;
-    const char *bytes = kt_render(kt_pending, &length, &storage);
-    kt_write(2, "Exception in thread \"main\" ", 27);
+    const char *bytes = kt_render(uncaught, &length, &storage);
+    if (kt_raised()) {
+        const KType *raised = kt_pending->header.type;
+        kt_write(2, "\nException: ", 12);
+        kt_write(2, raised->name, raised->name_length);
+        kt_write(2, " thrown from the UncaughtExceptionHandler in thread \"main\"\n", 59);
+        kt_sys_exit(134);
+    }
     kt_write(2, bytes, (size_t)length);
     kt_write(2, "\n", 1);
     kt_sys_exit(134);
@@ -6052,10 +6315,16 @@ void kt_check_uncaught(void) {
 
 /* ---- kotlin.io ----------------------------------------------------------------------------- */
 
+/* `print`/`println`. Kotlin renders the value before it writes a byte, and a `toString` of the
+   program's that raises ends the call there: nothing is written, not even the `null` the renderer
+   falls back to or the newline after it, and the caller's check propagates the raise. */
 static void kt_emit(KRef value, bool newline) {
     kt_int length = 0;
     KRef storage = NULL;
     const char *bytes = kt_render(value, &length, &storage);
+    if (kt_raised()) {
+        return;
+    }
     kt_write(1, bytes, (size_t)length);
     if (newline) {
         kt_write(1, "\n", 1);

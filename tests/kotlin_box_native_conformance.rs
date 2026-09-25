@@ -5,17 +5,24 @@
 //! that prints `box()`'s result, linked by krusty's linker against the prebuilt runtime, and RUN;
 //! the executable must print `OK` and exit cleanly.
 //!
-//! **Skipping is permitted; miscompiling is not.** The native generator covers a subset of Kotlin
-//! and declines the rest by name, so a case it declines is a skip, counted by reason — the sorted
-//! reasons are the backlog, printed with the report. A case the frontend rejects is a skip too
-//! (the JVM gate measures that). But a case that compiles and links and then prints anything other
-//! than `OK`, exits nonzero, or does not finish, is a FAILURE of this test: an accepted program must
-//! run correctly, whatever fraction is accepted.
+//! **Skipping is recorded; miscompiling is not permitted.** The native generator covers a subset of
+//! Kotlin and declines the rest by name, and the frontend rejects some cases outright. Each case
+//! that does either is listed, with which of the two it is, in `native_box_expected_declines.txt`:
+//! the coverage RATCHET. A case that newly declines or is newly rejected fails the test, and so does
+//! a listed case that now passes, so coverage can only grow and the ledger only shrink, each
+//! explicitly. A case that compiles and links and then answers anything other than `OK`, exits
+//! nonzero, or does not finish, is a FAILURE unless `native_box_expected_failures.txt` names it as a
+//! known defect elsewhere in the compiler. A compiler PANIC is a failure wherever it was raised.
+//!
+//! Every ledger entry is held to its outcome: an entry the corpus no longer has, or whose case now
+//! answers differently in any way, fails the test until the ledger says so.
 //!
 //! Multi-file and multi-module cases (`// FILE:`, `// MODULE:`) are skipped as such for now: the
 //! generator does not lower cross-file calls yet. The harness reads the corpus from
-//! `KRUSTY_KOTLIN_BOX_DIR` (as the JVM gate does) and falls back to the vendored cases under
-//! `tests/box_data/`, so it always runs against something.
+//! `KRUSTY_KOTLIN_BOX_DIR` (as the JVM gate does). A local run without it falls back to the vendored
+//! cases under `tests/box_data/`, which the ledgers do not describe; a GATE run (one scheduled as a
+//! shard) requires the provisioned runtime and corpus instead, so a broken setup fails rather than
+//! reporting a green lane over nothing.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -49,8 +56,9 @@ enum Outcome {
     /// wide and opaque without it, and what is in it is core work that every backend would gain
     /// from — so it is ranked in the report rather than left as a number.
     Frontend(String),
-    /// The compiler panicked somewhere other than the native backend: no program was produced, so
-    /// nothing was miscompiled, but a compiler defect is a compiler defect and it is listed.
+    /// The compiler panicked somewhere other than the native backend. No program was produced, but
+    /// a compiler defect is a compiler defect: it fails the test unless the expected-failure ledger
+    /// names it, like any other known defect.
     FrontendPanic(String),
     /// A directive puts the case outside this harness: multi-file, another backend, and so on.
     NotApplicable(&'static str),
@@ -180,13 +188,30 @@ thread_local! {
 /// them and must not hide them.
 const EXPECTED_FAILURES: &str = include_str!("native_box_expected_failures.txt");
 
-fn expected_failures() -> BTreeMap<&'static str, &'static str> {
-    EXPECTED_FAILURES
-        .lines()
+/// Cases the native lane does not run, and why: `<path><TAB>declined` for a construct the generator
+/// declines, `<path><TAB>frontend` for a source the frontend rejects. The coverage ratchet: a case
+/// that newly declines or is rejected fails the test, and so does a listed case that now passes or
+/// now answers differently. Regenerate it with `KRUSTY_NATIVE_BOX_WRITE_LEDGER=<path>`, which
+/// writes every case's entry from the run and suspends this ledger's checks for it.
+const EXPECTED_DECLINES: &str = include_str!("native_box_expected_declines.txt");
+
+/// One ledger's `<path><TAB><value>` lines, comments and blank lines skipped.
+fn ledger(text: &'static str) -> BTreeMap<&'static str, &'static str> {
+    text.lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('\t'))
-        .map(|(path, reason)| (path.trim(), reason.trim()))
+        .map(|(path, value)| (path.trim(), value.trim()))
         .collect()
+}
+
+/// What a case that did not pass is recorded as in the decline ledger, or `None` for an outcome
+/// that ledger does not hold.
+fn decline_kind(outcome: &Outcome) -> Option<&'static str> {
+    match outcome {
+        Outcome::Declined(_) => Some("declined"),
+        Outcome::Frontend(_) => Some("frontend"),
+        _ => None,
+    }
 }
 
 /// Compile one case with the native backend; the object, or why not.
@@ -315,18 +340,19 @@ fn outcome(scratch: &Path, file: &Path, target: NativeTarget) -> Outcome {
     let result = run(&executable);
     let _ = std::fs::remove_file(&executable);
     match result {
-        // The entry prints what `box()` returned, as the LAST line. Anything before it is the
+        // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
+        // the answer is every byte past the frame's last occurrence. Anything before it is the
         // PROGRAM's own output — `controlStructures/kt513.kt` builds a list and `println`s it
         // before returning `OK` — which the JVM lane never sees, because there the answer is a
-        // return value rather than a stream. Requiring the whole of stdout to be `OK` counted
-        // every such case as a miscompile, which is the opposite of what it is.
-        //
-        // This does not weaken the check: a program that prints `OK` itself and then answers
-        // something else still fails, because the answer is what comes last.
-        Ok(stdout) if stdout.trim_end_matches('\n').rsplit('\n').next() == Some("OK") => {
-            Outcome::Pass
-        }
-        Ok(stdout) => Outcome::Failed(format!("box() printed {stdout:?}")),
+        // return value rather than a stream. The answer is compared whole, so one that spans
+        // lines (`"FAIL\nOK"`) is the wrong answer it is, not a last line that happens to read OK.
+        Ok(stdout) => match stdout.rsplit_once(krusty::native::BOX_RESULT_FRAME) {
+            Some((_, "OK")) => Outcome::Pass,
+            Some((_, answer)) => Outcome::Failed(format!("box() answered {answer:?}")),
+            None => Outcome::Failed(format!(
+                "the program ended without framing an answer; stdout {stdout:?}"
+            )),
+        },
         Err(error) => Outcome::Failed(error),
     }
 }
@@ -352,7 +378,33 @@ fn report_line_has_a_stable_shape() {
 }
 
 #[test]
+fn a_ledger_skips_comments_and_blank_lines() {
+    let text = "# a comment\n\na/b.kt\tdeclined\nc.kt\tfrontend\n";
+    let parsed = ledger(text);
+    assert_eq!(
+        parsed.into_iter().collect::<Vec<_>>(),
+        vec![("a/b.kt", "declined"), ("c.kt", "frontend")]
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_native_conformance() {
+    // A SHARD is what the gate schedules. There a missing runtime or corpus is a broken setup, and
+    // reporting a green lane over it would hide exactly that; a plain local run may still skip or
+    // fall back.
+    let gate = std::env::var_os("KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT").is_some();
+    if gate {
+        assert!(
+            host().is_some(),
+            "a scheduled native conformance shard needs the prebuilt runtime, the stdlib and the JDK \
+             modules, and this build has not got them"
+        );
+        assert!(
+            krusty::toolchain::box_corpus_dir().is_some(),
+            "a scheduled native conformance shard needs the provisioned box corpus \
+             (KRUSTY_KOTLIN_BOX_DIR); the vendored fallback is for local runs"
+        );
+    }
     let Some(target) = host() else {
         // Written to the report too, so a CI lane that skipped says so in its artifact instead
         // of reading as a run that found nothing.
@@ -364,7 +416,18 @@ fn kotlin_codegen_box_native_conformance() {
         return;
     };
     let corpus = corpus_dir();
+    // The ledgers describe the provisioned corpus; the vendored fallback is a smoke test they say
+    // nothing about.
+    let provisioned = krusty::toolchain::box_corpus_dir().is_some();
     let files = krusty::conformance::kotlin_files(&corpus);
+    let relative = |file: &Path| {
+        file.strip_prefix(&corpus)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let corpus_cases: std::collections::BTreeSet<String> =
+        files.iter().map(|file| relative(file)).collect();
     assert!(
         !files.is_empty(),
         "no Kotlin sources under {}",
@@ -394,6 +457,8 @@ fn kotlin_codegen_box_native_conformance() {
     // Striding by position rather than splitting into blocks keeps the shards comparable: the
     // corpus is ordered by path, so contiguous blocks would hand one shard a whole directory of
     // near-identical cases and another the long tail.
+    let first_shard =
+        std::env::var("KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX").map_or(true, |index| index == "0");
     let files = match (
         std::env::var("KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX"),
         std::env::var("KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT"),
@@ -433,8 +498,12 @@ fn kotlin_codegen_box_native_conformance() {
         let file = info.location().map(|location| location.file().to_string());
         LAST_PANIC_FILE.with(|last| *last.borrow_mut() = file);
     }));
-    let known = expected_failures();
-
+    let known = ledger(EXPECTED_FAILURES);
+    let expected_declines = ledger(EXPECTED_DECLINES);
+    let ledger_out = std::env::var("KRUSTY_NATIVE_BOX_WRITE_LEDGER").ok();
+    // Held to the ratchet only where the ledger describes the corpus, and not while it is being
+    // rewritten from this very run.
+    let ratchet = provisioned && ledger_out.is_none();
     // The same worker pool shape as the JVM gate: frontend analysis dominates each case, and the
     // deep recursion of resolution wants a wide stack.
     let mut pool = rayon::ThreadPoolBuilder::new().stack_size(64 * 1024 * 1024);
@@ -485,17 +554,68 @@ fn kotlin_codegen_box_native_conformance() {
     let mut frontend_panics: Vec<(PathBuf, String)> = Vec::new();
     let mut known_failures: Vec<(PathBuf, String)> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
+    let mut written_ledger: Vec<String> = Vec::new();
+    // Every ledger entry must name a case the corpus has. Checked once, by the first shard, since
+    // every shard sees the same corpus.
+    if provisioned && first_shard {
+        for path in known.keys().chain(expected_declines.keys()) {
+            if !corpus_cases.contains(*path) {
+                failed.push((
+                    PathBuf::from(path),
+                    "a ledger entry for a case the corpus does not have: remove it".to_string(),
+                ));
+            }
+        }
+    }
     for (file, result) in outcomes {
-        let relative = file
-            .strip_prefix(&corpus)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .into_owned();
-        match result {
-            Outcome::Pass if known.contains_key(relative.as_str()) => failed.push((
+        let relative = relative(file);
+        if let Some(kind) = decline_kind(&result) {
+            written_ledger.push(format!("{relative}\t{kind}"));
+        }
+        // The decline ledger holds a case to the kind it records; any other outcome of a listed
+        // case, and any decline or rejection it does not list, fails the ratchet.
+        if ratchet {
+            let listed = expected_declines.get(relative.as_str()).copied();
+            let kind = decline_kind(&result);
+            if listed != kind {
+                let reason = match (listed, kind, &result) {
+                    (Some(_), None, Outcome::Pass) => {
+                        "listed in native_box_expected_declines.txt but passes now: remove it"
+                            .to_string()
+                    }
+                    (Some(listed), None, other) => format!(
+                        "listed in native_box_expected_declines.txt as {listed}, but {other:?}"
+                    ),
+                    (Some(listed), Some(kind), other) => format!(
+                        "listed in native_box_expected_declines.txt as {listed}, but {kind}: \
+                         {other:?}"
+                    ),
+                    (None, Some(kind), other) => format!(
+                        "newly {kind}, a coverage regression: {other:?}; lower it, or record it \
+                         in native_box_expected_declines.txt"
+                    ),
+                    (None, None, _) => unreachable!("equal"),
+                };
+                failed.push((file.clone(), reason));
+                continue;
+            }
+        }
+        // The expected-failure ledger holds its cases to FAILING; a listed case that now answers
+        // any other way, passing included, fails the test until the ledger says so.
+        if provisioned
+            && known.contains_key(relative.as_str())
+            && !matches!(result, Outcome::Failed(_) | Outcome::FrontendPanic(_))
+        {
+            failed.push((
                 file.clone(),
-                "listed in native_box_expected_failures.txt but passes now: remove it".to_string(),
-            )),
+                format!(
+                    "listed in native_box_expected_failures.txt, but no longer fails: {result:?}; \
+                     remove it"
+                ),
+            ));
+            continue;
+        }
+        match result {
             Outcome::Pass => passed += 1,
             Outcome::Frontend(reason) => {
                 frontend += 1;
@@ -509,7 +629,12 @@ fn kotlin_codegen_box_native_conformance() {
                 // does not expose and therefore what to fix.
                 *frontend_reasons.entry(reason).or_default() += 1;
             }
-            Outcome::FrontendPanic(reason) => frontend_panics.push((file.clone(), reason)),
+            Outcome::FrontendPanic(reason) => match known.get(relative.as_str()) {
+                Some(why) => {
+                    frontend_panics.push((file.clone(), format!("{reason} — {why}")));
+                }
+                None => failed.push((file.clone(), format!("compiler panic: {reason}"))),
+            },
             Outcome::Declined(reason) => {
                 traced.push((file.clone(), reason.clone()));
                 *declined.entry(reason).or_default() += 1;
@@ -584,6 +709,12 @@ fn kotlin_codegen_box_native_conformance() {
     }
     for (file, reason) in &known_failures {
         eprintln!("  known failure {}: {reason}", file.display());
+    }
+    if let Some(path) = &ledger_out {
+        written_ledger.sort();
+        let mut text = written_ledger.join("\n");
+        text.push('\n');
+        std::fs::write(path, text).expect("write the decline ledger");
     }
     let _ = std::panic::take_hook();
     for (file, reason) in &failed {
