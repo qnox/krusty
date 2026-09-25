@@ -436,14 +436,26 @@ pub(super) fn step(
     pool: &dyn PoolView,
     this_class: Option<&str>,
 ) -> Option<FrameState> {
+    let mut after = state.clone();
+    step_in_place(insns, index, &mut after, pool, this_class)?;
+    Some(after)
+}
+
+/// [`step`] applied to `s` itself. On `None`, `s` is left partly stepped.
+pub(super) fn step_in_place(
+    insns: &[Insn],
+    index: usize,
+    s: &mut FrameState,
+    pool: &dyn PoolView,
+    this_class: Option<&str>,
+) -> Option<()> {
     use VerificationType::*;
-    let mut s = state.clone();
     let (op, operands): (u8, &[u8]) = match insns.get(index)? {
         Insn::Plain { op, operands } => (*op, operands.as_slice()),
         Insn::Branch { op, .. } | Insn::BranchW { op, .. } => (*op, &[]),
         Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => {
             s.pop()?;
-            return Some(s);
+            return Some(());
         }
     };
     let class_at = |operands: &[u8]| -> Option<VerificationType> {
@@ -539,26 +551,26 @@ pub(super) fn step(
         } // dup_x1
         0x5b => {
             let a = s.pop()?;
-            let under = pop_group(&mut s)?;
+            let under = pop_group(s)?;
             s.push(a.clone());
             s.stack.extend(under);
             s.push(a);
         } // dup_x2
         0x5c => {
-            let group = pop_group(&mut s)?;
+            let group = pop_group(s)?;
             s.stack.extend(group.iter().cloned());
             s.stack.extend(group);
         } // dup2
         0x5d => {
-            let group = pop_group(&mut s)?;
+            let group = pop_group(s)?;
             let under = s.pop()?;
             s.stack.extend(group.iter().cloned());
             s.push(under);
             s.stack.extend(group);
         } // dup2_x1
         0x5e => {
-            let group = pop_group(&mut s)?;
-            let under = pop_group(&mut s)?;
+            let group = pop_group(s)?;
+            let under = pop_group(s)?;
             s.stack.extend(group.iter().cloned());
             s.stack.extend(under);
             s.stack.extend(group);
@@ -630,7 +642,7 @@ pub(super) fn step(
         } // putfield
         0xb6 | 0xb9 => {
             let descriptor = pool.method_descriptor(u2(operands)?)?;
-            invoke(&mut s, descriptor, true)?;
+            invoke(s, descriptor, true)?;
         } // invokevirtual, invokeinterface
         0xb7 => {
             let descriptor = pool.method_descriptor(u2(operands)?)?;
@@ -664,11 +676,11 @@ pub(super) fn step(
         } // invokespecial
         0xb8 => {
             let descriptor = pool.method_descriptor(u2(operands)?)?;
-            invoke(&mut s, descriptor, false)?;
+            invoke(s, descriptor, false)?;
         } // invokestatic
         0xba => {
             let descriptor = pool.method_descriptor(u2(operands)?)?;
-            invoke(&mut s, descriptor, false)?;
+            invoke(s, descriptor, false)?;
         } // invokedynamic
         0xbb => {
             let _ = class_at(operands)?;
@@ -746,7 +758,7 @@ pub(super) fn step(
         0xfe => {}
         _ => return None,
     }
-    Some(s)
+    Some(())
 }
 
 /// The class the `new` at `created` instantiates.
@@ -941,6 +953,38 @@ mod tests {
             types.before(8).expect("reachable").local(1),
             &reference("java/lang/String")
         );
+    }
+
+    #[test]
+    fn stepping_in_place_leaves_the_state_step_returns() {
+        let mut pool = FakePool::default();
+        pool.methods.insert(7, "(Ljava/lang/Object;)I");
+        pool.constants.insert(3, object("java/lang/String"));
+        // aconst_null ; astore_1 ; aload_1 ; invokestatic #7 ; lconst_0 ; lstore_2 ; ldc #3 ;
+        // astore_1 ; pop ; return
+        let insns = [
+            plain(0x01),
+            plain(0x4c),
+            plain(0x2b),
+            with(0xb8, &[0, 7]),
+            plain(0x09),
+            plain(0x41),
+            with(0x12, &[3]),
+            plain(0x4c),
+            plain(0x57),
+            plain(0xb1),
+        ];
+        let mut state = FrameState {
+            locals: vec![reference("Main")],
+            stack: Vec::new(),
+        };
+        for index in 0..insns.len() {
+            let expected = step(&insns, index, &state, &pool, None).expect("steps");
+            step_in_place(&insns, index, &mut state, &pool, None).expect("steps in place");
+            assert_eq!(state, expected, "after instruction {index}");
+        }
+        assert_eq!(state.local(1), &reference("java/lang/String"));
+        assert_eq!(state.local(2), &VerificationType::Long);
     }
 
     /// Two frames at ONE index means the caller handed over per-label frames instead of the merged
