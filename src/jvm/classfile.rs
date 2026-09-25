@@ -78,21 +78,10 @@ pub struct SeedField {
     /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull` + a `checkNotNullParameter`
     /// guard), 2 = nullable reference (`@Nullable`, no guard).
     pub ann_kind: u8,
-    /// `true` for a primary-constructor PARAMETER. Only a parameter carries a ctor parameter
-    /// annotation or a null-check guard — a body property is initialized in `init_body`.
+    /// `true` for a primary-constructor PARAMETER the constructor stores. Only a parameter carries a
+    /// ctor parameter annotation or a null-check guard — a body property is initialized in
+    /// `init_body`, whose stores intern naturally in evaluation order.
     pub is_ctor_param: bool,
-    /// `true` when the constructor actually stores this field. A body property initialized to `null`
-    /// has no store at all — the JVM already zero-initializes it — so its name and descriptor first
-    /// appear at the getter's `getfield`, not at a `putfield`.
-    pub stores_in_ctor: bool,
-    /// A `String` literal initializer. kotlinc interns it as an `ldc` constant just before the
-    /// property's store, so it lands ahead of the field's own name/descriptor.
-    pub string_const: Option<KtString>,
-    /// `(value class internal name, `constructor-impl` descriptor)` when the initializer CONSTRUCTS a
-    /// value class (`val k: K = K("OK")`). The store is then `ldc <const>; invokestatic
-    /// K.constructor-impl; putfield`, so the factory's entries intern between the constant and the
-    /// field — exactly where kotlinc puts them.
-    pub value_class_ctor: Option<(String, String)>,
     /// USER annotation type descriptors on this constructor parameter (`class C(@Mark val x: Int)`),
     /// split by the attribute each retention selects. kotlinc writes the whole
     /// `RuntimeVisibleParameterAnnotations` before `RuntimeInvisible…`, so every parameter's `visible`
@@ -1666,9 +1655,6 @@ impl ClassWriter {
         fields: &[SeedField],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
-        // The primary ctor's `$default` overload entries (marker desc, default string constants,
-        // delegating `<init>` ref) — interned between the ctor and the accessors, kotlinc's order.
-        ctor_defaults: Option<&SeedCtorDefaults>,
         // Entries the `super(…)` call's arguments intern in code order, BEFORE the super `<init>`
         // Methodref (`class Basic : Engine(Cfg(false), "basic")`).
         super_arg_entries: &[SeedSuperArg],
@@ -1756,25 +1742,25 @@ impl ClassWriter {
         }
         self.cp.methodref(super_internal, "<init>", super_ctor_desc);
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
-        for f in fields.iter().filter(|f| f.stores_in_ctor) {
-            // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
-            if let Some(sc) = &f.string_const {
-                self.cp.string_kt(sc);
-            }
-            if let Some((owner, desc)) = &f.value_class_ctor {
-                self.cp.methodref(owner, "constructor-impl", desc);
-            }
+        for f in fields.iter().filter(|f| f.is_ctor_param) {
             self.cp.utf8(&f.name);
             self.cp.utf8(&f.desc);
             self.cp.fieldref(this_internal, &f.name, &f.desc);
         }
-        // The constructor's LocalVariableTable strings (`this` and its type); the parameters reuse the
-        // field name/descriptor entries interned just above.
+    }
+
+    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this` and
+    /// its type; the parameters reuse the field entries), then the `$default` overload kotlinc
+    /// writes right after it — its marker descriptor, the default STRING constants its body `ldc`s
+    /// (in parameter order), then the delegating `invokespecial` to the real `<init>`.
+    pub fn seed_plain_constructor_tail(
+        &mut self,
+        this_internal: &str,
+        ctor_desc: &str,
+        ctor_defaults: Option<&SeedCtorDefaults>,
+    ) {
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
-        // The `$default` ctor overload follows the primary immediately: its marker descriptor, the
-        // default STRING constants its body `ldc`s (in parameter order), then the NameAndType +
-        // Methodref of the delegating `invokespecial` to the real `<init>`.
         if let Some(d) = ctor_defaults {
             self.cp.utf8(&d.marker_desc);
             for s in &d.string_consts {
