@@ -201,7 +201,7 @@ fn superclass_method_bridges(
                 result
                     .non_null()
                     .obj_internal()
-                    .is_some_and(|name| ir.is_value_class_name(name))
+                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
             });
         if method_descriptor(&base_params, base_ret) == method_descriptor(&own_params, own_ret)
             && bridge_name == target_name
@@ -220,7 +220,7 @@ fn superclass_method_bridges(
             let vc_ret = own_ret
                 .non_null()
                 .obj_internal()
-                .is_some_and(|n| ir.is_value_class_name(n));
+                .is_some_and(|n| crate::jvm::value_classes::is_boxed_value_class(ir, n));
             if base_params == own_params && !vc_ret {
                 continue;
             }

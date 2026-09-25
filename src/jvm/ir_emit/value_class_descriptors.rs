@@ -7,18 +7,19 @@ use std::collections::{HashMap, HashSet};
 use crate::ir::IrFile;
 use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::names::type_descriptor;
+use crate::jvm::value_classes::boxed_value_class_underlying;
 use crate::types::Ty;
 
 use super::ir_ty_to_jvm;
 
 pub(super) fn of(ir: &IrFile) -> ValueClassDescriptors {
-    let descriptors: HashMap<String, String> = ir
-        .value_class_names()
-        .filter_map(|name| {
-            let unboxed = unboxed_type(ir, Ty::obj_name(name))?;
-            Some((name.render(), type_descriptor(ir_ty_to_jvm(&unboxed))))
-        })
-        .collect();
+    let descriptors: HashMap<String, String> =
+        crate::jvm::value_classes::boxed_value_class_names(ir)
+            .filter_map(|name| {
+                let unboxed = unboxed_type(ir, Ty::obj_name(name))?;
+                Some((name.render(), type_descriptor(ir_ty_to_jvm(&unboxed))))
+            })
+            .collect();
     ValueClassDescriptors(descriptors)
 }
 
@@ -30,9 +31,9 @@ fn unboxed_type(ir: &IrFile, class: Ty) -> Option<Ty> {
         if !seen.insert(classifier) {
             return None;
         }
-        let underlying = ir.value_class_underlying_name(classifier)?;
+        let underlying = boxed_value_class_underlying(ir, classifier)?;
         match underlying.obj_internal().filter(|&next| {
-            !underlying.is_nullable() && ir.value_class_underlying_name(next).is_some()
+            !underlying.is_nullable() && boxed_value_class_underlying(ir, next).is_some()
         }) {
             Some(next) => classifier = next,
             None => return Some(underlying),

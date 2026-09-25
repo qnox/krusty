@@ -69,6 +69,7 @@ mod scalar_coercion;
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
+mod type_arguments;
 mod value_class_descriptors;
 mod value_class_signatures;
 use class_pool_seed::{
@@ -1158,7 +1159,8 @@ fn build_class_metadata(
             // Same-file and classpath declarations are in the unified lookup. A sibling source
             // declaration is deliberately not materialized into this file's IR, so the module-origin
             // subset is also positive identity for that one case; it is not a second underlying map.
-            (ir.is_value_class_name(fq_name) || ir.module_source_value_classes.contains(&fq_name))
+            (crate::jvm::value_classes::is_boxed_value_class(ir, fq_name)
+                || ir.module_source_value_classes.contains(&fq_name))
                 && !value_class_is_readable(ir, fq_name)
         })
     };
@@ -2546,7 +2548,7 @@ fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> 
         return None;
     }
     if let Some(owner) = ty.non_null().obj_internal() {
-        if ir.value_class_underlying_name(owner).is_some() {
+        if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
             return Some(owner.render());
         }
     }
@@ -4653,7 +4655,9 @@ fn emit_backing_field_read_adaptation(
             .storage_ty
             .and_then(|ty| ty.non_null().obj_internal())
         {
-            if ir.is_value_class_name(storage) && field_jvm.is_jvm_scalar() {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage)
+                && field_jvm.is_jvm_scalar()
+            {
                 emit_box_impl(ir, cw, &Ty::obj_name(storage), code);
                 return;
             }
@@ -4687,7 +4691,7 @@ fn emit_backing_field_write_adaptation(
             .storage_ty
             .and_then(|ty| ty.non_null().obj_internal())
         {
-            if ir.is_value_class_name(storage) {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
                 let class = cw.class_ref(&storage.render());
                 code.checkcast(class);
                 emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);
@@ -9098,11 +9102,11 @@ fn sorted_interface_closure(
     out
 }
 
-fn backend_member_jvm_name(member: &crate::backend::BackendMemberFact) -> String {
+fn backend_member_jvm_name(ir: &IrFile, member: &crate::backend::BackendMemberFact) -> String {
     if let Some(name) = &member.physical_name {
         return name.to_string();
     }
-    match &member.name {
+    let base = match &member.name {
         crate::backend::BackendMemberName::Declared(name) => name.to_string(),
         crate::backend::BackendMemberName::PropertyGetter(name) => {
             crate::jvm::names::property_getter_name(name)
@@ -9110,7 +9114,14 @@ fn backend_member_jvm_name(member: &crate::backend::BackendMemberFact) -> String
         crate::backend::BackendMemberName::PropertySetter(name) => {
             crate::jvm::names::property_setter_name(name)
         }
-    }
+    };
+    crate::jvm::value_classes::module_member_jvm_name(
+        ir,
+        &base,
+        &member.params,
+        &member.ret,
+        member.suspend(),
+    )
 }
 
 fn emit_default_impls_forwarders(
@@ -9302,16 +9313,12 @@ fn emit_default_impls_forwarders(
     };
     for (interface, shape) in closure {
         for member in &shape.surface {
-            let physical_params = if member.physical_params.len() == member.params.len() {
-                member.physical_params.clone()
-            } else {
-                member.params.clone()
-            };
-            let mut param_tys = jvm_tys(&physical_params);
-            let mut ret = jvm_declared_ty(&member.physical_ret);
-            let mut semantic_params = member.params.to_vec();
+            let types = crate::jvm::value_classes::forwarded_member_types(ir, member, shape.source);
+            let mut param_tys = jvm_tys(&types.physical_params);
+            let mut ret = jvm_declared_ty(&types.physical_ret);
+            let mut semantic_params = types.semantic_params;
             let mut parameter_identities = member.parameter_identities.to_vec();
-            let mut semantic_ret = member.ret;
+            let mut semantic_ret = types.semantic_ret;
             assert_eq!(
                 parameter_identities.len(),
                 semantic_params.len(),
@@ -9330,7 +9337,7 @@ fn emit_default_impls_forwarders(
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
-            let name = backend_member_jvm_name(member);
+            let name = backend_member_jvm_name(ir, member);
             let key = method_key(&name, &param_tys);
             // The nearest declaration wins even when it is abstract: an abstract redeclaration
             // suppresses a farther ancestor's body rather than exposing it as a fake override.
@@ -10525,33 +10532,6 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
     }
 
-    fn type_argument(
-        &self,
-        declaration: TypeVariance,
-        argument: Ty,
-        wildcards: Wildcards,
-    ) -> Option<String> {
-        match argument {
-            Ty::StarProjection(_) => Some("*".to_string()),
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
-            argument => {
-                let mut signature = String::new();
-                if wildcards == Wildcards::Declared
-                    && !self.wildcard_is_redundant(declaration, argument)?
-                {
-                    match declaration {
-                        TypeVariance::In => signature.push('-'),
-                        TypeVariance::Out => signature.push('+'),
-                        TypeVariance::Invariant => {}
-                    }
-                }
-                signature.push_str(&self.ty_at(&argument, wildcards)?);
-                Some(signature)
-            }
-        }
-    }
-
     fn function_ty(&self, signature: &crate::types::FnSig, wildcards: Wildcards) -> Option<String> {
         let arity = signature.params.len() + usize::from(signature.suspend);
         if arity > 22 {
@@ -10654,6 +10634,10 @@ impl<'a> JvmSignatureFormatter<'a> {
                 };
                 Some(format!("[{}", self.ty_at(element, wildcards)?))
             }
+            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
+                "L{};",
+                crate::jvm::names::classfile_internal_name(&owner.render())
+            )),
             Ty::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
                 let declared_arguments: usize =
@@ -10726,7 +10710,7 @@ fn jvm_class_signature(
             s.push_str(&formatter.ty_at(sup, Wildcards::Suppressed)?);
         }
     }
-    Some(s)
+    Some(s).filter(|signature| signature.contains('<'))
 }
 
 /// A `Ty` as a JVM generic-signature type element: a primitive in a generic position is its BOXED wrapper

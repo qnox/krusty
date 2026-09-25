@@ -1106,6 +1106,12 @@ mod module_extension_signature_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "nothing_type_argument_signature_e2e.rs"]
+mod nothing_type_argument_signature_e2e;
+#[path = "value_class_bounded_parameter_bridge_e2e.rs"]
+mod value_class_bounded_parameter_bridge_e2e;
+#[path = "value_class_inherited_default_names_e2e.rs"]
+mod value_class_inherited_default_names_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
