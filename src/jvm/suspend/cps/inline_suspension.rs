@@ -27,7 +27,7 @@ use std::collections::HashSet;
 /// Carrying an `inline_body` does NOT make a lambda's body part of this frame: lowering attaches
 /// one wherever it can, including to the lambda of an ordinary function (`launch { … }`). Only the
 /// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
-fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
+pub(crate) fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
     let IrExpr::Call {
         callee: Callee::Static { name, inline, .. },
         ..
