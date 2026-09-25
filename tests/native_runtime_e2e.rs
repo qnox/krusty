@@ -403,3 +403,39 @@ fn a_throwable_subclass_is_allocated_at_its_own_size() {
 fn integer_arithmetic_and_exceptions_answer_as_kotlin_does() {
     run_driver("arithmetic_and_exceptions");
 }
+
+#[test]
+fn a_program_member_that_raises_inside_a_runtime_call_keeps_its_exception_in_flight() {
+    run_driver("user_code_raise_keeps_first_exception");
+}
+
+#[test]
+fn a_print_whose_to_string_raises_writes_nothing() {
+    let Some(output) = run_driver("print_of_raising_to_string_writes_nothing") else {
+        return;
+    };
+    // The driver's own `OK` is the whole of stdout: a byte before it is one `print` or `println`
+    // wrote after the rendering raised.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "OK\n",
+        "a print whose toString raised wrote output"
+    );
+}
+
+#[test]
+fn the_uncaught_report_runs_to_string_with_nothing_in_flight() {
+    run_driver_expecting_failure(
+        "uncaught_report_runs_to_string_with_nothing_pending",
+        "Exception in thread \"main\" Failure: disk full\n",
+    );
+}
+
+#[test]
+fn an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_it() {
+    run_driver_expecting_failure(
+        "uncaught_report_whose_to_string_throws",
+        "Exception in thread \"main\" \nException: kotlin.IllegalStateException thrown from the \
+         UncaughtExceptionHandler in thread \"main\"\n",
+    );
+}

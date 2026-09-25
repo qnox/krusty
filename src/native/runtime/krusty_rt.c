@@ -5797,9 +5797,17 @@ KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause) {
 /* `Throwable(cause)`, the one-argument form whose operand is the CAUSE rather than the message.
    Kotlin fills the message from the cause — `cause?.toString()` — so the two one-argument
    constructors differ in more than which field they fill, and a caller cannot rewrite one as the
-   other. The rendering happens BEFORE the allocation, so nothing half-built is live across it. */
+   other. The rendering happens BEFORE the allocation, so nothing half-built is live across it.
+
+   The cause's `toString` is the program's to override, and one that raises ends the constructor
+   call there, as it does in Kotlin: nothing is constructed, and the caller's check finds the
+   program's exception rather than a throwable built around the `null` the rendering came back
+   with. */
 KRef kt_throwable_new_from_cause(const KType *type, KRef cause) {
     KRef message = cause == NULL ? NULL : kt_to_string(cause);
+    if (kt_raised()) {
+        return NULL;
+    }
     return kt_throwable_new_with_cause(type, message, cause);
 }
 
@@ -5852,7 +5860,14 @@ KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot) {
     return *slot;
 }
 
-/* ---- kotlin.test ---------------------------------------------------------------------------- */
+/* ---- kotlin.test ----------------------------------------------------------------------------
+
+   An assertion compares and renders its operands with THEIR `equals` and `toString`, which a
+   program overrides, and one of those may raise. The raise is what the caller has to see: Kotlin's
+   assertion never gets as far as its own `AssertionError`. `kt_throw` records into one slot, so
+   raising that error after the operand's would overwrite it, and a `catch` for the operand's
+   exception would miss. Each assertion therefore asks `kt_raised` after every call that reaches the
+   program and returns at once when one did. */
 
 /* Kotlin's own wording, which is what a failing assertion has to report: the caller's message
    first when there is one, then what was expected and what arrived. */
@@ -5878,23 +5893,45 @@ void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
                                kt_string_utf8("Expected an exception of class ", 31));
     text = kt_string_plus(text, kt_string_utf8(expected->name, (kt_int)expected->name_length));
     text = kt_string_plus(text, kt_string_utf8(" to be thrown, but was ", 23));
-    text = kt_string_plus(text, was == NULL ? kt_string_utf8("completed successfully.", 23)
-                                            : kt_to_string(was));
-    kt_assert_fail(text);
+    KRef outcome = was == NULL ? kt_string_utf8("completed successfully.", 23) : kt_to_string(was);
+    if (kt_raised()) {
+        return;
+    }
+    kt_assert_fail(kt_string_plus(text, outcome));
+}
+
+/* The report `assertEquals` and `assertSame` share: `Expected <expected>, actual <actual>` and then
+   `tail`, or NULL when rendering an operand raised. Built in pieces because rendering either
+   operand may itself allocate, and the text so far has to stay reachable across that — the same
+   reason `kt_list_to_string` is a loop over `kt_string_plus` rather than a render into one
+   buffer. Each operand is rendered on its own before it joins the text, so a raise is seen before
+   anything is built from what the rendering came back with. */
+static KRef kt_assert_expected_actual(KRef expected, KRef actual, KRef message, KRef tail) {
+    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
+    KRef rendered = kt_to_string(expected);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
+    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
+    rendered = kt_to_string(actual);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(text, rendered);
+    return kt_string_plus(text, tail);
 }
 
 void kt_assert_equals(KRef expected, KRef actual, KRef message) {
-    if (kt_equals(expected, actual)) {
+    kt_boolean equal = kt_equals(expected, actual);
+    if (equal || kt_raised()) {
         return;
     }
-    /* Built in pieces because rendering either operand may itself allocate, and the text so far
-       has to stay reachable across that — the same reason `kt_list_to_string` is a loop over
-       `kt_string_plus` rather than a render into one buffer. */
-    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
-    text = kt_string_plus(text, kt_to_string(expected));
-    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
-    text = kt_string_plus(text, kt_to_string(actual));
-    kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
+    KRef text = kt_assert_expected_actual(expected, actual, message, kt_string_utf8(">.", 2));
+    if (text == NULL) {
+        return;
+    }
+    kt_assert_fail(text);
 }
 
 /* `assertSame`/`assertNotSame`: IDENTITY, which is the whole of what separates them from
@@ -5907,11 +5944,12 @@ void kt_assert_same(KRef expected, KRef actual, KRef message) {
     if (expected == actual) {
         return;
     }
-    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
-    text = kt_string_plus(text, kt_to_string(expected));
-    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
-    text = kt_string_plus(text, kt_to_string(actual));
-    kt_assert_fail(kt_string_plus(text, kt_string_utf8("> is not same.", 14)));
+    KRef text =
+        kt_assert_expected_actual(expected, actual, message, kt_string_utf8("> is not same.", 14));
+    if (text == NULL) {
+        return;
+    }
+    kt_assert_fail(text);
 }
 
 void kt_assert_not_same(KRef illegal, KRef actual, KRef message) {
@@ -5919,7 +5957,11 @@ void kt_assert_not_same(KRef illegal, KRef actual, KRef message) {
         return;
     }
     KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Illegal value: <", 16));
-    text = kt_string_plus(text, kt_to_string(actual));
+    KRef rendered = kt_to_string(actual);
+    if (kt_raised()) {
+        return;
+    }
+    text = kt_string_plus(text, rendered);
     kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
 }
 
@@ -5974,7 +6016,13 @@ kt_int kt_reference_hash_code(KRef self) {
     uint32_t hash = (uint32_t)(uintptr_t)self->header.type->reference_target;
     KRef receiver = kt_reference_receiver(self);
     if (receiver != NULL) {
-        hash = 31u * hash + (uint32_t)kt_hash_code(receiver);
+        /* The receiver's `hashCode` is the program's, and one that raised answered nothing to
+           combine: the caller's check propagates the raise and never reads this answer. */
+        kt_int receiver_hash = kt_hash_code(receiver);
+        if (kt_raised()) {
+            return 0;
+        }
+        hash = 31u * hash + (uint32_t)receiver_hash;
     }
     return (kt_int)hash;
 }
@@ -6023,15 +6071,35 @@ void kt_clear_pending(void) { kt_pending = NULL; }
 
 /* Nothing handled it. Kotlin ends the program, reporting the exception on stderr; 134 is the code
    this target uses for every abnormal end. Called once, where the generated entry has run the
-   program's `main` and is about to treat its answer as an answer. */
+   program's `main` and is about to treat its answer as an answer.
+
+   The report renders the exception with its own `toString`, which the program may override, so the
+   slot is EMPTIED first: generated code checks the slot after every call it makes, and a
+   `toString` entered with the uncaught exception still there would take it for its own raise after
+   its first call and come back with nothing. The exception stays reachable from `uncaught`, a
+   local, across whatever the rendering allocates.
+
+   A `toString` that raises leaves no text to print and no caller to propagate to. The JVM's
+   answer, which this one copies, is the report's opening and then a line naming the class of the
+   exception the `toString` raised; the class is read from its descriptor, which runs no program
+   code. */
 void kt_check_uncaught(void) {
     if (kt_pending == NULL) {
         return;
     }
+    KRef uncaught = kt_pending;
+    kt_clear_pending();
+    kt_write(2, "Exception in thread \"main\" ", 27);
     kt_int length = 0;
     KRef storage = NULL;
-    const char *bytes = kt_render(kt_pending, &length, &storage);
-    kt_write(2, "Exception in thread \"main\" ", 27);
+    const char *bytes = kt_render(uncaught, &length, &storage);
+    if (kt_raised()) {
+        const KType *raised = kt_pending->header.type;
+        kt_write(2, "\nException: ", 12);
+        kt_write(2, raised->name, raised->name_length);
+        kt_write(2, " thrown from the UncaughtExceptionHandler in thread \"main\"\n", 59);
+        kt_sys_exit(134);
+    }
     kt_write(2, bytes, (size_t)length);
     kt_write(2, "\n", 1);
     kt_sys_exit(134);
@@ -6039,10 +6107,16 @@ void kt_check_uncaught(void) {
 
 /* ---- kotlin.io ----------------------------------------------------------------------------- */
 
+/* `print`/`println`. Kotlin renders the value before it writes a byte, and a `toString` of the
+   program's that raises ends the call there: nothing is written, not even the `null` the renderer
+   falls back to or the newline after it, and the caller's check propagates the raise. */
 static void kt_emit(KRef value, bool newline) {
     kt_int length = 0;
     KRef storage = NULL;
     const char *bytes = kt_render(value, &length, &storage);
+    if (kt_raised()) {
+        return;
+    }
     kt_write(1, bytes, (size_t)length);
     if (newline) {
         kt_write(1, "\n", 1);
