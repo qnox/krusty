@@ -87,15 +87,18 @@ impl Emitter<'_> {
         &mut self,
         machine: &TransformedMachine,
         completion: u32,
-    ) -> Option<u16> {
-        let (slot, _) = *self.slots.get(&completion)?;
+    ) -> u16 {
+        let (slot, _) = *self
+            .slots
+            .get(&completion)
+            .expect("a transformed suspend function retains its completion identity");
         self.continuation_slot = Some(slot);
         self.transformed_suspensions = machine
             .suspensions
             .iter()
             .map(|suspension| (suspension.call, suspension.result))
             .collect();
-        Some(slot)
+        slot
     }
 }
 
@@ -114,11 +117,11 @@ pub(super) fn request_transform(
         desc,
         CoroutineRequest {
             continuation_class: machine.continuation_class.clone(),
-            line_number: ir
+            line_number: (*ir
                 .fn_decl_lines
                 .get(&fid)
-                .and_then(|&line| u16::try_from(line).ok())
-                .unwrap_or_default(),
+                .expect("a transformed source function retains its declaration line"))
+            .min(u16::MAX as u32) as u16,
             completion_slot,
             dispatch_receiver: dispatch_receiver(ir, fid),
         },

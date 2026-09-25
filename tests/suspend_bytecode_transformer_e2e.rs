@@ -69,6 +69,24 @@ suspend fun work(count: Int, ref: String) {\n\
 }
 
 #[test]
+fn a_backticked_hyphen_stays_in_the_continuation_source_name() {
+    let src = "suspend fun leaf() {}\n\
+suspend fun `work-item`(): Int {\n\
+    leaf()\n\
+    return 1\n\
+}\n";
+    let Some(result) = common::byte_diff_against_kotlinc(
+        "TransformerBacktick",
+        src,
+        "TransformerBacktickKt$work-item$1",
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("the continuation keeps the exact source identifier like kotlinc's");
+}
+
+#[test]
 fn spilled_locals_survive_real_suspensions() {
     // `pause` really suspends; `work` resumes twice from a continuation parked outside it, so its
     // spilled `count` and `ref` are restored from the continuation's fields.
