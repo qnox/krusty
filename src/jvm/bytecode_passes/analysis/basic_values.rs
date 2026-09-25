@@ -311,7 +311,7 @@ impl Interpreter for BasicInterpreter {
 }
 
 /// kotlinc's `mergeReferenceTypes`: `Object`, or an array of `Object` of the common dimension.
-fn merge_references(mut a: &str, mut b: &str) -> BasicValue {
+pub(crate) fn merge_references(mut a: &str, mut b: &str) -> BasicValue {
     let mut dimensions = 0;
     while let (Some(x), Some(y)) = (a.strip_prefix('['), b.strip_prefix('[')) {
         a = x;

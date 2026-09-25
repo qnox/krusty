@@ -7160,6 +7160,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   separates nothing. Tests: the unit tests beside the pass, and
   `tests/redundant_checkcasts_before_aastore_e2e.rs` (the three methods' instructions against kotlinc,
   and the uncast store at run time).
+- **A null jump or `instanceof` on a value known to be `null`, or known not to be, folds as
+  kotlinc's `RedundantNullCheckMethodTransformer` does.** The pass runs at kotlinc's position
+  (step `RedundantNullCheck`, `bytecode_passes/redundant_null_checks/`). A value is known non-null
+  when it is made by `new`, a reference `ldc`, `Unit.INSTANCE`, boxing, a new array, or a
+  progression iterator's `next`, and known `null` when it is `aconst_null` (not a `typeOf`
+  placeholder); a `checkcast` keeps its operand's knowledge (not after a reified safe-as marker). A
+  check of a local teaches the local on each edge: `ifnull`/`ifnonnull` and `instanceof` + `ifeq`/`ifne`
+  make it `null` or non-null on the matching edge, a `checkNotNull*`/`checkNotNullParameter` makes it
+  non-null after the call. Values that merge from different kinds are unknown. `ifnull`/`ifnonnull`
+  of a known value becomes a `goto` when it always jumps and goes when it never does; `instanceof` of
+  `null` is `false`, and of a non-null value whose class is exactly the tested class `true` (a reified
+  `instanceof` stays); the dropped operand's `aload`/`dup`/`aconst_null` goes, otherwise it is popped.
+  Rounds repeat while a jump or `instanceof` folds. Nothing that runs changes: the folded test had
+  one outcome. Tests: the unit tests beside the pass, and `tests/redundant_null_jumps_e2e.rs`
+  (instructions and frames against kotlinc, and the folded samples at run time).
 
 ## 8. Success criteria for the PoC
 
