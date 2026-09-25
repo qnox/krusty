@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 
-use crate::jvm::method_node::{LabelId, MethodNode, Node};
+use crate::jvm::method_node::Node;
+#[cfg(test)]
+use crate::jvm::method_node::{LabelId, MethodNode};
 
 /// A node's identity in its [`InsnList`], stable while other nodes come and go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -70,6 +72,13 @@ impl InsnList {
         &self.entry(id).node
     }
 
+    /// Whether `id` is still in the list.
+    pub(crate) fn contains(&self, id: NodeId) -> bool {
+        self.entries
+            .get(id.0 as usize)
+            .is_some_and(|entry| entry.is_some())
+    }
+
     /// Replaces the node `id` stands for, keeping its identity (ASM's `set`, whose callers keep
     /// no reference to the old node).
     pub(crate) fn set(&mut self, id: NodeId, node: Node) {
@@ -80,6 +89,7 @@ impl InsnList {
         self.first
     }
 
+    #[cfg(test)]
     pub(crate) fn last(&self) -> Option<NodeId> {
         self.last
     }
@@ -185,6 +195,7 @@ impl InsnList {
     }
 
     /// The node at `index` (ASM's `get`).
+    #[cfg(test)]
     pub(crate) fn at(&self, index: usize) -> NodeId {
         self.ensure_order();
         self.order
@@ -193,6 +204,7 @@ impl InsnList {
             .expect("the order was just built")[index]
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.ensure_order();
         self.order.borrow().as_ref().map_or(0, Vec::len)
@@ -208,6 +220,7 @@ impl InsnList {
     }
 
     /// The position of the label node placing `label`.
+    #[cfg(test)]
     pub(crate) fn label_node(&self, label: LabelId) -> Option<NodeId> {
         self.ids()
             .into_iter()
@@ -225,11 +238,13 @@ impl InsnList {
 /// A [`MethodNode`] whose instructions are being edited as an [`InsnList`]. `method.nodes` stays
 /// empty until [`EditableMethod::finish`]; the try/catch and local-variable tables refer to labels,
 /// which keep their identity on their own.
+#[cfg(test)]
 pub(crate) struct EditableMethod {
     pub method: MethodNode,
     pub insns: InsnList,
 }
 
+#[cfg(test)]
 impl EditableMethod {
     pub(crate) fn new(mut method: MethodNode) -> Self {
         let nodes = std::mem::take(&mut method.nodes);
