@@ -2385,6 +2385,7 @@ impl ClassWriter {
                     name: name.to_string(),
                     desc: desc.to_string(),
                     builder: code.clone(),
+                    decided: None,
                 })
             }),
             exceptions: code.resolved_exceptions(),

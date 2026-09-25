@@ -210,14 +210,10 @@ impl ClassWriter {
     /// decided yet; its table as emitted stands in.
     pub(super) fn intern_frame_classes(&mut self, body: &Body<'_>, computed: &Computed) {
         let index = self.methods.len() - 1;
-        let method = &self.methods[index];
         let rewritten = if body.name == "<init>" || body.name == "<clinit>" {
             None
         } else {
-            method
-                .rewrite_source
-                .as_deref()
-                .and_then(|source| self.rewritten(method, source))
+            self.remembered_rewrite(index)
         };
         let Some(rewritten) = rewritten else {
             self.encode_frames(body, computed);
