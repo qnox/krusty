@@ -203,6 +203,20 @@ impl ResolvedModuleIndex {
         );
     }
 
+    /// Whether a value parameter (context parameters excluded) or the extension receiver of this
+    /// callable has a function type.
+    pub fn has_function_typed_parameter(&self, callable: CallableId) -> bool {
+        self.function_typed_parameter_callables.contains(&callable)
+    }
+
+    pub(crate) fn publish_function_typed_parameter(&mut self, callable: CallableId) {
+        assert!(
+            self.callable(callable).is_some(),
+            "a function-typed parameter fact requires a published callable identity"
+        );
+        self.function_typed_parameter_callables.insert(callable);
+    }
+
     /// Strict-equality refinement published by `equals`' first ordinary value parameter.
     pub fn callable_equality_bound(&self, callable: CallableId) -> Option<super::ResolvedTy> {
         self.callable_equality_bounds.get(&callable).copied()

@@ -1194,6 +1194,9 @@ impl<'a> CommonIrBodySink<'a> {
             {
                 self.ir.inline_fns.insert(function);
             }
+            if index.has_function_typed_parameter(callable.id) {
+                self.ir.function_typed_parameter_fns.insert(function);
+            }
             // An override inherits `operator` / `infix` from the declarations it overrides.
             if inherited.operator
                 || declaration_header

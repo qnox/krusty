@@ -249,6 +249,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        has_function_typed_parameter: false,
         receiver: None,
         params_have_defaults: false,
         param_defaults: Vec::new(),
@@ -314,6 +315,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        has_function_typed_parameter: false,
         receiver: None,
         params_have_defaults: false,
         param_defaults: Vec::new(),
@@ -426,6 +428,7 @@ fn package_value_param_defaults_round_trip() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        has_function_typed_parameter: false,
         operator: false,
         infix: false,
         type_params: Vec::new(),
@@ -438,7 +441,7 @@ fn package_value_param_defaults_round_trip() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None);
+    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
     let ci = class_info("com/example/HostKt", d1, d2);
 
     let fns = package_functions(&ci);
@@ -475,6 +478,7 @@ fn package_function_type_parameter_bound_round_trips() {
         jvm_desc: Some("(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;".to_string()),
         contract: None,
         inline: false,
+        has_function_typed_parameter: false,
         operator: false,
         infix: false,
         type_params: vec![("T".to_string(), false)],
@@ -487,7 +491,7 @@ fn package_function_type_parameter_bound_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None);
+    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
     let ci = class_info("com/example/HostKt", d1, d2);
     let function = package_functions(&ci)
         .iter()
@@ -526,6 +530,7 @@ fn package_extension_receiver_round_trips() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        has_function_typed_parameter: false,
         operator: true,
         infix: false,
         type_params: Vec::new(),
@@ -538,7 +543,7 @@ fn package_extension_receiver_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None);
+    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
@@ -595,6 +600,7 @@ fn package_receiver_function_type_param_round_trips() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        has_function_typed_parameter: false,
         operator: false,
         infix: false,
         type_params: Vec::new(),
@@ -607,7 +613,7 @@ fn package_receiver_function_type_param_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None);
+    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)

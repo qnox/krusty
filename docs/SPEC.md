@@ -6994,6 +6994,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   field-number order, as kotlinc's generated `writeTo` does, and a `Type` refers to a type parameter
   its declaration owns by name and to an enclosing class's by id. Measured against kotlinc 2.4.0,
   2.4.10 and 2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_type_reference_e2e.rs`.
+- **Inline functions with functional parameters require compiler 1.3.50.** A named, non-private,
+  non-suspend inline function whose value parameter or extension receiver has a function type records
+  kotlinc's compiler-version requirement 1.3.50 in `@Metadata`, unless parameter assertions are
+  disabled; property accessors never do. Measured against kotlinc 2.4.20; see
+  `docs/METADATA_NOTES.md`. Test: `tests/metadata_version_requirement_e2e.rs`.
+- **A function records its JVM signature exactly when kotlinc's class mapper cannot rebuild it.**
+  The descriptor derived from the declared types' class ids is compared with the physical one, as
+  kotlinc 2.4.20 does; see `docs/METADATA_NOTES.md`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part
