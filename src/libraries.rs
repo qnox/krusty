@@ -312,6 +312,8 @@ pub struct LibraryMember {
     /// identity, not a backend spelling: each backend decides how the selected operation is realized.
     /// Ordinary declared members carry `None`.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
+    /// A compiled `companion { … }` block member's classifier; see `FunctionInfo`'s field.
+    pub associated_classifier: Option<TypeName>,
     /// Compiler-plugin expression implementation attached to this exact declaration. Ordinary
     /// declarations leave it unset; selection carries it unchanged to the plugin planning phase.
     pub plugin_expression: Option<PluginExpressionDeclaration>,
@@ -757,6 +759,7 @@ impl LibraryMember {
             constructor_realization: None,
             declared_ret: None,
             implicit_classifier_callable: None,
+            associated_classifier: None,
             plugin_expression: None,
             stable_declaration: None,
             source_member: None,
@@ -1823,9 +1826,9 @@ impl ReturnInfo {
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
-    /// A `companion fun C.name`: source lookup uses the declared classifier receiver, while the
-    /// selected callable has no runtime receiver parameter.
-    pub companion_extension: bool,
+    /// The classifier of a `companion { … }` block member or `companion fun C.name`: named through
+    /// the classifier with no value operand, so providers publish it as a receiver-less candidate.
+    pub associated_classifier: Option<TypeName>,
     /// The extension/member receiver type; `None` for a top-level function.
     pub receiver: Option<Ty>,
     pub ret: ReturnInfo,
@@ -2080,7 +2083,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
-            companion_extension: false,
+            associated_classifier: None,
             receiver,
             ret: ReturnInfo::default(),
             flags: FnFlags::default(),
@@ -2169,6 +2172,7 @@ impl FunctionInfo {
         candidate.stable_declaration = member.stable_declaration;
         candidate.source_member = member.source_member;
         candidate.implicit_classifier_callable = member.implicit_classifier_callable;
+        candidate.associated_classifier = member.associated_classifier;
         candidate
     }
 
@@ -2419,7 +2423,8 @@ pub struct PropertyInfo {
     /// The extension/member receiver type; `None` for a top-level property.
     pub receiver: Option<Ty>,
     /// The classifier this receiver-less property is named through (`C.name`): a Java static field,
-    /// a `companion { … }` block property or a companion `@JvmField`, published in `C`'s namespace.
+    /// a companion `@JvmField`, a `companion { … }` block property or a written `companion val
+    /// C.name`, published in `C`'s namespace; see [`FunctionInfo::associated_classifier`].
     pub associated_classifier: Option<TypeName>,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
     pub formals: Vec<String>,
@@ -2490,14 +2495,6 @@ pub struct PropertySet {
 }
 
 impl PropertyInfo {
-    /// Whether this extension property uses its classifier receiver only as an associated lookup
-    /// coordinate. Providers express that semantic/physical distinction directly in the accessor:
-    /// the logical parameters contain the receiver, while the physical parameters do not.
-    pub fn is_companion_extension(&self) -> bool {
-        self.kind == PropKind::Extension
-            && self.getter.params.len() == self.getter.physical_params.len() + 1
-    }
-
     pub fn owner_name(&self) -> String {
         self.owner.render()
     }

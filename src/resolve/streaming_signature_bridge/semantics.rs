@@ -214,7 +214,7 @@ impl ProductionSignatureSemantics<'_> {
         Ok(Some(receiver))
     }
 
-    fn record_scoped_argument_constraints(
+    pub(super) fn record_scoped_argument_constraints(
         &self,
         scope: crate::fir::SignatureScope,
         parameters: &[Ty],
@@ -787,89 +787,6 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    /// Select a `companion fun C.name` declaration through the classifier coordinate written at
-    /// the call site. A companion block does not create a singleton value, so this rung must be
-    /// evaluated before qualified-receiver folding tries to turn `C` into an object/companion.
-    fn select_associated_classifier_call(
-        &self,
-        scope: crate::fir::SignatureScope,
-        classifier: crate::types::TypeName,
-        spelling: &str,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        type_arguments: &[crate::fir::ResolvedTy],
-        trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let receiver = Ty::obj_name(classifier);
-        let resolved_type_arguments = type_arguments
-            .iter()
-            .map(|argument| argument.get())
-            .collect::<Vec<_>>();
-        let selected = self.with_resolver(scope, |resolver| {
-            let (mut functions, _) = resolver.receiver_callables(receiver, spelling).into_parts();
-            functions
-                .overloads
-                .retain(|candidate| candidate.companion_extension);
-            functions.overloads =
-                self.implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
-            if functions.overloads.is_empty() {
-                return None;
-            }
-            let callables = crate::libraries::Callables::from_parts(
-                functions,
-                crate::libraries::PropertySet::default(),
-            );
-            let (argument_kinds, argument_types) =
-                Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-            let projected =
-                self.project_postponed_callables(scope, receiver, callables, &argument_kinds);
-            let crate::symbol_resolver::CandidateSelection::Selected((selected, _, result)) =
-                resolver.select_receiver_function_with_params_tracking(
-                    receiver,
-                    spelling,
-                    projected.arguments(),
-                    &resolved_type_arguments,
-                    projected.callables(),
-                    None,
-                )
-            else {
-                return None;
-            };
-            Some((
-                result,
-                selected.source_key,
-                selected.stable_declaration,
-                argument_types,
-                projected.selected_bindings(&selected),
-            ))
-        });
-        let Ok((result, source, declaration, argument_types, postponed_bindings)) = selected else {
-            return Ok(None);
-        };
-        self.commit_postponed_bindings(scope, postponed_bindings);
-        if let Some(source) = source {
-            if let Some(signature) = self.demanded_source_signature(None, declaration, demand)? {
-                return self
-                    .apply_demanded_source_callable(
-                        source,
-                        Some(receiver),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &resolved_type_arguments,
-                        None,
-                    )
-                    .map(Some);
-            }
-        }
-        crate::fir::ResolvedTy::new(result)
-            .map(Some)
-            .map_err(|_| Self::failure())
-    }
-
     /// Select the ordinary callable family denoted by `Classifier.name(...)`. The shared resolver
     /// owns whether the declaration is a Java static, Kotlin companion instance/static, or an
     /// implicit enum callable; compact signature solving only consumes the selected semantic member
@@ -1012,50 +929,6 @@ impl ProductionSignatureSemantics<'_> {
                 .map(Some);
         }
         crate::fir::ResolvedTy::new(member.ret)
-            .map(Some)
-            .map_err(|_| Self::failure())
-    }
-
-    /// Property counterpart of [`Self::select_associated_classifier_call`]. The ordinary extension
-    /// property selector supplies scope, visibility, receiver applicability, and specialization;
-    /// this adapter only requires the selected declaration to carry the associated-call fact.
-    fn select_associated_classifier_property(
-        &self,
-        scope: crate::fir::SignatureScope,
-        classifier: crate::types::TypeName,
-        spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let receiver = Ty::obj_name(classifier);
-        let property = self
-            .with_resolver(scope, |resolver| {
-                resolver
-                    .select_extension_property(receiver, spelling)
-                    .ok()
-                    .flatten()
-                    .filter(crate::libraries::PropertyInfo::is_companion_extension)
-            })
-            .ok();
-        let Some(property) = property else {
-            let associated = self.with_resolver(scope, |resolver| {
-                resolver.accessible_classifier_associated_property(classifier, spelling)
-            });
-            return match associated {
-                Ok(property) => crate::fir::ResolvedTy::new(property.ty)
-                    .map(Some)
-                    .map_err(|_| Self::failure()),
-                Err(_) => Ok(None),
-            };
-        };
-        if let Some(signature) =
-            self.demanded_source_signature(None, property.stable_declaration, demand)?
-        {
-            return Ok(Some(signature.result));
-        }
-        crate::fir::ResolvedTy::new(property.ty)
             .map(Some)
             .map_err(|_| Self::failure())
     }
@@ -1610,7 +1483,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     self.qualified_classifier_or_source_alias(scope, qualifier)
                 {
                     if let Some(result) =
-                        self.select_associated_classifier_property(scope, classifier, name, demand)?
+                        self.select_qualified_associated_property(scope, classifier, name, demand)?
                     {
                         return Ok(result);
                     }
@@ -1759,11 +1632,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if let Some(declaration) = self.enclosing_enum_entry_property(scope, spelling) {
             return demand(declaration).map(|signature| signature.result);
         }
-        for receiver in self
-            .implicit_receivers(scope)
-            .into_iter()
-            .chain(self.enclosing_lexical_singleton_receivers(scope))
-        {
+        for rung in self.implicit_rungs(scope) {
+            let receiver = match rung {
+                super::classifier_associated::ImplicitRung::StaticScope(classifier) => {
+                    if let Some(result) =
+                        self.select_static_scope_property(scope, classifier, spelling, demand)?
+                    {
+                        return Ok(result);
+                    }
+                    continue;
+                }
+                super::classifier_associated::ImplicitRung::Receiver(receiver) => receiver,
+            };
             if let Some(result) =
                 self.selected_member_property_type(scope, receiver, spelling, demand)?
             {
@@ -2179,16 +2059,27 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
             }
             if let Some(classifier) = self.qualified_classifier_or_source_alias(scope, qualifier) {
-                if let Some(result) = self.select_associated_classifier_call(
+                // Associated declarations precede the members of `C`'s companion-object value;
+                // an inapplicable one is final and does not reinterpret `C` as that value.
+                match self.select_qualified_associated_call(
                     scope,
                     classifier,
                     name,
-                    arguments,
-                    type_arguments,
-                    trailing_lambda,
+                    &super::classifier_associated::AssociatedSignatureArguments {
+                        arguments,
+                        type_arguments,
+                        trailing_lambda,
+                        expected,
+                    },
                     demand,
                 )? {
-                    return Ok(result);
+                    super::classifier_associated::AssociatedSignatureCall::Selected(result) => {
+                        return Ok(result);
+                    }
+                    super::classifier_associated::AssociatedSignatureCall::Inapplicable => {
+                        return Err(Self::failure());
+                    }
+                    super::classifier_associated::AssociatedSignatureCall::Absent => {}
                 }
                 if let Some(result) = self.select_classifier_call(
                     scope,
@@ -2222,11 +2113,29 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .scopes
             .file(scope.source)
             .is_some_and(|file| file.explicit_context_arguments);
-        for receiver in self
-            .implicit_receivers(scope)
-            .into_iter()
-            .chain(self.enclosing_lexical_singleton_receivers(scope))
-        {
+        for rung in self.implicit_rungs(scope) {
+            let receiver = match rung {
+                super::classifier_associated::ImplicitRung::StaticScope(classifier) => {
+                    if let super::classifier_associated::AssociatedSignatureCall::Selected(result) =
+                        self.select_static_scope_call(
+                            scope,
+                            classifier,
+                            spelling,
+                            &super::classifier_associated::AssociatedSignatureArguments {
+                                arguments,
+                                type_arguments,
+                                trailing_lambda,
+                                expected,
+                            },
+                            demand,
+                        )?
+                    {
+                        return Ok(result);
+                    }
+                    continue;
+                }
+                super::classifier_associated::ImplicitRung::Receiver(receiver) => receiver,
+            };
             if let Ok((
                 result,
                 member,
@@ -4349,13 +4258,53 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .flatten()
         };
 
-        let selected = match receiver {
-            Some(receiver) => property_on_receiver(receiver.get()),
-            None => self
-                .implicit_receivers(scope)
+        let associated = |properties: Vec<crate::libraries::PropertyInfo>| {
+            let nearest = properties
+                .iter()
+                .map(|property| property.receiver_rank)
+                .min()?;
+            let mut nearest = properties
                 .into_iter()
-                .find_map(property_on_receiver)
-                .or_else(|| {
+                .filter(|property| property.receiver_rank == nearest);
+            match (nearest.next(), nearest.next()) {
+                (Some(property), None) => Some(
+                    is_lateinit(property.stable_declaration)
+                        .then_some(property.stable_declaration)
+                        .flatten(),
+                ),
+                _ => Some(None),
+            }
+        };
+        let selected = match receiver {
+            Some(receiver) => {
+                let classifier_associated = receiver.get().obj_internal().and_then(|classifier| {
+                    self.with_resolver(scope, |resolver| {
+                        associated(resolver.classifier_associated_properties(classifier, spelling))
+                    })
+                    .ok()
+                });
+                match classifier_associated {
+                    Some(selected) => selected,
+                    None => property_on_receiver(receiver.get()),
+                }
+            }
+            None => self
+                .implicit_rungs(scope)
+                .into_iter()
+                .map(|rung| match rung {
+                    super::classifier_associated::ImplicitRung::Receiver(receiver) => {
+                        property_on_receiver(receiver).map(Some)
+                    }
+                    super::classifier_associated::ImplicitRung::StaticScope(classifier) => self
+                        .with_resolver(scope, |resolver| {
+                            associated(
+                                resolver.static_scope_associated_properties(classifier, spelling),
+                            )
+                        })
+                        .ok(),
+                })
+                .find_map(|selected| selected)
+                .unwrap_or_else(|| {
                     self.with_resolver(scope, |resolver| {
                         let crate::symbol_resolver::Symbol::Member(facets) = resolver
                             .resolve_symbol(

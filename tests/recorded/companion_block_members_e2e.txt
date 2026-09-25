@@ -1,0 +1,7 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[associated_declarations_are_not_members_of_instances]
+2.4.20:
+  Main.kt:6:9: unresolved reference 'f' on receiver of type 'C'.
+  Main.kt:7:9: unresolved reference 'q' on receiver of type 'C'.

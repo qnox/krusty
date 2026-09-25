@@ -13,6 +13,7 @@ use crate::types::{Ty, TypeName};
 use super::{ClassSig, Signature, SymbolTable};
 
 mod callable_references;
+mod classifier_associated;
 mod classifier_identities;
 mod declaration_aliases;
 mod declaration_conflicts;
@@ -3232,18 +3233,16 @@ impl ProductionSignatureSemantics<'_> {
                 owner = parent;
             }
         }
-        // A top-level EXTENSION PROPERTY (`val A.z get() = this.x`) also has a receiver, and `this`
-        // inside its accessor resolves to it. Only functions were consulted here, so the receiver
-        // was invisible and the whole module's signatures declined with no diagnostic.
+        // An extension property's accessor sees its receiver as `this`; a companion one has none.
         if let Some(receiver) = self
             .table
             .ext_props
             .values()
             .flatten()
             .find(|property| property.stable_declaration == Some(scope.owner))
-            .map(|property| property.receiver)
+            .map(|property| (!property.is_companion_extension).then_some(property.receiver))
         {
-            let mut receivers = vec![receiver];
+            let mut receivers = receiver.into_iter().collect::<Vec<_>>();
             receivers.extend(context_receivers);
             return receivers;
         }
@@ -3260,6 +3259,7 @@ impl ProductionSignatureSemantics<'_> {
                     .flatten(),
             )
             .find(|signature| signature.stable_declaration == Some(scope.owner))
+            .filter(|signature| !signature.is_companion_extension())
             .and_then(|signature| signature.source_receiver);
         let mut receivers = source_receiver.into_iter().collect::<Vec<_>>();
         receivers.extend(context_receivers);

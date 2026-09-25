@@ -3315,10 +3315,10 @@ impl Classpath {
                         default_values: Vec::new(),
                         default_realization: None,
                         constructor_realization: None,
-                        // No `.kotlin_builtins` member declares a value-class return: the builtins are
-                        // the mapped platform types, whose members predate value classes entirely.
+                        // Builtin members predate value classes, so none returns one.
                         declared_ret: None,
                         implicit_classifier_callable: None,
+                        associated_classifier: None,
                         plugin_expression: None,
                         stable_declaration: None,
                         source_member: None,

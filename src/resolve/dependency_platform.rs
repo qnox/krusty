@@ -190,7 +190,7 @@ fn merge_functions(
             // matching source candidate made ordinary calls work while language conventions (most
             // visibly delegated properties) disappeared.
             let existing = &mut primary.overloads[existing];
-            existing.companion_extension = candidate.companion_extension;
+            existing.associated_classifier = candidate.associated_classifier;
             existing.receiver = candidate.receiver.or(existing.receiver);
             existing.flags = candidate.flags;
             existing.visibility = candidate.visibility;
