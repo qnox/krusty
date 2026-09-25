@@ -6145,6 +6145,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
   `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
   `a_function_type_is_not_a_function_of_an_unrelated_result`).
+- **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
+  runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
+  flag for which it is, because the two classes differ observably and the step cannot tell them
+  apart (`1..3 step 1` is a progression). A range (`..`, `until`) renders `"$first..$last"`, hashes
+  `31 * first + last`, and equals only a range of the same element type; a progression (`step`,
+  `downTo`, `reversed()`) renders `"$first..$last step $step"` or `"$first downTo $last step
+  ${-step}"`, hashes `31 * (31 * first + last) + step`, and equals a range or a progression with
+  the same first, last and step — the asymmetry of `IntRange` subclassing `IntProgression`, so
+  `(1..3 step 1) == (1..3)` but not the reverse. Two empty ones are equal and hash to `-1`.
+  `last` is the last element reached. `UIntRange`/`ULongRange` read their bounds unsigned in
+  every comparison, membership residue and walk step, so a `ULong` walk across 2^63 neither
+  misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
+  (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
+  Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
+  range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
+  the range: the builtin one for strings and boxed primitives, and the class's `compareTo` for a
+  program's own `Comparable`. The runtime never rediscovers the order from the bounds' descriptors,
+  which know only the builtin types. `isEmpty` is `start > end`; `contains(v)` asks `v` against
+  `start` and then `end`, as Kotlin's class does. A `compareTo` that raises ends the member there:
+  `contains` makes no second comparison, and neither member answers `true` for a comparison that
+  raised. `equals`, `hashCode` and `toString` stop likewise at the first bound member that raises.
+  Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`).
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,

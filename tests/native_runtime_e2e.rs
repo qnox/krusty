@@ -300,3 +300,33 @@ fn a_result_whose_content_throws_renders_no_text() {
 fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
     run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
 }
+
+#[test]
+fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
+    run_driver("range_contains_unsigned");
+}
+
+#[test]
+fn a_progression_renders_compares_and_hashes_with_its_step() {
+    run_driver("range_progression_members");
+}
+
+#[test]
+fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
+    run_driver("comparable_range_program_type");
+}
+
+#[test]
+fn an_empty_unsigned_until_is_the_declared_empty_range() {
+    run_driver("range_unsigned_until_empty");
+}
+
+#[test]
+fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
+    run_driver("range_iterator_ulong_crosses_sign");
+}
+
+#[test]
+fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
+    run_driver("array_copy_into_bounds");
+}
