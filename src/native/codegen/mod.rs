@@ -96,7 +96,7 @@ impl Backend for CraneliftBackend {
         // `box$1`. Everything below, the name a failed cast reports included, reads that name.
         file.ir.realize_local_class_names_in_packages();
         if state.runtime_symbols.is_none() {
-            match super::linker::runtime_symbols(self.target.arch) {
+            match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
                 Err(error) => {
                     diags.error(
