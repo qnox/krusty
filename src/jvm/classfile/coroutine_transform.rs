@@ -111,7 +111,10 @@ impl ClassWriter {
             .finished_node(method, source, bytes, &pool)
             .ok_or("the finished body cannot be read")?
             .node;
-        let source_file = self.source_file.clone().unwrap_or_default();
+        let source_file = self
+            .source_file
+            .clone()
+            .ok_or("the transformed source method has no SourceFile identity")?;
         let owner = self.internal_name.clone();
         let function = NamedFunction {
             owner: &owner,
