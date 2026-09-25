@@ -62,6 +62,7 @@ pub(super) fn inventory(body: &FirBody) -> HashMap<crate::fir::LocalValueId, IrB
             }
             FirStatementKind::Loop { header, .. } => match header {
                 FirLoopHeader::Range { variable, .. }
+                | FirLoopHeader::Progression { variable, .. }
                 | FirLoopHeader::Iterable { variable, .. }
                 | FirLoopHeader::Iterator { variable, .. } => {
                     record(*variable, IrBindingStability::Stable);

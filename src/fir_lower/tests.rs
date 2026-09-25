@@ -269,9 +269,12 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
                 variable,
                 variable_name,
                 counter,
-                operation,
-                start,
-                end,
+                source:
+                    crate::ir::IrProgressionSource::Literal {
+                        operation,
+                        start,
+                        end,
+                    },
                 body,
                 label,
             }) => Some((
@@ -326,7 +329,10 @@ fn range_loop_records_an_exact_type_stable_bound_read() {
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop { end, .. }) => Some(*end),
+            IrExpr::Checked(IrCheckedOperation::RangeLoop {
+                source: crate::ir::IrProgressionSource::Literal { end, .. },
+                ..
+            }) => Some(*end),
             _ => None,
         })
         .collect::<Vec<_>>();

@@ -1,8 +1,8 @@
 use crate::fir::{
     ControlTargetId, FirBuiltinIterableKind, FirExprId, FirIteratorCall, FirIteratorReceiver,
-    FirLoopHeader, FirRangeCounterKind, FirRangeOperation, LocalValueId, OriginId, ResolvedTy,
+    FirLoopHeader, FirProgressionSource, FirRangeCounterKind, LocalValueId, OriginId, ResolvedTy,
 };
-use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic};
+use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrProgressionSource};
 use crate::types::Ty;
 
 use super::source_calls::SameFileExtensionReceiverMode;
@@ -21,15 +21,13 @@ struct IteratorLoopContract<'a> {
     body: FirExprId,
 }
 
-/// The checked semantic pieces of one loop over a range literal. Common lowering preserves this
-/// contract; each backend chooses its own counted-loop control-flow shape.
-struct RangeLoopContract {
+/// The checked semantic pieces of one counted loop over a progression. Common lowering preserves
+/// this contract; each backend chooses its own counted-loop control-flow shape.
+struct RangeLoopContract<'a> {
     target: ControlTargetId,
     variable: LocalValueId,
     counter: FirRangeCounterKind,
-    operation: FirRangeOperation,
-    start: FirExprId,
-    end: FirExprId,
+    source: std::borrow::Cow<'a, FirProgressionSource>,
     body: FirExprId,
 }
 
@@ -74,9 +72,22 @@ impl BodyLowering<'_> {
                 target,
                 variable: *variable,
                 counter: *counter,
-                operation: *operation,
-                start: *start,
-                end: *end,
+                source: std::borrow::Cow::Owned(FirProgressionSource::Literal {
+                    operation: *operation,
+                    start: *start,
+                    end: *end,
+                }),
+                body,
+            }),
+            FirLoopHeader::Progression {
+                variable,
+                counter,
+                source,
+            } => self.range_loop(RangeLoopContract {
+                target,
+                variable: *variable,
+                counter: *counter,
+                source: std::borrow::Cow::Borrowed(source),
                 body,
             }),
             FirLoopHeader::Iterable {
@@ -125,23 +136,68 @@ impl BodyLowering<'_> {
         }))
     }
 
-    fn range_loop(&mut self, lp: RangeLoopContract) -> Result<ExprId, FirLoweringFailure> {
-        let ty = lp.counter.ty();
-        let start = self.expression(lp.start)?;
-        let end = self.expression(lp.end)?;
+    fn range_loop(&mut self, lp: RangeLoopContract<'_>) -> Result<ExprId, FirLoweringFailure> {
+        let source = self.progression_source(&lp.source)?;
         let body = self.expression(lp.body)?;
         Ok(self
             .ir
             .add_expr(IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop {
                 variable: self.value_slot(lp.variable),
                 variable_name: self.body.debug_value_name(lp.variable).map(Into::into),
-                counter: ty,
-                operation: lp.operation,
-                start,
-                end,
+                counter: lp.counter.ty(),
+                source,
                 body,
                 label: self.control_label(0, lp.target)?,
             })))
+    }
+
+    /// Lowers the operands of a matched progression. A progression value gets the static class
+    /// the checker built its header from (`irCastIfNeeded`).
+    fn progression_source(
+        &mut self,
+        source: &FirProgressionSource,
+    ) -> Result<IrProgressionSource, FirLoweringFailure> {
+        Ok(match source {
+            FirProgressionSource::Literal {
+                operation,
+                start,
+                end,
+            } => IrProgressionSource::Literal {
+                operation: *operation,
+                start: self.expression(*start)?,
+                end: self.expression(*end)?,
+            },
+            FirProgressionSource::Value {
+                progression,
+                iterable,
+            } => {
+                let value = self.expression(*iterable)?;
+                let iterable_ty = self
+                    .body
+                    .expr(*iterable)
+                    .map(|expression| expression.ty.get());
+                let value = if iterable_ty == Some(progression.ty) {
+                    value
+                } else {
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::Cast,
+                        arg: value,
+                        type_operand: progression.ty,
+                    })
+                };
+                IrProgressionSource::Value {
+                    progression: *progression,
+                    iterable: value,
+                }
+            }
+            FirProgressionSource::Step { nested, step } => IrProgressionSource::Step {
+                nested: Box::new(self.progression_source(nested)?),
+                step: self.expression(*step)?,
+            },
+            FirProgressionSource::Reversed(nested) => {
+                IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

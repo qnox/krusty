@@ -5,10 +5,14 @@ use std::collections::HashMap;
 mod context_parameters;
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod ranges;
+pub use ranges::{
+    FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
+};
 
 use crate::diag::Span;
 use crate::kt_string::KtString;
-use crate::types::{Ty, TypeName};
+use crate::types::TypeName;
 
 use super::body_work::BodyWorkItem;
 use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
@@ -944,35 +948,6 @@ pub enum FirBinaryOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirRangeOperation {
-    Through,
-    OpenEnd,
-    Until,
-    DownTo,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirRangeCounterKind {
-    Int,
-    Long,
-    Char,
-    UInt,
-    ULong,
-}
-
-impl FirRangeCounterKind {
-    pub const fn ty(self) -> Ty {
-        match self {
-            Self::Int => Ty::Int,
-            Self::Long => Ty::Long,
-            Self::Char => Ty::Char,
-            Self::UInt => Ty::UInt,
-            Self::ULong => Ty::ULong,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirBuiltinIterableKind {
     Array,
     String,
@@ -1745,6 +1720,12 @@ pub enum FirLoopHeader {
         operation: FirRangeOperation,
         start: FirExprId,
         end: FirExprId,
+    },
+    /// A counted loop over a progression built by `kotlin.ranges` or held in a value.
+    Progression {
+        variable: LocalValueId,
+        counter: FirRangeCounterKind,
+        source: FirProgressionSource,
     },
     Iterable {
         variable: LocalValueId,

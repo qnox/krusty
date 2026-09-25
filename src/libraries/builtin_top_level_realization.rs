@@ -297,6 +297,56 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     .then_some(CompilerIntrinsic::TypeOf)
 }
 
+/// The signed `kotlin.ranges` progression builders: `downTo`, `until`, `step` and `reversed` over
+/// `Int`, `Long` and `Char` progressions.
+fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if facts.kind != FnKind::Extension
+        || facts.context_count != 0
+        || facts.is_suspend
+        || facts.is_operator
+        || facts.type_parameter_count != 0
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    let class = |ty: Ty, classes: &[&str]| {
+        ty.obj_internal().is_some_and(|name| {
+            ty.type_args().is_empty() && classes.iter().any(|class| name.matches(class))
+        })
+    };
+    const PROGRESSIONS: [&str; 3] = [
+        "kotlin/ranges/IntProgression",
+        "kotlin/ranges/LongProgression",
+        "kotlin/ranges/CharProgression",
+    ];
+    const RANGES: [&str; 3] = [
+        "kotlin/ranges/IntRange",
+        "kotlin/ranges/LongRange",
+        "kotlin/ranges/CharRange",
+    ];
+    let integral = |ty: Ty| matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long | Ty::Char);
+    match (facts.name, facts.params) {
+        ("downTo", [to]) if facts.is_infix && integral(receiver) && integral(*to) => {
+            class(facts.ret, &PROGRESSIONS).then_some(CompilerIntrinsic::RangeDownTo)
+        }
+        ("until", [to]) if facts.is_infix && integral(receiver) && integral(*to) => {
+            class(facts.ret, &RANGES).then_some(CompilerIntrinsic::RangeUntil)
+        }
+        ("step", [Ty::Int | Ty::Long])
+            if facts.is_infix && class(receiver, &PROGRESSIONS) && facts.ret == receiver =>
+        {
+            Some(CompilerIntrinsic::ProgressionStep)
+        }
+        ("reversed", [])
+            if !facts.is_infix && class(receiver, &PROGRESSIONS) && facts.ret == receiver =>
+        {
+            Some(CompilerIntrinsic::ProgressionReversed)
+        }
+        _ => None,
+    }
+}
+
 fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.context_count != 0
         || facts.vararg.is_some()
@@ -381,6 +431,8 @@ pub(crate) fn function_realization(
         kotlin_test(&facts)
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
+    } else if facts.package.matches("kotlin/ranges") {
+        progression_builder(&facts)
     } else {
         None
     }
