@@ -4451,14 +4451,17 @@ shadow with no output change.
   block reuse the numbers kotlinc reuses. Temporaries still keep the cursor when released; a
   variable left below a live temporary keeps it too, and a `finally`'s pooled parked-exception
   slot stays entered for the method (`FrameMap::keep_for_method`) until 4e deletes the pool.
-  In the 2.4.20 box corpus 2,319 of 25,936 classes change and no box outcome moves. Per method,
-  the local-variable slots of 218 changed methods now match kotlinc and 769 more are closer, against
-  20 that matched and no longer do and 79 further off; one class (`Advanced_when5Kt`) becomes
-  byte-identical (files 249 -> 250). Almost every method still off is off for 4d (kotlinc enters a
-  variable before its initializer), 4e/4f (temporaries, inline fake locals), or one open 4c
-  question: a `try` whose own type is not `Unit` and whose body is `Nothing`-typed keeps the body's
-  locals through its catch clauses in kotlinc, where krusty frees them for the catch parameter.
-- ☐ 4c–4h. Lowering's scope facts where an IR block is a kotlinc transparent scope (4c),
+  A `Nothing`-typed `try` enters its one-slot result temporary after its body, as kotlinc's
+  `visitTry` does for every `try` that is not `Unit`, so its catch parameters sit above the slot
+  the body's locals left; a valued `try`'s temporary moves after its body with 4d. In the 2.4.20
+  box corpus 2,285 of 25,936 classes change and no box outcome moves. Per method, the
+  local-variable slots of 220 changed methods now match kotlinc and 769 more are closer, against 2
+  that matched and no longer do and 79 further off; one class (`Advanced_when5Kt`) becomes
+  byte-identical (files 249 -> 250). The methods still off are off for 4d (kotlinc enters a
+  variable before its initializer: `kt27161_int`), 4e (a `finally`'s slots reserved at the `try`:
+  `break.kt` `qux`) and 4f (the inline splice base and fake locals: `kt5448`).
+- ☐ 4c–4h. Lowering's scope facts where an IR block is a kotlinc transparent scope (4c; the corpus
+  shows no such block yet — the `try` difference above was the result temporary's placement),
   variables entered before their initializers (4d), backend temporaries on the stack (4e),
   inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine locals at
   `max_locals` (4h).
