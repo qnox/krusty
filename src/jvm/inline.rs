@@ -1502,6 +1502,20 @@ pub fn lambda_invoke_sites(
                 (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
                     .then_some(index)
             })?;
+        // The load must still denote the invocation receiver. A store between it and the call can
+        // consume that value and move it to another slot (nested inline prologues do exactly this).
+        // Deleting the original load would then leave the store without an operand. Proving aliases
+        // through arbitrary local traffic belongs to the symbolic inliner; this byte splicer accepts
+        // only the direct stack-carried shape it can preserve.
+        if insns[load_idx + 1..site]
+            .iter()
+            .enumerate()
+            .any(|(offset, instruction)| {
+                !deleted.contains(&(load_idx + 1 + offset)) && stored_local(instruction).is_some()
+            })
+        {
+            return None;
+        }
         found.push((lambda, load_idx, site));
     }
     Some(found)
@@ -2275,6 +2289,48 @@ mod tests {
             },
         ];
         assert_eq!(function_invoke_sites(&insns, &cp), vec![3]);
+    }
+
+    #[test]
+    fn lambda_invoke_site_rejects_a_receiver_moved_through_another_local() {
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/functions/Function1".into()),
+            C::Class(1),
+            C::Utf8("invoke".into()),
+            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()),
+            C::NameAndType(3, 4),
+            C::InterfaceMethodref(2, 5),
+        ];
+        // aload_2; astore 5; aload 5; aconst_null; invokeinterface Function1.invoke
+        // The first load is consumed by the store, so deleting it as the invoke receiver would
+        // underflow the final bytecode.
+        let insns = vec![
+            Insn::Plain {
+                op: 0x2c,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x3a,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0xb9,
+                operands: vec![0x00, 0x06, 0x02, 0x00],
+            },
+        ];
+        assert!(
+            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &std::collections::HashSet::new(),)
+                .is_none()
+        );
     }
 
     #[test]
