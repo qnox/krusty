@@ -15,6 +15,15 @@ fn byte_identical(name: &str, src: &str, class: &str) {
     }
 }
 
+/// As [`byte_identical`], with the standard library on both compilers' classpath.
+fn byte_identical_with_stdlib(name: &str, src: &str, class: &str) {
+    match common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()]) {
+        None => eprintln!("skip ({name}: reference toolchain unavailable)"),
+        Some(Ok(())) => {}
+        Some(Err(e)) => panic!("{e}"),
+    }
+}
+
 /// Every method's `LocalVariableTable` rows as `slot name descriptor`, in table order, from
 /// `javap -l`. Start and length are left out: they follow instruction offsets, which differ for
 /// reasons other than slot choice.
@@ -901,5 +910,26 @@ fun strings(s: String): Int {\n\
 }\n\
 fun types(a: Any): Int = when (a) { is String -> a.length; is Int -> a; else -> 0 }\n",
         "SlotTempWhenSubjectKt",
+    );
+}
+
+/// `x as? T` of a parameter or an immutable local tests and casts it in place, with no temporary
+/// (kotlinc's `irLetS`), so `r` and `q` keep kotlinc's slots and the whole class matches.
+#[test]
+fn a_safe_cast_of_an_immutable_binding_needs_no_slot() {
+    byte_identical_with_stdlib(
+        "slotTempSafeCast",
+        "fun parameter(x: Any): Int {\n\
+    val r = x as? String\n\
+    val q = 1\n\
+    return (r?.length ?: 0) + q\n\
+}\n\
+fun local(y: Any): Int {\n\
+    val x: Any = y\n\
+    val r = x as? CharSequence\n\
+    val q = 2\n\
+    return (r?.length ?: 0) + q\n\
+}\n",
+        "SlotTempSafeCastKt",
     );
 }

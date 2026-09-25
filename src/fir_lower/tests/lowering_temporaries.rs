@@ -111,3 +111,46 @@ fn a_when_subject_is_held_even_when_it_reads_an_immutable_binding() {
         1
     );
 }
+
+/// `x as? T` of an immutable binding tests and casts the binding itself (kotlinc's `irLetS` binds an
+/// immutable `IrGetValue` without a temporary); a mutable one is evaluated once into a temporary.
+#[test]
+fn a_safe_cast_of_an_immutable_binding_needs_no_temporary() {
+    let ir = lower_single_source(
+        "fun parameter(x: Any): Int { val r = x as? String; return r?.length ?: 0 }\n",
+        "SafeCastStable",
+    );
+    let cast_operands = |ir: &IrFile| {
+        ir.exprs
+            .iter()
+            .filter_map(|expression| match expression {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg,
+                    ..
+                } => Some(*arg),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let operands = cast_operands(&ir);
+    assert_eq!(operands.len(), 1);
+    assert!(matches!(ir.expr(operands[0]), IrExpr::GetValue(0)));
+    assert_eq!(
+        temporaries_initialized_by(&ir, |init| matches!(init, IrExpr::GetValue(0))),
+        0
+    );
+
+    let ir = lower_single_source(
+        "fun variable(y: Any): Int { var x = y; val r = x as? String; x = 1; return r?.length ?: 0 }\n",
+        "SafeCastMutable",
+    );
+    let variable = named_slot(&ir, "x");
+    assert_eq!(
+        temporaries_initialized_by(
+            &ir,
+            |init| matches!(init, IrExpr::GetValue(slot) if *slot == variable)
+        ),
+        1
+    );
+}
