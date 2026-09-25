@@ -17,32 +17,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `(Arch variant name, LLVM triple, extra flags)` for every target the runtime supports.
-///
-/// `-fno-pic` and a small code model keep the objects free of GOT/PLT machinery: the output is a
-/// static executable at a fixed address, so absolute 32-bit relocations are fine and simplest.
-/// RISC-V's clang does not take `-mcmodel=small` (its equivalent is the default `medlow`), and
-/// `-mno-relax` keeps linker-relaxation relocations out of its objects: krusty's own linker applies
-/// relocations and relaxes nothing.
-///
-/// The number after the triple is the target's ELF `e_machine`: every object is checked against it,
-/// because a `KRUSTY_RUNTIME_CC` wrapper that adds its own `--target` would otherwise file one
-/// architecture's code under another's name without a single failed step.
-const TARGETS: &[(&str, &str, u16, &[&str])] = &[
-    (
-        "X86_64",
-        "x86_64-unknown-linux-gnu",
-        62,
-        &["-mcmodel=small", "-fcf-protection=none"],
-    ),
-    (
-        "Aarch64",
-        "aarch64-unknown-linux-gnu",
-        183,
-        &["-mcmodel=small"],
-    ),
-    ("Riscv64", "riscv64-unknown-linux-gnu", 243, &["-mno-relax"]),
-];
+// The supported targets, their triples, ELF machines and runtime flags. The compiler reads the same
+// module, so the targets built here are the targets it names.
+#[path = "src/native/target_contract.rs"]
+mod target_contract;
 
 /// Flags every target compiles with. The objects are embedded in krusty and linked into a user's
 /// program, so their bytes must not depend on how the HOST's clang was configured: a distribution
@@ -84,6 +62,7 @@ fn prebuild_runtime() -> Result<(), String> {
         );
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/native/target_contract.rs");
     println!("cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
@@ -95,8 +74,13 @@ fn prebuild_runtime() -> Result<(), String> {
 
     let mut built_any = false;
     let mut compiler_missing = false;
-    for (arch, triple, machine, extra) in TARGETS {
-        let target_dir = out_dir.join("runtime").join(arch);
+    for (arch, os) in target_contract::SUPPORTED {
+        let triple = target_contract::triple(arch, os);
+        // Every object is checked against the target's ELF machine: a `KRUSTY_RUNTIME_CC` wrapper
+        // that adds its own `--target` would otherwise file one architecture's code under
+        // another's name without a single failed step.
+        let machine = arch.elf_machine();
+        let target_dir = out_dir.join("runtime").join(format!("{arch:?}"));
         std::fs::create_dir_all(&target_dir).expect("create runtime output directory");
         let mut objects = Vec::new();
         for source in SOURCES {
@@ -104,7 +88,7 @@ fn prebuild_runtime() -> Result<(), String> {
             let status = Command::new(&compiler)
                 .arg(format!("--target={triple}"))
                 .args(COMMON_FLAGS)
-                .args(*extra)
+                .args(arch.runtime_cflags())
                 .arg("-I")
                 .arg(runtime_dir)
                 .arg("-o")
@@ -113,7 +97,7 @@ fn prebuild_runtime() -> Result<(), String> {
                 .status();
             match status {
                 Ok(status) if status.success() => {
-                    check_object(&object, *machine).map_err(|problem| {
+                    check_object(&object, machine).map_err(|problem| {
                         format!(
                             "native runtime: `{compiler}` built `{source}` for `{triple}` as \
                              {problem}"
@@ -148,7 +132,7 @@ fn prebuild_runtime() -> Result<(), String> {
             break;
         }
         built_any = true;
-        generated.push_str(&format!("    (crate::native::Arch::{arch}, &[\n"));
+        generated.push_str(&format!("    (crate::native::Arch::{arch:?}, &[\n"));
         for object in &objects {
             let name = object.file_name().unwrap().to_string_lossy();
             generated.push_str(&format!(

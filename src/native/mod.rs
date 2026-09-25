@@ -25,6 +25,7 @@ mod prebuilt;
 pub mod runtime;
 mod symbols;
 mod target;
+mod target_contract;
 
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
 pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};

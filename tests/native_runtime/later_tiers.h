@@ -9,8 +9,9 @@
 
    Every definition here is WEAK, so the tier that supplies the real one wins the link and the
    driver then runs against it unchanged. Each stand-in keeps the real contract (`krusty_rt.h`) and
-   no more: the slot is a collector root, a thrown object carries its type, and `toString` goes
-   through the vtable slot `kotlin.Any` declares. Include this from exactly one file per driver. */
+   no more: the slot is a collector root, a thrown object carries its type and message, and
+   `toString` goes through the vtable slot `kotlin.Any` declares. Include this from exactly one file
+   per driver. */
 #ifndef KRUSTY_TEST_LATER_TIERS_H
 #define KRUSTY_TEST_LATER_TIERS_H
 
@@ -43,10 +44,28 @@ __attribute__((weak)) KRef kt_pending_exception(void) { return kt_pending; }
 
 __attribute__((weak)) void kt_clear_pending(void) { kt_pending = NULL; }
 
-/* Only the type is kept: a driver asks what was thrown, never what it said. */
+/* A thrown object as the runtime lays one out: its message, then its cause. A driver that asks
+   what an exception SAID reads the message through `kt_throwable_message`, and the two stand-ins
+   below agree on where it is, as the real pair does. */
+typedef struct LaterThrowable {
+    KObjectHeader header;
+    KRef message;
+    KRef cause;
+} LaterThrowable;
+
+static const uint32_t later_throwable_offsets[] = {offsetof(LaterThrowable, message),
+                                                   offsetof(LaterThrowable, cause)};
+
 __attribute__((weak)) KRef kt_throwable_new(const KType *type, KRef message) {
-    (void)message;
-    return (KRef)kt_gc_allocate(type, sizeof(KObjectHeader));
+    /* `message` stays in this parameter across the allocation: it is its root. */
+    LaterThrowable *thrown = (LaterThrowable *)kt_gc_allocate(type, sizeof(LaterThrowable));
+    thrown->message = message;
+    thrown->cause = NULL;
+    return (KRef)thrown;
+}
+
+__attribute__((weak)) KRef kt_throwable_message(KRef self) {
+    return ((const LaterThrowable *)self)->message;
 }
 
 __attribute__((weak)) const KType kt_type_null_pointer_exception = {
@@ -71,6 +90,17 @@ LATER_TIERS_EXCEPTION(kt_type_assertion_error, "kotlin.AssertionError")
 LATER_TIERS_EXCEPTION(kt_type_not_implemented_error, "kotlin.NotImplementedError")
 
 #undef LATER_TIERS_EXCEPTION
+
+/* Its message is text a driver reads back, so this one lists the fields for the collector: while
+   it is pending, the message is reachable only through it. */
+__attribute__((weak)) const KType kt_type_negative_array_size_exception = {
+    .name = "java.lang.NegativeArraySizeException",
+    .name_length = sizeof("java.lang.NegativeArraySizeException") - 1,
+    .instance_size = sizeof(LaterThrowable),
+    .reference_count = sizeof(later_throwable_offsets) / sizeof(later_throwable_offsets[0]),
+    .reference_offsets = later_throwable_offsets,
+    .super = &kt_type_any,
+};
 
 /* The runtime declares this one `static` and defines it in a later tier; until then its call is an
    unresolved reference like any other, and this answers it the way the real one does. */
