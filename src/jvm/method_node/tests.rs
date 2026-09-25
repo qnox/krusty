@@ -71,7 +71,7 @@ impl TestPool {
             max_stack: code.max_stack,
             max_locals: code.max_locals,
             code: code.code,
-            source_cp: self.cp.clone(),
+            source_cp: self.cp.as_slice().into(),
             stackmap: None,
             handlers: code
                 .exception_table
