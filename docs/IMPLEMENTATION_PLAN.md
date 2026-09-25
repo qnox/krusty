@@ -4514,6 +4514,11 @@ regress.
 - ☐ 3. Inline lambdas: each lambda body is emitted to a node, invoke sites are found by kotlinc's
   source analysis (`markPlacesForInlineAndRemoveInlinable`), captured values and `$i$a$` markers,
   non-local returns. Replaces the lambda splice (`try_inline_unified`).
+  - ◐ 3a. kotlinc's `RedundantBoxingMethodTransformer` on the method node
+    (`bytecode_passes::redundant_boxing`). A lambda's primitive parameters and result pass through
+    `invoke`'s `Object`s, so kotlinc's inlined bodies only come out unboxed after this pass. It is
+    tested on its own and joins the rewrite pipeline, ahead of the temporaries pass, when the
+    pipeline runs on the method node (emitter stage 3c).
 - ☐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.

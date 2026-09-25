@@ -22,6 +22,8 @@ pub(crate) mod local_slots;
 pub(crate) mod negated_jumps;
 #[cfg(test)]
 pub(crate) mod opcodes;
+#[cfg(test)]
+pub(crate) mod redundant_boxing;
 pub(crate) mod redundant_checkcasts;
 pub(crate) mod redundant_gotos;
 pub(crate) mod redundant_null_checks;
