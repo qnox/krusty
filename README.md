@@ -32,7 +32,7 @@ Website: [krustythecompiler.dev](https://krustythecompiler.dev) · Downloads: [l
 
 - [Motivation](#motivation)
 - [Why memory-lean matters](#why-memory-lean-matters)
-- [What makes it different](#what-makes-it-different)
+- [What it does](#what-it-does)
 - [Compiler plugins](#compiler-plugins)
 - [Design](#design)
 - [Project layout](#project-layout)
@@ -62,23 +62,21 @@ checked file per `lower_file` call and carries explicit module state into finali
 makes memory behavior measurable and leaves room to shorten frontend lifetimes without changing the
 backend contract.
 
-## What makes it different
+## What it does
 
-Compiling Kotlin to JVM bytecode is the baseline. krusty focuses on these implementation properties:
-
-- **Byte-level fidelity.** Tests compare emitted classes and metadata with `kotlinc`, then compile
-  Kotlin and Java consumers against krusty's output.
-- **Classpath bytecode inlining.** Supported inline calls can splice the selected callable's
-  compiled body instead of relying on a function-name-specific rewrite.
-- **Explicit plugin paths.** kotlinx.serialization uses a native IR pass; KSP uses a code-generation
-  host for external processors. The general Kotlin compiler-plugin ABI is not exposed.
-- **File-oriented backend contract.** Module-wide resolution feeds one checked file per backend call,
-  with explicit state carried into module finalization.
-
-It offers a **kotlinc-compatible command line for the supported subset**: kotlinc-style flags in, a
-`.class` directory or `.jar` out. The supported language subset lives in
-[`docs/SPEC.md`](docs/SPEC.md); the badges above track the current Kotlin version and `codegen/box`
-conformance.
+- **Compiles Kotlin to the JVM.** Output is `.class` files, `@kotlin.Metadata` and
+  `META-INF/*.kotlin_module`, written to a directory or a `.jar`.
+- **Takes kotlinc's command line.** The same flags work, and `krusty` also runs as a Bazel
+  persistent worker.
+- **Matches kotlinc byte for byte.** Differential tests compare each emitted class with the real
+  `kotlinc`'s, then compile Kotlin and Java consumers against krusty's output. Every build also runs
+  JetBrains' `codegen/box` tests; the conformance badge shows the share that passes.
+- **Inlines from compiled libraries.** Calls to `inline` functions in library jars copy the callee's
+  compiled bytecode, as `kotlinc` does, rather than special-casing known functions.
+- **Supports kotlinx.serialization and KSP.** Serialization runs as a built-in compiler pass, and KSP
+  processors run through a bundled host (see [Compiler plugins](#compiler-plugins)).
+- **Ships a language server.** `krusty-lsp` serves editors from the same compiler, with a Zed
+  extension (see [Language server](#language-server)).
 
 ## Compiler plugins
 

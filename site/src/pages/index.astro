@@ -63,10 +63,12 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
 
       <h2>What it does</h2>
       <ul>
-        <li>Output is diffed against the real <code>kotlinc</code>: class files, <code>@kotlin.Metadata</code>, <code>.kotlin_module</code>.</li>
-        <li>Every build runs JetBrains' <code>codegen/box</code> suite; the badge shows the pass rate.</li>
-        <li>kotlinx.serialization and KSP are supported.</li>
-        <li><code>krusty-lsp</code> is a Kotlin language server on the same compiler, with a <a href={`${repo}/tree/master/editors/zed`}>Zed extension</a>.</li>
+        <li>Compiles Kotlin to JVM <code>.class</code> files, <code>@kotlin.Metadata</code> and <code>.kotlin_module</code>, into a directory or a jar.</li>
+        <li>Takes <code>kotlinc</code>'s command-line flags, and runs as a Bazel persistent worker.</li>
+        <li>Is tested byte for byte against the real <code>kotlinc</code>, and runs JetBrains' <code>codegen/box</code> tests on every build. The badge shows the share that passes.</li>
+        <li>Inlines <code>inline</code> functions from library jars by copying their compiled bytecode, as <code>kotlinc</code> does.</li>
+        <li>Runs kotlinx.serialization as a built-in compiler pass, and KSP processors through a bundled host.</li>
+        <li>Ships <code>krusty-lsp</code>, a Kotlin language server on the same compiler, with a <a href={`${repo}/tree/master/editors/zed`}>Zed extension</a>.</li>
       </ul>
     </main>
     <footer>
