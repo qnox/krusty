@@ -58,9 +58,9 @@ enum SelectedTopLevelCall {
         parameter_by_argument: Box<[Option<u32>]>,
     },
     Value(Box<crate::libraries::PropertyInfo>),
-    /// Runtime value denoted by a classifier name (an object singleton or companion). Call syntax
-    /// applies the ordinary `invoke` convention to this value before considering construction.
-    ClassifierValue(Ty),
+    /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
+    /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
+    ClassifierInvoke(TypeName, Option<Ty>),
     Constructor(Box<crate::libraries::LibraryMember>),
     /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
     /// constructor, so this is not a `Constructor` selection — the result is the interface itself.

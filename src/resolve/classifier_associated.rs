@@ -197,6 +197,30 @@ impl Checker<'_> {
         .selected_or_report(inapplicable)
     }
 
+    /// The associated `operator fun invoke` a bare classifier call `C(args)` selects before the
+    /// classifier's runtime value: the selected call's result type, or `None` with inapplicable
+    /// candidates added to `inapplicable`.
+    pub(super) fn classifier_invoke_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        site: AssociatedCallSite<'_>,
+        classifier: TypeName,
+        inapplicable: &mut Vec<crate::libraries::FunctionInfo>,
+    ) -> Option<Ty> {
+        let candidates = self
+            .resolver()
+            .classifier_associated_callables(classifier, CALLABLE_INVOKE_OPERATOR);
+        self.associated_call(
+            scope,
+            site.call_args,
+            (CALLABLE_INVOKE_OPERATOR, site.argument_names),
+            candidates,
+            site.explicit_type_args,
+            (site.expected, None),
+        )
+        .selected_or_report(inapplicable)
+    }
+
     /// The associated property `name` of `classifier`'s static scope: the nearest classifier
     /// declaring one, with its context arguments selected.
     pub(super) fn select_static_scope_property(
