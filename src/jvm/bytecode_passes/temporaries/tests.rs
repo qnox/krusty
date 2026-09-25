@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::null_check_folds::{analysis_within_limit, ANALYSIS_COMPLEXITY_LIMIT};
 use super::shapes::is_expression_null_check;
 use super::*;
@@ -924,4 +926,26 @@ fn a_line_and_a_local_bound_at_the_null_target_move_after_its_pop() {
         ]
     );
     assert_eq!(folded.method.local_variables[0].end, debug);
+}
+
+#[test]
+fn an_instruction_is_stepped_again_only_when_its_incoming_state_changed() {
+    let analyze = |code: &Code| {
+        let mut steps = 0;
+        let found = temporary_values::analyze(&code.method, &mut || steps += 1).expect("analyzed");
+        (found, steps)
+    };
+
+    // call ; ifnull 0 ; return — the back edge arrives with the state the loop was entered with.
+    let steady = Code::new(&[call("g"), jump(IFNULL, 0), op(RETURN)]);
+    let (found, steps) = analyze(&steady);
+    assert!(found.is_empty());
+    assert_eq!(steps, 3, "an unchanged loop is walked once");
+
+    // call ; astore_2 ; aload_2 ; ifnull 0 ; return — the back edge brings the store to the header,
+    // so only the header and the store it reaches are stepped again.
+    let widening = Code::new(&[call("g"), astore(2), aload(2), jump(IFNULL, 0), op(RETURN)]);
+    let (found, steps) = analyze(&widening);
+    assert_eq!(found, BTreeMap::from([(1, vec![2])]));
+    assert_eq!(steps, 7);
 }
