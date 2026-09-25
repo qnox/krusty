@@ -413,11 +413,13 @@ impl Emitter<'_> {
             self.bind(after, code);
         }
         self.pending_return_spills.pop();
+        // The parked-exception slot stays in the reuse pool after this `try`, where a later `try`
+        // takes it back, so it stays entered: a local declared after this `try` must not get it.
+        if let Some(parked) = own_parked {
+            self.frame.keep_for_method(parked);
+        }
         // Newest first, as they were entered.
-        for temp in [own_parked, own_return_spill, result_temp]
-            .into_iter()
-            .flatten()
-        {
+        for temp in [own_return_spill, result_temp].into_iter().flatten() {
             self.frame.leave_temp(temp);
         }
     }
