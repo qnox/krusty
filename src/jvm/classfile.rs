@@ -622,6 +622,8 @@ pub struct ClassWriter {
     /// whole compile. The set answers the same question in one lookup, and the recorded sizes make
     /// a stale answer impossible: anything appended invalidates it.
     mentioned_names: std::cell::RefCell<Option<DescriptorMentionCache>>,
+    /// The frames computed so far for this class's method bodies (see [`stack_maps`]).
+    computed_bodies: stack_maps::ComputedBodies,
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
     /// `-Xno-param-assertions`.
     param_assertions: bool,
@@ -756,6 +758,7 @@ impl ClassWriter {
         ClassWriter {
             cp,
             mentioned_names: std::cell::RefCell::new(None),
+            computed_bodies: stack_maps::ComputedBodies::default(),
             param_assertions: true,
             nullability_annotations: true,
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
