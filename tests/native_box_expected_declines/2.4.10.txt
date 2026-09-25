@@ -1,4 +1,4 @@
-# The native lane's coverage ratchet: every corpus case the native lane does not run, and why.
+# The native lane's coverage ratchet for Kotlin 2.4.10: every corpus case the native lane does not run, and why.
 # Format: <path relative to the box corpus root><TAB>declined|frontend. `declined` is a construct the
 # native generator declines by name; `frontend` is a source the frontend rejects. A case that newly
 # declines or is rejected fails the test, and so does a listed case that now passes or answers any

@@ -1,4 +1,4 @@
-# Corpus cases the native lane ACCEPTS and runs WRONG today, each a known defect outside the native
+# Corpus cases (Kotlin 2.4.10) the native lane ACCEPTS and runs WRONG today, each a known defect outside the native
 # backend that the JVM lane fails on as well. Format: <path relative to the box corpus root><TAB><reason>.
 # A case not listed here that fails, or a case listed here that passes, fails the test — so this list
 # can only shrink honestly. See tests/kotlin_box_native_conformance.rs.
