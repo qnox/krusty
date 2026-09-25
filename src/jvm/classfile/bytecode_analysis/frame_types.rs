@@ -744,6 +744,14 @@ pub(super) fn step(
         } // multianewarray
         // `impdep1`: a coroutine marker, stack-neutral like the `nop`s that replace it.
         0xfe => {}
+        // `impdep2`: a codegen `InlineMarker` call. `mark(I)V` takes the id pushed before it.
+        crate::jvm::bytecode::CODEGEN_MARKER_OP => {
+            if crate::jvm::bytecode::CodegenMarker::from_operand(*operands.first()?)?
+                == crate::jvm::bytecode::CodegenMarker::Mark
+            {
+                s.pop()?;
+            }
+        }
         _ => return None,
     }
     Some(s)

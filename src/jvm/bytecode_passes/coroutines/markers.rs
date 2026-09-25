@@ -26,6 +26,7 @@ pub(crate) enum SuspendMarker {
 }
 
 /// The two instructions of a `mark(id)` call, id first.
+#[cfg(test)]
 pub(crate) fn mark(marker: SuspendMarker) -> Vec<Node> {
     vec![
         Node::Insn(int_constant_insn(marker as i32)),
@@ -40,6 +41,7 @@ pub(crate) fn mark(marker: SuspendMarker) -> Vec<Node> {
 }
 
 /// A call of `InlineMarker.beforeInlineCall` or `afterInlineCall`.
+#[cfg(test)]
 pub(crate) fn inline_call_marker(before: bool) -> Node {
     Node::Insn(Insn::Method {
         op: INVOKESTATIC,

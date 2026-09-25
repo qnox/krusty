@@ -1604,6 +1604,8 @@ mod inline_lambda_operand_stack_e2e;
 #[path = "suspend_anonymous_object_name_e2e.rs"]
 mod suspend_anonymous_object_name_e2e;
 
+#[path = "suspend_bytecode_transformer_e2e.rs"]
+mod suspend_bytecode_transformer_e2e;
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
 #[path = "suspend_debug_metadata_e2e.rs"]

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::nodes::{Insn, LabelId, LocalVariable, MethodNode, Node, TryCatchBlock};
 use super::pool::{ConstantPoolView, SourcePool};
-use crate::jvm::bytecode::instruction_len;
+use crate::jvm::bytecode::{instruction_len, CodegenMarker, CODEGEN_MARKER_OP};
 use crate::jvm::classreader::{ExcEntry, MethodCode, MethodLocal};
 
 /// Why a body could not be decoded: the offset of the offending instruction or table entry, and
@@ -113,7 +113,9 @@ impl MethodNode {
     ///
     /// Fails on anything the node form cannot represent faithfully: a truncated or unknown
     /// instruction, a table naming an offset inside an instruction, a pool entry of the wrong kind,
-    /// or one of krusty's own coroutine-site markers (which never reach a class file). A branch to
+    /// or one of krusty's own coroutine-site markers (which never reach a class file). krusty's
+    /// stand-in for a codegen `InlineMarker` call reads as that call (see
+    /// [`CodegenMarker`](crate::jvm::bytecode::CodegenMarker)). A branch to
     /// the end of the code and a line number starting there are malformed (JVMS 4.9.2, 4.7.12); a
     /// protected or local range may end there, and the node then ends with a label.
     pub fn read_code(
@@ -405,6 +407,18 @@ fn decode(
             desc: pool.class(u2(code, pc + 1))?,
             dims: u1(code, pc + 3),
         },
+        CODEGEN_MARKER_OP => {
+            let marker = CodegenMarker::from_operand(u1(code, pc + 1))
+                .ok_or_else(|| pool.fail("unknown codegen marker"))?;
+            let (name, desc) = marker.method();
+            Insn::Method {
+                op: 0xb8,
+                owner: CodegenMarker::OWNER.to_string(),
+                name: name.to_string(),
+                desc: desc.to_string(),
+                interface: false,
+            }
+        }
         _ => return Err(pool.fail("unknown opcode")),
     })
 }

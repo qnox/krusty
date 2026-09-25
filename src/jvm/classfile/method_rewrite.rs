@@ -131,7 +131,7 @@ impl ClassWriter {
             return None;
         }
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let node = self.finished_node(method, source, bytes, &pool)?;
+        let node = self.finished_node(method, bytes, &pool)?;
         let indexed = IndexedBody::new(&node, &mut pool).ok()?;
         let insns = &indexed.insns;
         // The builder's labels and branch fixups name offsets of the emitted bytes, so the indexed
@@ -419,10 +419,9 @@ impl ClassWriter {
     /// The finished `method` read into a node against the writer's own pool. A local-variable
     /// entry without a start covers the method from its first instruction, one without a length
     /// runs to its end; a range reaching past the code is cut at its end.
-    fn finished_node(
+    pub(super) fn finished_node(
         &self,
         method: &MethodInfo,
-        source: &RewriteSource,
         bytes: &[u8],
         pool: &PoolLookup<'_>,
     ) -> Option<MethodNode> {
@@ -461,7 +460,9 @@ impl ClassWriter {
             lines: &method.lnt,
             locals: &locals,
         };
-        MethodNode::read_code(source.access, &source.name, &source.desc, &code, pool).ok()
+        let name = self.cp.utf8_at(method.name)?;
+        let desc = self.cp.utf8_at(method.desc)?;
+        MethodNode::read_code(method.access, name, desc, &code, pool).ok()
     }
 }
 

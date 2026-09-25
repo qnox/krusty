@@ -185,6 +185,7 @@ impl InsnList {
     }
 
     /// The node at `index` (ASM's `get`).
+    #[cfg(test)]
     pub(crate) fn at(&self, index: usize) -> NodeId {
         self.ensure_order();
         self.order
@@ -193,6 +194,7 @@ impl InsnList {
             .expect("the order was just built")[index]
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.ensure_order();
         self.order.borrow().as_ref().map_or(0, Vec::len)
