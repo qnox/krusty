@@ -479,6 +479,7 @@ fn materialize_delegation(
                     decl_line: 0,
                     ty,
                     visibility: crate::types::Visibility::Public,
+                    return_value_status: Default::default(),
                     annotations: Box::new([]),
                     initializer: None,
                     storage_ty: None,

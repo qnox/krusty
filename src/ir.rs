@@ -1457,6 +1457,8 @@ pub struct IrProperty {
     /// visibility of an accessor or a target-specific storage realization; they must not recover it
     /// from a rendered owner/property-name key.
     pub visibility: crate::types::Visibility,
+    /// Checked Kotlin return-value status, inherited from the property this one overrides.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Resolved Kotlin annotation identities. Backends interpret annotations in their own namespace;
     /// common lowering does not turn them into storage or calling-convention choices.
     pub annotations: Box<[TypeName]>,
@@ -2567,6 +2569,8 @@ pub struct IrFile {
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
     pub fn_param_no_infer: std::collections::HashMap<u32, Vec<bool>>,
+    /// Function id → checked non-default Kotlin return-value status, which Kotlin metadata records.
+    pub fn_return_value_statuses: std::collections::HashMap<u32, crate::types::ReturnValueStatus>,
     /// Class identity → per-primary-constructor-parameter checked default expression (`None` =
     /// required). This is the target-neutral constructor contract. A target backend consumes it when
     /// choosing that class's physical default-argument ABI; common lowering does not distinguish value

@@ -770,6 +770,7 @@ impl<'a> ModuleSymbols<'a> {
                 setter
             });
             PropertyInfo {
+                return_value_status: None,
                 name: name.to_string(),
                 kind: PropKind::MemberExtension,
                 receiver: Some(declaration.receiver_ty()),
@@ -949,6 +950,7 @@ fn fn_info(
             infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
             is_final: sig.is_final(),
+            return_value_status: None,
         },
         visibility: sig.visibility,
         annotations: sig.annotations.clone(),
@@ -1070,6 +1072,7 @@ fn source_property(
         setter
     });
     PropertyInfo {
+        return_value_status: None,
         name: name.to_string(),
         kind: PropKind::Member,
         receiver: Some(Ty::obj_name(owner)),
@@ -1304,6 +1307,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
                 .unwrap_or(property.ty);
             properties.push(PropertyInfo {
+                return_value_status: None,
                 name: name.clone(),
                 kind: PropKind::TopLevel,
                 receiver: None,
@@ -1399,6 +1403,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     }
                 }
                 properties.push(PropertyInfo {
+                    return_value_status: None,
                     name: property_name.clone(),
                     kind: if imported_associated {
                         PropKind::TopLevel

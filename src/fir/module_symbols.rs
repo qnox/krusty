@@ -606,6 +606,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             .and_then(|setter| self.index.declaration_header(setter))
             .map_or(header.visibility, |setter| setter.visibility);
         PropertyInfo {
+            return_value_status: None,
             name: name.to_owned(),
             kind,
             receiver,
@@ -683,6 +684,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             infix: header.flags.has(DeclarationFlags::INFIX),
             is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
             is_final: header.flags.has(DeclarationFlags::FINAL),
+            return_value_status: None,
         };
         function.visibility = header.visibility;
         function.overload_rank = self.index.source_order(declaration).unwrap_or(u32::MAX);
@@ -941,6 +943,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
+                return_value_status: None,
             };
             function.visibility = header.visibility;
             function.overload_rank = self.index.source_order(declaration).unwrap_or(u32::MAX);
@@ -1141,6 +1144,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .and_then(|setter| self.index.declaration_header(setter))
                 .map_or(header.visibility, |setter| setter.visibility);
             properties.push(PropertyInfo {
+                return_value_status: None,
                 name: name.to_owned(),
                 kind: if receiver.is_some() {
                     PropKind::MemberExtension
@@ -1384,6 +1388,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
+                return_value_status: None,
             };
             function.visibility = header.visibility;
             function.receiver_rank = receiver_rank;
@@ -1546,6 +1551,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .and_then(|setter| self.index.declaration_header(setter))
                 .map_or(header.visibility, |setter| setter.visibility);
             properties.push(PropertyInfo {
+                return_value_status: None,
                 name: name.to_owned(),
                 kind: if imported_associated {
                     PropKind::TopLevel

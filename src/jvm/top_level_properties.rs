@@ -57,6 +57,7 @@ pub(super) fn merge_top_level_const(
     );
     getter.external_identity = field.external_identity;
     properties.push(PropertyInfo {
+        return_value_status: None,
         name: source_name.to_string(),
         kind: crate::libraries::PropKind::TopLevel,
         receiver: None,
