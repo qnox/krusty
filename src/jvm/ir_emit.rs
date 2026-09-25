@@ -4344,9 +4344,7 @@ fn emit_pass(
         if let Some(m) = metadata {
             cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
         }
-        let (bytes, coroutines) = cw.finish_with_coroutines();
-        env.run.record_transformed_coroutines(coroutines);
-        out.push((facade.to_string(), bytes));
+        out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
@@ -6722,7 +6720,7 @@ fn emit_class(
     if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
         cw.seed_inner_class_names();
     }
-    cw.finish()
+    env.run.finish_class(cw)
 }
 
 /// Emit a synthesized property-reference singleton (`Type$prop$N extends PropertyReference1Impl`):

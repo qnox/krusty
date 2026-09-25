@@ -107,6 +107,16 @@ Known gaps, both byte differences in the function's own method (the continuation
 * A body the common IR expanded from a same-file inline function has no `$i$f`/`$i$a`
   inline-depth locals, so its local-variable table and slots differ from kotlinc's.
 
+### Step 3 as landing
+
+* An instance member of a final class (not open, not an interface body, not a value-class
+  `-impl` static) takes the same route. Its continuation nests under the class (`Box$work$1`), captures the
+  receiver as `this$0` (the transformer's `needDispatchReceiver`), and re-enters the member through
+  it; a class's methods are transformed when the class is written, as the facade's are.
+* An open member is next: kotlinc moves its body to a static `<name>$suspendImpl(receiver, …)`
+  that carries the machine and leaves `<name>` a trampoline, which krusty does only for interface
+  members so far.
+
 ## 2. The symptom this exists to fix
 
 `JVM backend inline error: call arity mismatch` — always exactly one operand short, and the missing
