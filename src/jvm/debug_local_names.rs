@@ -52,6 +52,20 @@ pub(super) fn name(ir: &IrFile, declaration: ExprId) -> Option<String> {
     )
 }
 
+/// A name as kotlinc spells it inside a debug local: every character other than a letter, a digit
+/// or `_` becomes `_u` and its hexadecimal code (`$` is `_u24`, `-` is `_u2d`).
+pub(super) fn escaped(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_alphanumeric() || character == '_' {
+            escaped.push(character);
+        } else {
+            escaped.push_str(&format!("_u{:x}", u32::from(character)));
+        }
+    }
+    escaped
+}
+
 /// Render one debug local from the two facts common IR carries for every binding: the source
 /// spelling it was declared with, and its provenance.
 ///
@@ -64,7 +78,7 @@ pub(super) fn render(
 ) -> Option<String> {
     match provenance {
         Some(IrDebugLocalProvenance::InlineValue { role, depth }) => {
-            let escaped = source?.replace('$', "_u24");
+            let escaped = escaped(source?);
             let mut rendered = match role {
                 IrInlineLocalRole::Value => escaped,
                 // kotlinc spells the expanded callable's own `this` `this_`, and the receiver it
@@ -86,7 +100,7 @@ pub(super) fn render(
                 .get(&implementation)
                 .cloned()
                 .unwrap_or_else(|| lambda_implementation_name(origin));
-            Some(format!("$this${}", name.replace('$', "_u24")))
+            Some(format!("$this${}", escaped(&name)))
         }
         None => source.map(str::to_owned),
     }

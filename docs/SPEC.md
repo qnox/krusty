@@ -6978,6 +6978,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic and value-class, reading and writing). Corpus:
   `inlineClasses/interfaceDelegation/memberExt{Val,Var}DelegationWithInlineClassParameterTypes*`
   and `delegation/genericProperty`.
+- **A value class implements its interfaces through instance entries on its box.** Each member an
+  interface calls is realized as a static replacement over the carrier (`f-<hash>(carrier, …)`),
+  and the box gets one public instance method with the member's physical name and parameters,
+  declared right after that replacement. The entry guards its parameters as the member does, but
+  quotes an extension receiver as `<this>` and names its local `$this$<entry name>` with every
+  character other than a letter, digit or `_` escaped as `_u<hex>` (`$this$f_u2d_u2dndakOA`). It
+  reads the carrier and calls the replacement, and carries the member's generic `Signature` and
+  nullability annotations less the carrier. Every generic bridge the member needs calls the entry.
+  A generic `Signature` signs a value class in a top-level parameter or result position as its
+  physical slot, as the descriptor does (`<X>(Ljava/lang/String;TX;)`), and a value class inside a
+  type argument by its own name; the declaration's metadata keeps the value class. Tests:
+  `tests/value_class_interface_entry_e2e.rs` (the box's member order and each entry in full
+  against kotlinc; a generic function's signature; delegated calls and a generic bridge at run
+  time). Corpus: `inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypes*`.
 
 ## 8. Success criteria for the PoC
 

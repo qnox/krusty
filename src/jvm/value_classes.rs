@@ -20,6 +20,7 @@ mod call_results;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
+mod interface_entries;
 mod member_names;
 mod operation_relocation;
 mod property_references;
@@ -30,7 +31,7 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
-use member_names::{vc_mangle, vc_mangle_once, vc_member_impl_name};
+use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 use operation_relocation::clone_below_representation_wrapper;
 use std::collections::{HashMap, HashSet};
 
@@ -1043,6 +1044,10 @@ pub(crate) fn lower_value_classes(
                     .expect("a value-class member has a dispatch receiver");
                 let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
                 f.params.insert(0, carrier);
+                // The carrier is the receiver the box already checked, never a guarded parameter.
+                if !f.param_checks.is_empty() {
+                    f.param_checks.insert(0, None);
+                }
                 f.is_static = true;
                 lowered_value_members.insert(fid as u32);
                 // The former `this` and the new explicit carrier are both slot zero. Source value
@@ -1119,8 +1124,11 @@ pub(crate) fn lower_value_classes(
                 // than [`is_ref`]: an ordinary type parameter is a generic reference boundary, but
                 // a value-class carrier can temporarily retain `TyParam<T : Int>` here and is emitted
                 // as the primitive bound (`I`). The guard must agree with that final physical slot.
-                let under_nullable = orig_params[fid]
-                    .get(k)
+                // A lowered member's checks start after its carrier; `orig_params` has none.
+                let source_index =
+                    k.checked_sub(usize::from(lowered_value_members.contains(&(fid as u32))));
+                let under_nullable = source_index
+                    .and_then(|index| orig_params[fid].get(index))
                     .is_some_and(|t| vc_underlying_nullable(t, &under));
                 let physical_is_ref = f
                     .params
@@ -1693,85 +1701,20 @@ pub(crate) fn lower_value_classes(
             fr.box_ret
         );
     }
-    // A boxed value-class object must still implement every selected interface declaration even though
-    // its source member has become a static carrier function. Materialize an ordinary instance adapter
-    // from the stable override edge and exact implementation identity. Descriptor-changing generic
-    // bridges derived earlier remain separate; this is the concrete boxed entry kotlinc emits even when
-    // the interface and implementation descriptors are otherwise identical.
-    let mut interface_entries = Vec::new();
-    for (&owner, edges) in &ir.function_overrides {
-        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
-            continue;
-        };
-        if !class.is_value {
-            continue;
-        }
-        for edge in edges {
-            if edge.implementation_owner != owner || !edge.overridden_is_interface {
-                continue;
-            }
-            let implementation = edge.implementation_function.or_else(|| {
-                let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
-                    edge.implementation
-                else {
-                    return None;
-                };
-                ir.checked_callable_functions.get(&declaration).copied()
-            });
-            let Some(implementation) = implementation.filter(|function| {
-                lowered_value_members.contains(function) && class.methods.contains(function)
-            }) else {
-                continue;
-            };
-            let entry = (
-                owner,
-                implementation,
-                edge.name.clone(),
-                edge.implementation_parameters.clone(),
-                edge.implementation_parameter_identities.clone(),
-                edge.implementation_result,
-            );
-            if !interface_entries.iter().any(|existing| existing == &entry) {
-                interface_entries.push(entry);
-            }
-        }
-    }
-    for (owner, implementation, name, parameters, parameter_identities, result) in interface_entries
-    {
-        assert_eq!(
-            parameter_identities.len(),
-            parameters.len(),
-            "a value-class interface entry retains its semantic parameter identities"
-        );
-        let class = ir
-            .classes
-            .iter_mut()
-            .find(|class| class.fq_name == owner)
-            .expect("an override edge owner must remain in its IR file");
-        let duplicate = class.bridges.iter().any(|bridge| {
-            bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry
-                && bridge.name == name
-                && bridge.erased_params == parameters
-                && bridge.erased_ret == result
-        });
-        if !duplicate {
-            class.bridges.push(crate::ir::Bridge {
-                kind: crate::ir::BridgeKind::ValueClassInterfaceEntry,
-                target_function: Some(implementation),
-                parameter_identities,
+    let interface_entries =
+        interface_entries::materialize(ir, &lowered_value_members, |ir: &IrFile, member: u32| {
+            let (name, params, ret) = ir
+                .vc_declared_sigs
+                .get(&member)
+                .expect("a lowered value-class member records its declaration");
+            vc_member_entry_name(
                 name,
-                erased_params: parameters.clone(),
-                erased_ret: result,
-                concrete_params: parameters,
-                concrete_ret: result,
-                target_ret: None,
-                type_safe_barrier: false,
-                target_name: None,
-                box_ret: None,
-                unbox_params: Vec::new(),
-            });
-        }
-    }
+                params,
+                ret,
+                &callable_under,
+                suspend_fids.contains(&member),
+            )
+        });
 
     // Exact user value-class members have now been rewritten to static carrier functions. Snapshot
     // those physical signatures before borrowing the class bridge lists; a bridge keeps the stable
@@ -2030,6 +1973,14 @@ pub(crate) fn lower_value_classes(
                     b.target_name = Some(target_name);
                     if target_ret != b.concrete_ret {
                         b.target_ret = Some(target_ret);
+                    }
+                    // Only the entry calls the static member; any other bridge calls the entry,
+                    // which has the member's physical name and parameters on the box itself.
+                    if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry
+                        && b.target_function
+                            .is_some_and(|function| interface_entries.contains(&function))
+                    {
+                        b.target_function = None;
                     }
                 }
             }
