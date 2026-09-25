@@ -9401,15 +9401,12 @@ fn emit_enum_class(
         .emit(ordinal, constructor);
     }
     let markers = property_annotation_marker_fids(ir, c);
-    // kotlinc's enum member order is `<init>`, the DECLARED members, then the synthesized
-    // `values`/`valueOf`/`getEntries`/`$values`, then anything a PLUGIN synthesized onto the class
-    // (`_init_$_anonymous_`, `access$…`), then `<clinit>`. So this runs twice around that
-    // machinery, split on whether the member was compiler-invented.
-    let emit_members = |cw: &mut ClassWriter, compiler_invented: bool| {
-        for &fid in &c.methods {
-            if ir.synthetic_methods.contains(&fid) != compiler_invented {
-                continue;
-            }
+    // kotlinc's enum member order is `<init>`, the DECLARED members, `values`/`valueOf`/
+    // `getEntries`, the lifted local functions, `$values`, the lambdas, anything a PLUGIN
+    // synthesized onto the class (`_init_$_anonymous_`, `access$…`), then `<clinit>`.
+    let schedule = member_schedule::enum_member_schedule(ir, c);
+    let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
+        for &fid in members {
             if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
                 continue; // already emitted beside its property's accessors
             }
@@ -9442,7 +9439,7 @@ fn emit_enum_class(
             }
         }
     };
-    emit_members(&mut cw, false);
+    emit_members(&mut cw, &schedule.declared);
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
@@ -9486,6 +9483,7 @@ fn emit_enum_class(
         &gent,
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
+    emit_members(&mut cw, &schedule.local_functions);
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
     // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
     let mut vbuild = CodeBuilder::new(1);
@@ -9511,7 +9509,8 @@ fn emit_enum_class(
         &vbuild,
     );
 
-    emit_members(&mut cw, true);
+    emit_members(&mut cw, &schedule.lambdas);
+    emit_members(&mut cw, &schedule.plugin_generated);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
