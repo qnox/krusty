@@ -17,13 +17,6 @@ pub(super) enum AssociatedSignatureCall {
     Selected(crate::fir::ResolvedTy),
 }
 
-/// One rung of the unqualified call/value tower: an implicit value receiver or a classifier's
-/// static scope, in lexical order.
-pub(super) enum ImplicitRung {
-    Receiver(Ty),
-    StaticScope(crate::types::TypeName),
-}
-
 /// Arguments of one compact call, as the ordinary call path receives them.
 pub(super) struct AssociatedSignatureArguments<'call, 'argument> {
     pub(super) arguments: &'call [crate::fir::ResolvedSigCallArgument<'argument>],
@@ -90,28 +83,20 @@ impl ProductionSignatureSemantics<'_> {
         classifiers
     }
 
-    /// The implicit receivers of `scope` interleaved with the static scopes of the classifiers
-    /// open there: a class's static scope follows its own instance receiver, and a static scope
-    /// with no receiver in lexical scope follows every receiver.
-    pub(super) fn implicit_rungs(&self, scope: crate::fir::SignatureScope) -> Vec<ImplicitRung> {
-        let mut pending = self.static_scope_classifiers(scope);
-        let mut rungs = Vec::new();
-        for receiver in self
+    /// The implicit rungs of `scope`, in the order the checker walks them.
+    pub(super) fn implicit_rungs(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> Vec<crate::resolve::implicit_rungs::ImplicitRung<Ty>> {
+        let receivers = self
             .implicit_receivers(scope)
             .into_iter()
-            .chain(self.enclosing_lexical_singleton_receivers(scope))
-        {
-            rungs.push(ImplicitRung::Receiver(receiver));
-            if let Some(index) = receiver.non_null().obj_internal().and_then(|internal| {
-                pending
-                    .iter()
-                    .position(|classifier| *classifier == internal)
-            }) {
-                rungs.push(ImplicitRung::StaticScope(pending.remove(index)));
-            }
-        }
-        rungs.extend(pending.into_iter().map(ImplicitRung::StaticScope));
-        rungs
+            .chain(self.enclosing_lexical_singleton_receivers(scope));
+        crate::resolve::implicit_rungs::implicit_rungs(
+            receivers,
+            self.static_scope_classifiers(scope),
+            |receiver| receiver.non_null().obj_internal(),
+        )
     }
 
     /// `C.name(args)` naming `classifier`'s own associated functions.
@@ -225,6 +210,87 @@ impl ProductionSignatureSemantics<'_> {
                 .map_err(|_| Self::failure());
         }
         Ok(AssociatedSignatureCall::Inapplicable)
+    }
+
+    /// `::name` naming the nearest associated declaration of `classifier`'s static scope: a
+    /// receiver-less function or property reference. An expected function type selects among the
+    /// functions exactly as it does among top-level ones.
+    pub(super) fn select_static_scope_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        (classifier, spelling): (crate::types::TypeName, &str),
+        expected: Option<crate::fir::ResolvedTy>,
+        demand: &mut Demand<'_>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        let (functions, properties) = self
+            .with_resolver(scope, |resolver| {
+                Some((
+                    resolver.static_scope_associated_callables(classifier, spelling),
+                    resolver.static_scope_associated_properties(classifier, spelling),
+                ))
+            })
+            .unwrap_or_default();
+        if let (false, Some(Ty::Fun(expected))) = (
+            functions.is_empty(),
+            expected.map(|expected| expected.get().non_null()),
+        ) {
+            return self
+                .select_receiverless_function_reference(scope, functions, expected, demand)
+                .map(Some);
+        }
+        if let Some(nearest) = functions
+            .iter()
+            .map(|function| function.receiver_rank)
+            .min()
+        {
+            let mut nearest = functions
+                .into_iter()
+                .filter(|function| function.receiver_rank == nearest);
+            let (Some(function), None) = (nearest.next(), nearest.next()) else {
+                return Err(Self::failure());
+            };
+            let (params, ret) =
+                match self.demanded_source_signature(None, function.stable_declaration, demand)? {
+                    Some(signature) => (
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.get())
+                            .collect(),
+                        signature.result.get(),
+                    ),
+                    None => (function.callable.params.clone(), function.callable.ret),
+                };
+            let reference = if function.callable.suspend {
+                Ty::fun_suspend(params, ret)
+            } else {
+                Ty::fun(params, ret)
+            };
+            return crate::fir::ResolvedTy::new(reference)
+                .map(Some)
+                .map_err(|_| Self::failure());
+        }
+        let Some(nearest) = properties
+            .iter()
+            .map(|property| property.receiver_rank)
+            .min()
+        else {
+            return Ok(None);
+        };
+        let mutable = properties
+            .iter()
+            .any(|property| property.receiver_rank == nearest && property.setter.is_some());
+        let Some(value) = self.associated_property_result(properties, demand)? else {
+            return Ok(None);
+        };
+        let reference = self
+            .table
+            .libraries
+            .property_reference_type(0, mutable, &[value.get()])
+            .ok_or_else(Self::failure)?;
+        crate::fir::ResolvedTy::new(reference)
+            .map(Some)
+            .map_err(|_| Self::failure())
     }
 
     /// `C.name` naming `classifier`'s own associated property.

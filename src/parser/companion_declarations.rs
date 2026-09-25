@@ -1,5 +1,6 @@
-//! Parsing of `companion { … }` blocks and the lookahead that tells a companion block from a
-//! `companion object`.
+//! Parsing of `+CompanionBlocksAndExtensions` declarations: the top-level `companion` modifier of a
+//! companion extension, `companion { … }` blocks, and the lookahead that tells a companion block
+//! from a `companion object`.
 //!
 //! A block introduces no singleton classifier: each member is recorded as a companion-associated
 //! declaration whose receiver names the classifier that declared the block, the same associated
@@ -8,6 +9,33 @@
 use super::*;
 
 impl Parser<'_> {
+    /// `+CompanionBlocksAndExtensions`: `companion fun/val/var C.member …` is a real top-level
+    /// declaration modifier. It is intentionally consumed only at file scope; inside a classifier,
+    /// `companion object` and `companion { … }` select member grammar productions and must remain
+    /// visible to that dispatcher.
+    pub(super) fn take_top_level_companion_modifier(&mut self, mods: &mut Vec<String>) {
+        if !(self.at(TokenKind::Ident) && self.keyword_text("companion")) {
+            return;
+        }
+        let save = self.i;
+        self.bump(); // `companion`
+        let mut tail = if self.at(TokenKind::At) || self.at_modifier() {
+            self.skip_decl_prefix()
+        } else {
+            Vec::new()
+        };
+        self.skip_newlines();
+        if matches!(
+            self.kind(),
+            TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar
+        ) {
+            mods.push("companion".to_string());
+            mods.append(&mut tail);
+        } else {
+            self.i = save;
+        }
+    }
+
     pub(super) fn at_companion_declaration(&self) -> bool {
         self.at(TokenKind::Ident)
             && self.keyword_text("companion")

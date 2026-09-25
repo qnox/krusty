@@ -798,11 +798,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   "unresolved reference 'f' on receiver of type 'C'.". `C.f()` names `C`'s own associated
   declarations and precedes the members of `C`'s companion object; an inapplicable one is final.
   Unqualified, they are found in `C`'s static scope, which a class body opens right after its own
-  instance receiver and a companion-associated declaration opens in place of a receiver (it has
-  no `this`). The static scope includes the supertypes' associated declarations ranked by supertype
-  distance: the nearest applicable classifier wins and an inapplicable nearer one falls through,
-  while an instance member still precedes every block member. Selection is the ordinary
-  receiver-less top-level selection in both the checker and compact signature solving. A written
+  instance receiver, ahead of every outer receiver (an inner class's block `f` shadows its outer
+  class's member `f` for a call, a read and `::f`), and a companion-associated declaration opens
+  after every receiver (it has no `this`); the checker and compact signature solving walk this one
+  rung order (`resolve/implicit_rungs.rs`). The static scope includes the supertypes' associated
+  declarations ranked by supertype distance: the nearest applicable classifier wins and an
+  inapplicable nearer one falls through, while an instance member still precedes every block
+  member. Selection is the ordinary receiver-less top-level selection in both the checker and
+  compact signature solving. A written
   `companion fun C.f()` / `companion val C.p` stays on the facade with the receiver dropped from
   the JVM descriptor; its facade record carries the receiver type, the companion bit and an
   explicit JVM signature. When a companion-object property hoisted onto `C` has the same field
@@ -816,7 +819,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not apply reaches `C`'s associated `operator fun invoke` before the companion object's `invoke`,
   the same rung order as `C.f(args)`; an applicable constructor still wins, and an inapplicable
   associated `invoke` joins the reported candidates
-  (`bare_classifier_call_invokes_block_and_extension_operators`).
+  (`bare_classifier_call_invokes_block_and_extension_operators`). `context(…)` may precede the
+  `companion` modifier; such a declaration's context parameters are its implicit receivers, ahead
+  of its classifier's static scope, and `this` and `C`'s instance members are not in scope there
+  (`companion_extensions_with_context_parameters_see_their_classifier_scope`,
+  `companion_extension_has_no_value_receiver`).
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and

@@ -5,3 +5,14 @@
 2.4.20:
   Main.kt:6:9: unresolved reference 'f' on receiver of type 'C'.
   Main.kt:7:9: unresolved reference 'q' on receiver of type 'C'.
+
+[companion_extension_has_no_value_receiver]
+2.4.20:
+  Main.kt:3:23: 'this' is not defined in this context.
+  Main.kt:4:23: unresolved reference 'm'.
+
+[static_scope_reference_without_an_expected_type_is_ambiguous]
+2.4.20:
+  Main.kt:7:20: overload resolution ambiguity between candidates:
+  | companion fun f(x: Int): String
+  | companion fun f(x: String): String
