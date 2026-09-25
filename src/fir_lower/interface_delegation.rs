@@ -463,6 +463,8 @@ fn materialize_delegation(
                             ty,
                             is_var: setter.is_some(),
                             is_abstract: false,
+                            modifiers: Default::default(),
+                            delegate_field: None,
                             getter,
                             setter,
                             visibility: crate::types::Visibility::Public,
