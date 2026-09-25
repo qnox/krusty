@@ -2735,6 +2735,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   tables. Metadata string tables merge consecutive plain records, and method attribute names use
   ASM's `StackMapTable`-before-debug-table order. Remaining byte-parity differences include dead
   slot reuse, branch fall-through elimination, and inline-local name mangling.
+- **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
+  its block end leaves each variable the block declared, and a variable left from the top of the
+  frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
+  statements after the block take the same numbers again (`if (c) { val a } else { val b }; val z`
+  puts all three in one slot). A `do` body's locals stay live through the condition, and a catch
+  parameter is left when its catch ends. Backend temporaries do not hand slots back yet: a released
+  temporary keeps the cursor, a variable left below one that is still live keeps it too, and a
+  `finally`'s parked-exception slot stays taken for the rest of the method because a later `try`
+  takes it from the reuse pool again. `tests/block_slot_reuse_e2e.rs` (full-byte against kotlinc
+  for sibling branches and a loop body; runtime pins for `do`/`while`, catch parameters and the
+  parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
+  pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through
