@@ -581,7 +581,7 @@ fn materialize_top_level_property(
             source_order,
         });
         if companion_block_owner.is_some() {
-            ir.companion_block_statics.insert(storage_index);
+            ir.companion_blocks.mark_storage(storage_index);
         }
         let getter = property.getter.map(|body| {
             add_accessor_function(
@@ -766,7 +766,7 @@ fn place_companion_block_accessors(
 ) {
     for accessor in accessors {
         ir.classes[owner as usize].methods.push(accessor);
-        ir.companion_block_functions.insert(accessor, owner);
+        ir.companion_blocks.place_function(accessor, owner);
     }
 }
 
@@ -794,17 +794,16 @@ fn record_companion_block_property(
         source_order,
     } = realization;
     let class = ir.classes[owner as usize].fq_name_id();
-    ir.companion_block_properties
-        .push(crate::ir::IrCompanionBlockProperty {
+    let has_constant = index.compile_time_constant(property.declaration).is_some()
+        || ir.companion_blocks.has_constant_initializer(property_id);
+    ir.companion_blocks
+        .record_property(crate::ir::IrCompanionBlockProperty {
             class,
             name: property.name.clone(),
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),
-            has_constant: index.compile_time_constant(property.declaration).is_some()
-                || ir
-                    .companion_block_constant_initializers
-                    .contains(&property_id),
+            has_constant,
             visibility: property.visibility,
             storage,
             getter,
@@ -1701,7 +1700,7 @@ pub(super) fn accept_property_body(
         .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
     if has_constant_initializer && companion_block_member {
         // Recorded on its classifier's property record instead of the package's.
-        ir.companion_block_constant_initializers.insert(property_id);
+        ir.companion_blocks.mark_constant_initializer(property_id);
     } else if has_constant_initializer {
         let package_property = ir
             .package_properties

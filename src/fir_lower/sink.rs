@@ -1175,7 +1175,7 @@ impl<'a> CommonIrBodySink<'a> {
             });
             if let Some(owner) = companion_block_owner {
                 self.ir.classes[owner as usize].methods.push(function);
-                self.ir.companion_block_functions.insert(function, owner);
+                self.ir.companion_blocks.place_function(function, owner);
             }
             self.ir.fn_source_names.insert(function, source_name);
             self.ir.fn_source_order.insert(

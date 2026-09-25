@@ -113,7 +113,7 @@ pub(super) fn source_ordered_members<'a>(
             .iter()
             .enumerate()
             .filter(|(index, property)| {
-                ir.companion_block_statics.contains(&(*index as u32))
+                ir.companion_blocks.is_storage(*index as u32)
                     && property.owner == Some(class.fq_name_id())
             })
             .map(|(index, property)| {

@@ -9,7 +9,7 @@
 use crate::ir::{Callee, IrExpr, IrFile};
 
 pub(super) fn realize_companion_block_calls(ir: &mut IrFile) {
-    if ir.companion_block_functions.is_empty() {
+    if !ir.companion_blocks.has_functions() {
         return;
     }
     for expression in 0..ir.exprs.len() {
@@ -17,9 +17,9 @@ pub(super) fn realize_companion_block_calls(ir: &mut IrFile) {
             continue;
         };
         let owner_of = |function: &u32| {
-            ir.companion_block_functions
-                .get(function)
-                .map(|class| ir.classes[*class as usize].fq_name_id())
+            ir.companion_blocks
+                .declaring_class(*function)
+                .map(|class| ir.classes[class as usize].fq_name_id())
         };
         let replacement = match callee {
             Callee::Local(function) => owner_of(function).map(|owner| Callee::ClassStatic {
