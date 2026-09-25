@@ -10,15 +10,52 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(&format!("{LANGUAGE}{src}"), "Main")
 }
 
-fn javap_members(classes: &[(String, Vec<u8>)], class: &str) -> String {
-    let dir = common::scratch_dir().expect("scratch directory");
-    let (_, bytes) = classes
-        .iter()
-        .find(|(name, _)| name == class)
-        .unwrap_or_else(|| panic!("krusty did not emit {class}"));
-    let path = dir.join(format!("{class}.class"));
-    std::fs::write(&path, bytes).expect("write class file");
-    common::javap(&["-p", &path.to_string_lossy()]).expect("javap")
+/// Compile `src` with kotlinc (the feature enabled by flag) and krusty, and require each of
+/// `classes` to carry exactly kotlinc's fields and methods, in class-file order with their access
+/// flags, descriptors and generic signatures, and exactly kotlinc's `@Metadata`.
+fn assert_members_and_metadata_match_kotlinc(stem: &str, src: &str, classes: &[&str]) {
+    let source = format!("{LANGUAGE}{src}");
+    for class in classes {
+        let comparison = common::compare_with_kotlinc_plugin(
+            stem,
+            &source,
+            class,
+            &[common::stdlib_jar()],
+            "17",
+            &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+        )
+        .expect("reference kotlinc and javap are provisioned");
+        let members = |bytes: &[u8]| {
+            let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
+            let fields = info
+                .fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "field {:#06x} {} {} {:?}",
+                        field.access, field.name, field.descriptor, field.signature
+                    )
+                })
+                .collect::<Vec<_>>();
+            let methods = info.methods.iter().map(|method| {
+                format!(
+                    "method {:#06x} {}{} {:?}",
+                    method.access, method.name, method.descriptor, method.signature
+                )
+            });
+            fields.into_iter().chain(methods).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            members(&comparison.krusty_bytes),
+            members(&comparison.reference_bytes),
+            "{class}: kotlinc's member table"
+        );
+        assert_eq!(
+            common::raw_kotlin_metadata(&comparison.krusty_bytes),
+            common::raw_kotlin_metadata(&comparison.reference_bytes),
+            "{class}: kotlinc's @Metadata"
+        );
+    }
 }
 
 #[test]
@@ -31,23 +68,7 @@ fn block_members_are_static_members_of_their_class() {
         }\n\
         companion fun A.g() = \"K\"\n\
         fun box() = A.f()\n";
-    let classes = common::expect_classes_with_stdlib(&format!("{LANGUAGE}{SRC}"), "Main");
-    let class = javap_members(&classes, "A");
-    for member in [
-        "private static final java.lang.String v;",
-        "public static final java.lang.String getV();",
-        "public static final java.lang.String f();",
-        "static {};",
-    ] {
-        assert!(class.contains(member), "A lacks `{member}`:\n{class}");
-    }
-    let facade = javap_members(&classes, "MainKt");
-    assert!(
-        facade.contains("public static final java.lang.String g();")
-            && !facade.contains(" f()")
-            && !facade.contains("getV"),
-        "only the written companion extension belongs on the facade:\n{facade}"
-    );
+    assert_members_and_metadata_match_kotlinc("BlockMembers", SRC, &["A", "BlockMembersKt"]);
     assert_eq!(run(SRC).expect("block members"), "OK");
 }
 
@@ -83,8 +104,12 @@ fn instance_member_calls_inherited_and_private_block_members() {
 #[test]
 fn block_property_initializes_with_its_class_not_the_file() {
     const SRC: &str = "var initialized = false\n\
+        fun initialize(): String {\n\
+        \x20   initialized = true\n\
+        \x20   return \"\"\n\
+        }\n\
         class Foo {\n\
-        \x20   companion { val p = run { initialized = true; \"\" } }\n\
+        \x20   companion { val p = initialize() }\n\
         }\n\
         companion val Foo.greeting: String = \"hi\"\n\
         fun box(): String {\n\
@@ -104,12 +129,7 @@ fn nested_class_block_members_belong_to_the_nested_class() {
         \x20   }\n\
         }\n\
         fun box() = Outer.Nested.v\n";
-    let classes = common::expect_classes_with_stdlib(&format!("{LANGUAGE}{SRC}"), "Main");
-    let nested = javap_members(&classes, "Outer$Nested");
-    assert!(
-        nested.contains("public static final java.lang.String getV();"),
-        "Outer$Nested lacks its block property accessor:\n{nested}"
-    );
+    assert_members_and_metadata_match_kotlinc("NestedBlock", SRC, &["Outer$Nested"]);
     assert_eq!(run(SRC).expect("nested block"), "OK");
 }
 
@@ -120,13 +140,7 @@ fn block_property_beside_companion_object_property_keeps_its_field_name() {
         \x20   companion object { val value = \"K\" }\n\
         }\n\
         fun box() = E.value + E.Companion.value\n";
-    let classes = common::expect_classes_with_stdlib(&format!("{LANGUAGE}{SRC}"), "Main");
-    let class = javap_members(&classes, "E");
-    assert!(
-        class.contains("private static final java.lang.String value;")
-            && class.contains("private static final java.lang.String value$1;"),
-        "the hoisted companion property takes the suffixed field:\n{class}"
-    );
+    assert_members_and_metadata_match_kotlinc("FieldNames", SRC, &["E"]);
     assert_eq!(run(SRC).expect("field names"), "OK");
 }
 

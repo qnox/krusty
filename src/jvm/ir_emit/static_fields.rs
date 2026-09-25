@@ -244,14 +244,14 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-    for &(_, s) in &facade_statics {
+    for &(index, s) in &facade_statics {
         if !should_store(s) {
             continue;
         }
         if s.line != 0 {
             clinit_lines.push((code.bytes.len() as u16, s.line));
         }
-        e.emit_static_initializer_store(facade, s, &mut code);
+        e.emit_static_initializer_store(facade, index, &mut code);
     }
     code.ret_void();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());

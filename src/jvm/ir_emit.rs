@@ -1472,7 +1472,8 @@ fn build_class_metadata(
                 visibility: property.visibility,
                 has_constant: property.has_constant,
                 is_const: property.is_const,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: storage.is_some(),
                 tparam: None,
                 receiver: None,
@@ -1491,7 +1492,7 @@ fn build_class_metadata(
                             .map_or_else(|| Some(default_setter()), accessor_sig)
                     })
                     .flatten(),
-                setter_parameter_name: explicit_setter_parameter_name(ir, property.setter),
+                setter_parameter_name: super::parameter_names::explicit_setter(ir, property.setter),
                 field_desc: None,
                 field_name: None,
                 annotations: Vec::new(),
@@ -3302,13 +3303,15 @@ fn emit_jvm_interface_companion_surface(
         }
     }
 
-    let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+    let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
         .statics
         .iter()
-        .filter(|s| {
+        .enumerate()
+        .filter(|(_, s)| {
             s.owner_matches(&fq_name)
                 && !(s.is_const && static_fields::const_value_idx_peek(ir, s.init))
         })
+        .map(|(index, s)| (index as u32, s))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
         cw.reserve_method_name("<clinit>");
@@ -3320,12 +3323,12 @@ fn emit_jvm_interface_companion_surface(
             &fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|property| property.init),
+            clinit_statics.iter().map(|(_, property)| property.init),
         );
         let mut clinit = CodeBuilder::new(0);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
-        for s in &clinit_statics {
+        for &(static_index, s) in &clinit_statics {
             let pc = clinit.bytes.len() as u16;
             if let Some(&line) = c
                 .companion_class
@@ -3336,7 +3339,7 @@ fn emit_jvm_interface_companion_surface(
                     clinit_lines.push((pc, line));
                 }
             }
-            emitter.emit_static_initializer_store(&fq_name, s, &mut clinit);
+            emitter.emit_static_initializer_store(&fq_name, static_index, &mut clinit);
         }
         clinit.ret_void();
         clinit.ensure_locals(emitter.frame.max());
@@ -6484,7 +6487,7 @@ fn emit_class(
                 if line != 0 {
                     clinit_lines.push((pc, line));
                 }
-                e.emit_static_initializer_store(&fq_name, s, &mut clinit);
+                e.emit_static_initializer_store(&fq_name, *static_index, &mut clinit);
             }
             clinit.ret_void();
             clinit.ensure_locals(e.frame.max());
@@ -8428,8 +8431,13 @@ fn emit_enum_class(
     // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
     // instance fields. Emitting it last also interned its name and descriptor late, so the class
     // differed in constant-pool order even where every member matched.
-    let owner_statics: Vec<&crate::ir::IrStatic> =
-        ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
+    let owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.owner_matches(&fq))
+        .map(|(index, s)| (index as u32, s))
+        .collect();
     // The `Companion` field LEADS the field table, but kotlinc interns its name and descriptor at
     // the field VISIT — late, not here. Emitting it eagerly put those strings at the head of the
     // constant pool and reordered nearly all of it.
@@ -8977,12 +8985,12 @@ fn emit_enum_class(
         // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
         // line marks — so pushing entries here is the only thing that reaches the attribute.
         let mut stepped_away = false;
-        for s in &owner_statics {
+        for &(static_index, s) in &owner_statics {
             if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
                 clinit_lines.push((clinit.bytes.len() as u16, s.line));
                 stepped_away = true;
             }
-            e.emit_static_initializer_store(&fq, s, &mut clinit);
+            e.emit_static_initializer_store(&fq, static_index, &mut clinit);
         }
         // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
         // line. An enum with no generated statics has a single-entry table, and adding a closing
@@ -16746,9 +16754,10 @@ impl<'a> Emitter<'a> {
     fn emit_static_initializer_store(
         &mut self,
         owner: &str,
-        field: &crate::ir::IrStatic,
+        static_index: u32,
         code: &mut CodeBuilder,
     ) {
+        let field = &self.ir.statics[static_index as usize];
         self.emit_value(field.init, code);
         if self.diverges(field.init) {
             return;
@@ -16756,17 +16765,11 @@ impl<'a> Emitter<'a> {
         let physical = jvm_declared_ty(&field.ty);
         self.adapt_physical_operand_for(field.init, self.value_ty(field.init), physical, code);
         // Static storage is identified by its place in the file's static table.
-        let field_name = self
-            .ir
-            .statics
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, field))
-            .map_or(field.name.as_str(), |index| {
-                self.ir.static_field_jvm_name(index as u32)
-            });
-        let reference = self
-            .cw
-            .fieldref(owner, field_name, &type_descriptor(physical));
+        let reference = self.cw.fieldref(
+            owner,
+            self.ir.static_field_jvm_name(static_index),
+            &type_descriptor(physical),
+        );
         code.putstatic(reference, slot_words(physical) as i32);
     }
 
@@ -17617,8 +17620,6 @@ impl<'a> Emitter<'a> {
         self.bind(end, code);
     }
 
-    /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
-    /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     /// Whether static `index` is a `companion { … }` block property that other classes reach
     /// through its class's generated public accessors (see `SourceOrderedMember::StaticProperty`).
     fn companion_block_accessor_owned(&self, index: u32) -> bool {
@@ -17629,6 +17630,8 @@ impl<'a> Emitter<'a> {
             && !property.visibility.is_private()
     }
 
+    /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
+    /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         self.ir
             .expr_diverges_by(e, &|_, value| matches!(value, IrExpr::BottomValue { .. }))
