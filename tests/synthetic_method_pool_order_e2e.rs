@@ -9,8 +9,8 @@
 use super::common;
 
 /// Compile `src` with kotlinc and with krusty and return both builds of each class in `classes`.
-fn build_both(stem: &str, src: &str, classes: &[&str]) -> Option<Vec<(String, Vec<u8>, Vec<u8>)>> {
-    let dir = common::scratch_dir()?;
+fn build_both(stem: &str, src: &str, classes: &[&str]) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    let dir = common::scratch_dir().expect("scratch directory");
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
     let source = dir.join(format!("{stem}.kt"));
@@ -19,7 +19,8 @@ fn build_both(stem: &str, src: &str, classes: &[&str]) -> Option<Vec<(String, Ve
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         source.to_string_lossy().into_owned(),
-    ])?;
+    ])
+    .expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let krusty = common::compile_in_process_metadata_cp_module_target(src, stem, &[], "main", None)
         .expect("krusty compiles the fixture");
@@ -37,15 +38,11 @@ fn build_both(stem: &str, src: &str, classes: &[&str]) -> Option<Vec<(String, Ve
         })
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    Some(pairs)
+    pairs
 }
 
 fn assert_identical(stem: &str, src: &str, classes: &[&str]) {
-    let Some(pairs) = build_both(stem, src, classes) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
-    for (class, reference, krusty) in pairs {
+    for (class, reference, krusty) in build_both(stem, src, classes) {
         assert!(reference == krusty, "{class} differs from kotlinc's build");
     }
 }
