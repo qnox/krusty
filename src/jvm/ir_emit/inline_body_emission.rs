@@ -45,6 +45,31 @@ impl Emitter<'_> {
         param_slots: &[(u16, Ty)],
         code: &mut CodeBuilder,
     ) -> Ty {
+        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+            let result = emitter.value_ty(inline_body);
+            emitter.emit_value(inline_body, code);
+            result
+        })
+    }
+
+    /// The type a lambda body leaves, typed in the body's own scope as [`Self::emit_fn_body_inline`]
+    /// emits it.
+    pub(super) fn inline_body_result_ty(
+        &mut self,
+        inline_body: u32,
+        param_slots: &[(u16, Ty)],
+    ) -> Ty {
+        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+            emitter.value_ty(inline_body)
+        })
+    }
+
+    fn in_inline_body_scope<R>(
+        &mut self,
+        inline_body: u32,
+        param_slots: &[(u16, Ty)],
+        within: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_var_types = std::mem::replace(
             &mut self.var_types,
@@ -53,8 +78,7 @@ impl Emitter<'_> {
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
             self.slots.insert(index as u32, (slot, ty));
         }
-        let result = self.value_ty(inline_body);
-        self.emit_value(inline_body, code);
+        let result = within(self);
         self.slots = saved_slots;
         self.var_types = saved_var_types;
         result

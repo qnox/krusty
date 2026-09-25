@@ -645,6 +645,7 @@ pub struct ClassWriter {
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
     inner_class_resolver: Option<InnerClassResolver>,
+    value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     /// Internal names of every ANNOTATION type this class applies (class/field/method/parameter).
     /// An applied annotation appears only as a descriptor string inside the annotation attribute —
     /// never as a class constant — yet kotlinc still gives a nested one an `InnerClasses` entry, so
@@ -766,6 +767,7 @@ impl ClassWriter {
             deprecated_methods: std::collections::HashSet::new(),
             inner_class_candidates: Vec::new(),
             inner_class_resolver: None,
+            value_classes: Rc::default(),
             annotation_class_refs: std::collections::HashSet::new(),
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
@@ -851,6 +853,13 @@ impl ClassWriter {
 
     pub fn set_inner_class_resolver(&mut self, resolver: Option<InnerClassResolver>) {
         self.inner_class_resolver = resolver;
+    }
+
+    pub(crate) fn set_value_classes(
+        &mut self,
+        value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
+    ) {
+        self.value_classes = value_classes;
     }
 
     /// Set the `PermittedSubclasses` entries in emission order.

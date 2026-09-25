@@ -25,8 +25,8 @@ use super::stack_maps;
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::bytecode_passes::redundant_checkcasts::{self, StackTops};
 use crate::jvm::bytecode_passes::{
-    dead_code, local_slots, negated_jumps, redundant_gotos, redundant_null_checks, stack_peephole,
-    temporaries,
+    captured_vars, dead_code, local_slots, negated_jumps, redundant_boxing, redundant_gotos,
+    redundant_null_checks, stack_peephole, temporaries,
 };
 use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
 use crate::jvm::method_node::{LabelId, MethodNode};
@@ -309,8 +309,16 @@ impl ClassWriter {
             position += 1;
             !removed.contains(&(position - 1))
         });
+        // kotlinc runs `CapturedVarsOptimizationMethodTransformer` first. The null-check and cast
+        // passes above judge the method as emitted and never select a `Ref`'s operations, so it
+        // runs after their removals here.
+        let refs_unboxed = captured_vars::eliminate(&mut node, &self.internal_name).ok()?;
+        // Then `RedundantBoxingMethodTransformer`, ahead of the temporaries pass.
+        let unboxed =
+            redundant_boxing::eliminate(&mut node, &self.internal_name, &*self.value_classes)
+                .ok()?;
         let temporaries = temporaries::eliminate(&mut node);
-        let folded_any = !removed.is_empty() || temporaries.is_some();
+        let folded_any = !removed.is_empty() || refs_unboxed || unboxed || temporaries.is_some();
         let pinned = temporaries.map(|done| done.pinned).unwrap_or_default();
         // kotlinc's stack peephole runs after the temporaries pass, then its `goto` cleanup and
         // its `NegatedJumpsMethodTransformer`, the last of its rewrites (see `stack_peephole`,
@@ -355,15 +363,22 @@ impl ClassWriter {
             .enumerate()
             .filter(|&(at, _)| !removed_locals.get(at).copied().unwrap_or(false))
             .map(|(_, entry)| entry);
+        // A local whose type a rewrite changed (a `Ref` become its element) names its new
+        // descriptor, which must already be in the pool like every constant the body uses.
         let lvt: Vec<LvtEntry> = kept_locals
             .zip(&assembled.local_variables)
             .map(|(&(name, desc, _, old_start, old_len), local)| {
                 let start = old_start.map(|_| local.start_pc);
                 let end = local.start_pc + local.length;
                 let len = old_len.map(|_| end - start.unwrap_or(0));
-                (name, desc, local.slot, start, len)
+                let desc = if self.cp.utf8_at(desc) == Some(local.desc.as_str()) {
+                    desc
+                } else {
+                    self.cp.lookup_utf8(&local.desc)?
+                };
+                Some((name, desc, local.slot, start, len))
             })
-            .collect();
+            .collect::<Option<_>>()?;
         if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
             // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
             // does not own debug-local deletion, so preserve the original method instead.

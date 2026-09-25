@@ -3442,6 +3442,15 @@ impl IrFile {
         self.external_value_class_name(internal).is_some()
     }
 
+    /// Every value class this IR knows: the file's own and the external ones its checked facts name.
+    pub(crate) fn value_class_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .iter()
+            .filter(|class| class.is_value)
+            .map(|class| class.fq_name)
+            .chain(self.external_value_classes.keys().copied())
+    }
+
     /// Return a value class's declared, one-level underlying semantic type without making callers
     /// branch on whether the declaration belongs to this source file or external checked facts.
     pub(crate) fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {

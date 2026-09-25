@@ -26,6 +26,10 @@ pub(crate) enum Binding {
         category: Category,
         checkcast: Option<String>,
     },
+    /// The inline lambda at this index of the call's lambdas. The body's uses of it are removed
+    /// before it is placed (`markPlacesForInlineAndRemoveInlinable`), and each `invoke` of it
+    /// becomes the lambda's own body, so it has no slot in the caller.
+    Lambda(usize),
 }
 
 /// One parameter of the inlined callee, in declaration order.
@@ -35,10 +39,13 @@ pub(crate) struct Parameter {
     pub binding: Binding,
 }
 
-/// The inlined callee's parameters, `this` included.
+/// The inlined callee's parameters, `this` included, followed by the values its inline lambdas
+/// capture (kotlinc's captured parameters, which `prepareNode` places after the real ones).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Parameters {
     pub parameters: Vec<Parameter>,
+    /// Each lambda's captured values, the lambdas in argument order.
+    pub captured: Vec<Parameter>,
 }
 
 /// Where one of the body's slots lives in the caller.
@@ -51,38 +58,73 @@ enum Remapped<'a> {
         category: Category,
         checkcast: Option<&'a str>,
     },
+    /// An inline lambda, which the body no longer reads.
+    Lambda,
 }
 
 impl Parameters {
-    /// The words the parameters occupy in the callee (`argsSizeOnStack`).
+    /// Every parameter, the captured values last, in declaration-slot order.
+    fn all(&self) -> impl Iterator<Item = &Parameter> {
+        self.parameters.iter().chain(&self.captured)
+    }
+
+    /// The words the parameters occupy in the callee (`argsSizeOnStack`), captured values
+    /// included.
     pub(crate) fn args_size(&self) -> u16 {
+        self.all()
+            .map(|parameter| parameter.category.words() as u16)
+            .sum()
+    }
+
+    /// The words the callee's own parameters occupy (`realParametersSizeOnStack`).
+    pub(crate) fn real_size(&self) -> u16 {
         self.parameters
             .iter()
             .map(|parameter| parameter.category.words() as u16)
             .sum()
     }
 
+    /// The words the captured values occupy (`capturedParametersSizeOnStack`).
+    pub(crate) fn captured_size(&self) -> u16 {
+        self.args_size() - self.real_size()
+    }
+
+    /// The inline lambda a parameter's declaration slot holds (`getFunctionalArgumentIfExists`).
+    pub(super) fn lambda_at(&self, slot: usize) -> Option<usize> {
+        let mut declaration = 0usize;
+        for parameter in self.all() {
+            let words = parameter.category.words() as usize;
+            if slot < declaration + words {
+                return match parameter.binding {
+                    Binding::Lambda(lambda) => Some(lambda),
+                    _ => None,
+                };
+            }
+            declaration += words;
+        }
+        None
+    }
+
     /// The temporary each parameter is stored to, relative to the inline frame's base; `None` for a
     /// parameter bound to a caller local.
+    /// The captured values follow the callee's own parameters.
     pub(crate) fn temporaries(&self) -> Vec<Option<u16>> {
         let mut next = 0u16;
-        self.parameters
-            .iter()
+        self.all()
             .map(|parameter| match parameter.binding {
                 Binding::Temporary => {
                     let slot = next;
                     next += parameter.category.words() as u16;
                     Some(slot)
                 }
-                Binding::CallerLocal { .. } => None,
+                Binding::CallerLocal { .. } | Binding::Lambda(_) => None,
             })
             .collect()
     }
 
     /// The words the temporaries take (`actualParamsSize`).
     fn temporaries_size(&self) -> u16 {
-        self.parameters
-            .iter()
+        self.all()
             .filter(|parameter| parameter.binding == Binding::Temporary)
             .map(|parameter| parameter.category.words() as u16)
             .sum()
@@ -96,10 +138,11 @@ impl Parameters {
         }
         let mut declaration = 0u16;
         let mut temporary = 0u16;
-        for parameter in &self.parameters {
+        for parameter in self.all() {
             let words = parameter.category.words() as u16;
             if slot < declaration + words {
                 return match &parameter.binding {
+                    Binding::Lambda(_) => Remapped::Lambda,
                     Binding::Temporary => Remapped::Frame(frame_base + temporary),
                     Binding::CallerLocal {
                         slot,
@@ -155,6 +198,7 @@ impl Parameters {
                             }));
                         }
                     }
+                    Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
                 },
                 Node::Insn(Insn::Iinc { slot, delta }) => {
                     let slot = match self.place(*slot, frame_base) {
@@ -165,6 +209,7 @@ impl Parameters {
                             ..
                         } => slot,
                         Remapped::Caller { .. } => return Err(InlineError::IncrementOfCallerValue),
+                        Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
                     };
                     out.nodes.push(Node::Insn(Insn::Iinc {
                         slot,
@@ -182,7 +227,7 @@ impl Parameters {
                     slot,
                     ..local.clone()
                 }),
-                Remapped::Caller { .. } => None,
+                Remapped::Caller { .. } | Remapped::Lambda => None,
             })
             .collect();
         Ok(out)

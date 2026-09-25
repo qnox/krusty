@@ -20,7 +20,42 @@ fn temporaries(categories: &[Category]) -> Parameters {
                 binding: Binding::Temporary,
             })
             .collect(),
+        captured: Vec::new(),
     }
+}
+
+/// Lines left as the callee's own.
+struct OwnLines;
+
+impl SourceLines for OwnLines {
+    fn map(&mut self, line: u16) -> Option<u16> {
+        Some(line)
+    }
+    fn synthetic(&mut self) -> Option<u16> {
+        None
+    }
+    fn call_site(&self) -> Option<u16> {
+        None
+    }
+}
+
+/// [`inline`] of a call without lambdas, its lines left as the callee's.
+fn inline_plain(
+    callee: &MethodNode,
+    parameters: &Parameters,
+    inline_only: bool,
+    frame_base: u16,
+    reified_arguments: &crate::jvm::inline::ReifiedArguments,
+) -> Result<MethodNode, InlineError> {
+    inline(
+        callee,
+        parameters,
+        &[],
+        inline_only,
+        frame_base,
+        reified_arguments,
+        &mut OwnLines,
+    )
 }
 
 fn local(name: &str, desc: &str, start: LabelId, end: LabelId, slot: u16) -> LocalVariable {
@@ -67,7 +102,7 @@ fn plus_one() -> MethodNode {
 
 #[test]
 fn a_body_moves_above_its_temporaries_and_renames_its_locals() {
-    let inlined = inline(
+    let inlined = inline_plain(
         &plus_one(),
         &temporaries(&[Category::Int]),
         false,
@@ -116,7 +151,7 @@ fn a_body_moves_above_its_temporaries_and_renames_its_locals() {
 
 #[test]
 fn an_inline_only_body_loses_its_debug_information_and_its_marker() {
-    let inlined = inline(
+    let inlined = inline_plain(
         &plus_one(),
         &temporaries(&[Category::Int]),
         true,
@@ -154,8 +189,10 @@ fn a_parameter_bound_to_a_caller_local_reads_it_and_keeps_no_entry() {
                 checkcast: None,
             },
         }],
+        captured: Vec::new(),
     };
-    let inlined = inline(&plus_one(), &parameters, false, 5, &Default::default()).expect("inlines");
+    let inlined =
+        inline_plain(&plus_one(), &parameters, false, 5, &Default::default()).expect("inlines");
     let instructions: Vec<&Insn> = inlined.instructions().take(4).collect();
     assert_eq!(
         instructions,
@@ -181,7 +218,7 @@ fn a_return_under_other_values_stores_its_value_and_pops_the_rest() {
     node.nodes = vec![op(0x04), op(0x09), op(0x05), op(0xac)];
     node.max_locals = 0;
     let inlined =
-        inline(&node, &Parameters::default(), true, 4, &Default::default()).expect("inlines");
+        inline_plain(&node, &Parameters::default(), true, 4, &Default::default()).expect("inlines");
     let instructions: Vec<&Insn> = inlined.instructions().collect();
     assert_eq!(
         &instructions[1..4],
@@ -229,7 +266,7 @@ fn dead_code_and_parameter_checks_are_removed() {
         catch_type: None,
     }];
     node.max_locals = 1;
-    let inlined = inline(
+    let inlined = inline_plain(
         &node,
         &temporaries(&[Category::Reference]),
         true,
@@ -244,6 +281,73 @@ fn dead_code_and_parameter_checks_are_removed() {
     );
     assert_eq!(instructions.len(), 4, "{instructions:?}");
     assert!(inlined.try_catch_blocks.is_empty());
+}
+
+/// `inline fun f(): String { try { try { throw E() } catch (e: Throwable) { throw E() } } catch
+/// (e: Throwable) { return "" } }`: both tries open on a line, and each handler is reached only by
+/// the exception its range throws.
+#[test]
+fn a_handler_reached_only_by_an_exception_survives() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()Ljava/lang/String;");
+    let [outer, inner, inner_handler, outer_handler] = [(); 4].map(|()| node.new_label());
+    let throw = || {
+        [
+            Node::Insn(Insn::Type {
+                op: 0xbb,
+                class: "java/lang/Exception".into(),
+            }),
+            op(0x59),
+            method(0xb7, "java/lang/Exception", "<init>", "()V"),
+            op(0xbf),
+        ]
+    };
+    node.nodes = vec![
+        Node::Label(outer),
+        Node::Line {
+            line: 3,
+            start: outer,
+        },
+        op(0x00),
+        Node::Label(inner),
+        Node::Line {
+            line: 4,
+            start: inner,
+        },
+        op(0x00),
+    ];
+    node.nodes.extend(throw());
+    node.nodes
+        .extend([Node::Label(inner_handler), var(0x3a, 0)]);
+    node.nodes.extend(throw());
+    node.nodes.extend([
+        Node::Label(outer_handler),
+        var(0x3a, 0),
+        Node::Insn(Insn::Ldc(Constant::String("".into()))),
+        op(0xb0),
+    ]);
+    let block = |start, end, handler| TryCatchBlock {
+        start,
+        end,
+        handler,
+        catch_type: Some("java/lang/Throwable".into()),
+    };
+    node.try_catch_blocks = vec![
+        block(inner, inner_handler, inner_handler),
+        block(outer, outer_handler, outer_handler),
+    ];
+    node.max_locals = 1;
+    let inlined =
+        inline_plain(&node, &temporaries(&[]), false, 0, &Default::default()).expect("inlines");
+    let instructions: Vec<&Insn> = inlined.instructions().collect();
+    // The leading nop, the two try nops, three instructions of each `throw E()` and its athrow,
+    // two catch stores, the ldc and the return turned into a jump to the end.
+    assert_eq!(instructions.len(), 16, "{instructions:?}");
+    assert_eq!(inlined.try_catch_blocks.len(), 2);
+    let positions = preparation::label_positions(&inlined);
+    for block in &inlined.try_catch_blocks {
+        let start = positions[block.start.index()].expect("a placed start");
+        assert_eq!(inlined.nodes[start + 1], op(0x00), "{:?}", inlined.nodes);
+    }
 }
 
 #[test]
@@ -322,4 +426,165 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
         true,
     );
     assert!(!can_inline_arguments_in_place(&null_check));
+}
+
+fn method(op: u8, owner: &str, name: &str, desc: &str) -> Node {
+    Node::Insn(Insn::Method {
+        op,
+        owner: owner.to_string(),
+        name: name.to_string(),
+        desc: desc.to_string(),
+        interface: op == 0xb9,
+    })
+}
+
+fn checkcast(class: &str) -> Node {
+    Node::Insn(Insn::Type {
+        op: 0xc0,
+        class: class.to_string(),
+    })
+}
+
+/// `inline fun f(block: (Int) -> Int): Int = block(1)` as kotlinc compiles it.
+fn apply_to_one() -> MethodNode {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "(Lkotlin/jvm/functions/Function1;)I");
+    let (start, end) = (node.new_label(), node.new_label());
+    node.nodes = vec![
+        Node::Label(start),
+        Node::Line { line: 7, start },
+        var(0x19, 0),
+        op(0x04),
+        method(
+            0xb8,
+            "java/lang/Integer",
+            "valueOf",
+            "(I)Ljava/lang/Integer;",
+        ),
+        method(
+            0xb9,
+            "kotlin/jvm/functions/Function1",
+            "invoke",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
+        checkcast("java/lang/Number"),
+        method(0xb6, "java/lang/Number", "intValue", "()I"),
+        op(0xac),
+        Node::Label(end),
+    ];
+    node.local_variables = vec![local(
+        "block",
+        "Lkotlin/jvm/functions/Function1;",
+        start,
+        end,
+        0,
+    )];
+    node.max_locals = 1;
+    node.max_stack = 2;
+    node
+}
+
+/// `{ it + base }`, capturing an `Int` `base`: its parameter in slot 0, the captured value in 1.
+fn plus_captured() -> Lambda {
+    let mut node = MethodNode::new(ACC_STATIC, "f$lambda", "(II)I");
+    let (start, end) = (node.new_label(), node.new_label());
+    node.nodes = vec![
+        Node::Label(start),
+        Node::Line { line: 2, start },
+        var(0x15, 0),
+        var(0x15, 1),
+        op(0x60),
+        op(0xac),
+        Node::Label(end),
+    ];
+    node.local_variables = vec![local("it", "I", start, end, 0)];
+    node.max_locals = 2;
+    node.max_stack = 2;
+    Lambda {
+        node,
+        parameter_types: vec!["I".to_string()],
+        return_type: "I".to_string(),
+        captured: 0..1,
+    }
+}
+
+#[test]
+fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
+    let parameters = Parameters {
+        parameters: vec![Parameter {
+            category: Category::Reference,
+            binding: Binding::Lambda(0),
+        }],
+        captured: vec![Parameter {
+            category: Category::Int,
+            binding: Binding::CallerLocal {
+                slot: 2,
+                category: Category::Int,
+                checkcast: None,
+            },
+        }],
+    };
+    let inlined = inline(
+        &apply_to_one(),
+        &parameters,
+        &[plus_captured()],
+        false,
+        5,
+        &Default::default(),
+        &mut OwnLines,
+    )
+    .expect("inlines");
+    let instructions: Vec<Node> = inlined
+        .instructions()
+        .filter(|insn| !matches!(insn, Insn::Jump { .. }))
+        .cloned()
+        .map(Node::Insn)
+        .collect();
+    assert_eq!(
+        instructions,
+        vec![
+            op(0x00),
+            op(0x04),
+            method(
+                0xb8,
+                "java/lang/Integer",
+                "valueOf",
+                "(I)Ljava/lang/Integer;"
+            ),
+            // The argument, coerced back to the lambda's `Int` and stored above the body's
+            // parameters (the lambda and its captured value), then the lambda's body reading it
+            // and the caller's `base`.
+            checkcast("java/lang/Number"),
+            method(0xb6, "java/lang/Number", "intValue", "()I"),
+            var(0x36, 5),
+            var(0x15, 5),
+            var(0x15, 2),
+            op(0x60),
+            op(0x00),
+            method(
+                0xb8,
+                "java/lang/Integer",
+                "valueOf",
+                "(I)Ljava/lang/Integer;"
+            ),
+            checkcast("java/lang/Number"),
+            method(0xb6, "java/lang/Number", "intValue", "()I"),
+            op(0x00),
+        ]
+    );
+    let locals: Vec<(&str, u16)> = inlined
+        .local_variables
+        .iter()
+        .map(|local| (local.name.as_str(), local.slot))
+        .collect();
+    assert_eq!(locals, vec![("it", 5)]);
+    let lines: Vec<u16> = inlined
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Line { line, .. } => Some(*line),
+            _ => None,
+        })
+        .collect();
+    // The body's line, the lambda's, and the body's again after the lambda.
+    assert_eq!(lines, vec![7, 2, 7]);
 }

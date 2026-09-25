@@ -74,11 +74,9 @@ pub(crate) const I2S: u8 = 0x93;
 pub(crate) const LCMP: u8 = 0x94;
 pub(crate) const DCMPG: u8 = 0x98;
 pub(crate) const IFEQ: u8 = 0x99;
-#[cfg(test)]
 pub(crate) const IFNE: u8 = 0x9a;
 pub(crate) const IFLE: u8 = 0x9e;
 pub(crate) const IF_ICMPEQ: u8 = 0x9f;
-#[cfg(test)]
 pub(crate) const IF_ICMPNE: u8 = 0xa0;
 pub(crate) const IF_ACMPNE: u8 = 0xa6;
 pub(crate) const GOTO: u8 = 0xa7;

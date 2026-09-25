@@ -13,3 +13,14 @@ mod tests;
 
 pub(crate) use recognizers::ValueClasses;
 pub(crate) use rewrite::eliminate;
+
+/// The value classes a class's code may box: internal name → the descriptor of the unboxed value
+/// its `box-impl` takes (kotlinc's `unboxedTypeOfInlineClass`).
+#[derive(Default)]
+pub(crate) struct ValueClassDescriptors(pub(crate) std::collections::HashMap<String, String>);
+
+impl ValueClasses for ValueClassDescriptors {
+    fn underlying_type(&self, internal_name: &str) -> Option<String> {
+        self.0.get(internal_name).cloned()
+    }
+}
