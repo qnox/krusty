@@ -57,6 +57,40 @@ pub(crate) struct ForwardedMemberTypes {
     pub(crate) semantic_ret: Ty,
 }
 
+/// The physical parameters that correspond to source-semantic parameters of a dependency member.
+///
+/// A normalized suspend member deliberately retains the classfile's trailing CPS `Continuation`
+/// in `physical_params`, while `params` contains only source parameters. The forwarder emitters add
+/// that CPS parameter themselves, together with its synthetic identity and nullability, so remove
+/// exactly that declared ABI tail here. This is not an arity fallback: every remaining physical
+/// parameter must still correspond one-for-one with a semantic parameter, preserving value-class
+/// carriers that differ from their source types.
+fn dependency_source_physical_params<'a>(
+    physical: &'a [Ty],
+    semantic: &[Ty],
+    suspend: bool,
+) -> &'a [Ty] {
+    let source = if suspend {
+        let (continuation, source) = physical
+            .split_last()
+            .expect("a normalized suspend member publishes its CPS continuation");
+        assert_eq!(
+            continuation.non_null().obj_internal(),
+            Some(crate::types::wk::continuation()),
+            "a normalized suspend member ends its physical parameters with Continuation"
+        );
+        source
+    } else {
+        physical
+    };
+    assert_eq!(
+        source.len(),
+        semantic.len(),
+        "a normalized dependency member publishes one source physical type per semantic parameter"
+    );
+    source
+}
+
 pub(crate) fn forwarded_member_types(
     ir: &IrFile,
     member: &crate::backend::BackendMemberFact,
@@ -76,15 +110,31 @@ pub(crate) fn forwarded_member_types(
             semantic_ret: ret,
         };
     }
-    assert_eq!(
-        member.physical_params.len(),
-        member.params.len(),
-        "a normalized dependency member publishes one physical type per semantic parameter"
+    let physical_params = dependency_source_physical_params(
+        &member.physical_params,
+        &member.params,
+        member.suspend(),
     );
     ForwardedMemberTypes {
-        physical_params: member.physical_params.to_vec(),
+        physical_params: physical_params.to_vec(),
         physical_ret: member.physical_ret,
         semantic_params: member.params.to_vec(),
         semantic_ret: member.ret,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suspend_dependency_keeps_its_source_carrier_and_drops_only_the_cps_tail() {
+        let semantic = [Ty::obj("fixture/Ticket")];
+        let physical = [Ty::Int, Ty::obj("kotlin/coroutines/Continuation")];
+
+        assert_eq!(
+            dependency_source_physical_params(&physical, &semantic, true),
+            &[Ty::Int]
+        );
     }
 }
