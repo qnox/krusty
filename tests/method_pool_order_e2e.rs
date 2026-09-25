@@ -9,6 +9,9 @@
 //!   initializer references (a class, a constructor, a lambda) precedes the field's own entries,
 //!   and the constructor's `this` follows them.
 //!
+//! - A primary constructor's descriptor covers every argument, a plain (non-property) parameter
+//!   included, and its `$default` overload's body interns before the data-class members that follow.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -97,5 +100,26 @@ fn a_data_class_generic_field_signature_follows_its_constructor() {
         "class Box<T>(val item: T)\n\
          data class Crate(val box: Box<String>)\n",
         &["Box", "Crate"],
+    );
+}
+
+#[test]
+fn a_plain_constructor_parameter_is_in_the_constructor_header() {
+    assert_identical(
+        "PlainParameter",
+        "open class Base(p: Int)\n\
+         class Cell<T>(t: T) {\n\
+         \x20   var value = t\n\
+         }\n",
+        &["Base", "Cell"],
+    );
+}
+
+#[test]
+fn a_default_constructor_body_interns_before_data_members() {
+    assert_identical(
+        "DefaultBody",
+        "data class Pair2(val a: Int = 1, val b: String = \"$a\")\n",
+        &["Pair2"],
     );
 }

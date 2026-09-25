@@ -4512,6 +4512,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   visit as any other declared property, so a generic field's `Signature` lands after `this`. Tests:
   `tests/method_pool_order_e2e.rs::a_property_initializer_interns_its_value_before_its_field` and
   `::a_data_class_generic_field_signature_follows_its_constructor`.
+- **The primary constructor's descriptor covers every argument, plain parameters included.** The
+  pool seeder derived the constructor's descriptor from its property-backed parameters only, so
+  `open class Base(p: Int)` seeded `()V` where kotlinc writes `(I)V`, and a `$default` overload's
+  marker descriptor dropped the plain parameters the same way. Both now come from the constructor's
+  arguments (`primary_ctor_descriptor`), as the emitted `<init>` does. The seeded LocalVariableTable
+  after `this` lists every named parameter, plain ones included. The `$default` overload is written
+  right after the primary, so its body (`String.valueOf` for `val b: String = "$a"`, the delegating
+  `<init>`) interns there; only its header descriptor is seeded, and a data class's synthesized
+  members are seeded after it rather than before. Tests:
+  `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_in_the_constructor_header` and
+  `::a_default_constructor_body_interns_before_data_members`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
