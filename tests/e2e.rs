@@ -1124,10 +1124,14 @@ mod native_assert_e2e;
 mod native_bottom_value_e2e;
 #[path = "native_boxed_numbers_e2e.rs"]
 mod native_boxed_numbers_e2e;
+#[path = "native_builder_scope_e2e.rs"]
+mod native_builder_scope_e2e;
 #[path = "native_builtin_companions_e2e.rs"]
 mod native_builtin_companions_e2e;
 #[path = "native_builtin_supertypes_e2e.rs"]
 mod native_builtin_supertypes_e2e;
+#[path = "native_callable_name_e2e.rs"]
+mod native_callable_name_e2e;
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
 #[path = "native_classes_e2e.rs"]
@@ -1138,10 +1142,22 @@ mod native_codegen_e2e;
 mod native_comparable_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
+#[path = "native_const_reference_e2e.rs"]
+mod native_const_reference_e2e;
+#[path = "native_context_parameter_sam_e2e.rs"]
+mod native_context_parameter_sam_e2e;
+#[path = "native_delegated_properties_e2e.rs"]
+mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
 mod native_delegation_e2e;
 #[path = "native_dependency_overrides_e2e.rs"]
 mod native_dependency_overrides_e2e;
+#[path = "native_dependency_property_reference_e2e.rs"]
+mod native_dependency_property_reference_e2e;
+#[path = "native_dependency_reference_e2e.rs"]
+mod native_dependency_reference_e2e;
+#[path = "native_enum_defaults_e2e.rs"]
+mod native_enum_defaults_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
 #[path = "native_exceptions_e2e.rs"]
@@ -1154,6 +1170,12 @@ mod native_float_identity_e2e;
 mod native_float_predicates_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_function_slot_bridge_e2e.rs"]
+mod native_function_slot_bridge_e2e;
+#[path = "native_function_type_checks_e2e.rs"]
+mod native_function_type_checks_e2e;
+#[path = "native_function_type_classes_e2e.rs"]
+mod native_function_type_classes_e2e;
 #[path = "native_gc_e2e.rs"]
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]
@@ -1172,6 +1194,10 @@ mod native_not_null_assert_type_e2e;
 mod native_number_subclass_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
+#[path = "native_property_reference_e2e.rs"]
+mod native_property_reference_e2e;
+#[path = "native_read_only_property_delegate_e2e.rs"]
+mod native_read_only_property_delegate_e2e;
 #[path = "native_receiver_property_e2e.rs"]
 mod native_receiver_property_e2e;
 #[path = "native_reflection_type_checks_e2e.rs"]
@@ -1180,6 +1206,10 @@ mod native_reflection_type_checks_e2e;
 mod native_reified_declarations_e2e;
 #[path = "native_runtime_e2e.rs"]
 mod native_runtime_e2e;
+#[path = "native_sam_e2e.rs"]
+mod native_sam_e2e;
+#[path = "native_secondary_constructor_defaults_e2e.rs"]
+mod native_secondary_constructor_defaults_e2e;
 #[path = "native_secondary_constructors_e2e.rs"]
 mod native_secondary_constructors_e2e;
 #[path = "native_string_builders_e2e.rs"]

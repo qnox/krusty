@@ -210,16 +210,48 @@ impl<'a> FileLowering<'a> {
                             for &statement in &entry.argument_prelude {
                                 body.statement(statement)?;
                             }
-                            // A constant leaving an argument out needs the class's defaults, which this
-                            // generator does not compute.
-                            if !entry.default_parameters.is_empty() {
-                                return Err(format!(
-                                    "an enum constant omitting a constructor argument (`{}`)",
-                                    entry.name
-                                ));
-                            }
-                            let (target, carried): (FuncId, Vec<Ty>) =
-                                (constructor, entry.constructor_parameter_types.clone());
+                            // A constant leaving an argument out reaches the class's own defaults
+                            // wrapper, which fills the frame and runs the constructor — the same wrapper
+                            // `Foo()` written as an expression reaches. What the entry supplies is then
+                            // the parameters it did NOT omit, at their own physical types.
+                            let omitted = {
+                                let mut omitted = entry.default_parameters.clone();
+                                omitted.sort_unstable();
+                                omitted
+                            };
+                            let (target, carried): (FuncId, Vec<Ty>) = if omitted.is_empty() {
+                                (constructor, entry.constructor_parameter_types.clone())
+                            } else {
+                                let key = super::defaults::CtorOmission {
+                                    class,
+                                    // An enum constant names the enum's PRIMARY constructor; a secondary
+                                    // is reached by a constant's own body, which is a subclass instead.
+                                    secondary: None,
+                                    omitted: omitted.clone(),
+                                };
+                                let Some(&wrapper) = body.file.default_constructors.get(&key)
+                                else {
+                                    return Err(format!(
+                                        "an enum constant omitting a constructor argument (`{}`)",
+                                        entry.name
+                                    ));
+                                };
+                                let carried = body.file.ir.classes[class as usize]
+                                    .ctor_args
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
+                                    .map(|(ordinal, argument)| {
+                                        super::super::super::captures::physical_ty(
+                                            body.file.ir,
+                                            class,
+                                            ordinal as u32,
+                                            argument.ty,
+                                        )
+                                    })
+                                    .collect();
+                                (wrapper, carried)
+                            };
                             if entry.args.len() != carried.len() {
                                 return Err(
                                     "an enum constant with a mismatched argument list".to_string()

@@ -6798,6 +6798,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_try_catch_e2e.rs`
   (`a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does`); the box corpus's
   `casts/nativeCCEMessage` cases in the native lane.
+- **Native: an override called by its own type takes the defaults of the member it overrides.**
+  An override cannot declare defaults, so `Mid().f()` on an override of `open fun f(x: Int = 23)`
+  fills `x` from the overridden declaration and still runs `Mid.f`. The frontend hands the call
+  over naming that declaration (`default_provider`); native fills the omitted arguments in the
+  provider's frame, so a default reading an earlier parameter sees the argument passed, and then
+  dispatches through the slot the override shares, so a `Mid`-typed `Leaf` runs `Leaf.f`.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_override_called_by_its_own_type_takes_the_defaults_of_the_member_it_overrides`, whose
+  output kotlinc 2.4.10 prints identically); the box corpus's inherited-default cases
+  (`defaultArguments/function/funInTrait.kt`, `defaultArguments/implementedByFake.kt`, ...) in
+  the native lane.
 - **Native: a generic result widened to a nullable primitive keeps its `null`.** `fun <T> f(): T`
   read as `Int` and stored into an `Int?` arrives as two coercions, the erased reference to `Int` and
   `Int` to `Int?`. Realized one after the other they unbox a reference that may be `null`, which

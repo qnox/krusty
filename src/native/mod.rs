@@ -21,6 +21,7 @@
 mod captures;
 mod classes;
 mod codegen;
+mod dependency_references;
 mod intrinsics;
 mod linker;
 mod prebuilt;

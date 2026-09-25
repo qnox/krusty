@@ -117,6 +117,22 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// The one member of a functional interface the RUNTIME knows, or `None` for any other.
+///
+/// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
+/// caller reaches its member through a program-wide number. One the runtime knows needs no number
+/// at all: nothing but its single member is ever asked of it, and every caller here is the runtime
+/// or a call site that can see the type — so the object is the ordinary FUNCTION VALUE the lambda
+/// already is, answering through the one invoke slot every function value declares.
+///
+/// `kotlin.Comparator` is the only one. Its `compare` is what `sortWith` calls, and a program
+/// calling it directly is the same invoke.
+pub(super) fn runtime_functional_interface(
+    classifier: crate::types::TypeName,
+) -> Option<&'static str> {
+    (kotlin_owner(&classifier.render()) == "kotlin/Comparator").then_some("compare")
+}
+
 /// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class
 /// may extend.
 ///
@@ -298,6 +314,96 @@ pub(super) fn assertion_call(
     Some((symbol, compared))
 }
 
+/// The scope functions that have NO receiver to arrive on: `run { … }` and `with(x) { … }`.
+///
+/// The same rearrangement as the member ones beside them, reached by the other path because these
+/// take their subject as an argument rather than as a receiver. Like the others they are `inline`,
+/// so what arrives here is the shape with no body to splice — a block that is an ordinary function
+/// value — which is exactly what a klib-backed compilation produces for every one of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TopLevelScope {
+    /// `run(block: () -> R): R` — the block takes nothing.
+    Block,
+    /// `with(receiver: T, block: T.() -> R): R` — the block takes the value written before it.
+    WithReceiver,
+}
+
+/// Which of the two a selected top-level declaration is, or `None` for anything else.
+///
+/// Keyed on the SHAPE as well as the name, because `kotlin.run` is two declarations: this one and
+/// `T.run(block: T.() -> R): R`, which has a receiver and is handled as a member.
+pub(super) fn top_level_scope(owner: &str, name: &str, params: &[Ty]) -> Option<TopLevelScope> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
+        return None;
+    }
+    match (name, params) {
+        ("run", [Ty::Fun(_)]) => Some(TopLevelScope::Block),
+        ("with", [_, Ty::Fun(_)]) => Some(TopLevelScope::WithReceiver),
+        _ => None,
+    }
+}
+
+/// Whether this names the REIFIED `assertFailsWith`, whose class operand is its type argument.
+///
+/// Two spellings arrive, because two providers do different things with the same declaration. A
+/// JVM provider splices the inline body, and what reaches a backend is the non-inline half
+/// kotlin-test names `assertFailsWithAny`. A klib provider publishes no inline-ness it has no body
+/// for, so the declaration arrives under its own name.
+///
+/// The SHAPE is what separates the reified overload from its siblings, and it has to: the others
+/// take a `KClass` operand and this one takes none — its type argument is resolved into the call's
+/// RETURN type before a backend sees it, which is where the caller reads the class to test against.
+/// So only `(block)` and `(message, block)` are admitted, and an `(exceptionClass, …)` overload
+/// falls through to the ordinary declining path rather than silently ignoring its first argument.
+pub(super) fn is_assert_fails_with(owner: &str, name: &str, params: &[Ty]) -> bool {
+    if declaration_package(kotlin_owner(owner)) != "kotlin/test" {
+        return false;
+    }
+    if name == "assertFailsWithAny" {
+        return true;
+    }
+    name == "assertFailsWith"
+        && matches!(params.last(), Some(Ty::Fun(_)))
+        && match params {
+            [_] => true,
+            [message, _] => is_string_type(message),
+            _ => false,
+        }
+}
+
+/// A `build…` function: a fresh subject the block fills, answered once it has.
+///
+/// `buildString { append(1) }` is `StringBuilder().apply { … }.toString()` written shorter, and the
+/// rearrangement is the same one the scope functions above get — the difference is only that the
+/// subject is MADE here rather than written by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Builder {
+    /// `buildString(builderAction: StringBuilder.() -> Unit): String`.
+    Text,
+    /// `buildList(builderAction: MutableList<E>.() -> Unit): List<E>`.
+    List,
+}
+
+/// Which `build…` function a selected top-level declaration is, or `None` for anything else.
+///
+/// The optional `capacity` is Kotlin's own second overload of each, and it is a HINT: a program
+/// cannot read it back, so passing it on or dropping it are both correct and it is passed on.
+pub(super) fn builder_scope(owner: &str, name: &str, params: &[Ty]) -> Option<Builder> {
+    let builder = match (declaration_package(kotlin_owner(owner)), name) {
+        ("kotlin/text", "buildString") => Builder::Text,
+        ("kotlin/collections", "buildList") => Builder::List,
+        _ => return None,
+    };
+    // The BLOCK is what makes this the declaration it looks like; `buildList`'s siblings
+    // `buildSet` and `buildMap` have the same shape and are not answered, so they are not named
+    // above rather than being separated here.
+    match params {
+        [Ty::Fun(_)] => Some(builder),
+        [Ty::Int, Ty::Fun(_)] => Some(builder),
+        _ => None,
+    }
+}
+
 /// One of `kotlin`'s preconditions: `require`, `check`, `requireNotNull`, `checkNotNull`, `error`.
 ///
 /// Each raises a named exception with a wording Kotlin fixes, and each has a form taking a
@@ -444,6 +550,65 @@ pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
         "ordinal" => Some("ordinal"),
         _ => None,
     }
+}
+
+/// What a scope function's call yields once its block has run.
+///
+/// `apply`, `also`, `let` and `run` differ in exactly this and in nothing else: each evaluates the
+/// receiver once, hands it to the block, and then yields either the receiver it was called on or
+/// whatever the block returned. Kotlin's own signatures say which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScopeResult {
+    /// `T.apply(block: T.() -> Unit): T` and `T.also(block: (T) -> Unit): T`.
+    Receiver,
+    /// `T.let(block: (T) -> R): R` and `T.run(block: T.() -> R): R`.
+    BlockResult,
+}
+
+/// Which scope function a selected dependency member is, or `None` for anything else.
+///
+/// A block written at the call site never arrives here: these are `inline`, and the checked
+/// lowering splices such a block into its caller. What arrives is the call whose block is an
+/// ordinary function VALUE, which has no body to splice.
+pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
+        return None;
+    }
+    match name {
+        "apply" | "also" => Some(ScopeResult::Receiver),
+        "let" | "run" => Some(ScopeResult::BlockResult),
+        _ => None,
+    }
+}
+
+/// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
+/// program can have without any reflection metadata existing, because the declaration it names is
+/// written in the same file.
+pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> bool {
+    name == "name"
+        && [
+            "kotlin/reflect/KCallable",
+            "kotlin/reflect/KFunction",
+            "kotlin/reflect/KProperty",
+        ]
+        .iter()
+        .any(|candidate| owner.matches(candidate))
+}
+
+/// Whether a declaration's owner is where the stdlib's delegate operators on a property reference
+/// live. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of `KProperty0`/`KProperty1`,
+/// so a JVM provider presents them on the file facade `PropertyReferenceDelegates.kt` compiles to
+/// and a klib provider, which has no facades, presents them on the package itself.
+///
+/// The bare package `kotlin` is admitted even though `Lazy.getValue` is also a top-level `kotlin`
+/// declaration of that name, because the owner is not what tells them apart: only a call whose
+/// RECEIVER is one of the four property-reference types reaches these slots, and the caller checks
+/// that before asking anything else.
+pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
+    matches!(
+        kotlin_owner(owner),
+        "kotlin/PropertyReferenceDelegatesKt" | "kotlin"
+    )
 }
 
 /// How a program iterates a receiver it could only type by an INTERFACE.
@@ -1053,6 +1218,31 @@ pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Optio
     })
 }
 
+/// Every marker a PROPERTY REFERENCE of this shape wears, flattened as `KType.interfaces` requires.
+///
+/// Kotlin's hierarchy is `KCallable` → `KProperty` → `KPropertyN`, with `KMutableProperty` and
+/// `KMutablePropertyN` beside them for a `var`. An interface's own bases are not walked at an `is`,
+/// so every one of them is named rather than only the most derived.
+pub(super) fn property_reference_markers(mutable: bool, arity: usize) -> Vec<&'static str> {
+    let mut markers = vec!["kt_type_kcallable", "kt_type_kproperty"];
+    markers.extend(match arity {
+        0 => Some("kt_type_kproperty0"),
+        1 => Some("kt_type_kproperty1"),
+        2 => Some("kt_type_kproperty2"),
+        _ => None,
+    });
+    if mutable {
+        markers.push("kt_type_kmutable_property");
+        markers.extend(match arity {
+            0 => Some("kt_type_kmutable_property0"),
+            1 => Some("kt_type_kmutable_property1"),
+            2 => Some("kt_type_kmutable_property2"),
+            _ => None,
+        });
+    }
+    markers
+}
+
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
 /// operands are read at the operand type and the answer is that type.
 ///
@@ -1361,6 +1551,24 @@ mod tests {
             "kotlin/collections"
         );
         assert_eq!(declaration_package("kotlin"), "kotlin");
+    }
+
+    /// The delegate operators on a property reference, under either provider's spelling.
+    ///
+    /// The klib spelling is the bare package, which `Lazy.getValue` also answers to — the owner
+    /// does not separate them and is not asked to. Fourteen corpus cases delegated to a property
+    /// reference and were declined because only the JVM facade was admitted.
+    #[test]
+    fn the_reference_delegate_operators_are_found_under_either_spelling() {
+        assert!(is_property_delegates_facade(
+            "kotlin/PropertyReferenceDelegatesKt"
+        ));
+        assert!(!is_property_delegates_facade("kotlin/properties"));
+        assert!(is_property_delegates_facade("kotlin"));
+        // A different package, and a CLASS in the right one, are both still no.
+        assert!(!is_property_delegates_facade("kotlin/collections"));
+        assert!(!is_property_delegates_facade("kotlin/Lazy"));
+        assert!(!is_property_delegates_facade("kotlin/text/StringsKt"));
     }
 
     /// `x++` names the same operation whichever provider selected the declaration.

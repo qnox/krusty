@@ -350,6 +350,128 @@ impl BodyLowering<'_, '_, '_> {
         self.run_finallys_above(depth)
     }
 
+    /// `assertFailsWith<T> { … }` — run the block, and answer the exception it had to throw.
+    ///
+    /// The reified `T` never reaches here as a type argument: kotlinc resolves it into the call's
+    /// RETURN type, so `assertFailsWith<IllegalStateException> { … }` arrives as a call answering
+    /// `IllegalStateException`. That is the class to test against, and the descriptor it already
+    /// wears is the test — the same `kt_is_instance` a `catch` clause uses, so a SUPERTYPE matches
+    /// exactly as it does there (`assertFailsWith<RuntimeException>` takes an
+    /// `IllegalStateException`, which kotlinc confirms).
+    ///
+    /// The block is the LAST argument, never the first: `message` is declared before it and
+    /// defaulted, so a call that omits it passes one argument and a call that supplies it passes
+    /// two. Reading the first would take the message for the block wherever one was given.
+    ///
+    /// A block that throws the WRONG type is an assertion failure, not a propagation — kotlin-test
+    /// catches `Throwable` and fails the assertion with what it caught, so the original exception
+    /// is REPLACED rather than allowed past. Verified against kotlinc 2.4.10 rather than assumed;
+    /// letting it propagate is the plausible reading and it is wrong.
+    pub(super) fn assert_fails_with(
+        &mut self,
+        args: &[u32],
+        params: &[Ty],
+        expected: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some((&block, leading)) = args.split_last() else {
+            return Err("`assertFailsWith` with no block".to_string());
+        };
+        let Some(descriptor) = self.file.type_descriptor(expected.non_null())? else {
+            return Err(format!(
+                "`assertFailsWith` of `{}`, which wears no runtime descriptor",
+                super::type_checks::type_name_of(expected)
+            ));
+        };
+        // The caller's message prefix, when there is one. `params` always declares it; `args` only
+        // carries it when the call did not leave it defaulted.
+        let message = match leading {
+            [] => None,
+            [only] if params.len() == args.len() => Some(*only),
+            _ => return Err("`assertFailsWith` with an unexpected argument shape".to_string()),
+        };
+        let message = match message {
+            Some(arg) => self.reference(arg)?,
+            None => self.builder.ins().iconst(types::I64, 0),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let function = self.reference(block)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let descriptor = self.data_address(descriptor);
+
+        let dispatch = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, types::I64);
+
+        self.handlers.push(dispatch);
+        let ran = self.invoke_value(function, &[], Ty::Unit);
+        self.handlers.pop();
+        ran?;
+
+        // The block completed. Kotlin fails the assertion here, and the failure is itself a throw,
+        // so what follows is the ordinary propagation every raise gets.
+        if !self.terminated {
+            let nothing = self.builder.ins().iconst(types::I64, 0);
+            self.runtime_call(
+                "kt_assert_failed_to_throw",
+                &[any(), any(), any()],
+                Ty::Unit,
+                &[message, descriptor, nothing],
+            )?;
+            if !self.terminated {
+                let onward = self.unwind_target();
+                self.builder.ins().jump(onward, &[]);
+                self.terminate();
+            }
+        }
+
+        self.continue_in(dispatch);
+        self.builder.seal_block(dispatch);
+        let thrown = self
+            .runtime_call_unchecked("kt_pending_exception", &[], any(), &[])?
+            .expect("the pending exception is a reference");
+        let matched = self
+            .runtime_call_unchecked(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[thrown, descriptor],
+            )?
+            .expect("`kt_is_instance` answers a Boolean");
+        let took = self.builder.create_block();
+        let wrong = self.builder.create_block();
+        self.builder.ins().brif(matched, took, &[], wrong, &[]);
+
+        self.continue_in(took);
+        self.builder.seal_block(took);
+        self.runtime_call_unchecked("kt_clear_pending", &[], Ty::Unit, &[])?;
+        self.builder.ins().jump(join, &[BlockArg::Value(thrown)]);
+
+        // The wrong type: clear it first, because the assertion failure REPLACES it rather than
+        // joining it, and a raise onto a slot that is already set would lose the new one.
+        self.continue_in(wrong);
+        self.builder.seal_block(wrong);
+        self.runtime_call_unchecked("kt_clear_pending", &[], Ty::Unit, &[])?;
+        self.runtime_call(
+            "kt_assert_failed_to_throw",
+            &[any(), any(), any()],
+            Ty::Unit,
+            &[message, descriptor, thrown],
+        )?;
+        if !self.terminated {
+            let onward = self.unwind_target();
+            self.builder.ins().jump(onward, &[]);
+            self.terminate();
+        }
+
+        self.continue_in(join);
+        self.builder.seal_block(join);
+        Ok(Some(self.builder.block_params(join)[0]))
+    }
+
     /// `try { … } catch (e: T) { … }`.
     ///
     /// The body is lowered with a DISPATCH block pushed on the handler stack, so the check after
@@ -581,9 +703,19 @@ impl BodyLowering<'_, '_, '_> {
         message: Option<u32>,
     ) -> Result<(), Unsupported> {
         let text = match message {
-            // The message is a block, which is a function value this generator does not call.
-            Some(_) => {
-                return Err("a precondition whose message is computed by a block".to_string())
+            Some(block) => {
+                // The block answers `Any`, and the exception carries a `String`: Kotlin renders it
+                // with `toString()`, so a message written as a number is its decimal spelling.
+                let function = self.reference(block)?;
+                if self.terminated {
+                    return Ok(());
+                }
+                match self.invoke_value(function, &[], any())? {
+                    Some(value) => self.render(value)?,
+                    // A block that left rather than answered: the throw it made is already in
+                    // flight, and nothing here adds to it.
+                    None => return Ok(()),
+                }
             }
             None => Some(self.string_literal(precondition.default_message.as_bytes())?),
         };

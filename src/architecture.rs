@@ -465,6 +465,7 @@ mod tests {
             "src/native/codegen/lower/statics.rs",
             &["fir", "names", "types"],
         );
+        assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
     }
 
     #[test]
