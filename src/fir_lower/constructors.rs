@@ -1,7 +1,8 @@
 use crate::fir::{DeclarationId, FirBody, ResolvedModuleIndex};
 use crate::ir::{
     IrCheckedArgument, IrCheckedConstructorBody, IrCheckedConstructorTarget, IrCheckedOperation,
-    IrConst, IrCtorArg, IrExpr, IrFile, IrNodeOrigin, IrTypeOp,
+    IrConst, IrConstructorAccess, IrConstructorTarget, IrCtorArg, IrExpr, IrFile, IrNodeOrigin,
+    IrTypeOp,
 };
 
 use super::checked_arguments::{
@@ -303,7 +304,7 @@ pub(super) fn finalize_constructors(
                 declaration,
             ));
         }
-        let (owner, parameters, target_primary, external_target) = match target {
+        let (owner, parameters, target, external_target) = match target {
             IrCheckedConstructorTarget::Module(callable) => {
                 let callable = index
                     .callable(callable)
@@ -311,24 +312,27 @@ pub(super) fn finalize_constructors(
                 let signature = index
                     .signature(callable.declaration)
                     .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-                let owner = index
+                let classifier = index
                     .enclosing_classifier(callable.declaration)
-                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
-                    .classifier;
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
                 let primary = index
                     .declaration_anchor(callable.declaration)
                     .is_some_and(|anchor| anchor.sibling == 0);
+                let access = module_constructor_access(index, callable.declaration, classifier)
+                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
                 (
-                    owner,
+                    classifier.classifier,
                     signature
                         .parameters
                         .iter()
                         .map(|parameter| parameter.get())
                         .collect::<Vec<_>>(),
-                    primary,
+                    IrConstructorTarget { primary, access },
                     None,
                 )
             }
+            // A dependency's constructor that checking selected is callable from here: it is not
+            // private, and a sealed class's subclasses all live in its own module.
             IrCheckedConstructorTarget::External {
                 declaration,
                 classifier,
@@ -336,7 +340,7 @@ pub(super) fn finalize_constructors(
             } => (
                 classifier,
                 parameters,
-                true,
+                IrConstructorTarget::UNRESTRICTED_PRIMARY,
                 Some(crate::ir::IrExternalConstructorTarget::unresolved(
                     declaration,
                 )),
@@ -360,7 +364,7 @@ pub(super) fn finalize_constructors(
             class.super_arg_prelude = delegate_prelude;
             class.super_args = arguments;
             class.super_ctor_params = parameters;
-            class.super_ctor_is_primary = target_primary;
+            class.super_ctor = target;
             if let Some(external_target) = external_target {
                 ir.external_super_constructors
                     .insert(class.fq_name, external_target);
@@ -375,14 +379,14 @@ pub(super) fn finalize_constructors(
             let delegate = if owner == own {
                 crate::ir::CtorDelegateTarget::This {
                     target_params: parameters,
-                    to_primary: target_primary,
+                    target,
                     default_masks: Vec::new(),
                 }
             } else {
                 crate::ir::CtorDelegateTarget::Super {
                     owner,
                     target_params: parameters,
-                    to_primary: target_primary,
+                    target,
                     default_masks: Vec::new(),
                 }
             };
@@ -946,4 +950,27 @@ pub(super) fn accept_constructor_body(
     constructor.body = body;
     constructor.body_attached = true;
     Ok(())
+}
+
+/// Who may call a module constructor, from its class's modality and its declared visibility.
+/// Every source constructor of a sealed class is restricted, whatever its modifier says: Kotlin
+/// makes an unmodified one `protected` and rejects a public one. `None` when either header is
+/// missing, which a checked selection never leaves.
+fn module_constructor_access(
+    index: &ResolvedModuleIndex,
+    constructor: DeclarationId,
+    classifier: &crate::fir::ResolvedClassifierHeader,
+) -> Option<IrConstructorAccess> {
+    let visibility = index.declaration_header(constructor)?.visibility;
+    let sealed = index
+        .declaration_header(classifier.declaration)?
+        .flags
+        .has(crate::fir::DeclarationFlags::SEALED);
+    Some(if sealed {
+        IrConstructorAccess::SealedClass
+    } else if visibility == crate::types::Visibility::Private {
+        IrConstructorAccess::Private
+    } else {
+        IrConstructorAccess::Unrestricted
+    })
 }

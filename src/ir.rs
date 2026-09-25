@@ -50,6 +50,7 @@ pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
+pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
@@ -1617,9 +1618,9 @@ pub struct IrClass {
     /// Checker-selected semantic parameter types parallel to `super_args`. A backend couples these to
     /// its physical superclass-constructor ABI without resolving the constructor again.
     pub super_ctor_params: Vec<Ty>,
-    /// Whether the checker-selected superclass constructor is the primary declaration. Backends
-    /// consume this identity fact instead of comparing erased descriptors with the primary shape.
-    pub super_ctor_is_primary: bool,
+    /// The checker-selected superclass constructor. Backends consume its declaration facts instead
+    /// of comparing erased descriptors with the primary shape.
+    pub super_ctor: IrConstructorTarget,
     /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
     /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
@@ -1864,7 +1865,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
-            super_ctor_is_primary: true,
+            super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -1976,7 +1977,7 @@ impl IrClass {
             super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
-            super_ctor_is_primary: true,
+            super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -2067,15 +2068,14 @@ pub enum CtorDelegateTarget {
     /// secondary). The class init body runs in the reached constructor, not here.
     This {
         target_params: Vec<Ty>,
-        to_primary: bool,
+        target: IrConstructorTarget,
         default_masks: Vec<i32>,
     },
     /// `super(args)` (or implicit) → the exact checker-selected superclass constructor.
     Super {
         owner: TypeName,
         target_params: Vec<Ty>,
-        /// Exact selected declaration kind retained from checked constructor resolution.
-        to_primary: bool,
+        target: IrConstructorTarget,
         default_masks: Vec<i32>,
     },
     /// An enum secondary constructor with no written `this(…)` delegation. Kotlin implicitly

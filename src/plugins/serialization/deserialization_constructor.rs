@@ -433,7 +433,7 @@ pub(super) fn add_deserialization_constructor(
             delegate: CtorDelegateTarget::Super {
                 owner: super_owner,
                 target_params: vec![],
-                to_primary: true,
+                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
                 default_masks: vec![],
             },
             synthetic: true,

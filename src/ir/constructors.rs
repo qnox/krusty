@@ -1,10 +1,43 @@
-//! The constructors a class declares beyond its primary one.
+//! The constructors a class declares beyond its primary one, and the constructor a delegation
+//! reaches.
 //!
 //! A secondary constructor is neither a function nor a property: it carries its own parameters,
 //! defaults, delegation and declaration line, so every phase that needs one of those reads this
 //! declaration rather than reconstructing it from the primary or from a body expression.
 
 use super::{CtorDelegateTarget, DeclarationAnnotations, ExprId, IrGeneratedDeclarationDebug, Ty};
+
+/// The checker-selected constructor a `super(…)`/`this(…)` delegation reaches, as the declaration
+/// facts a target's constructor ABI depends on. Lowering records them once from the selection; a
+/// backend never recovers them from the target class's IR, which another file may own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrConstructorTarget {
+    /// The selected constructor is its class's primary declaration.
+    pub primary: bool,
+    pub access: IrConstructorAccess,
+}
+
+impl IrConstructorTarget {
+    /// The primary constructor of an ordinary class, as a compiler-synthesized class reaches its
+    /// superclass (`Any`, a lambda or continuation base, an enum base).
+    pub const UNRESTRICTED_PRIMARY: Self = Self {
+        primary: true,
+        access: IrConstructorAccess::Unrestricted,
+    };
+}
+
+/// Who Kotlin lets call a selected constructor, beyond the call already being well-typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrConstructorAccess {
+    /// Any caller that selected it: a public, protected or internal constructor of a class that is
+    /// not sealed, or a compiler-generated public one.
+    Unrestricted,
+    /// A `private` constructor of a class that is not sealed: only its own class.
+    Private,
+    /// A declared constructor of a `sealed` class, which is always `protected` or `private`: only
+    /// the class and its subclasses.
+    SealedClass,
+}
 
 /// A secondary constructor: `<init>(params)` runs `delegate_prelude`, loads `delegate_args`, calls the
 /// delegate target, then runs `body`. `this` is value 0 and parameters are values `1..=params.len()`.

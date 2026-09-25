@@ -281,7 +281,7 @@ pub(super) fn build_continuation_class(
         // backend's exact selected-constructor contract, so it must describe the target parameter,
         // not the continuation class's `label: Int` storage field.
         super_ctor_params: vec![continuation_ty()],
-        super_ctor_is_primary: true,
+        super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
         enum_entries: vec![],
         enum_entry_of: None,
         prop_ref: None,
