@@ -773,20 +773,22 @@ fun returnInCatch(n: Int): Int {\n\
 /// parked value.
 #[test]
 fn reused_temporary_slots_verify_and_run() {
-    let src = "fun spill(n: Int): Long {\n\
+    let src = "var sink = 0\n\
+fun total(vararg values: Int): Long = values[0] * 1L + values[1]\n\
+fun spill(n: Int): Long {\n\
     try {\n\
         try {\n\
-            val a = n.toLong() * 3\n\
+            val a = n * 3L\n\
             if (n > 2) return a\n\
         } finally {\n\
             val s: String? = if (n > 5) null else \"s$n\"\n\
-            println(s?.length ?: -1)\n\
+            sink += s?.length ?: -1\n\
         }\n\
     } catch (e: IllegalStateException) {\n\
         return -1L\n\
     } finally {\n\
         val d = n * 0.5\n\
-        if (d > 100.0) println(d)\n\
+        if (d > 100.0) sink += 1\n\
     }\n\
     val after = n * 7L\n\
     return after\n\
@@ -801,23 +803,22 @@ fun thrower(n: Int): Int {\n\
         }\n\
     } catch (e: ArithmeticException) {\n\
         val w = 2.0\n\
-        r = w.toInt()\n\
+        r = if (w > 1.5) 2 else 0\n\
     }\n\
-    val k = r.toLong() + 1\n\
-    return k.toInt()\n\
+    val k = r + 1L\n\
+    return if (k > 100L) -1 else r + 1\n\
 }\n\
 fun mixed(a: Boolean, b: Int): Double {\n\
     val c = a && (if (b > 0) true else b < -5)\n\
     val d = b * 1.5\n\
-    val xs = listOf(b, if (c) b + 1 else try { b / 0 } catch (e: ArithmeticException) { 7 })\n\
-    val w = xs.sum().toLong()\n\
+    val w = total(b, if (c) b + 1 else try { b / 0 } catch (e: ArithmeticException) { 7 })\n\
     return d + w\n\
 }\n\
 fun box(): String {\n\
-    val r = listOf(spill(1), spill(3), spill(8)).joinToString()\n\
-    val t = listOf(thrower(0), thrower(5)).joinToString()\n\
-    val m = listOf(mixed(true, 2), mixed(false, -1)).joinToString()\n\
-    return if (r == \"7, 9, 24\" && t == \"3, 4\" && m == \"8.0, 4.5\") \"OK\" else \"FAIL: $r | $t | $m\"\n\
+    if (spill(1) != 7L || spill(3) != 9L || spill(8) != 24L) return \"FAIL spill\"\n\
+    if (thrower(0) != 3 || thrower(5) != 4) return \"FAIL thrower\"\n\
+    if (mixed(true, 2) != 8.0 || mixed(false, -1) != 4.5) return \"FAIL mixed\"\n\
+    return \"OK\"\n\
 }\n";
     assert_eq!(run(src), "OK");
 }
