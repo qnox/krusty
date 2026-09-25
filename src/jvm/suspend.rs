@@ -2153,18 +2153,36 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// position from [`continuation_ordinal`] instead of counting anything here.
 fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
     let function = &ir.functions[fid as usize];
-    let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
-    let name = bare(&function.name);
+    let name = continuation_source_name(ir, fid);
     ir.functions
         .iter()
         .enumerate()
         .take(fid as usize)
         .filter(|(other_fid, other)| {
-            bare(&other.name) == name
+            continuation_source_name(ir, *other_fid as u32) == name
                 && other.dispatch_receiver == function.dispatch_receiver
                 && ir.suspend_funs.contains(&(*other_fid as u32))
         })
         .count()
+}
+
+/// The source identity used in a generated continuation class name.
+///
+/// A source-declared function keeps this independently from its physical JVM method name, which
+/// may be value-class-mangled or changed by `@JvmName`. A lowering-made function has no source
+/// declaration and therefore owns its generated name directly. In particular, never split a JVM
+/// name on `-`: that character is valid inside a backticked Kotlin identifier.
+pub(crate) fn continuation_source_name(ir: &IrFile, fid: u32) -> &str {
+    match ir.fn_source_names.get(&fid) {
+        Some(name) => name,
+        None => {
+            assert!(
+                !ir.fn_source_order.contains_key(&fid),
+                "source suspend function {fid} has no recorded source name"
+            );
+            &ir.functions[fid as usize].name
+        }
+    }
 }
 
 /// The 1-based `$N` the continuation class of `fid` takes in its `<owner>$<function>` sequence.
@@ -2515,10 +2533,10 @@ fn build_state_machine(
     let cont_owner = semantic_owner
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
-    // The continuation class uses the SOURCE method name, never the value-class-mangled JVM name:
-    // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
-    // identifier, so it only ever separates the mangle hash — strip from the first `-`.
-    let cont_fname = fname.split('-').next().unwrap_or(&fname);
+    // The continuation class uses the recorded SOURCE method name, never the value-class-mangled
+    // JVM name. A backticked source identifier may itself contain `-`, so physical spelling cannot
+    // recover this identity.
+    let cont_fname = continuation_source_name(ir, fid);
     let cont_internal =
         continuation_class_name(&cont_owner, cont_fname, continuation_ordinal(ir, fid));
     let cont_ty = Ty::obj(&cont_internal);

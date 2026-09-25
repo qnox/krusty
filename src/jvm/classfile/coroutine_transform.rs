@@ -109,9 +109,12 @@ impl ClassWriter {
         let pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let node = self
             .finished_node(method, source, bytes, &pool)
-            .ok_or("the finished body cannot be read")?;
-        let node = node.node;
-        let source_file = self.source_file.clone().unwrap_or_default();
+            .ok_or("the finished body cannot be read")?
+            .node;
+        let source_file = self
+            .source_file
+            .clone()
+            .ok_or("the transformed source method has no SourceFile identity")?;
         let owner = self.internal_name.clone();
         let function = NamedFunction {
             owner: &owner,

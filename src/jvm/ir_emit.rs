@@ -10058,10 +10058,15 @@ fn emit_method_inner_with_holder(
         let slot = e.frame.enter(FrameKey::Value(vi), *t);
         e.slots.insert(vi, (slot, *t));
     }
-    let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
-    let transformed = transformed.and_then(|machine| {
-        let slot = e.arm_transformed_machine(machine, completion)?;
-        Some((machine, slot))
+    let transformed = transformed.map(|machine| {
+        let completion = param_tys
+            .len()
+            .checked_sub(1)
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("a transformed suspend function has a physical completion parameter")
+            + u32::from(instance);
+        let slot = e.arm_transformed_machine(machine, completion);
+        (machine, slot)
     });
     // A function whose coroutine machine emission owns reads its continuation from a slot this
     // emitter picks. While the frame is being discovered that is the `$completion` parameter, which
