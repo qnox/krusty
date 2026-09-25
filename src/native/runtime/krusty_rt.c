@@ -1102,16 +1102,30 @@ static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int 
 
    A `CharSequence` the PROGRAM implements is read the way Kotlin's own builder reads one, unit by
    unit through its `length` and `get`, since it has no bytes to copy. Its `toString` is not the
-   text: nothing obliges a class to render itself as its characters. */
+   text: nothing obliges a class to render itself as its characters.
+
+   Those two are the program's own members and may throw. A throw comes back with the exception
+   pending and a placeholder unit or length, so the construction stops at the first one and makes
+   no builder, as Kotlin's constructor does: a placeholder length read on would size the builder
+   from it -- a negative one raising a second exception over the first -- and a placeholder unit
+   would be appended and the next `get` asked. The NULL is never read; the caller finds the
+   exception first. */
 KRef kt_string_builder_with_text(KRef text) {
     if (text->header.type->walk_length != NULL) {
         kt_int units = text->header.type->walk_length(text);
+        if (kt_pending_exception() != NULL) {
+            return NULL;
+        }
         /* `text` stays live in this parameter, and the builder in this local, across every
            allocation the appends make. */
         KRef builder = kt_string_builder_with_capacity(units);
         for (kt_int index = 0; index < units; index++) {
             char encoded[3];
-            kt_int width = kt_render_char(text->header.type->walk_char_at(text, index), encoded);
+            kt_char unit = text->header.type->walk_char_at(text, index);
+            if (kt_pending_exception() != NULL) {
+                return NULL;
+            }
+            kt_int width = kt_render_char(unit, encoded);
             kt_string_builder_append_bytes(builder, encoded, width);
         }
         return builder;
@@ -1627,15 +1641,23 @@ KRef kt_result_get_or_throw(KRef value) {
     return value;
 }
 
-/* Kotlin's own rendering: `Success(value)` or `Failure(exception)`. */
+/* Kotlin's own rendering: `Success(value)` or `Failure(exception)`.
+
+   Either one renders an object through ITS `toString`, which the program may override and which
+   may throw. That comes back with the exception pending and a placeholder where the text would be,
+   so the rendering stops there and answers no text: going on would build `Success(null)` out of
+   the placeholder -- allocating, and handing back text -- after the call it was built from had
+   already failed. The NULL is never read; the caller finds the exception first. */
 KRef kt_result_to_string(KRef value) {
-    if (kt_result_is_failure(value)) {
-        KRef opening = kt_string_utf8("Failure(", 8);
-        KRef rendered = kt_to_string(((const KResultFailure *)value)->exception);
-        return kt_string_plus(kt_string_plus(opening, rendered), kt_string_utf8(")", 1));
+    kt_boolean failure = kt_result_is_failure(value);
+    KRef rendered = kt_to_string(failure ? ((const KResultFailure *)value)->exception : value);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
     }
-    KRef opening = kt_string_utf8("Success(", 8);
-    return kt_string_plus(kt_string_plus(opening, kt_to_string(value)), kt_string_utf8(")", 1));
+    /* `rendered` stays a root in this local across the allocations below. */
+    KRef opening = failure ? kt_string_utf8("Failure(", 8) : kt_string_utf8("Success(", 8);
+    KRef text = kt_string_plus(opening, rendered);
+    return kt_string_plus(text, kt_string_utf8(")", 1));
 }
 
 KRef kt_lazy_of(KRef initializer) {
@@ -1848,6 +1870,13 @@ KRef kt_pair_first(KRef pair) { return ((const KPair *)pair)->first; }
 
 KRef kt_pair_second(KRef pair) { return ((const KPair *)pair)->second; }
 
+/* Each member below asks BOTH components the same question, and a component answers through its
+   own override, which may throw. A throw comes back with the exception pending and a placeholder
+   answer -- a `true`, a zero, a NULL -- that no one may read, so the member returns as soon as the
+   first component's call comes back pending: asking the second would run program code Kotlin never
+   reaches, since the generated member propagates the first exception from where it was thrown.
+   What each returns then is never read either; the caller finds the exception first. */
+
 /* A data class's `equals`: componentwise, and only against another `Pair`. */
 static kt_boolean kt_pair_equals(KRef self, KRef other) {
     if (self == other) {
@@ -1858,22 +1887,43 @@ static kt_boolean kt_pair_equals(KRef self, KRef other) {
     }
     const KPair *a = (const KPair *)self;
     const KPair *b = (const KPair *)other;
-    return kt_equals(a->first, b->first) && kt_equals(a->second, b->second);
+    kt_boolean first_equal = kt_equals(a->first, b->first);
+    if (kt_pending_exception() != NULL || !first_equal) {
+        return false;
+    }
+    return kt_equals(a->second, b->second);
 }
 
 /* Kotlin's generated data-class hash: `first.hashCode() * 31 + second.hashCode()`, a null
    component contributing 0. */
 static kt_int kt_pair_hash_code(KRef self) {
     const KPair *pair = (const KPair *)self;
-    return (kt_int)(31u * (uint32_t)kt_hash_code(pair->first) + (uint32_t)kt_hash_code(pair->second));
+    uint32_t first = (uint32_t)kt_hash_code(pair->first);
+    if (kt_pending_exception() != NULL) {
+        return 0;
+    }
+    uint32_t second = (uint32_t)kt_hash_code(pair->second);
+    return (kt_int)(31u * first + second);
 }
 
-/* `(first, second)` — `Pair` overrides the generated `toString` with this shape. */
+/* `(first, second)` — `Pair` overrides the generated `toString` with this shape. Each component is
+   rendered, and checked, before any text is built from it, so a throw leaves nothing allocated
+   after it. */
 static KRef kt_pair_to_string(KRef self) {
     const KPair *pair = (const KPair *)self;
-    KRef text = kt_string_plus(kt_string_utf8("(", 1), kt_to_string(pair->first));
+    KRef first = kt_to_string(pair->first);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    /* `self`, and through it both components, stays a root in the caller's frame; each rendered
+       text stays one in its local across the allocations after it. */
+    KRef second = kt_to_string(pair->second);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    KRef text = kt_string_plus(kt_string_utf8("(", 1), first);
     text = kt_string_plus(text, kt_string_utf8(", ", 2));
-    text = kt_string_plus(text, kt_to_string(pair->second));
+    text = kt_string_plus(text, second);
     return kt_string_plus(text, kt_string_utf8(")", 1));
 }
 
