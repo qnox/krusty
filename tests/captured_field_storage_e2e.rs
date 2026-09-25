@@ -91,7 +91,5 @@ fn captured_field_flags_match_kotlinc() {
 /// spells a local class's captured enclosing instance `$this$0` where kotlinc writes `this$0`.
 fn field_flags(bytes: &[u8]) -> Vec<u16> {
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
-    let mut flags: Vec<u16> = class.fields.iter().map(|field| field.access).collect();
-    flags.sort();
-    flags
+    class.fields.iter().map(|field| field.access).collect()
 }
