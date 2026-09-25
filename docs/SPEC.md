@@ -4552,6 +4552,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/method_pool_order_e2e.rs::an_inherited_forwarder_interns_its_annotations_before_its_body`,
   `::an_anonymous_object_constructor_interns_this_before_its_members` and
   `::a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes`.
+- **A synthesized data-class member writes its locals with its body.** kotlinc gives `equals`,
+  `hashCode`, `toString`, `componentN` and `copy` a `LocalVariableTable` (receiver and parameters)
+  but no line, and interns it as it writes the method. krusty attached those tables after every
+  member, so a `data object`'s `equals` interned `other` after `<clinit>`. Recording a data-class
+  member now marks it as a debug-locals declaration, so emission writes the table in place. Test:
+  `tests/method_pool_order_e2e.rs::a_data_object_equals_interns_its_locals_with_its_body`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
