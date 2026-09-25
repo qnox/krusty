@@ -170,7 +170,7 @@ pub(super) fn merge_referenced(
     let mut pending = referenced_classifier_names(ir);
     let mut probed = HashSet::new();
     while let Some(classifier) = pending.pop() {
-        if !probed.insert(classifier) || is_native_unsigned(classifier) {
+        if !probed.insert(classifier) {
             continue;
         }
         if let Some(underlying) = declarations.get(&classifier).copied() {
@@ -211,11 +211,18 @@ pub(super) fn merge_referenced(
             continue;
         };
         ir.insert_external_value_class_name(classifier, underlying);
+        collect_classifier_names(underlying, &mut pending);
+        // Unsigned integers have target-native carriers and therefore stay out of the ordinary
+        // value-class rewrite map. They are still value classes semantically: publish the checked
+        // declaration above so later JVM naming/forwarding consumes the same identity as every
+        // other metadata-backed value class instead of recovering that fact from a stdlib name.
+        if is_native_unsigned(classifier) {
+            continue;
+        }
         declarations.insert(
             classifier,
             underlying.scalar_value_repr().unwrap_or(underlying),
         );
-        collect_classifier_names(underlying, &mut pending);
     }
     crate::value_classes::declarations_are_acyclic(declarations).then_some(underlying_properties)
 }
@@ -223,6 +230,39 @@ pub(super) fn merge_referenced(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnsignedFacts;
+
+    impl crate::types::ClassifierFactSource for UnsignedFacts {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+            classifier.matches("kotlin/UInt").then_some(Ty::Int)
+        }
+    }
+
+    #[test]
+    fn checked_unsigned_declaration_is_published_without_joining_the_rewrite_map() {
+        let uint = crate::types::type_name("kotlin/UInt");
+        let mut ir = IrFile::default();
+        let mut holder = crate::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(uint),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::new();
+
+        assert!(merge_referenced(&mut ir, &UnsignedFacts, &mut declarations).is_some());
+        assert_eq!(ir.external_value_class_name(uint), Some(&Ty::Int));
+        assert!(ir.is_value_class_name(uint));
+        assert!(!declarations.contains_key(&uint));
+    }
 
     #[test]
     fn cyclic_checked_facts_decline_instead_of_selecting_an_edge() {

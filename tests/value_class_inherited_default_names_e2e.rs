@@ -21,6 +21,18 @@ class Concrete : ByteParser
 fun box(): String = if (Concrete().rep(Count(1)) == "rep1") "OK" else "fail"
 "#;
 
+// Separate from the generic regression above: this pins the stdlib metadata boundary. `UInt` has
+// a JVM-native carrier, but its checked declaration must still publish that it is a value class so
+// an inherited member is named from semantic identity rather than a hardcoded stdlib list.
+const UNSIGNED_SOURCE: &str = r#"interface UnsignedParser {
+    fun rep(n: UInt): String = "rep" + n.toInt()
+}
+
+interface UnsignedChild : UnsignedParser
+
+class UnsignedConcrete : UnsignedChild
+"#;
+
 /// The class disassembled verbosely without its constant pool, with pool indices masked.
 fn disassembled(bytes: &[u8]) -> String {
     let work = common::scratch_dir().expect("a scratch directory");
@@ -69,4 +81,16 @@ fn an_implementing_class_forwards_the_default_under_its_hashed_name() {
 #[test]
 fn a_call_reaches_the_inherited_default() {
     common::expect_box_ok_with_stdlib(SOURCE, "InheritedDefaultNames");
+}
+
+#[test]
+fn stdlib_unsigned_metadata_drives_the_inherited_member_name() {
+    let pair = common::ModuleClassPair::compile(
+        &[("UnsignedParser.kt", UNSIGNED_SOURCE)],
+        "UnsignedConcrete",
+    );
+    assert_eq!(
+        before_metadata(&disassembled(&pair.krusty)),
+        before_metadata(&disassembled(&pair.kotlinc))
+    );
 }

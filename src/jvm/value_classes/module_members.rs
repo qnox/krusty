@@ -76,13 +76,13 @@ pub(crate) fn forwarded_member_types(
             semantic_ret: ret,
         };
     }
-    let physical_params = if member.physical_params.len() == member.params.len() {
-        &member.physical_params
-    } else {
-        &member.params
-    };
+    assert_eq!(
+        member.physical_params.len(),
+        member.params.len(),
+        "a normalized dependency member publishes one physical type per semantic parameter"
+    );
     ForwardedMemberTypes {
-        physical_params: physical_params.to_vec(),
+        physical_params: member.physical_params.to_vec(),
         physical_ret: member.physical_ret,
         semantic_params: member.params.to_vec(),
         semantic_ret: member.ret,
