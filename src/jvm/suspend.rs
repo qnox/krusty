@@ -2172,7 +2172,14 @@ fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
 /// may be value-class-mangled or changed by `@JvmName`. A lowering-made function has no source
 /// declaration and therefore owns its generated name directly. In particular, never split a JVM
 /// name on `-`: that character is valid inside a backticked Kotlin identifier.
+///
+/// A lifted lambda or local function records its enclosing callable as its source name, which is
+/// not its own identity: its continuation keeps the implementation name it was lifted under, so it
+/// cannot take the `<owner>$<enclosing>$N` name of the enclosing function's own classes.
 pub(crate) fn continuation_source_name(ir: &IrFile, fid: u32) -> &str {
+    if ir.lambda_origins.contains_key(&fid) || ir.lifted_functions.contains_key(&fid) {
+        return &ir.functions[fid as usize].name;
+    }
     match ir.fn_source_names.get(&fid) {
         Some(name) => name,
         None => {
