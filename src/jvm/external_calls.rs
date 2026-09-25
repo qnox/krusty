@@ -398,6 +398,7 @@ pub(super) fn realize(
         let callable = realization.callable;
         publish_reified_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
+        let lambda_materialized = callable.lambda_materialized.clone();
         let member_realization = callable.member_realization;
         let semantic_role = callable.semantic_role;
         let descriptor = if callable.descriptor.is_empty() {
@@ -633,11 +634,17 @@ pub(super) fn realize(
                         let position = callable.context_count.min(args.len());
                         args.insert(position, receiver);
                         operand_plan.insert(position, DefaultCallOperand::supplied(receiver));
+                        ir.static_extension_receivers
+                            .insert(expression, position as u32);
                     }
                     ExternalCallableKind::Member => {
                         let receiver = dispatch_receiver.take().ok_or(target)?;
                         args.insert(0, receiver);
                         operand_plan.insert(0, DefaultCallOperand::supplied(receiver));
+                        if let Some(position) = extension_receiver {
+                            ir.static_extension_receivers
+                                .insert(expression, (position + 1) as u32);
+                        }
                     }
                     ExternalCallableKind::Constructor
                     | ExternalCallableKind::InstanceFieldRead
@@ -692,11 +699,21 @@ pub(super) fn realize(
                 true,
                 declared_params,
             );
+            publish_materialized_lambda_params(
+                ir,
+                expression,
+                target,
+                kind,
+                member_realization,
+                true,
+                lambda_materialized,
+            )?;
             let physical_call =
                 bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
             continue;
         }
+        let mut extension_receiver_at = None;
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -788,7 +805,9 @@ pub(super) fn realize(
             }
             ExternalCallableKind::Extension => {
                 let receiver = dispatch_receiver.take().ok_or(target)?;
-                args.insert(callable.context_count.min(args.len()), receiver);
+                let position = callable.context_count.min(args.len());
+                args.insert(position, receiver);
+                extension_receiver_at = Some(position as u32);
                 *callee = Callee::Static {
                     owner: callable.owner,
                     name: callable.name,
@@ -876,6 +895,20 @@ pub(super) fn realize(
                 return Err(target.into());
             }
         }
+        if extension_receiver_at.is_none() && kind == ExternalCallableKind::Member {
+            if let Some(position) = extension_receiver_parameter {
+                let consumes_dispatch = matches!(
+                    member_realization,
+                    crate::libraries::MemberRealization::Direct {
+                        pass_receiver: true
+                    }
+                );
+                extension_receiver_at = Some(position + u32::from(consumes_dispatch));
+            }
+        }
+        if let Some(position) = extension_receiver_at {
+            ir.static_extension_receivers.insert(expression, position);
+        }
         publish_declared_call_params(
             ir,
             index as crate::ir::ExprId,
@@ -884,6 +917,15 @@ pub(super) fn realize(
             false,
             declared_params,
         );
+        publish_materialized_lambda_params(
+            ir,
+            expression,
+            target,
+            kind,
+            member_realization,
+            false,
+            lambda_materialized,
+        )?;
         let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);
@@ -1040,6 +1082,12 @@ fn copy_call_facts(ir: &mut IrFile, source: crate::ir::ExprId, target: crate::ir
     if let Some(value) = ir.call_declared_params.get(&source).cloned() {
         ir.call_declared_params.insert(target, value);
     }
+    if let Some(value) = ir.static_extension_receivers.get(&source).copied() {
+        ir.static_extension_receivers.insert(target, value);
+    }
+    if let Some(value) = ir.call_materialized_lambda_params.get(&source).cloned() {
+        ir.call_materialized_lambda_params.insert(target, value);
+    }
     // A suspension point identifies the selected call operation, not the semantic result wrapper.
     // Keeping the identity on both nodes makes later representation rewrites ambiguous: value-class
     // lowering can move the inner operation again while coroutine lowering still mistakes the outer
@@ -1091,5 +1139,128 @@ fn publish_declared_call_params(
     if declared.len() <= argument_count {
         ir.call_declared_params
             .insert(expression, declared.into_boxed_slice());
+    }
+}
+
+/// Align provider-published materialized-lambda roles with the realized call operands. Kotlin
+/// metadata excludes receiver operands; realization inserts those explicit `false` entries and
+/// pads only the backend-owned default-mask/marker suffix. Inconsistent declaration data rejects
+/// the selected target rather than silently assigning a role to the wrong operand.
+fn publish_materialized_lambda_params(
+    ir: &mut IrFile,
+    expression: crate::ir::ExprId,
+    target: ExternalCallableId,
+    kind: ExternalCallableKind,
+    member_realization: crate::libraries::MemberRealization,
+    default_call: bool,
+    roles: Box<[bool]>,
+) -> Result<(), ExternalDependencyTarget> {
+    if roles.is_empty() {
+        return Ok(());
+    }
+    let consumes_dispatch = kind == ExternalCallableKind::Member
+        && (default_call
+            || matches!(
+                member_realization,
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true
+                }
+            ));
+    let extension_receiver = ir
+        .static_extension_receivers
+        .get(&expression)
+        .copied()
+        .map(|position| position as usize);
+    let argument_count = match ir.expr(expression) {
+        IrExpr::Call { args, .. } => args.len(),
+        _ => return Err(target.into()),
+    };
+    let roles = align_materialized_lambda_params(
+        roles,
+        consumes_dispatch,
+        extension_receiver,
+        argument_count,
+        default_call,
+    )
+    .ok_or(target)?;
+    ir.call_materialized_lambda_params.insert(expression, roles);
+    Ok(())
+}
+
+fn align_materialized_lambda_params(
+    roles: Box<[bool]>,
+    consumes_dispatch: bool,
+    extension_receiver: Option<usize>,
+    argument_count: usize,
+    default_call: bool,
+) -> Option<Box<[bool]>> {
+    let mut roles = roles.into_vec();
+    if consumes_dispatch {
+        roles.insert(0, false);
+    }
+    if let Some(position) = extension_receiver {
+        if position > roles.len() {
+            return None;
+        }
+        roles.insert(position, false);
+    }
+    if roles.len() > argument_count {
+        return None;
+    }
+    // Only a `$default` bridge owns extra physical operands: its mask words and marker. An
+    // ordinary call must align exactly, otherwise padding would silently assign `false` to a
+    // declaration parameter whose metadata was missing or misaligned.
+    if !default_call && roles.len() != argument_count {
+        return None;
+    }
+    roles.resize(argument_count, false);
+    Some(roles.into_boxed_slice())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::align_materialized_lambda_params;
+
+    #[test]
+    fn materialized_lambda_roles_follow_realized_receiver_and_default_operands() {
+        assert_eq!(
+            align_materialized_lambda_params(
+                vec![false, true].into_boxed_slice(),
+                true,
+                Some(2),
+                6,
+                true,
+            )
+            .as_deref(),
+            Some([false, false, false, true, false, false].as_slice()),
+        );
+    }
+
+    #[test]
+    fn inconsistent_materialized_lambda_roles_are_rejected() {
+        assert_eq!(
+            align_materialized_lambda_params(
+                vec![true].into_boxed_slice(),
+                false,
+                Some(2),
+                2,
+                false,
+            ),
+            None,
+        );
+        assert_eq!(
+            align_materialized_lambda_params(
+                vec![false, true].into_boxed_slice(),
+                true,
+                None,
+                2,
+                false,
+            ),
+            None,
+        );
+        assert_eq!(
+            align_materialized_lambda_params(vec![true].into_boxed_slice(), false, None, 2, false,),
+            None,
+        );
     }
 }

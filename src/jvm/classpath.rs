@@ -2332,6 +2332,11 @@ impl Classpath {
         if stored.callable.declared_params.is_none() {
             stored.callable.declared_params = callable.declared_params.clone();
         }
+        if stored.callable.lambda_materialized.is_empty()
+            && !callable.lambda_materialized.is_empty()
+        {
+            stored.callable.lambda_materialized = callable.lambda_materialized.clone();
+        }
     }
 
     /// A one-line snapshot of every cache's entry count — for memory profiling (`KRUSTY_MEM_REPORT`). The

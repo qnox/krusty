@@ -922,6 +922,7 @@ impl LibraryCallable {
             origin: Origin::Library,
             source_receiver: None,
             declared_params: None,
+            lambda_materialized: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,
@@ -1103,6 +1104,11 @@ pub struct LibraryCallable {
     /// boxed Result). Providers retain the declaration fact; a representation backend consumes it only
     /// after FIR has selected this exact callable identity.
     pub declared_params: Option<Box<[Ty]>>,
+    /// Per logical parameter, whether an inline declaration materializes its function argument
+    /// instead of substituting it at each invoke site. This declaration metadata excludes an
+    /// extension receiver. Retaining it on the selected external callable keeps target realization
+    /// from inferring `noinline` from an argument's type or from bytecode shape.
+    pub lambda_materialized: Box<[bool]>,
     /// The callee's DECLARED (un-erased, pre-substitution) return type — the return analogue of
     /// [`Self::source_receiver`], carried for the same reason and read by the same pass. See
     /// [`LibraryMember::declared_ret`]: [`Self::ret`] is the SUBSTITUTED type, which cannot say whether
@@ -2138,6 +2144,11 @@ impl FunctionInfo {
             .generic_sig
             .as_ref()
             .map(|signature| signature.parameters_with_receiver(member.context_count));
+        callable.lambda_materialized = member
+            .call_sig
+            .lambda_materialized
+            .clone()
+            .into_boxed_slice();
         callable.inline = member.inline;
         callable.inline_body_plan = member.inline_body_plan.clone();
         callable.suspend = member.suspend();
