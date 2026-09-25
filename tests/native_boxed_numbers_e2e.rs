@@ -122,3 +122,24 @@ fn the_conversion_table_agrees_with_the_jvm_backend() {
         "2147483647/-2147483648/9223372036854775807/0/0/2/258/2"
     );
 }
+
+#[test]
+fn a_generic_result_widened_to_a_nullable_primitive_keeps_its_null() {
+    // `fun <T> f(): T` read as `Int` and stored into an `Int?` is two coercions in the IR: the
+    // erased reference to `Int`, then `Int` to `Int?`. One after the other they unbox a reference
+    // that may be `null`, and a `null` cannot be unboxed. The pair is one reference conversion, as
+    // on the JVM (`codegen/box/boxing/kt84727.kt`).
+    assert_eq!(
+        expect_box_run_with_stdlib(
+            "@Suppress(\"UNCHECKED_CAST\")\n\
+             fun <T> uncheckedCast(value: Any?): T = value as T\n\
+             fun box(): String {\n\
+             \x20   val none: Int? = uncheckedCast<Int>(null)\n\
+             \x20   val some: Int? = uncheckedCast<Int>(7)\n\
+             \x20   return \"$none/$some\"\n\
+             }\n",
+            "GenericNullableResult",
+        ),
+        "null/7"
+    );
+}
