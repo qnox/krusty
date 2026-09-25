@@ -14,6 +14,7 @@
 //! `docs/IMPLEMENTATION_PLAN.md`).
 
 mod constructor;
+use constructor::DeclaredCapture;
 mod type_remapper;
 
 use std::collections::HashMap;
@@ -198,7 +199,21 @@ pub(crate) fn regenerate(
             "a constructor called through another descriptor",
         ));
     }
-    let plan = constructor::extract(constructor_code, regeneration.constructor_desc)?;
+    let declared: Vec<DeclaredCapture<'_>> = original
+        .fields
+        .iter()
+        .filter(|field| is_captured_field_name(&field.name))
+        .map(|field| DeclaredCapture {
+            name: &field.name,
+            desc: &field.desc,
+        })
+        .collect();
+    let plan = constructor::extract(
+        constructor_code,
+        old,
+        &declared,
+        regeneration.constructor_desc,
+    )?;
     // `generateConstructorAndFields`: the constructor is declared, then each captured field, then
     // the constructor's body is written.
     cw.seed_utf8("<init>");
@@ -236,7 +251,7 @@ pub(crate) fn regenerate(
 
     for method in methods {
         let mut method = method.clone();
-        check_captured_field_accesses(&method, old)?;
+        check_captured_field_accesses(&method, old, &declared)?;
         method.desc = remapper.map_desc(&method.desc)?;
         method.signature = method
             .signature
@@ -386,7 +401,11 @@ fn split_constructor(
 /// kotlinc's field remapper folds and unfolds back to the same read of the copy. Any other access
 /// (through an alias of `this`, an outer object, or a store) is remapped differently, which this
 /// stage does not port.
-fn check_captured_field_accesses(method: &ClassMethod, old: &str) -> Result<(), RegenerationError> {
+fn check_captured_field_accesses(
+    method: &ClassMethod,
+    old: &str,
+    declared: &[DeclaredCapture<'_>],
+) -> Result<(), RegenerationError> {
     let Some(code) = &method.code else {
         return Ok(());
     };
@@ -397,12 +416,18 @@ fn check_captured_field_accesses(method: &ClassMethod, old: &str) -> Result<(), 
             continue;
         };
         if let Insn::Field {
-            op, owner, name, ..
+            op,
+            owner,
+            name,
+            desc,
         } = insn
         {
             if (*op == GETFIELD || *op == PUTFIELD) && is_captured_field_name(name) {
                 let direct = *op == GETFIELD
                     && owner == old
+                    && declared
+                        .iter()
+                        .any(|field| field.name == name && field.desc == desc)
                     && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
                 if !direct {
                     return Err(RegenerationError::Unsupported(

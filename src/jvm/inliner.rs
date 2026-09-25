@@ -102,8 +102,8 @@ pub(in crate::jvm) fn inline(
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
     object_regeneration::regenerate_objects(&mut node, call.objects)?;
+    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
     let context = lambda_expansion::Context {
         parameters,
         lambdas,

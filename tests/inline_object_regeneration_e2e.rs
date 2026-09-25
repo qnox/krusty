@@ -19,7 +19,6 @@ interface Box<T> {
 open class Item(val name: String)
 
 class Wrap<out T>(val value: T)
-
 inline fun twice(block: () -> Unit) {
     block()
     block()
@@ -109,6 +108,49 @@ fn regenerated_objects_are_the_reference_compilers_classes() {
             "RegenerationKt$paired$$inlined$pair$2",
             "RegenerationKt$plain$$inlined$greeter$1",
             "RegenerationKt$wrapped$$inlined$boxed$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const SHADOWING_LIB: &str = r#"
+package lib
+
+interface Shadowing<T> {
+    fun <T> other(value: T): T
+
+    fun open(): T
+}
+
+inline fun <T> shadowed(value: T): Shadowing<T> = object : Shadowing<T> {
+    override fun <T> other(value: T): T = value
+
+    override fun open(): T = value
+}
+"#;
+
+const SHADOWING_MAIN: &str = r#"
+import lib.*
+
+fun shadowedText(): String = shadowed("s").open()
+"#;
+
+/// `other` declares its own `T`, and kotlinc lets that shadow the call's `T` for the rest of the
+/// copy: the later `open` keeps `()TT;` instead of `()Ljava/lang/String;`.
+#[test]
+fn a_member_s_own_type_parameter_shadows_the_call_s_for_the_rest_of_the_copy() {
+    let classes = common::classes_against_kotlinc_lib(
+        "Shadowing",
+        &[("Lib.kt", SHADOWING_LIB)],
+        SHADOWING_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "ShadowingKt",
+            "ShadowingKt$shadowedText$$inlined$shadowed$1"
         ]
     );
     let differences = classes.differences();

@@ -144,8 +144,13 @@ impl TypeRemapper {
 
     /// `Remapper.mapSignature`: a generic signature, its class types renamed as
     /// `SignatureRemapper` renames them and each of the call's type parameters replaced by its
-    /// argument. The type parameters the signature declares shadow the call's from now on.
+    /// argument. The type parameters a signature declares shadow the call's for the rest of the
+    /// class, not only in that signature: kotlinc registers them in the regenerated class's own
+    /// `TypeRemapper` (`AsmTypeRemapper.visitFormalTypeParameter`), so a member after
+    /// `fun <T> f()` keeps `TT;` where the call's `T` was meant (checked against kotlinc 2.4.20).
+    /// A signature that does not parse registers nothing.
     pub(crate) fn map_signature(&mut self, signature: &str) -> Result<String, MalformedType> {
+        let registered = self.type_parameters.clone();
         let mut remapped = SignatureRemapper {
             remapper: self,
             input: signature.as_bytes(),
@@ -154,7 +159,10 @@ impl TypeRemapper {
         };
         match remapped.signature() {
             Some(()) if remapped.at == signature.len() => Ok(remapped.out),
-            _ => Err(MalformedType(signature.to_string())),
+            _ => {
+                self.type_parameters = registered;
+                Err(MalformedType(signature.to_string()))
+            }
         }
     }
 
@@ -505,7 +513,7 @@ mod tests {
         assert_eq!(
             remapper.map_signature("()TT;"),
             ok("()TT;"),
-            "the declared `T` shadows the call's"
+            "the declared `T` shadows the call's for the rest of the class, as in kotlinc"
         );
     }
 
@@ -538,6 +546,19 @@ mod tests {
         for class in ["", "lib/A$f$1;", "[Llib/A$f$1"] {
             assert_eq!(remapper.map_type(class), malformed(class), "{class:?}");
         }
+    }
+
+    #[test]
+    fn a_malformed_signature_declares_no_type_parameter() {
+        let mut remapper = TypeRemapper::with_type_arguments(&[(
+            "T".to_string(),
+            "Ljava/lang/String;".to_string(),
+        )]);
+        assert_eq!(
+            remapper.map_signature("<T:Ljava/lang/Object;>(TT;"),
+            malformed("<T:Ljava/lang/Object;>(TT;")
+        );
+        assert_eq!(remapper.map_signature("()TT;"), ok("()Ljava/lang/String;"));
     }
 
     #[test]

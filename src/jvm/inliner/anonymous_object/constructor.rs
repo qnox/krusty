@@ -7,6 +7,8 @@
 //! constructor declares the captured fields afresh and stores every one of them first, then runs
 //! what is left of the original body.
 
+use std::collections::HashMap;
+
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::{is_captured_field_name, RegenerationError};
@@ -33,76 +35,108 @@ pub(super) struct Constructor {
     pub body: MethodNode,
 }
 
-/// Take the captured-field stores out of `original` (`findCapturedFieldAssignmentInstructions`)
-/// and plan the new constructor for a call through `call_desc`.
+/// A captured field the original class declares.
+pub(super) struct DeclaredCapture<'a> {
+    pub name: &'a str,
+    pub desc: &'a str,
+}
+
+/// Take the captured-field stores out of `original`, the constructor of `owner`
+/// (`findCapturedFieldAssignmentInstructions`), and plan the new constructor for a call through
+/// `call_desc`. Every field of `declared` must be stored exactly once, as
+/// `aload 0; <load of its parameter>; putfield owner.field`, from a parameter of its own type;
+/// any other store or read of a captured field is refused, since the copy declares only these.
 pub(super) fn extract(
     original: &MethodNode,
+    owner: &str,
+    declared: &[DeclaredCapture<'_>],
     call_desc: &str,
 ) -> Result<Constructor, RegenerationError> {
-    let mut body = original.clone();
-    // Parameter slot → the captured field it initializes.
-    let mut captured: Vec<(u16, CapturedField)> = Vec::new();
-    let mut remove = Vec::new();
-    for (at, entry) in body.nodes.iter().enumerate() {
-        let Node::Insn(Insn::Field {
-            op: PUTFIELD,
-            name,
-            desc,
-            ..
-        }) = entry
-        else {
-            continue;
-        };
-        if !is_captured_field_name(name) || at < 2 {
-            continue;
-        }
-        let (Node::Insn(Insn::Var { slot, .. }), Node::Insn(Insn::Var { slot: 0, .. })) =
-            (&body.nodes[at - 1], &body.nodes[at - 2])
-        else {
-            continue;
-        };
-        captured.retain(|(known, _)| known != slot);
-        captured.push((
-            *slot,
-            CapturedField {
-                name: name.clone(),
-                desc: desc.clone(),
-                slot: *slot,
-            },
-        ));
-        remove.extend([at - 2, at - 1, at]);
-    }
-    for at in remove.into_iter().rev() {
-        body.nodes.remove(at);
-    }
-    // A captured field the body still reads is remapped to a local by kotlinc's field remapper,
-    // which this stage does not port.
-    let reads_captured = body.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD, name, .. } if is_captured_field_name(name))
-    });
-    if reads_captured {
-        return Err(RegenerationError::Unsupported(
-            "a constructor that reads a captured field",
-        ));
-    }
-
-    let arguments = argument_descriptors(call_desc).ok_or(RegenerationError::Unsupported(
-        "a malformed constructor descriptor",
-    ))?;
-    let mut fields = Vec::new();
+    let unsupported = RegenerationError::Unsupported;
+    let arguments =
+        argument_descriptors(call_desc).ok_or(unsupported("a malformed constructor descriptor"))?;
+    // The parameter that starts at each slot.
+    let mut parameters: HashMap<u16, &str> = HashMap::new();
     let mut slot = 1u16;
     for argument in &arguments {
-        if let Some(position) = captured.iter().position(|(known, _)| *known == slot) {
-            fields.push(captured.remove(position).1);
-        }
+        parameters.insert(slot, argument);
         slot += if matches!(argument.as_bytes()[0], b'J' | b'D') {
             2
         } else {
             1
         };
     }
+
+    let mut body = original.clone();
+    let mut captured: Vec<CapturedField> = Vec::new();
+    let mut remove = Vec::new();
+    for (at, entry) in body.nodes.iter().enumerate() {
+        let Node::Insn(Insn::Field {
+            op: PUTFIELD,
+            owner: field_owner,
+            name,
+            desc,
+        }) = entry
+        else {
+            continue;
+        };
+        if field_owner != owner
+            || !declared
+                .iter()
+                .any(|field| field.name == name && field.desc == desc)
+            || at < 2
+        {
+            continue;
+        }
+        let (
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            Node::Insn(Insn::Var { op: load, slot }),
+        ) = (&body.nodes[at - 2], &body.nodes[at - 1])
+        else {
+            continue;
+        };
+        let from_parameter = parameters
+            .get(slot)
+            .is_some_and(|parameter| parameter == desc);
+        if *load != load_opcode(desc) || !from_parameter {
+            continue;
+        }
+        if captured.iter().any(|field| field.name == *name) {
+            return Err(unsupported("a captured field stored twice"));
+        }
+        captured.push(CapturedField {
+            name: name.clone(),
+            desc: desc.clone(),
+            slot: *slot,
+        });
+        remove.extend([at - 2, at - 1, at]);
+    }
+    if captured.len() != declared.len() {
+        return Err(unsupported(
+            "a captured field its constructor does not store",
+        ));
+    }
+    for at in remove.into_iter().rev() {
+        body.nodes.remove(at);
+    }
+    // Any other access to a captured field is remapped by kotlinc's field remapper, which this
+    // stage does not port.
+    let accesses_captured = body.instructions().any(|insn| {
+        matches!(insn, Insn::Field { op: GETFIELD | PUTFIELD, name, .. } if is_captured_field_name(name))
+    });
+    if accesses_captured {
+        return Err(unsupported(
+            "a constructor that accesses a captured field other than by storing its parameter",
+        ));
+    }
+
+    captured.sort_by_key(|field| field.slot);
     let desc = format!("({})V", arguments.concat());
-    Ok(Constructor { desc, fields, body })
+    Ok(Constructor {
+        desc,
+        fields: captured,
+        body,
+    })
 }
 
 impl Constructor {
@@ -170,4 +204,138 @@ fn argument_descriptors(desc: &str) -> Option<Vec<String>> {
         out.push(inner[start..at].to_string());
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OWNER: &str = "lib/LibKt$greeter$1";
+    const STRING: &str = "Ljava/lang/String;";
+
+    fn var(op: u8, slot: u16) -> Node {
+        Node::Insn(Insn::Var { op, slot })
+    }
+
+    fn put(owner: &str, name: &str) -> Node {
+        Node::Insn(Insn::Field {
+            op: PUTFIELD,
+            owner: owner.to_string(),
+            name: name.to_string(),
+            desc: STRING.to_string(),
+        })
+    }
+
+    /// `<init>(String)` of `OWNER`: `stores`, then `super()` and `return`.
+    fn constructor(stores: Vec<Node>) -> MethodNode {
+        let mut node = MethodNode::new(0, "<init>", "(Ljava/lang/String;)V");
+        node.nodes = stores;
+        node.nodes.extend([
+            var(ALOAD, 0),
+            Node::Insn(Insn::Method {
+                op: 0xb7,
+                owner: "java/lang/Object".to_string(),
+                name: "<init>".to_string(),
+                desc: "()V".to_string(),
+                interface: false,
+            }),
+            Node::Insn(Insn::Op(0xb1)),
+        ]);
+        node
+    }
+
+    fn prefix() -> [DeclaredCapture<'static>; 1] {
+        [DeclaredCapture {
+            name: "$prefix",
+            desc: STRING,
+        }]
+    }
+
+    fn extracted(stores: Vec<Node>) -> Result<Vec<CapturedField>, RegenerationError> {
+        extract(
+            &constructor(stores),
+            OWNER,
+            &prefix(),
+            "(Ljava/lang/String;)V",
+        )
+        .map(|constructor| constructor.fields)
+    }
+
+    #[test]
+    fn a_captured_parameter_store_moves_to_the_new_constructor() {
+        let plan = extract(
+            &constructor(vec![var(ALOAD, 0), var(ALOAD, 1), put(OWNER, "$prefix")]),
+            OWNER,
+            &prefix(),
+            "(Ljava/lang/String;)V",
+        )
+        .expect("extracts");
+        assert_eq!(
+            plan.fields,
+            [CapturedField {
+                name: "$prefix".to_string(),
+                desc: STRING.to_string(),
+                slot: 1,
+            }]
+        );
+        assert_eq!(plan.body.nodes, constructor(Vec::new()).nodes);
+    }
+
+    #[test]
+    fn a_captured_store_of_another_value_declines() {
+        assert_eq!(
+            extracted(vec![
+                var(ALOAD, 0),
+                Node::Insn(Insn::Op(0x01)),
+                put(OWNER, "$prefix")
+            ]),
+            Err(RegenerationError::Unsupported(
+                "a captured field its constructor does not store"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_captured_store_through_the_wrong_load_declines() {
+        assert_eq!(
+            extracted(vec![var(ALOAD, 0), var(0x15, 1), put(OWNER, "$prefix")]),
+            Err(RegenerationError::Unsupported(
+                "a captured field its constructor does not store"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_captured_named_store_on_another_class_declines() {
+        assert_eq!(
+            extracted(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$prefix"),
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put("lib/Other", "$prefix"),
+            ]),
+            Err(RegenerationError::Unsupported(
+                "a constructor that accesses a captured field other than by storing its parameter"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_captured_field_stored_twice_declines() {
+        assert_eq!(
+            extracted(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$prefix"),
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$prefix"),
+            ]),
+            Err(RegenerationError::Unsupported(
+                "a captured field stored twice"
+            ))
+        );
+    }
 }
