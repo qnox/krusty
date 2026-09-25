@@ -3394,23 +3394,27 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare ONE method's instruction sequence against the reference compiler's, with a dependency
-/// the reference compiler built.
+/// Compare ONE method's instruction sequence against the reference compiler's, with the
+/// dependencies in `lib` (none when empty) built by the reference compiler.
 ///
 /// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
 /// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// change is actually about — whether the emitted code is the same instructions in the same order,
-/// over the same local slots. Pool indices are normalized away because two pools interned in
-/// different orders describe the same references.
+/// or coroutine change is actually about — whether the emitted code is the same instructions in the
+/// same order, over the same local slots. Pool indices are normalized away because two pools
+/// interned in different orders describe the same references.
 #[allow(dead_code)]
-pub fn method_code_diff_against_kotlinc_lib(
+pub fn method_code_diff_against_kotlinc(
     name: &str,
-    lib: &str,
+    lib: &[(&str, &str)],
     src: &str,
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
-    let libout = kotlinc_lib_out(&[("Lib.kt", lib)])?;
+    let libout = if lib.is_empty() {
+        None
+    } else {
+        Some(kotlinc_lib_out(lib)?)
+    };
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     let kout = dir.join("krusty");
@@ -3418,16 +3422,16 @@ pub fn method_code_diff_against_kotlinc_lib(
     std::fs::create_dir_all(&kout).ok()?;
     let src_path = dir.join(format!("{name}.kt"));
     std::fs::write(&src_path, src).ok()?;
-    let (code, stderr) = kotlinc_compile(&[
-        "-d".to_string(),
-        kref.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        libout.to_string_lossy().into_owned(),
-        src_path.to_string_lossy().into_owned(),
-    ])?;
+    let mut args = vec!["-d".to_string(), kref.to_string_lossy().into_owned()];
+    if let Some(libout) = &libout {
+        args.push("-cp".to_string());
+        args.push(libout.to_string_lossy().into_owned());
+    }
+    args.push(src_path.to_string_lossy().into_owned());
+    let (code, stderr) = kotlinc_compile(&args)?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
 
-    let classpath = [libout, stdlib_jar()];
+    let classpath: Vec<PathBuf> = libout.into_iter().chain([stdlib_jar()]).collect();
     let classes = compile_in_process_metadata_cp(src, name, &classpath)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, krusty_bytes) = classes

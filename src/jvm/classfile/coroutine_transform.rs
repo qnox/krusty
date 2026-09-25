@@ -10,6 +10,7 @@
 //! writes that class afterwards.
 
 use super::constant_pool_queries::PoolLookup;
+use super::method_rewrite::MethodIdentity;
 use super::ClassWriter;
 use crate::jvm::bytecode_passes::coroutines::{
     transform_named_function, CoroutineError, DebugMetadata, NamedFunction, SpillField, Transformed,
@@ -106,6 +107,8 @@ impl ClassWriter {
             .rewrite_source
             .as_deref()
             .ok_or("the method has no rewrite source")?;
+        let (access, method_name, method_desc) =
+            (source.access, source.name.clone(), source.desc.clone());
         let pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let node = self
             .finished_node(method, source, bytes, &pool)
@@ -161,8 +164,20 @@ impl ClassWriter {
         method.lnt = assembled.line_numbers;
         method.lvt = lvt;
         method.implicit_void_return_pc = None;
-        // kotlinc's later rewrites are not run over a transformed body yet.
+        // The rewrites for emitted bodies read the emitter's labels, which the transformed body no
+        // longer lays out as.
         method.rewrite_source = None;
+        // kotlinc's optimizer takes the transformer's method, as its visitor chain hands it on.
+        let identity = MethodIdentity {
+            access,
+            name: &method_name,
+            desc: &method_desc,
+        };
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let optimized = self.optimized(&self.methods[index], identity, node, None, &mut pool);
+        if let Some(optimized) = optimized {
+            self.methods[index].take_rewritten(optimized);
+        }
         Ok(outcome)
     }
 }
