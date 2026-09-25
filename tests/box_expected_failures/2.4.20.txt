@@ -442,9 +442,6 @@ safeCall/parenthesizedSafeCallsAndOperators.kt
 sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt
 sam/topLevelConversions.kt
-sealed/delegatingConstructor.kt
-sealed/multipleFiles_enabled.kt
-sealed/sealedInSameFile.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt

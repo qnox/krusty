@@ -1493,6 +1493,8 @@ mod scalar_instance_check_e2e;
 mod scope_chain_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
+#[path = "sealed_constructor_accessors_e2e.rs"]
+mod sealed_constructor_accessors_e2e;
 #[path = "sealed_cross_file_metadata_e2e.rs"]
 mod sealed_cross_file_metadata_e2e;
 #[path = "sealed_data_object_parity_e2e.rs"]

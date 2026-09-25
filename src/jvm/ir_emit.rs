@@ -68,6 +68,7 @@ mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 mod value_class_signatures;
 use try_emission::FinallyRegion;
+mod sealed_constructors;
 mod secondary_constructor;
 mod static_fields;
 mod type_operation_emission;
@@ -182,7 +183,8 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
             || ir.has_value_param_ctor(&class.fq_name()))
 }
 
-/// Whether the primary's marker accessor follows every other member rather than the primary itself.
+/// Whether the primary's marker accessor follows the members as a companion's or a hidden
+/// value-class primary's does. A sealed class's accessors are `sealed_constructors`' to emit.
 fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
     class.is_companion || (!class.is_sealed && ir.has_value_param_ctor(&class.fq_name()))
 }
@@ -6443,24 +6445,11 @@ fn emit_class(
                 source_params,
                 source_defaults,
                 None,
-                value_param_ctor,
+                value_param_ctor || c.is_sealed,
                 c.primary_ctor_annotations.deprecated(),
                 0x1001,
                 &mut cw,
                 env,
-            );
-        }
-        // A COMPANION's synthetic marker ctor, and a value-class-parameter primary's, is emitted
-        // LAST, after the members (kotlinc's member order — see below); a sealed class keeps it
-        // beside the primary.
-        if has_ctor_marker_accessor(ir, c) && !marker_accessor_emitted_last(ir, c) {
-            let parameter_identities =
-                crate::jvm::method_parameters::primary_constructor_identities(c, &param_tys);
-            constructor_defaults::emit_ctor_marker_accessor(
-                &fq_name,
-                &param_tys,
-                &parameter_identities,
-                &mut cw,
             );
         }
     } // end `if c.has_primary_ctor`
@@ -6588,6 +6577,7 @@ fn emit_class(
         );
     }
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    sealed_constructors::emit_accessors(ir, c, &fq_name, &mut cw);
     // HOISTED companion properties: the private static field lives on THIS class, so the companion's
     // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
     // bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
@@ -18425,12 +18415,8 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 
 fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
     let mut params = jvm_tys(&c.super_ctor_params);
-    let target_is_sealed = ir
-        .classes
-        .iter()
-        .any(|candidate| candidate.fq_name_matches(superclass) && candidate.is_sealed);
-    let uses_accessor =
-        c.super_ctor_is_primary && (ir.has_value_param_ctor(superclass) || target_is_sealed);
+    let uses_accessor = (c.super_ctor.primary && ir.has_value_param_ctor(superclass))
+        || sealed_constructors::reached_through_accessor(c.super_ctor);
     if uses_accessor {
         params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
     }
