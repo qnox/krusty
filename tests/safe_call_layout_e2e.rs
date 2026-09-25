@@ -6,9 +6,7 @@
 //! the stack. krusty's lowering records every safe call's guard, and the JVM emitter lays it out
 //! the same way.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "class Link(val name: String?, val next: Link?) {\n\

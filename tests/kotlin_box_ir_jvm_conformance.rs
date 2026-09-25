@@ -12,9 +12,13 @@
 //! Env vars:
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
+//!   KRUSTY_BLESS_BOX_FAILURES=1  rewrite both exact outcome manifests (full local runs only)
+//!
+//! Every run is held to that version's exact fail/not-applicable manifests; see `box_ratchet`.
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
 //! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -30,6 +34,7 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 
+use super::box_ratchet::{self, Outcome};
 use super::common;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
@@ -1175,6 +1180,12 @@ fn kotlin_codegen_box_conformance() {
         .unwrap_or(usize::MAX);
 
     let mut files = krusty::conformance::kotlin_files(&box_dir);
+    let corpus: BTreeSet<String> = files
+        .iter()
+        .map(|file| box_ratchet::corpus_key(&box_dir, file))
+        .collect();
+    let full_run =
+        env("KRUSTY_BOX_ONLY").is_none() && limit == usize::MAX && conformance_shard().is_none();
     // KRUSTY_BOX_ONLY: run only files whose path contains this substring — a focused single-test debug
     // loop (pair with a `trace`-feature build + KRUSTY_TRACE=<category>). Empty/unset runs the corpus.
     if let Some(only) = env("KRUSTY_BOX_ONLY") {
@@ -1284,6 +1295,7 @@ fn kotlin_codegen_box_conformance() {
 
     let no_run = env("KRUSTY_NO_RUN").is_some();
     let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
+    let class_dump = env("KRUSTY_CLASS_DUMP").map(PathBuf::from);
     let byte_diffs: Mutex<Vec<(PathBuf, ByteDiff)>> = Mutex::new(Vec::new());
 
     // Heap profiler (`--features dhat-heap`): its `Drop` at end of scope writes `dhat-heap.json` with
@@ -1360,6 +1372,14 @@ fn kotlin_codegen_box_conformance() {
                     };
                     t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     mark_box_case_phase(&active, tid, file, "post-compile");
+                    if let Some(dump) = &class_dump {
+                        if let Err(error) = dump_compiled_classes(dump, &stem, &src, &classes) {
+                            return (
+                                file.clone(),
+                                TestResult::Fail(format!("failed to dump classes: {error}")),
+                            );
+                        }
+                    }
                     if byte_diff_on {
                         let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
                         byte_diffs.lock().unwrap().push((file.clone(), outcome));
@@ -1591,15 +1611,88 @@ fn kotlin_codegen_box_conformance() {
         fs::write(&path, conformance_report(files.len(), passed))
             .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
-    let applicable = files.len() - not_applicable;
-    assert!(
-        passed * 100 >= applicable * 55,
-        "box conformance is below 55% of backend-applicable cases: {passed}/{applicable} passed; {} failed; {not_applicable} not applicable",
-        failures.len()
-    );
+    if no_run {
+        eprintln!("box ratchet: skipped (KRUSTY_NO_RUN compiles without running box())");
+    } else {
+        check_expected_failures(&box_dir, &results, &corpus, full_run);
+    }
     assert!(
         passed > 0,
         "no box() cases ran — check Kotlin box corpus discovery / JDK"
+    );
+}
+
+/// Hold the run to both exact outcome manifests (see `box_ratchet`), or rewrite them under
+/// `KRUSTY_BLESS_BOX_FAILURES=1`.
+fn check_expected_failures(
+    box_dir: &Path,
+    results: &[(PathBuf, TestResult)],
+    corpus: &BTreeSet<String>,
+    full_run: bool,
+) {
+    let version = krusty::kotlin_version::target();
+    let outcomes: BTreeMap<String, Outcome> = results
+        .iter()
+        .map(|(file, result)| {
+            let outcome = match result {
+                TestResult::Pass => Outcome::Pass,
+                TestResult::Fail(_) => Outcome::Fail,
+                TestResult::NotApplicable => Outcome::NotApplicable,
+            };
+            (box_ratchet::corpus_key(box_dir, file), outcome)
+        })
+        .collect();
+    let bless = box_ratchet::bless_requested(env("KRUSTY_BLESS_BOX_FAILURES").as_deref())
+        .unwrap_or_else(|error| panic!("{error}"));
+    if bless {
+        assert!(
+            full_run,
+            "KRUSTY_BLESS_BOX_FAILURES needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
+        );
+        assert!(
+            env("CI").is_none(),
+            "KRUSTY_BLESS_BOX_FAILURES is refused under CI: a list is blessed locally and reviewed"
+        );
+        let failing: BTreeSet<String> = outcomes
+            .iter()
+            .filter(|(_, outcome)| **outcome == Outcome::Fail)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let not_applicable: BTreeSet<String> = outcomes
+            .iter()
+            .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let failure_path = box_ratchet::list_path(version);
+        let not_applicable_path = box_ratchet::not_applicable_list_path(version);
+        box_ratchet::write_atomic(
+            &failure_path,
+            &box_ratchet::render_failures(version, &failing),
+        )
+        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", failure_path.display()));
+        box_ratchet::write_atomic(
+            &not_applicable_path,
+            &box_ratchet::render_not_applicable(version, &not_applicable),
+        )
+        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", not_applicable_path.display()));
+        eprintln!(
+            "box ratchet: blessed {} expected failures and {} expected not-applicable cases into {} and {}",
+            failing.len(),
+            not_applicable.len(),
+            failure_path.display(),
+            not_applicable_path.display(),
+        );
+        return;
+    }
+    let expected = box_ratchet::load(version);
+    let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
+    assert!(mismatches.is_empty(), "{}", mismatches.report(version));
+    eprintln!(
+        "box ratchet: matches {} and {} ({} expected failures, {} expected not-applicable)",
+        box_ratchet::list_path(version).display(),
+        box_ratchet::not_applicable_list_path(version).display(),
+        expected.failures.len(),
+        expected.not_applicable.len(),
     );
 }
 
@@ -1881,6 +1974,26 @@ fn dump_class_sets(
         write("kotlinc", name, bytes)?;
     }
     fs::write(root.join("source.kt"), src)
+}
+
+/// `KRUSTY_CLASS_DUMP=<dir>`: write every compiled file's classes to `<dir>/<stem>-<hash>/`, with no
+/// reference compile. Two dumps from two builds show whether a change moved any output byte, which
+/// is how a refactor that must not change output is checked across the whole corpus.
+fn dump_compiled_classes(
+    dir: &Path,
+    stem: &str,
+    src: &str,
+    classes: &[(String, Vec<u8>)],
+) -> std::io::Result<()> {
+    let root = dir.join(format!("{stem}-{:016x}", fnv64(src.as_bytes())));
+    for (name, bytes) in classes {
+        let path = root.join(format!("{name}.class"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, bytes)?;
+    }
+    Ok(())
 }
 
 /// The full per-file byte-diff decision: gate un-mirrored shapes, reference-compile, compare.

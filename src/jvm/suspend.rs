@@ -27,9 +27,13 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 mod bottom_completion;
+mod call_operand_realization;
 pub(crate) mod cps;
 pub(crate) use cps::EmitTimeMachines;
 mod debug_metadata;
+mod emission_facts;
+pub(crate) use emission_facts::UnitResultTailForwards;
+pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 mod get_or_create;
 mod hoisting;
 mod live_scopes;
@@ -54,6 +58,7 @@ use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
 use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
+use call_operand_realization::append_continuation;
 use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
 use statement_normalization::{
@@ -109,24 +114,6 @@ struct MachineContext<'a> {
 }
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
-
-/// JVM class metadata computed before continuation spill scopes are discarded.
-#[derive(Clone, Debug, Default)]
-pub struct ContinuationMetadata {
-    pub l: Vec<i32>,
-    pub nl: Vec<i32>,
-    pub i: Vec<i32>,
-    pub s: Vec<String>,
-    pub n: Vec<String>,
-    pub m: String,
-    pub c: String,
-    pub v: i32,
-    pub enclosing_class: String,
-    pub enclosing_method: String,
-    pub enclosing_descriptor: String,
-}
-
-pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
 
 fn object_ty() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
@@ -203,6 +190,7 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
+    unit_result_tail_forwards: &mut UnitResultTailForwards,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
@@ -267,10 +255,7 @@ pub(crate) fn lower_suspend(
                     let this_offset = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
                     // Capture runs BEFORE the CPS rewrite appends the `Continuation` — only strip a
                     // trailing continuation when it is already there.
-                    let has_cont = f.params.last().is_some_and(|t| {
-                        t.obj_internal()
-                            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
-                    });
+                    let has_cont = f.params.last().copied() == Some(continuation_ty());
                     let n_real = f.params.len().saturating_sub(usize::from(has_cont));
                     // ALL value parameters — kotlinc spills primitive params too (`Z$0` for a
                     // Boolean), per-kind counters decide the field family.
@@ -523,7 +508,15 @@ pub(crate) fn lower_suspend(
             // made; the call ids remain stable and `rewrite_forward_body` can rewrite the function's
             // physical tails in one place.
             splice_return_blocks(ir, b);
-            rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
+            let returned =
+                rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
+            // Kotlin 2.4.20 answers a forwarded `Unit` function's result with `Unit` unless the
+            // callee suspended; earlier releases return whatever the callee returned.
+            if orig_rets[fid as usize] == Ty::Unit
+                && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
+            {
+                unit_result_tail_forwards.extend(returned);
+            }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
             // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail
@@ -2102,204 +2095,6 @@ fn when_has_non_direct_suspending_branch(
     })
 }
 
-/// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and erase
-/// the return to `Object` — `()I` → `(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`. A
-/// cross-unit suspend callee is *resolved* by its logical signature (no continuation, real return), but
-/// the emitted `invokestatic` must name the callee's physical CPS descriptor.
-fn cps_descriptor(logical: &str) -> String {
-    let close = logical
-        .rfind(')')
-        .unwrap_or(logical.len().saturating_sub(1));
-    format!(
-        "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
-        &logical[..close]
-    )
-}
-
-/// Locate the continuation slot in a suspend `$default` descriptor. Its ABI suffix is
-/// `Continuation, int mask..., Object marker`; scanning the typed signature keeps both continuation
-/// insertion and operand spilling independent of source arity and of the number of mask words.
-fn default_suspend_continuation_index(params: &[Ty]) -> Option<usize> {
-    let mut index = params.len().checked_sub(2)?;
-    let mut masks = 0;
-    while params.get(index).copied() == Some(Ty::Int) {
-        masks += 1;
-        index = index.checked_sub(1)?;
-    }
-    (masks > 0
-        && params
-            .get(index)
-            .and_then(|ty| ty.obj_internal())
-            .is_some_and(|name| name.matches("kotlin/coroutines/Continuation")))
-    .then_some(index)
-}
-
-/// Append the continuation `cont` as the trailing argument of suspend call `call_e` (a `Call` or
-/// `MethodCall`) — the CPS parameter the callee now expects. For a cross-unit `Callee::Static` (resolved
-/// by its logical signature), also rewrite the descriptor to the physical CPS form so the emitted
-/// `invokestatic` matches the callee. Returns the (unchanged) `ExprId`.
-fn append_continuation(
-    ir: &mut IrFile,
-    call_e: ExprId,
-    cont: ExprId,
-    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
-) -> bool {
-    crate::trace_compiler!(
-        "suspend",
-        "append continuation call={call_e} continuation={cont} node={:?}",
-        ir.exprs.get(call_e as usize),
-    );
-    let planned_index = match default_call_operands.insert_continuation(call_e, cont) {
-        Ok(index) => index,
-        Err(()) => {
-            crate::trace_compiler!(
-                "suspend",
-                "append continuation BAIL: default operand plan has no ABI suffix call={call_e}"
-            );
-            return false;
-        }
-    };
-    match &mut ir.exprs[call_e as usize] {
-        IrExpr::Call {
-            args,
-            callee: Callee::Static { descriptor, .. },
-            ..
-        } => {
-            // A selected default bridge already spells the `Continuation` in its descriptor — BEFORE
-            // the trailing mask words and marker. The recorded operand plan identifies that semantic
-            // realization without recovering it from the emitted method name.
-            if let Some(planned_index) = planned_index {
-                let Some((params, _)) = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
-                else {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "append continuation BAIL: invalid default descriptor call={call_e} descriptor={descriptor}"
-                    );
-                    return false;
-                };
-                let Some(index) = default_suspend_continuation_index(&params) else {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "default suspend call={call_e} has no continuation slot descriptor={descriptor} params={params:?}"
-                    );
-                    return false;
-                };
-                if planned_index != index || index > args.len() {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "append continuation BAIL: operand-plan boundary mismatch call={call_e} planned={planned_index} descriptor={index} args={} descriptor_text={descriptor}",
-                        args.len()
-                    );
-                    return false;
-                }
-                crate::trace_compiler!(
-                    "suspend",
-                    "insert default continuation call={call_e} index={index} descriptor={descriptor} args_before={args:?}"
-                );
-                args.insert(index, cont);
-            } else {
-                *descriptor = cps_descriptor(descriptor);
-                args.push(cont);
-            }
-        }
-        // A sibling-file suspend callee: its CPS signature appends a `Continuation` parameter and erases
-        // the return to `Object` (the JVM backend builds the descriptor from these `Ty`s).
-        IrExpr::Call {
-            args,
-            callee:
-                Callee::CrossFile {
-                    params,
-                    ret,
-                    module_default_call,
-                    ..
-                },
-            ..
-        } => {
-            if *module_default_call {
-                let Some(index) = planned_index else {
-                    return false;
-                };
-                if index > args.len() || index > params.len() {
-                    return false;
-                }
-                params.insert(index, continuation_ty());
-                args.insert(index, cont);
-            } else {
-                if planned_index.is_some() {
-                    return false;
-                }
-                params.push(continuation_ty());
-                args.push(cont);
-            }
-            *ret = object_ty();
-        }
-        IrExpr::Call {
-            args,
-            callee: Callee::Virtual {
-                descriptor, params, ..
-            },
-            ..
-        } => {
-            if planned_index.is_some() {
-                return false;
-            }
-            if let Some((params, ret)) = params {
-                params.push(continuation_ty());
-                *ret = object_ty();
-            } else {
-                *descriptor = cps_descriptor(descriptor);
-            }
-            args.push(cont);
-        }
-        IrExpr::Call {
-            args,
-            callee: Callee::LocalDefault(_) | Callee::ClassStaticDefault { .. },
-            ..
-        } => {
-            let Some(index) = planned_index else {
-                return false;
-            };
-            if index > args.len() {
-                return false;
-            }
-            args.insert(index, cont);
-        }
-        IrExpr::Call { args, .. } => {
-            if planned_index.is_some() {
-                return false;
-            }
-            args.push(cont);
-        }
-        IrExpr::MethodCall { args, .. } => {
-            if planned_index.is_some() {
-                return false;
-            }
-            args.push(Some(cont));
-        }
-        // A suspend function VALUE call (`block(a)`): the value implements `Function{N+1}`, so append the
-        // continuation — the emitter picks `Function{N+1}.invoke` from the arg count. The CPS result is
-        // the raw erased `Object` (COROUTINE_SUSPENDED or the boxed value): erase `ret` so the emitter
-        // does NOT unbox it — a tail-forward `areturn`s it verbatim, and the flattener re-applies the
-        // logical coercion from `ir.suspend_calls` when it binds the resume value.
-        IrExpr::InvokeFunction {
-            args, params, ret, ..
-        } => {
-            if planned_index.is_some() {
-                return false;
-            }
-            *ret = object_ty();
-            args.push(cont);
-            params.push(continuation_ty());
-        }
-        _ => {
-            if planned_index.is_some() {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
@@ -3755,7 +3550,8 @@ impl Flat<'_> {
         if !operands.iter().any(|&o| writes_local_in(self.ir, o, list)) {
             return true;
         }
-        let Some(operands) = typed_suspension_operands(self.ir, point) else {
+        let Some(operands) = typed_suspension_operands(self.ir, self.default_call_operands, point)
+        else {
             return false;
         };
         // A conditional suspension nested in an operand (`foo(if (c) susp() else 1)`) is left in place by
@@ -5498,7 +5294,7 @@ fn build_continuation_class(
         fq_name: crate::types::type_name(internal),
         is_source_declared: false,
         is_anonymous_object: false,
-        enclosing_function: None,
+        enclosure: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,
@@ -5945,11 +5741,16 @@ fn writes_local_in(ir: &IrFile, e: ExprId, list: &[(u32, Ty)]) -> bool {
 /// A `Callee::Virtual` may also be inline-spliced at emit (its descriptor form has an inline branch) and
 /// is deliberately NOT refused for it: splicing reads its operand nodes as values, and a `GetValue` of a
 /// temp is one.
-fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, Ty)>> {
+fn typed_suspension_operands(
+    ir: &IrFile,
+    default_call_operands: &crate::jvm::default_call_operands::DefaultCallOperands,
+    point: ExprId,
+) -> Option<Vec<(ExprId, Ty)>> {
     // Parameters are indexed before the continuation value is added. An ordinary suspend call's
     // continuation is the trailing surplus parameter. A `$default` call removes its descriptor-owned
     // continuation slot before this zip, leaving real arguments, masks, and marker aligned exactly.
     fn zip(args: &[ExprId], params: &[Ty], out: &mut Vec<(ExprId, Ty)>) -> Option<()> {
+        (args.len() == params.len()).then_some(())?;
         for (i, &a) in args.iter().enumerate() {
             out.push((a, *params.get(i)?));
         }
@@ -5984,15 +5785,13 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     params.clone()
                 }
                 Callee::Static {
-                    descriptor,
-                    name,
-                    inline,
-                    ..
+                    descriptor, inline, ..
                 } => {
                     (!inline.can_inline() && dispatch_receiver.is_none()).then_some(())?;
                     let mut params = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0;
-                    if name.ends_with("$default") {
-                        let continuation = default_suspend_continuation_index(&params)?;
+                    if let Some(continuation) = default_call_operands.abi_suffix_position(point) {
+                        (params.get(continuation).copied() == Some(continuation_ty()))
+                            .then_some(())?;
                         params.remove(continuation);
                     }
                     params
@@ -6015,13 +5814,11 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                 // Realized into `Callee::Special` before this pass runs.
                 Callee::Super { .. } => return None,
                 Callee::Special {
-                    owner,
-                    name,
-                    descriptor,
-                    ..
+                    owner, descriptor, ..
                 } => {
-                    // Same `$default` indexing rule as `Callee::Static` above.
-                    (!name.ends_with("$default")).then_some(())?;
+                    // A special default call has a descriptor-owned continuation slot but cannot
+                    // be safely rebound here; identify it from its operand plan, never its name.
+                    (!default_call_operands.contains(point)).then_some(())?;
                     out.push((
                         dispatch_receiver.as_ref().copied()?,
                         Ty::obj(&owner.render()),

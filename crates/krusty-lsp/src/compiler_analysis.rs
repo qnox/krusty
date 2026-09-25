@@ -231,6 +231,7 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
             DiagnosticKind::IncompatibleEquality => 1,
             DiagnosticKind::Inspection => 2,
             DiagnosticKind::ValReassignment => 3,
+            DiagnosticKind::Actualization => 4,
         },
     )
 }
@@ -932,24 +933,38 @@ mod tests {
                       fun invalid(): Int = pair(b = 2, 1)";
         let analysis = analyze_standalone_source_set(&[source]);
         let diagnostics = &analysis.files[0].diagnostics;
-        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-        let diagnostic = &diagnostics[0];
-        assert_eq!(
-            diagnostic.msg,
-            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
-        );
         let positional = source.rfind('1').expect("positional argument") as u32;
-        assert_eq!(
-            diagnostic.span,
-            krusty::diag::Span::new(positional, positional + 1)
-        );
-        assert_eq!(diagnostics[1].msg, "no value passed for parameter 'a'.");
         let callee = source.rfind("pair").expect("callee") as u32;
-        assert_eq!(
-            diagnostics[1].span,
-            krusty::diag::Span::new(callee, callee + 4)
+        let mixing = (
+            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+            krusty::diag::Span::new(positional, positional + 1),
         );
-        assert_eq!(diagnostics[1].editor_span, None);
+        let missing = (
+            "no value passed for parameter 'a'.",
+            krusty::diag::Span::new(callee, callee + 4),
+        );
+        // The LSP boundary consumes the compiler's alternate editor span, but preserves the
+        // reference compiler's diagnostic order for the selected Kotlin version.
+        let expected =
+            if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
+                vec![missing, mixing]
+            } else {
+                vec![mixing, missing]
+            };
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    assert_eq!(diagnostic.editor_span, None);
+                    assert_eq!(diagnostic.severity, krusty::diag::Severity::Error);
+                    assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
+                    assert_eq!(diagnostic.identity, None);
+                    assert_eq!(diagnostic.file, 0);
+                    (diagnostic.msg.as_str(), diagnostic.span)
+                })
+                .collect::<Vec<_>>(),
+            expected,
+        );
     }
 
     #[test]

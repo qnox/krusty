@@ -37,6 +37,7 @@ mod bridges;
 mod constants;
 mod constructors;
 mod default_arguments;
+mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
 mod referenced_classifiers;
@@ -50,6 +51,7 @@ pub use bridges::{Bridge, BridgeKind};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use referenced_classifiers::collect_classifiers;
@@ -651,16 +653,6 @@ pub struct IrAnnotationConstruction {
     pub defaults: Vec<Option<ExprId>>,
     /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
     pub enclosing_class: Option<TypeName>,
-}
-
-/// Which declaration a checked enum `valueOf` operation selected. Both name the same lookup by
-/// entry name; they are different declarations, and only one of them is `inline`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EnumValueOfDeclaration {
-    /// The classifier's own implicit member — `E.valueOf(name)`.
-    Member,
-    /// The standard library's top-level `enumValueOf<E>(name)`, whose body expands at the call.
-    StandardLibraryTopLevel,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -1475,6 +1467,28 @@ pub struct IrProperty {
     pub needs_access_bridge: bool,
 }
 
+/// The executable scope a local, anonymous or generated class is declared in. A backend realizes it
+/// as its own enclosure record (the JVM's `EnclosingMethod`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrEnclosure {
+    /// A function body, or a local function's own function. A lambda is not a scope of its own:
+    /// what it declares belongs to the function the lambda is written in.
+    Function(FunId),
+    /// A source property accessor. The common IR keeps the property identity and accessor role;
+    /// each backend resolves that pair through its finalized property realization.
+    PropertyAccessor {
+        property: crate::fir::PropertyId,
+        setter: bool,
+    },
+    /// A source constructor. `ordinal == 0` is the primary declaration and later ordinals are
+    /// secondary declarations in source order. Its physical descriptor remains backend-owned.
+    Constructor { class: ClassId, ordinal: u32 },
+    /// A top-level property initializer: the file itself.
+    File,
+    /// A classifier's property initializer or `init` block.
+    ClassInitializer(ClassId),
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -1484,10 +1498,11 @@ pub struct IrClass {
     /// classes must not be published as declared nested classifiers in language metadata, even when
     /// their backend name happens to look nested.
     pub is_source_declared: bool,
-    /// A source anonymous-object declaration. Its lexical function is recorded separately as an
-    /// exact [`FunId`], so a backend can realize enclosure metadata without parsing generated names.
+    /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
-    pub enclosing_function: Option<FunId>,
+    /// The executable scope a local, anonymous or generated class is declared in, recorded as an
+    /// exact identity so a backend realizes enclosure metadata without parsing generated names.
+    pub enclosure: Option<IrEnclosure>,
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
@@ -1815,7 +1830,7 @@ impl IrClass {
             fq_name,
             is_source_declared: false,
             is_anonymous_object: false,
-            enclosing_function: None,
+            enclosure: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -1927,7 +1942,7 @@ impl IrClass {
             fq_name: header.classifier,
             is_source_declared: true,
             is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
-            enclosing_function: None,
+            enclosure: None,
             is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
             is_local_class: flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS),
             is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
@@ -2130,6 +2145,22 @@ impl IrStatic {
     }
 }
 
+/// One sequence of lifted local callables: the source file that declares it, the lexical owner,
+/// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct IrLiftingSequence {
+    pub source: crate::fir::SourceFileId,
+    pub owner: Box<str>,
+    pub container: Box<str>,
+}
+
+/// One position of an [`IrLiftingSequence`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IrLiftingEntry {
+    pub name: Option<Box<str>>,
+    pub lifted: bool,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2190,6 +2221,27 @@ pub struct IrFile {
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
     pub(crate) local_class_name_provenance:
         std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
+    /// The same naming context for each source callable-reference node, by expression id. A target
+    /// that realizes the reference as a class of its own names that class from it.
+    pub(crate) callable_reference_provenance:
+        std::collections::HashMap<u32, IrLocalClassNameProvenance>,
+    /// The executable scope each source callable-reference node is written in, by expression id. A
+    /// target that realizes the reference as a class of its own records that class's enclosure.
+    pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
+    /// Every lifting site the file's bodies declare (see [`crate::fir::FirLiftingSite`]), by
+    /// sequence and source position: the step's source name, and whether it is lifted at all.
+    pub(crate) lifting_sequences: std::collections::HashMap<
+        IrLiftingSequence,
+        std::collections::BTreeMap<u32, IrLiftingEntry>,
+    >,
+    /// The sequence and lifting site of each function lowered from a lambda or local function.
+    pub(crate) lifted_functions:
+        std::collections::HashMap<FunId, (IrLiftingSequence, crate::fir::FirLiftingSite)>,
+    /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
+    /// callables are all lifted, once a target has numbered the sequences.
+    pub(crate) lifted_names: std::collections::HashMap<FunId, String>,
+    /// The class name a target chose for each source callable reference, by expression id.
+    pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
@@ -2381,6 +2433,9 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: std::collections::HashSet<ExprId>,
+    /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
+    /// the same generic `when` written by hand must remain distinguishable.
+    pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
@@ -2761,10 +2816,16 @@ pub struct IrFile {
     /// The distinction it carries cannot be recovered from the descriptor: a value class returned by
     /// declaration (`A.create(): A<String>`, whose mangled method hands back the erased carrier) and
     /// the same value class arriving BOXED out of a generic slot (`List<TokenBox>.get`) both
-    /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, `get`
-    /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
-    /// declared returns are recorded: a nullable value class really is boxed.
+    /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, while
+    /// `get` declares the type parameter `E`, which remains a type-parameter identity rather than
+    /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
+    /// class really is boxed.
     pub call_declared_ret: std::collections::HashMap<u32, Ty>,
+    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
+    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// where it was lowered, not from its shape: an adaptation or widening over the same call is
+    /// another coercion. A target decides whether the conversion crosses a physical result slot.
+    pub declaration_result_coercions: std::collections::HashSet<ExprId>,
     /// Realized dependency-call `ExprId` → declaration parameter types in the order of the call's
     /// ordinary argument vector. These are copied from the provider record selected by FIR, never
     /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
@@ -2773,6 +2834,11 @@ pub struct IrFile {
     /// Dispatch receivers remain separate; static realizations that consume one prepend its selected
     /// semantic receiver before publishing this vector.
     pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
+    /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
+    /// argument order. A generic constructor can consume a value-class box through bare `T` even
+    /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
+    /// consumes this identity-backed fact instead of reinterpreting the descriptor.
+    pub(crate) construction_declared_params: std::collections::HashMap<ExprId, Box<[Ty]>>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether

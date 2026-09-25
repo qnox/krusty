@@ -73,7 +73,7 @@ mod tests {
             max_stack: 2,
             max_locals: 1,
             code: vec![0x1a, 0x06, 0x68, 0xac],
-            source_cp: vec![C::Other],
+            source_cp: vec![C::Other].into(),
             stackmap: None,
             handlers: vec![],
             locals: vec![],
@@ -97,8 +97,8 @@ mod tests {
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
-        // A pure branchless body needs no join frame — appendable at any operand-stack height.
-        assert!(!bs.join_required);
+        // A pure branchless body needs no call-site relayout and is appendable at any stack height.
+        assert!(!bs.needs_relayout);
         assert!(bs.falls_through);
     }
 
@@ -109,7 +109,7 @@ mod tests {
             max_stack: 1,
             max_locals: 0,
             code: vec![0x01, 0xbf],
-            source_cp: vec![C::Other],
+            source_cp: vec![C::Other].into(),
             stackmap: None,
             handlers: vec![],
             locals: vec![],
@@ -132,7 +132,7 @@ mod tests {
         .expect("terminal branchless splice");
 
         assert_eq!(splice.bytes, vec![0x01, 0xbf]);
-        assert!(!splice.join_required);
+        assert!(!splice.needs_relayout);
         assert!(!splice.falls_through);
     }
 

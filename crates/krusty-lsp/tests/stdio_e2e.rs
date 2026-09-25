@@ -802,32 +802,32 @@ fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
         "fun combine(first: Int, second: Int): Int = first + second\n\
          fun use(): Int = combine(second = 2, 1)",
     );
-    let messages: Vec<_> = diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic["message"].as_str().unwrap())
-        .collect();
-
-    assert_eq!(
-        messages,
-        [
-            "Mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
-            "No value passed for parameter 'first'.",
-        ]
-    );
-    assert_eq!(
-        diagnostics[0]["range"],
-        json!({
+    let mixing = json!({
+        "range": {
             "start": {"line": 1, "character": 37},
             "end": {"line": 1, "character": 38}
-        })
-    );
-    assert_eq!(
-        diagnostics[1]["range"],
-        json!({
+        },
+        "severity": 1,
+        "source": "Kotlin",
+        "message": "Mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
+    });
+    let missing = json!({
+        "range": {
             "start": {"line": 1, "character": 17},
             "end": {"line": 1, "character": 24}
-        })
-    );
+        },
+        "severity": 1,
+        "source": "Kotlin",
+        "message": "No value passed for parameter 'first'."
+    });
+    let expected =
+        if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
+            vec![missing, mixing]
+        } else {
+            vec![mixing, missing]
+        };
+
+    assert_eq!(diagnostics, expected);
 }
 
 #[test]

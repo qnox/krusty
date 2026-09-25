@@ -16,25 +16,11 @@
 //! clang is told why they did not run rather than failing on a missing tool.
 
 use super::common;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-/// Whether every function the runtime sources on this branch call is defined by them. The runtime
-/// lands in tiers, and a tier below the last one calls functions a later tier defines; those links
-/// leave the missing symbols unresolved (a driver that reaches one crashes, it does not pass). The
-/// tier that completes the runtime turns this on, and from then on a missing definition fails the
-/// link.
-const RUNTIME_COMPLETE: bool = true;
-
-/// Warnings a tier below the last one cannot help giving. Such a tier DECLARES the internal
-/// functions a later tier defines, and defines helpers only a later tier's code calls; the tier that
-/// completes the runtime turns `RUNTIME_COMPLETE` on and with it every one of these back into an
-/// error.
-const INCOMPLETE_RUNTIME_WARNINGS: &[&str] = &[
-    "-Wno-undefined-internal",
-    "-Wno-unused-function",
-    "-Wno-unused-const-variable",
-];
+use std::sync::OnceLock;
 
 fn runtime_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native/runtime")
@@ -95,16 +81,10 @@ fn build_and_run(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
-            // The runtime's descriptor tables name their leading fields and leave the rest zero, as
-            // C initializers are meant to; every other extra warning stays an error.
+            // Runtime descriptors name the fields they define and intentionally leave the rest
+            // zero-initialized. Keep every other warning an error.
             "-Wno-missing-field-initializers",
         ])
-        .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
-        .args(if RUNTIME_COMPLETE {
-            &[][..]
-        } else {
-            INCOMPLETE_RUNTIME_WARNINGS
-        })
         .arg("-I")
         .arg(runtime_dir())
         .args(&sources)
@@ -402,4 +382,156 @@ fn a_throwable_subclass_is_allocated_at_its_own_size() {
 #[test]
 fn integer_arithmetic_and_exceptions_answer_as_kotlin_does() {
     run_driver("arithmetic_and_exceptions");
+}
+
+fn compiled_build_script() -> PathBuf {
+    static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+    BUILD_SCRIPT
+        .get_or_init(|| {
+            let scratch = common::scratch_dir().expect("scratch directory");
+            let executable = scratch.join("native-runtime-build-script");
+            let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+            let output = Command::new(rustc)
+                .args(["--edition=2021", "build.rs", "-o"])
+                .arg(&executable)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("compile build.rs");
+            assert_eq!(
+                (output.status.success(), output.stdout, output.stderr),
+                (true, Vec::new(), Vec::new()),
+                "build.rs compiles as a standalone build-script executable"
+            );
+            executable
+        })
+        .clone()
+}
+
+fn run_build_script(compiler: &Path, out_dir: &Path) -> Output {
+    Command::new(compiled_build_script())
+        .env("OUT_DIR", out_dir)
+        .env("KRUSTY_RUNTIME_CC", compiler)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run build.rs")
+}
+
+#[test]
+fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let out_dir = scratch.join("missing-runtime-compiler-out");
+    fs::create_dir(&out_dir).expect("create build-script output directory");
+    let missing = scratch.join("compiler-that-does-not-exist");
+
+    let output = run_build_script(&missing, &out_dir);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stderr, b"");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
+        format!(
+            "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=build.rs\n\
+             cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
+             cargo:warning=native runtime: compiler `{}` was not found; no native target will be available. Install clang, or set KRUSTY_RUNTIME_CC.\n\
+             cargo:rerun-if-env-changed=PATH\n",
+            missing.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("prebuilt_runtime.rs"))
+            .expect("read generated runtime table"),
+        "// Generated by build.rs: the native runtime, prebuilt per target.\n\
+         pub const PREBUILT: &[(crate::native::Arch, &[(&str, &[u8])])] = &[\n\
+         ];\n\
+         /// Whether any target's runtime was prebuilt (a C compiler was available when krusty was built).\n\
+         pub const AVAILABLE: bool = false;\n\
+         /// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
+         /// the test that checks the table against them reads it.\n\
+         #[cfg(test)]\n\
+         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_start.c\"];\n"
+    );
+}
+
+#[test]
+fn a_failing_runtime_compiler_fails_the_build() {
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let out_dir = scratch.join("failing-runtime-compiler-out");
+    fs::create_dir(&out_dir).expect("create build-script output directory");
+    let compiler = scratch.join("runtime-compiler-exits-one");
+    fs::write(&compiler, "#!/bin/sh\nexit 1\n").expect("write failing compiler");
+    let mut permissions = fs::metadata(&compiler)
+        .expect("read failing compiler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&compiler, permissions).expect("make failing compiler executable");
+
+    let output = run_build_script(&compiler, &out_dir);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
+        format!(
+            "native runtime: `{}` failed compiling `krusty_rt.c` for \
+             `x86_64-unknown-linux-gnu` (exit status: 1)\n",
+            compiler.display()
+        )
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
+        "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+         cargo:rerun-if-changed=build.rs\n\
+         cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n"
+    );
+    assert!(
+        !out_dir.join("prebuilt_runtime.rs").exists(),
+        "a failed compiler must not publish a partial target table"
+    );
+}
+
+#[test]
+fn a_runtime_object_that_is_not_elf_for_its_target_fails_the_build() {
+    // A `KRUSTY_RUNTIME_CC` that succeeds but writes the wrong thing (a wrapper that adds its own
+    // `--target`, say) would otherwise file one architecture's code under another's name.
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let out_dir = scratch.join("foreign-runtime-object-out");
+    fs::create_dir(&out_dir).expect("create build-script output directory");
+    let compiler = scratch.join("runtime-compiler-writes-text");
+    fs::write(
+        &compiler,
+        "#!/bin/sh\n\
+         while [ $# -gt 0 ]; do\n\
+         \x20 if [ \"$1\" = -o ]; then shift; printf 'not an object' > \"$1\"; fi\n\
+         \x20 shift\n\
+         done\n",
+    )
+    .expect("write foreign-object compiler");
+    let mut permissions = fs::metadata(&compiler)
+        .expect("read foreign-object compiler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&compiler, permissions).expect("make foreign-object compiler executable");
+
+    let output = run_build_script(&compiler, &out_dir);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
+        format!(
+            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` as \
+             something that is not ELF\n",
+            compiler.display()
+        )
+    );
+    assert!(
+        !out_dir.join("prebuilt_runtime.rs").exists(),
+        "a foreign object must not publish a partial target table"
+    );
 }

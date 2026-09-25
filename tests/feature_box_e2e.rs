@@ -629,9 +629,9 @@ fun box(): String {
 }
 "#,
     ),
-    // A non-local `return` through a spliced loop host (`repeat`/`forEach`) — including the unconditional
-    // (diverging-body) form. The splicer relocates the stack-map frame the host's now-unreachable
-    // post-invoke continuation needs.
+    // A non-local `return` through a spliced loop host (`repeat`/`forEach`) — including the
+    // unconditional (diverging-body) form. Final-body dataflow accounts for the now-unreachable
+    // post-invoke continuation.
     (
         "InlineNonLocalReturnThroughLoop",
         r#"
@@ -1023,8 +1023,8 @@ fun box(): String {
     ),
     // `require`/`check`: branchy, NON-public (`@InlineOnly`) `inline fun` from the stdlib. There is no
     // callable method to invoke — kotlinc inlines the body (`if (!cond) throw IllegalXException(…)`), so
-    // krusty splices it via `splice_branchy` (StackMapTable relocate). A passing condition falls through;
-    // a failing one throws. Exercises branchy inline splicing of a non-public callee at statement level.
+    // krusty splices it through the unified bytecode path and final-body analysis derives its frames.
+    // A passing condition falls through; a failing one throws. Exercises a non-public branchy callee.
     (
         "RequireCheck",
         r#"
@@ -1724,8 +1724,8 @@ fun box(): String {
 }
 "#,
     ),
-    // A `let`/`also` body containing a branch (`if`/`when`) can't go through the branchless inline
-    // splice — it falls back to the per-function desugar, which lowers the branchy body normally.
+    // `let`/`also` bodies containing `if`/`when` exercise branchy lambda substitution through the
+    // same unified splice path as straight-line bodies.
     (
         "ScopeFnsBranchy",
         r#"
@@ -1743,8 +1743,7 @@ fun box(): String {
     ),
     // LOOP hosts `forEach`/`map`/`fold` with a (branchless) lambda body: the host iterates, so its body
     // has a back-edge and is INLINED (iterator/hasNext/next loop spliced in — no `invokestatic
-    // CollectionsKt.map`). The universal splicer relocates the host's loop StackMapTable frames around the
-    // spliced lambda body. (A branchy lambda body inside a loop still falls back to a real call.)
+    // CollectionsKt.map`). Final-body analysis computes the loop and lambda frames after splicing.
     (
         "LoopInline",
         r#"
@@ -1892,7 +1891,7 @@ fun box(): String {
     // Inline functions with EXCEPTION HANDLERS (try/catch/finally): `synchronized` (monitorenter; try
     // { block } finally { monitorexit }), `run`/`let` are handler-free, but `synchronized`/`runCatching`/
     // `use` carry an exception table. The splicer relocates each entry's byte offsets + catch_type into
-    // the caller (handler frames are already StackMapTable targets) instead of bailing to a real call.
+    // the caller; final-body dataflow derives handler-entry frames instead of copying input frames.
     (
         "InlineWithHandlers",
         r#"
@@ -1909,10 +1908,9 @@ fun box(): String {
 }
 "#,
     ),
-    // A frame-recording inline HOF call used as a NON-FIRST operand — i.e. at a NON-EMPTY caller operand
-    // baseline (a dispatch receiver / earlier argument already on the stack). `records_frame` must report
-    // the inline splice so the parent operand sequence spills the earlier operands to temps, letting the
-    // splice land at an empty baseline instead of bailing to a real `invokestatic CollectionsKt.*` call.
+    // A control-flow-heavy inline HOF call used as a NON-FIRST operand — i.e. with a dispatch receiver
+    // or earlier argument already evaluated. This guards both valid choices: retain the prefix through
+    // final-body dataflow, or spill it for reference-compiler bytecode layout.
     (
         "InlineHofNonEmptyBaseline",
         r#"
@@ -1932,11 +1930,11 @@ fun box(): String {
     ),
     // `takeIf`/`takeUnless`: BRANCHY host (returns receiver or null per the inlined predicate) with a
     // `Function1` predicate whose body is a COMPARISON — i.e. a branchy lambda body. Exercises the
-    // universal splicer's full frame relocation: the host's StackMapTable frames AND the lambda body's own.
+    // unified splicer's final-body frame computation over both host and substituted lambda control flow.
     // A LOOP host (`map`/`filter` builds a collection) whose lambda body is BRANCHY (a comparison/`if`):
     // `map` keeps the destination collection on the operand stack BELOW the lambda result, so the lambda
-    // body's own StackMapTable frames must be rebased onto that `[Collection]` prefix (computed by the
-    // splicer's forward operand-stack simulation). `forEach`/`fold` exercise the EMPTY-prefix branchy case.
+    // final-body dataflow carries that `[Collection]` prefix through the lambda's branches.
+    // `forEach`/`fold` exercise the empty-prefix branchy case.
     (
         "MapBranchy",
         r#"

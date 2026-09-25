@@ -183,12 +183,11 @@ fun box(): String {{\n\
 /// argument.
 ///
 /// Both compilers reject, and their diagnostics are recorded exactly rather than compared, because
-/// they disagree about more than wording: kotlinc keeps `P` bound from the RECEIVER and reports the
-/// argument against `Plug<App, …>`, while krusty binds `P` from the formal's bound and reports it
-/// against `Plug<Pipe, Any>`. That divergence is not introduced here — it is what the rejecting
-/// path does on both sides of this change — and converging it is its own work. What this fixture
-/// pins is that the call is refused, and by exactly these diagnostics, so a future change to the
-/// solve cannot start accepting it unnoticed.
+/// they still disagree about the formal nothing fixes: both keep `P` bound from the RECEIVER and
+/// report the argument against `Plug<App, …>`, but kotlinc renders the unfixed `B` as
+/// `uninferred B (…)` and adds CANNOT_INFER for it, while krusty renders its bound `Any`.
+/// Converging that is its own work. What this fixture pins is that the call is refused, and by
+/// exactly these diagnostics, so a future change to the solve cannot start accepting it unnoticed.
 #[test]
 fn a_receiver_the_invariant_argument_excludes_is_still_rejected() {
     let main = format!(
@@ -217,7 +216,7 @@ fun probe() {{\n\
                 line: 31,
                 column: 19,
                 message: "argument type mismatch: actual type is 'OtherPlug', but \
-                          'Plug<Pipe, Any>' was expected."
+                          'Plug<App, Any>' was expected."
                     .to_string(),
             },
             common::CompilerError {
@@ -280,9 +279,8 @@ fun box(): String {{\n\
 /// The formal's declared BOUND still constrains a receiver that is the only evidence for it: a
 /// receiver outside the bound is rejected rather than widening the formal to admit it.
 ///
-/// Both compilers reject at the same position; kotlinc's message additionally enumerates why the
-/// candidate did not apply. That wording difference is general and predates this change, so both
-/// texts are recorded rather than matched.
+/// Both compilers reject at the same position; their complete diagnostics are pinned independently
+/// while krusty still calls the reference unresolved.
 #[test]
 fn a_receiver_outside_the_formals_bound_is_still_rejected() {
     let main = format!(
@@ -301,18 +299,24 @@ fun probe() {{\n\
             file: "Main.kt".to_string(),
             line: 23,
             column: 11,
-            message: "unresolved reference 'piped'.".to_string(),
+            message: krusty::diagnostic_wording::unresolved_reference_on("piped", Some("Cfg")),
         }]
     );
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_eq!(reference.len(), 1, "{}", result.reference_stderr);
     assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 23,
-            column: 11,
-            message: "unresolved reference. None of the following candidates is applicable \
-                      because of a receiver type mismatch:"
-                .to_string(),
-        }]
+        (
+            reference[0].file.as_str(),
+            reference[0].line,
+            reference[0].column
+        ),
+        ("Main.kt", 23, 11)
+    );
+    assert_eq!(
+        vec![reference[0].message.clone()],
+        common::recorded_named(
+            "a_receiver_outside_the_formals_bound_is_still_rejected",
+            || { vec![reference[0].message.clone()] }
+        )
     );
 }

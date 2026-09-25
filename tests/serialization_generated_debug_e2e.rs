@@ -1,7 +1,7 @@
 //! Exact debug-table ownership for serialization-generated members.
 
 use super::common;
-use super::serialization_companion_byte_parity_e2e::compare_with_kotlinc_plugin;
+use super::common::compare_with_kotlinc_plugin;
 
 const SERIALIZATION_VERSION: &str = "1.9.0";
 
@@ -30,7 +30,7 @@ fn method_lines(text: &str, member: &str) -> Vec<String> {
         .collect()
 }
 
-fn comparison(class: &str) -> super::serialization_companion_byte_parity_e2e::ReferenceComparison {
+fn comparison(class: &str) -> super::common::ReferenceComparison {
     let plugin = common::kotlinc_lib_dir()
         .unwrap_or_else(|| panic!("reference compiler must be provisioned for this regression"))
         .join("kotlinx-serialization-compiler-plugin.jar");

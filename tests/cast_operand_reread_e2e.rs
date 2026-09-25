@@ -7,9 +7,7 @@
 use std::fmt::Write;
 
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "class CastParts(val first: Any?, val second: Int) {\n\
     \x20   operator fun component1(): Any? = first\n\

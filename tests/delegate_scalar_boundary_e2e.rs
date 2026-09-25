@@ -241,7 +241,7 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
             "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
             "lreturn".to_string(),
         ],
-        "krusty's getX ledger: only the independently owned KProperty carrier differs"
+        "krusty's getX ledger: kotlinc's unbox; only the independently owned KProperty carrier differs"
     );
     assert_eq!(
         body(&ours, "void setX(long)"),
@@ -475,6 +475,7 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
         ],
         "both the extension receiver and the written value are boxed"
     );
+    // kotlinc's own ledgers.
     assert_eq!(
         without_kproperty_carrier(body(&reference, "long getExt(int)")),
         without_kproperty_carrier(body(&ours, "long getExt(int)")),
@@ -1393,9 +1394,24 @@ fn an_inapplicable_member_extension_is_retained_in_the_delegate_diagnostic() {
     );
 }
 
-/// Selection may inspect lower rungs after an inapplicable member, but a total failure diagnoses
-/// only the earliest non-empty candidate family. The sole member result therefore also determines
-/// the property-reference result argument instead of becoming a star projection.
+/// kotlinc's complete ordered ledger for a `Holder` property delegated to a `Cell` whose member,
+/// member extension and top-level extension all reject it, recorded per Kotlin version. Kotlin
+/// 2.4.20 lists every rung's candidate, members first, and with several to blame star-projects the
+/// property reference; earlier releases named only the earliest rung.
+fn mixed_family_failure(source: &str, stem: &str) -> Vec<String> {
+    common::recorded(|| {
+        let dir = common::scratch_dir().expect("scratch dir");
+        kotlinc_error_ledger(
+            source,
+            &format!("{stem}.kt"),
+            &dir.join(format!("{stem}-ref")),
+        )
+    })
+}
+
+/// Selection may inspect lower rungs after an inapplicable member. Before Kotlin 2.4.20 a total
+/// failure diagnoses only the earliest non-empty candidate family, whose sole member result then
+/// determines the property-reference result argument; 2.4.20 lists every family.
 #[test]
 fn inferred_delegate_failure_reports_the_earliest_candidate_family() {
     let source = "class Cell {\n\
@@ -1408,20 +1424,7 @@ fn inferred_delegate_failure_reports_the_earliest_candidate_family() {
                   \x20   operator fun Cell.getValue(owner: Int, property: Any?): Long = 1\n\
                   \x20   val inferred by Cell()\n\
                   }\n";
-    let expected = vec![
-        "9:18: error: property delegate must have a 'getValue(Holder, KProperty1<Holder, Long>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long"
-            .to_string(),
-    ];
-    let dir = common::scratch_dir().expect("scratch dir");
-    assert_eq!(
-        kotlinc_error_ledger(
-            source,
-            "InferredMixedDelegateCandidates.kt",
-            &dir.join("InferredMixedDelegateCandidates-ref"),
-        ),
-        expected,
-        "kotlinc's complete ordered ledger",
-    );
+    let expected = mixed_family_failure(source, "InferredMixedDelegateCandidates");
     assert_eq!(
         common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
         expected,
@@ -1443,20 +1446,7 @@ fn explicit_delegate_failure_reports_the_earliest_candidate_family() {
                   \x20   operator fun Cell.getValue(owner: Int, property: Any?): Long = 1\n\
                   \x20   val explicit: Long by Cell()\n\
                   }\n";
-    let expected = vec![
-        "9:24: error: property delegate must have a 'getValue(Holder, KProperty1<Holder, Long>)' method. None of the following functions is applicable:\nfun getValue(owner: String, property: Any?): Long"
-            .to_string(),
-    ];
-    let dir = common::scratch_dir().expect("scratch dir");
-    assert_eq!(
-        kotlinc_error_ledger(
-            source,
-            "ExplicitMixedDelegateCandidates.kt",
-            &dir.join("ExplicitMixedDelegateCandidates-ref"),
-        ),
-        expected,
-        "kotlinc's complete ordered ledger",
-    );
+    let expected = mixed_family_failure(source, "ExplicitMixedDelegateCandidates");
     assert_eq!(
         common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
         expected,
