@@ -12,6 +12,10 @@
 //! - A primary constructor's descriptor covers every argument, a plain (non-property) parameter
 //!   included, and its `$default` overload's body interns before the data-class members that follow.
 //!
+//! - An attribute name interns with the first method that uses it, `Code` included: an interface
+//!   whose first method is abstract interns that method's `Signature` and annotation names before
+//!   the `Code` of a later default body.
+//!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
 use super::common;
@@ -133,5 +137,17 @@ fn a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call(
         "open class Base(val s: String)\n\
          class Derived(label: String, n: Int) : Base(label + n)\n",
         &["Base", "Derived"],
+    );
+}
+
+#[test]
+fn an_abstract_first_method_interns_its_attribute_names_before_code() {
+    assert_identical(
+        "AbstractFirst",
+        "interface Source<T> {\n\
+         \x20   fun take(label: String): T\n\
+         \x20   fun first(label: String): T = take(label)\n\
+         }\n",
+        &["Source"],
     );
 }

@@ -2482,6 +2482,7 @@ impl ClassWriter {
         // sequence so both come out byte-identical.
         #[derive(PartialEq)]
         enum An {
+            Code,
             Lnt,
             Lvt,
             Dep,
@@ -2549,16 +2550,15 @@ impl ClassWriter {
                 field_ria = Some(self.cp.utf8("RuntimeInvisibleAnnotations"));
             }
         }
-        // kotlinc interns `Code` only when a method actually has one — an `interface` with no bodies
-        // has none, and an unused attribute name would diverge.
-        let code_attr_name = if self.methods.iter().any(|m| m.code.is_some()) {
-            self.cp.utf8("Code")
-        } else {
-            0
-        };
         // First-use order of the per-method attribute names, in method emit order.
         let mut seq: Vec<An> = Vec::new();
         for m in &self.methods {
+            // `Code` interns with the first method that has a body, ahead of its sub-attributes: an
+            // interface whose first method is abstract interns that method's `Signature` or
+            // annotation names before `Code` (ASM's per-method `computeMethodInfoSize`).
+            if m.code.is_some() && !seq.contains(&An::Code) {
+                seq.push(An::Code);
+            }
             // ASM interns StackMapTable during code emission, before debug attributes.
             if m.stackmap.is_some() && !seq.contains(&An::Smt) {
                 seq.push(An::Smt);
@@ -2594,6 +2594,8 @@ impl ClassWriter {
         }
         let (mut lnt_attr_name, mut lvt_attr_name, mut stackmap_attr_name, mut ripa_attr_name) =
             (None, None, None, None);
+        // Unused when no method has a body: an unused attribute name would diverge from kotlinc.
+        let mut code_attr_name = 0;
         // A method-level `RuntimeVisibleAnnotations` shares its attribute-name entry with the class
         // annotations when both are present; the class table is written later, so intern on first
         // METHOD use here and let that later write reuse the index.
@@ -2606,6 +2608,7 @@ impl ClassWriter {
         let mut invis_ann_name = field_ria;
         for k in &seq {
             match k {
+                An::Code => code_attr_name = self.cp.utf8("Code"),
                 An::Lnt => lnt_attr_name = Some(self.cp.utf8("LineNumberTable")),
                 An::Lvt => lvt_attr_name = Some(self.cp.utf8("LocalVariableTable")),
                 An::Ria => invis_ann_name = Some(self.cp.utf8("RuntimeInvisibleAnnotations")),

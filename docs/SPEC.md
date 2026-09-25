@@ -4535,6 +4535,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the first code krusty emits, so it interns its null checks, super call and stores in order by
   itself. The all-defaults no-argument `<init>()` interns its header before its body, as ASM visits
   it. Test: `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_annotated_and_checked_before_the_super_call`.
+- **An attribute name interns with the first method that uses it, `Code` included.** ASM interns a
+  method's attribute names when it sizes that method, in method order: `Code` and its
+  sub-attributes, then `Signature`, `Deprecated` and the annotation attributes. krusty interned
+  `Code` ahead of every method's names, so an interface whose first method is abstract put `Code`
+  before that method's `Signature` or `RuntimeInvisibleParameterAnnotations`. `Code` now joins the
+  per-method first-use sequence. Test:
+  `tests/method_pool_order_e2e.rs::an_abstract_first_method_interns_its_attribute_names_before_code`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
