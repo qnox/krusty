@@ -1410,54 +1410,8 @@ impl JvmLibraries {
         None
     }
 
-    fn counted_loop_info_for_type(&self, internal: &str) -> Option<CountedLoopInfo> {
-        let unit_step = |elem, first_desc, last_desc| CountedLoopInfo {
-            elem,
-            first: Self::range_accessor("getFirst", first_desc),
-            last: Self::range_accessor("getLast", last_desc),
-            step: None,
-        };
-        let progression = |elem, first_desc, last_desc, step_desc, step_ty| CountedLoopInfo {
-            elem,
-            first: Self::range_accessor("getFirst", first_desc),
-            last: Self::range_accessor("getLast", last_desc),
-            step: Some((Self::range_accessor("getStep", step_desc), step_ty)),
-        };
-        Some(match internal {
-            "kotlin/ranges/IntRange" => unit_step(Ty::Int, "()I", "()I"),
-            "kotlin/ranges/LongRange" => unit_step(Ty::Long, "()J", "()J"),
-            "kotlin/ranges/IntProgression" => progression(Ty::Int, "()I", "()I", "()I", Ty::Int),
-            "kotlin/ranges/LongProgression" => progression(Ty::Long, "()J", "()J", "()J", Ty::Long),
-            "kotlin/ranges/CharProgression" => progression(Ty::Char, "()C", "()C", "()I", Ty::Int),
-            "kotlin/ranges/UIntRange" => CountedLoopInfo {
-                elem: Ty::UInt,
-                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
-                last: self.member_accessor_by_prefix(internal, "getLast-")?,
-                step: None,
-            },
-            "kotlin/ranges/ULongRange" => CountedLoopInfo {
-                elem: Ty::ULong,
-                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
-                last: self.member_accessor_by_prefix(internal, "getLast-")?,
-                step: None,
-            },
-            "kotlin/ranges/UIntProgression" => CountedLoopInfo {
-                elem: Ty::UInt,
-                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
-                last: self.member_accessor_by_prefix(internal, "getLast-")?,
-                step: Some((Self::range_accessor("getStep", "()I"), Ty::Int)),
-            },
-            "kotlin/ranges/ULongProgression" => CountedLoopInfo {
-                elem: Ty::ULong,
-                first: self.member_accessor_by_prefix(internal, "getFirst-")?,
-                last: self.member_accessor_by_prefix(internal, "getLast-")?,
-                step: Some((Self::range_accessor("getStep", "()J"), Ty::Long)),
-            },
-            _ => return None,
-        })
-    }
-
-    fn counted_loop_info_for_name(&self, internal: TypeName) -> Option<CountedLoopInfo> {
+    /// The accessors a counted loop reads from a range or progression value of class `internal`.
+    pub(super) fn counted_loop_info_for_name(&self, internal: TypeName) -> Option<CountedLoopInfo> {
         let unit_step = |elem, first_desc, last_desc| CountedLoopInfo {
             elem,
             first: Self::range_accessor("getFirst", first_desc),
@@ -1474,6 +1428,8 @@ impl JvmLibraries {
             unit_step(Ty::Int, "()I", "()I")
         } else if internal.matches("kotlin/ranges/LongRange") {
             unit_step(Ty::Long, "()J", "()J")
+        } else if internal.matches("kotlin/ranges/CharRange") {
+            unit_step(Ty::Char, "()C", "()C")
         } else if internal.matches("kotlin/ranges/IntProgression") {
             progression(Ty::Int, "()I", "()I", "()I", Ty::Int)
         } else if internal.matches("kotlin/ranges/LongProgression") {
@@ -6062,7 +6018,8 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn iterable_element_type(&self, internal: &str) -> Option<Ty> {
-        self.counted_loop_info_for_type(internal)
+        existing_type_name(internal)
+            .and_then(|internal| self.counted_loop_info_for_name(internal))
             .map(|info| info.elem)
     }
 

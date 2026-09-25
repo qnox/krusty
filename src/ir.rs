@@ -41,6 +41,7 @@ mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
 mod lowering_options;
+mod progression;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
@@ -55,6 +56,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use lowering_options::CommonLoweringOptions;
+pub use progression::IrProgressionMember;
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -568,6 +570,12 @@ pub enum IrCheckedOperation {
         end: ExprId,
         negated: bool,
         counter: Ty,
+    },
+    /// `progression.member`, where `class` is the progression's static type.
+    ProgressionMember {
+        progression: ExprId,
+        class: Ty,
+        member: IrProgressionMember,
     },
     RangeLoop {
         variable: u32,

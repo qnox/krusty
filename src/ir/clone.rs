@@ -170,6 +170,9 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *start = map(*start);
                 *end = map(*end);
             }
+            IrCheckedOperation::ProgressionMember { progression, .. } => {
+                *progression = map(*progression);
+            }
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {

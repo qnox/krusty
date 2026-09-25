@@ -5,7 +5,7 @@ use crate::fir::{
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic};
 use crate::types::Ty;
 
-use super::counted_loops::CountedLoop;
+use super::counted_loops::{CountedLoop, ProgressionLoop};
 use super::source_calls::SameFileExtensionReceiverMode;
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -66,6 +66,17 @@ impl BodyLowering<'_> {
                 operation: *operation,
                 start: *start,
                 end: *end,
+                body,
+            }),
+            FirLoopHeader::Progression {
+                variable,
+                progression,
+                iterable,
+            } => self.progression_loop(ProgressionLoop {
+                target,
+                variable: *variable,
+                progression: *progression,
+                iterable: *iterable,
                 body,
             }),
             FirLoopHeader::Iterable {

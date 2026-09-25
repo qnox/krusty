@@ -1217,6 +1217,7 @@ fn specialize_checked_operation(
         }
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
+        IrCheckedOperation::ProgressionMember { class, .. } => specialize_ty(class, bindings),
         IrCheckedOperation::CallableReference {
             target,
             function_type,
