@@ -2,9 +2,10 @@
 //!
 //! kotlinc does not write its temporaries onto the operand stack while generating code; it writes
 //! them as locals and lets a bytecode pass fold them (see `bytecode_passes::temporaries`). This is
-//! the place krusty does the same. It runs when the class is written, because only then is every
-//! table final: several line and local-variable tables are attached after a method is added, and
-//! which values are temporaries depends on them. The method is read back into a
+//! the place krusty does the same. The rewrite is first decided when a method is added, so frame
+//! classes are interned in kotlinc's order, and that outcome is reused when the class is written if
+//! every table the decision read is unchanged. Methods whose line or local-variable tables are
+//! attached later are decided again from those final tables. The method is read back into a
 //! [`MethodNode`](crate::jvm::method_node::MethodNode) (see [`finished_node`]), kotlinc's passes run over it, and it is laid out again: every table
 //! keyed by a byte offset — exception ranges, line numbers, local ranges, the implicit return —
 //! hangs off a label and moves with it.
@@ -391,16 +392,30 @@ mod tests {
     #[test]
     fn a_rewrite_decided_when_the_method_is_added_is_the_one_written() {
         let mut writer = writer_with_temporary();
-        let method = &writer.methods[0];
-        let source = method.rewrite_source.as_deref().expect("rewrite source");
-        let decided = source.decided.as_ref().expect("decided when added");
-        let fresh = writer
-            .rewritten(method, source)
-            .expect("the temporary folds");
-        let remembered = decided.outcome.as_ref().expect("remembered rewrite");
+        let fresh = {
+            let method = &writer.methods[0];
+            let source = method.rewrite_source.as_deref().expect("rewrite source");
+            writer
+                .rewritten(method, source)
+                .expect("the temporary folds")
+        };
+        // Make the remembered result observably different from a fresh rewrite. The line is valid
+        // but is not part of the source method, so it can reach the method only through reuse.
+        let remembered_line = vec![(0, 7)];
+        let source = writer.methods[0]
+            .rewrite_source
+            .as_deref_mut()
+            .expect("rewrite source");
+        let remembered = source
+            .decided
+            .as_mut()
+            .and_then(|decided| decided.outcome.as_mut())
+            .expect("remembered rewrite");
         assert_eq!(remembered.code, fresh.code);
+        remembered.lnt.clone_from(&remembered_line);
         writer.rewrite_methods();
         assert_eq!(writer.methods[0].code.as_deref(), Some(&fresh.code[..]));
+        assert_eq!(writer.methods[0].lnt, remembered_line);
     }
 
     #[test]
