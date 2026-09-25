@@ -107,15 +107,18 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, route: Route<'_, '_
     // The continuation is named from the recorded source identity, never reconstructed from a
     // value-class-mangled JVM name (or truncated at a valid backticked `-`).
     let source_name = continuation_source_name(ir, fid);
+    // A member's continuation nests under its class, a top-level function's under the facade.
+    let receiver = ir.functions[fid as usize].dispatch_receiver;
+    let owner = receiver.map_or_else(|| route.facade.to_string(), |owner| owner.render());
     let continuation_class =
-        continuation_class_name(route.facade, source_name, continuation_ordinal(ir, fid));
+        continuation_class_name(&owner, source_name, continuation_ordinal(ir, fid));
     build_continuation_class(
         ir,
         &continuation_class,
         fid,
         &SpillLayout::default(),
         &[],
-        None,
+        receiver,
         &declared_params,
     );
     let function = &ir.functions[fid as usize];
@@ -124,9 +127,9 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, route: Route<'_, '_
         continuation_class.clone(),
         ContinuationMetadata {
             m: name.clone(),
-            c: route.facade.replace('/', "."),
+            c: owner.replace('/', "."),
             v: 2,
-            enclosing_class: route.facade.to_string(),
+            enclosing_class: owner,
             enclosing_method: name,
             enclosing_descriptor: crate::jvm::names::method_descriptor(
                 &function.params,
@@ -154,8 +157,12 @@ fn eligible_points(
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
+    // An open member's machine lives in its `$suspendImpl`, a later step.
+    let final_member = !function.is_static
+        && function.dispatch_receiver.is_some()
+        && !ir.open_methods.contains(&fid);
     if !route.context.null_out_dead_spills
-        || !top_level
+        || !(top_level || final_member)
         || ir.private_methods.contains(&fid)
         || !ir.fn_decl_lines.contains_key(&fid)
         || ir.suspend_lambda_sm.iter().any(|(lambda, _, _)| *lambda == fid)

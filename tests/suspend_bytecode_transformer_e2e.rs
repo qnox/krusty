@@ -1,5 +1,6 @@
-//! Top-level suspend functions whose state machine kotlinc's coroutine transformer builds from the
-//! finished method (`docs/JVM_INLINE_BEFORE_CPS.md` §1a, step 2).
+//! Top-level and final member suspend functions whose state machine kotlinc's coroutine
+//! transformer builds from the finished method (`docs/JVM_INLINE_BEFORE_CPS.md` §1a, steps 2
+//! and 3).
 //!
 //! The emitter marks each suspension point as kotlinc's codegen does and the transformer rewrites
 //! the method when its class is written. The continuation class it describes (spill fields, then
@@ -16,11 +17,17 @@ suspend fun work(count: Int, ref: String): Int {\n\
     return v + count + ref.length\n\
 }\n";
 
+/// `class` compiled by both compilers, against the standard library. Without it krusty's runtime
+/// capabilities do not include the spill clean-up the transformer needs, and the IR machine builds
+/// the function instead.
+fn transformed_class_diff(name: &str, src: &str, class: &str) -> Option<Result<(), String>> {
+    common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()])
+}
+
 #[test]
 fn a_continuation_spilling_an_int_and_a_reference_matches_kotlinc() {
-    let result =
-        common::byte_diff_against_kotlinc("TransformerWork", WORK, "TransformerWorkKt$work$1")
-            .expect("reference kotlinc is provisioned");
+    let result = transformed_class_diff("TransformerWork", WORK, "TransformerWorkKt$work$1")
+        .expect("reference kotlinc is provisioned");
     result.expect("the continuation class is byte-identical to kotlinc's");
 }
 
@@ -36,7 +43,7 @@ fn the_transformed_function_s_instructions_match_kotlinc() {
         "TransformerWorkCodeKt",
         "public static final java.lang.Object work(",
     ) {
-        None => eprintln!("skipping: reference kotlinc unavailable"),
+        None => panic!("reference kotlinc is provisioned"),
         Some(Ok(())) => {}
         Some(Err(difference)) => panic!("{difference}"),
     }
@@ -50,9 +57,8 @@ suspend fun work(count: Int, ref: String) {\n\
     leaf()\n\
     leaf()\n\
 }\n";
-    let result =
-        common::byte_diff_against_kotlinc("TransformerUnit", src, "TransformerUnitKt$work$1")
-            .expect("reference kotlinc is provisioned");
+    let result = transformed_class_diff("TransformerUnit", src, "TransformerUnitKt$work$1")
+        .expect("reference kotlinc is provisioned");
     result.expect("the continuation class is byte-identical to kotlinc's");
 }
 
@@ -122,4 +128,51 @@ fun box(): String {\n\
     return first + run(::k) + run(::k).drop(1)\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "TransformerLambdaNames");
+}
+
+const MEMBERS: &str = "suspend fun leaf() {}\n\
+suspend fun value(): Int = 1\n\
+class Box(val base: Int) {\n\
+    suspend fun work(count: Int, ref: String): Int {\n\
+        leaf()\n\
+        val v = value()\n\
+        return v + count + ref.length + base\n\
+    }\n\
+}\n\
+object Single {\n\
+    suspend fun work(count: Int): Int {\n\
+        leaf()\n\
+        return count + value()\n\
+    }\n\
+}\n";
+
+#[test]
+fn a_final_member_s_continuation_captures_its_receiver_like_kotlinc() {
+    // The continuation nests under the class and takes the receiver as `this$0`, which
+    // `invokeSuspend` re-enters the member through.
+    for class in ["Box$work$1", "Single$work$1"] {
+        let result = transformed_class_diff("TransformerMembers", MEMBERS, class)
+            .expect("reference kotlinc is provisioned");
+        result.expect("the continuation class is byte-identical to kotlinc's");
+    }
+}
+
+#[test]
+fn a_final_member_s_instructions_match_kotlinc() {
+    for (class, method) in [
+        ("Box", "public final java.lang.Object work("),
+        ("Single", "public final java.lang.Object work("),
+    ] {
+        match common::method_code_diff_against_kotlinc(
+            "TransformerMemberCode",
+            &[],
+            MEMBERS,
+            class,
+            method,
+        ) {
+            None => panic!("reference kotlinc is provisioned"),
+            Some(Ok(())) => {}
+            Some(Err(difference)) => panic!("{difference}"),
+        }
+    }
 }
