@@ -2421,6 +2421,12 @@ impl Visibility {
     pub fn is_private(self) -> bool {
         self == Visibility::Private
     }
+
+    /// Kotlin's `Visibility.isPublicAPI`: visible outside the module through inheritance or
+    /// directly (`public`, `protected`).
+    pub fn is_public_api(self) -> bool {
+        matches!(self, Visibility::Public | Visibility::Protected)
+    }
 }
 
 /// The metadata-declared reflection function interface. Callable-reference parameter/return shape is

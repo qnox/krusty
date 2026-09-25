@@ -91,7 +91,7 @@ fn value_class_constructor_realization_name_round_trips() {
         &[],
         &[],
         &ClassTail {
-            inline_underlying: Some(("value", Ty::String)),
+            inline_underlying: Some(("value", Some(Ty::String))),
             ctor_sig_name: Some("constructor-impl"),
             ..Default::default()
         },
@@ -146,33 +146,6 @@ fn secondary_constructor_default_flags_round_trip() {
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].params.names, ["required", "fallback"]);
     assert_eq!(constructors[0].params.defaults, defaults);
-}
-
-#[test]
-fn class_member_equality_bound_round_trips() {
-    let owner = Ty::obj("sample/Base");
-    let mut equals = FnMeta::plain(
-        "equals".to_string(),
-        vec![("other".to_string(), Ty::nullable(Ty::obj("kotlin/Any")))],
-        Ty::Boolean,
-    );
-    equals.equality_bound = Some(owner);
-    let (d1, d2) = build_class(
-        type_name("sample/Base"),
-        &[],
-        "()V",
-        &[],
-        &[equals],
-        &[],
-        &ClassTail::default(),
-    );
-    let ci = class_info("sample/Base", d1, d2);
-    let equals = class_functions(&ci)
-        .iter()
-        .find(|function| function.jvm_name == "equals")
-        .expect("equals metadata");
-
-    assert_eq!(equals.equality_bound, Some(owner));
 }
 
 #[test]
@@ -255,7 +228,6 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "pair".to_string(),
-        equality_bound: None,
         params: vec![
             (
                 "outer".to_string(),
@@ -336,7 +308,6 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "triple".to_string(),
-        equality_bound: None,
         params: vec![parameter(&outer), parameter(&middle), parameter(&own)],
         ret: Ty::Unit,
         type_params: Vec::new(),
@@ -447,7 +418,6 @@ fn package_value_param_defaults_round_trip() {
         decl_order: 0,
         jvm_name: None,
         name: "host".to_string(),
-        equality_bound: None,
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
         receiver: None,
@@ -497,7 +467,6 @@ fn package_function_type_parameter_bound_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "identity".to_string(),
-        equality_bound: None,
         params: vec![("value".to_string(), t)],
         ret: t,
         receiver: None,
@@ -549,7 +518,6 @@ fn package_extension_receiver_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "composable".to_string(),
-        equality_bound: None,
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
         receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
@@ -610,7 +578,6 @@ fn package_receiver_function_type_param_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "NavHost".to_string(),
-        equality_bound: None,
         params: vec![(
             "builder".to_string(),
             Ty::fun_with_shape(

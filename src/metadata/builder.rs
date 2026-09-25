@@ -87,8 +87,6 @@ pub struct FnMeta {
     pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
-    /// Semantic `ValueParameter.equality_bound_type` for `equals`' first ordinary value parameter.
-    pub equality_bound: Option<Ty>,
 }
 
 #[cfg(test)]
@@ -123,7 +121,6 @@ impl FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
-            equality_bound: None,
         }
     }
 }
@@ -520,15 +517,6 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             }
         }
         crate::metadata::class_builder::append_param_annotations(st, &mut vp, annotations);
-        if i == f.context_count {
-            if let Some(bound) = f.equality_bound {
-                let bound = encode_declared_type(st, bound, crate::spelling::Spelled::NONE, &tps)
-                    .unwrap_or_else(|error| {
-                        panic!("invalid emitted equality bound for '{}': {error}", f.name)
-                    });
-                vp.field_message(9, &bound);
-            }
-        }
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.

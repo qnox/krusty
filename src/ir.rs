@@ -2525,10 +2525,6 @@ pub struct IrFile {
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
     pub fn_param_no_infer: std::collections::HashMap<u32, Vec<bool>>,
-    /// Function id → semantic strict-equality bound declared on `equals`' value parameter.
-    /// Resolution owns the annotation lookup and class-literal checking; common lowering only
-    /// preserves the resulting type so Kotlin metadata can publish it to dependent modules.
-    pub fn_equality_bounds: std::collections::HashMap<u32, Ty>,
     /// Class identity → per-primary-constructor-parameter checked default expression (`None` =
     /// required). This is the target-neutral constructor contract. A target backend consumes it when
     /// choosing that class's physical default-argument ABI; common lowering does not distinguish value
@@ -2996,7 +2992,6 @@ pub struct IrPackageFunction {
     pub vararg_index: Option<usize>,
     pub visibility: crate::types::Visibility,
     pub spellings: crate::spelling::DeclaredSpellings,
-    pub equality_bound: Option<Ty>,
     pub source_order: u32,
 }
 
