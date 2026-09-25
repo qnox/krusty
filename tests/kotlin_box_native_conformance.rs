@@ -7,11 +7,11 @@
 //!
 //! **Skipping is recorded; miscompiling is not permitted.** The native generator covers a subset of
 //! Kotlin and declines the rest by name, and the frontend rejects some cases outright. Each case
-//! that does either is listed, with which of the two it is, in `native_box_expected_declines.txt`:
+//! that does either is listed, with which of the two it is, in `native_box_expected_declines/<version>.txt`:
 //! the coverage RATCHET. A case that newly declines or is newly rejected fails the test, and so does
 //! a listed case that now passes, so coverage can only grow and the ledger only shrink, each
 //! explicitly. A case that compiles and links and then answers anything other than `OK`, exits
-//! nonzero, or does not finish, is a FAILURE unless `native_box_expected_failures.txt` names it as a
+//! nonzero, or does not finish, is a FAILURE unless `native_box_expected_failures/<version>.txt` names it as a
 //! known defect elsewhere in the compiler. A compiler PANIC is a failure wherever it was raised.
 //!
 //! Every ledger entry is held to its outcome: an entry the corpus no longer has, or whose case now
@@ -186,21 +186,39 @@ thread_local! {
 /// test; so does a listed case that passes, so the list can only shrink honestly. These are
 /// frontend and common-lowering defects the JVM lane fails on too — the native lane inherits
 /// them and must not hide them.
-const EXPECTED_FAILURES: &str = include_str!("native_box_expected_failures.txt");
+const EXPECTED_FAILURES: &str = "native_box_expected_failures";
 
 /// Cases the native lane does not run, and why: `<path><TAB>declined` for a construct the generator
 /// declines, `<path><TAB>frontend` for a source the frontend rejects. The coverage ratchet: a case
 /// that newly declines or is rejected fails the test, and so does a listed case that now passes or
 /// now answers differently. Regenerate it with `KRUSTY_NATIVE_BOX_WRITE_LEDGER=<path>`, which
 /// writes every case's entry from the run and suspends this ledger's checks for it.
-const EXPECTED_DECLINES: &str = include_str!("native_box_expected_declines.txt");
+const EXPECTED_DECLINES: &str = "native_box_expected_declines";
+
+/// A ledger's file for the Kotlin release this run targets, `tests/<ledger>/<version>.txt`, and its
+/// text. Each release has its own, as the JVM lane's `box_expected_failures` do: releases add, mute
+/// and rewrite corpus cases, so one list cannot describe them all. A missing file is an empty
+/// ledger.
+fn ledger_file(ledger: &str) -> (String, String) {
+    let version = krusty::kotlin_version::target();
+    let name = format!("{ledger}/{version}.txt");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(&name);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!("reading {}: {error}", path.display()),
+    };
+    (name, text)
+}
 
 /// One ledger's `<path><TAB><value>` lines, comments and blank lines skipped.
-fn ledger(text: &'static str) -> BTreeMap<&'static str, &'static str> {
+fn ledger(text: &str) -> BTreeMap<String, String> {
     text.lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('\t'))
-        .map(|(path, value)| (path.trim(), value.trim()))
+        .map(|(path, value)| (path.trim().to_string(), value.trim().to_string()))
         .collect()
 }
 
@@ -383,7 +401,10 @@ fn a_ledger_skips_comments_and_blank_lines() {
     let parsed = ledger(text);
     assert_eq!(
         parsed.into_iter().collect::<Vec<_>>(),
-        vec![("a/b.kt", "declined"), ("c.kt", "frontend")]
+        vec![
+            ("a/b.kt".to_string(), "declined".to_string()),
+            ("c.kt".to_string(), "frontend".to_string())
+        ]
     );
 }
 
@@ -498,8 +519,10 @@ fn kotlin_codegen_box_native_conformance() {
         let file = info.location().map(|location| location.file().to_string());
         LAST_PANIC_FILE.with(|last| *last.borrow_mut() = file);
     }));
-    let known = ledger(EXPECTED_FAILURES);
-    let expected_declines = ledger(EXPECTED_DECLINES);
+    let (failures_name, failures_text) = ledger_file(EXPECTED_FAILURES);
+    let (declines_name, declines_text) = ledger_file(EXPECTED_DECLINES);
+    let known = ledger(&failures_text);
+    let expected_declines = ledger(&declines_text);
     let ledger_out = std::env::var("KRUSTY_NATIVE_BOX_WRITE_LEDGER").ok();
     // Held to the ratchet only where the ledger describes the corpus, and not while it is being
     // rewritten from this very run.
@@ -559,7 +582,7 @@ fn kotlin_codegen_box_native_conformance() {
     // every shard sees the same corpus.
     if provisioned && first_shard {
         for path in known.keys().chain(expected_declines.keys()) {
-            if !corpus_cases.contains(*path) {
+            if !corpus_cases.contains(path) {
                 failed.push((
                     PathBuf::from(path),
                     "a ledger entry for a case the corpus does not have: remove it".to_string(),
@@ -575,24 +598,22 @@ fn kotlin_codegen_box_native_conformance() {
         // The decline ledger holds a case to the kind it records; any other outcome of a listed
         // case, and any decline or rejection it does not list, fails the ratchet.
         if ratchet {
-            let listed = expected_declines.get(relative.as_str()).copied();
+            let listed = expected_declines.get(relative.as_str()).map(String::as_str);
             let kind = decline_kind(&result);
             if listed != kind {
                 let reason = match (listed, kind, &result) {
                     (Some(_), None, Outcome::Pass) => {
-                        "listed in native_box_expected_declines.txt but passes now: remove it"
-                            .to_string()
+                        format!("listed in {declines_name} but passes now: remove it")
                     }
-                    (Some(listed), None, other) => format!(
-                        "listed in native_box_expected_declines.txt as {listed}, but {other:?}"
-                    ),
-                    (Some(listed), Some(kind), other) => format!(
-                        "listed in native_box_expected_declines.txt as {listed}, but {kind}: \
-                         {other:?}"
-                    ),
+                    (Some(listed), None, other) => {
+                        format!("listed in {declines_name} as {listed}, but {other:?}")
+                    }
+                    (Some(listed), Some(kind), other) => {
+                        format!("listed in {declines_name} as {listed}, but {kind}: {other:?}")
+                    }
                     (None, Some(kind), other) => format!(
                         "newly {kind}, a coverage regression: {other:?}; lower it, or record it \
-                         in native_box_expected_declines.txt"
+                         in {declines_name}"
                     ),
                     (None, None, _) => unreachable!("equal"),
                 };
@@ -608,10 +629,7 @@ fn kotlin_codegen_box_native_conformance() {
         {
             failed.push((
                 file.clone(),
-                format!(
-                    "listed in native_box_expected_failures.txt, but no longer fails: {result:?}; \
-                     remove it"
-                ),
+                format!("listed in {failures_name}, but no longer fails: {result:?}; remove it"),
             ));
             continue;
         }

@@ -5,7 +5,7 @@
 //! a program's objects against these; nothing is compiled from C at a user's build. See the module
 //! comment in `build.rs` for why this is Go's arrangement and what it costs.
 
-use super::Arch;
+use super::NativeTarget;
 
 include!(concat!(env!("OUT_DIR"), "/prebuilt_runtime.rs"));
 
@@ -15,13 +15,13 @@ pub fn prebuilt_available() -> bool {
     AVAILABLE
 }
 
-/// The prebuilt runtime objects for `arch`, or `None` if krusty was built without a C compiler able
-/// to target it. The objects make Linux system calls; Linux is the only operating system a target
-/// names, so an architecture identifies them.
-pub fn runtime_objects(arch: Arch) -> Option<&'static [(&'static str, &'static [u8])]> {
+/// The prebuilt runtime objects for `target`, or `None` if krusty was built without a C compiler
+/// able to target it. The table is keyed by the whole target, architecture and operating system,
+/// because the objects make one operating system's system calls for one instruction set.
+pub fn runtime_objects(target: NativeTarget) -> Option<&'static [(&'static str, &'static [u8])]> {
     PREBUILT
         .iter()
-        .find(|(candidate, _)| *candidate == arch)
+        .find(|(candidate, _)| *candidate == target)
         .map(|(_, objects)| *objects)
 }
 
@@ -88,17 +88,15 @@ mod tests {
         // of the table with only a build warning. CI has the compiler for every target, so there
         // the table is every supported target, in the supported order.
         if std::env::var_os("CI").is_some() {
-            let built: Vec<Arch> = PREBUILT.iter().map(|(arch, _)| *arch).collect();
-            let supported: Vec<Arch> = crate::native::NativeTarget::ALL
-                .iter()
-                .map(|target| target.arch)
-                .collect();
+            let built: Vec<NativeTarget> = PREBUILT.iter().map(|(target, _)| *target).collect();
             assert_eq!(
-                built, supported,
+                built,
+                NativeTarget::ALL,
                 "CI must prebuild the runtime for every supported target"
             );
         }
-        for (arch, objects) in PREBUILT {
+        for (target, objects) in PREBUILT {
+            let arch = target.arch;
             let names: Vec<&str> = objects.iter().map(|(name, _)| *name).collect();
             let expected: Vec<String> = SOURCES
                 .iter()
@@ -109,21 +107,21 @@ mod tests {
                         .to_string()
                 })
                 .collect();
-            assert_eq!(names, expected, "{arch:?}: one object per runtime source");
+            assert_eq!(names, expected, "{target}: one object per runtime source");
             let mut defined = HashSet::new();
             let mut undefined = Vec::new();
             for (name, bytes) in objects.iter() {
-                assert_eq!(&bytes[..4], b"\x7fELF", "{arch:?}/{name} is not ELF");
+                assert_eq!(&bytes[..4], b"\x7fELF", "{target}/{name} is not ELF");
                 assert_eq!(
                     (bytes[4], bytes[5]),
                     (2, 1),
-                    "{arch:?}/{name} is not 64-bit little-endian"
+                    "{target}/{name} is not 64-bit little-endian"
                 );
-                assert_eq!(u16_at(bytes, 16), 1, "{arch:?}/{name} is not a relocatable");
+                assert_eq!(u16_at(bytes, 16), 1, "{target}/{name} is not a relocatable");
                 assert_eq!(
                     u16_at(bytes, 18),
                     arch.elf_machine(),
-                    "{arch:?}/{name} is code for another machine"
+                    "{target}/{name} is code for another machine"
                 );
                 let (defines, needs) = symbols(bytes);
                 defined.extend(defines);
@@ -135,7 +133,7 @@ mod tests {
             for (object, symbol) in undefined {
                 assert!(
                     defined.contains(&symbol) || symbol == "kt_program_entry",
-                    "{arch:?}/{object} needs `{symbol}`, which no runtime object defines"
+                    "{target}/{object} needs `{symbol}`, which no runtime object defines"
                 );
             }
         }
