@@ -31,6 +31,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_pool_seed;
 mod condition_emission;
 mod constructor_defaults;
 mod coroutine_machine;
@@ -65,6 +66,9 @@ mod scalar_coercion;
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
+use class_pool_seed::{
+    seed_data_class_pool, seed_plain_class_pool, seed_plain_constructor_tail, PlainClassPoolSeed,
+};
 use try_emission::FinallyRegion;
 mod secondary_constructor;
 mod static_fields;
@@ -801,6 +805,18 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
 /// constructor parameters — a BODY property (`val y: Int = 2`) is a field but not a ctor argument.
+/// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
+fn primary_ctor_descriptor(c: &IrClass) -> String {
+    format!("({})V", primary_ctor_parameter_descs(c))
+}
+
+fn primary_ctor_parameter_descs(c: &IrClass) -> String {
+    class_ctor_jvm_tys(c)
+        .into_iter()
+        .map(crate::jvm::names::type_descriptor)
+        .collect()
+}
+
 fn ctor_field_descs(c: &IrClass) -> String {
     c.fields
         .iter()
@@ -2571,206 +2587,6 @@ fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> 
         owner = "java/lang/Object".to_owned();
     }
     Some(owner)
-}
-
-struct PlainClassPoolSeed<'a, 'symbols> {
-    formatter: &'a JvmSignatureFormatter<'symbols>,
-    ir: &'a IrFile,
-    bodies: &'a dyn MethodBodies,
-    class: &'a crate::ir::IrClass,
-    fq_name: &'a str,
-    superclass: &'a str,
-    ctor_signature: Option<&'a str>,
-}
-
-fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
-    let PlainClassPoolSeed {
-        ir,
-        class: c,
-        fq_name,
-        superclass,
-        ctor_signature,
-        ..
-    } = seed;
-    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
-    // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
-    // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
-    let ann_kind = |name: &str, t: Ty| -> u8 { field_nullability_kind(ir, fq_name, name, t) };
-    let ctor_desc = format!("({})V", ctor_field_descs(c));
-    let fields: Vec<crate::jvm::classfile::SeedField> = c
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| crate::jvm::classfile::SeedField {
-            name: instance_field_jvm_name(ir, c, f),
-            desc: desc(f.ty),
-            ann_kind: ann_kind(&f.name, f.ty),
-            is_ctor_param: i < c.ctor_param_count as usize,
-            visible_ann_types: ctor_param_ann_types(c, i, true),
-            invisible_ann_types: ctor_param_ann_types(c, i, false),
-        })
-        .collect();
-    let ctor_sig = ctor_signature;
-    let (mut super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass);
-    if let Some(defaults) = ir
-        .super_constructor_default_arguments
-        .get(&c.fq_name_id())
-        .filter(|defaults| !defaults.is_empty())
-    {
-        super_param_tys = jvm_tys(&c.super_ctor_params);
-        super_param_tys.extend(std::iter::repeat_n(
-            Ty::Int,
-            constructor_default_masks(defaults, c.super_ctor_params.len()).len(),
-        ));
-        super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-    }
-    let super_ctor_desc = ir
-        .external_super_constructors
-        .get(&c.fq_name_id())
-        .and_then(|target| target.descriptor.clone())
-        .unwrap_or_else(|| crate::jvm::names::method_descriptor(&super_param_tys, Ty::Unit));
-    cw.seed_plain_class_pool(
-        fq_name,
-        superclass,
-        (&ctor_desc, &super_ctor_desc),
-        &fields,
-        &crate::jvm::classfile::MemberSignatures {
-            ctor: ctor_sig,
-        },
-        &{
-            use crate::jvm::classfile::SeedSuperArg;
-            fn collect(ir: &IrFile, expr: crate::ir::ExprId, entries: &mut Vec<SeedSuperArg>) {
-                match ir.expr(init_operand(ir, expr)) {
-                    IrExpr::Const(crate::ir::IrConst::String(s)) => {
-                        entries.push(SeedSuperArg::Str(s.clone()));
-                    }
-                    IrExpr::New {
-                        internal,
-                        args,
-                        ctor_params,
-                        ctor_desc,
-                        ..
-                    } => {
-                        let owner = internal.render();
-                        entries.push(SeedSuperArg::Class(owner.clone()));
-                        for &arg in args {
-                            collect(ir, arg, entries);
-                        }
-                        let desc = if let Some(desc) = ctor_desc {
-                            desc.clone()
-                        } else if let Some(params) = ctor_params {
-                            method_descriptor(&jvm_tys(params), Ty::Unit)
-                        } else {
-                            let class = ir.class_id_by_name(*internal).expect(
-                                "checked construction without explicit parameters must name an IR class",
-                            );
-                            method_descriptor(
-                                &class_ctor_jvm_tys(&ir.classes[class as usize]),
-                                Ty::Unit,
-                            )
-                        };
-                        entries.push(SeedSuperArg::Ctor { owner, desc });
-                    }
-                    IrExpr::Variable {
-                        init: Some(value), ..
-                    } => collect(ir, *value, entries),
-                    _ => {}
-                }
-            }
-
-            let mut entries: Vec<SeedSuperArg> = Vec::new();
-            for &statement in &c.super_arg_prelude {
-                collect(ir, statement, &mut entries);
-            }
-            for &arg in &c.super_args {
-                collect(ir, arg, &mut entries);
-            }
-            entries
-        },
-        &primary_ctor_annotations(c),
-    );
-}
-
-/// Seed what kotlinc interns once the primary constructor's body is done: its local-variable
-/// strings and `$default` overload, then a data class's synthesized members.
-fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
-    let PlainClassPoolSeed {
-        formatter,
-        ir,
-        bodies,
-        class: c,
-        fq_name,
-        ctor_signature,
-        ..
-    } = seed;
-    let ctor_desc = format!("({})V", ctor_field_descs(c));
-    // The primary ctor's `$default` overload interning window (marker desc, default STRING
-    // constants, delegating `<init>` ref) — kotlinc writes the synthetic right after the primary.
-    let ctor_default_seed = ir
-        .class_ctor_defaults(fq_name)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-        .map(|defaults| {
-            let source_parameter_count = defaults
-                .len()
-                .checked_sub(c.constructor_prefix_count as usize)
-                .expect("constructor default prefix exceeds its parameters");
-            let masks = "I".repeat(default_mask_count(source_parameter_count));
-            crate::jvm::classfile::SeedCtorDefaults {
-                marker_desc: format!(
-                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                    ctor_field_descs(c)
-                ),
-                string_consts: defaults
-                    .iter()
-                    .flatten()
-                    .filter_map(|&d| match ir.expr(d) {
-                        IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-            }
-        });
-    cw.seed_plain_constructor_tail(fq_name, &ctor_desc, ctor_default_seed.as_ref());
-    // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
-    // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
-    // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
-    // add_method_sig) dedupes to kotlinc's interning positions.
-    // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
-    // concrete type (`List<String>`). Disjoint — a field is one or the other.
-    let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
-        let type_parameter = ir
-            .field_signatures(fq_name)
-            .and_then(|fs| {
-                fs.iter()
-                    .find(|(name, _)| name == &f.name)
-                    .map(|(_, parameter)| parameter.as_str())
-            })
-            .or(f.type_param.as_deref());
-        property_jvm_signatures(formatter, &f.ty, type_parameter).field
-    };
-    let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
-    // A data class's accessor signatures join its accessor window below, while its backing-field
-    // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
-    // at the exact accessor/field visits.
-    // A companion OUTER's `access$…$cp` bridges, `<clinit>`, and hoisted-initializer constants are
-    // NOT seeded here: kotlinc interns them at their natural emission position — after the declared
-    // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
-    // each name at its emission site instead.
-    if synthesizes_data_class_members(c) {
-        data_class_pool_seed::seed_data_class_members(
-            data_class_pool_seed::DataClassPoolSeed {
-                ir,
-                class: c,
-                bodies,
-                fq_name,
-                ctor_signature,
-                ctor_desc: &ctor_desc,
-                field_sigs: &field_sigs,
-                field_sig_of: &field_sig_of,
-            },
-            cw,
-        );
-    }
 }
 
 /// One synthesized value-class member's JVM name, descriptor, and local-variable table entries.
@@ -6094,7 +5910,7 @@ fn emit_class(
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
-        let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
+        let ctor_desc = primary_ctor_descriptor(c);
         let ctor_parameters = if env.java_parameters {
             if is_continuation {
                 super::method_parameters::continuation_constructor(
@@ -6444,6 +6260,9 @@ fn emit_class(
                 &parameter_identities,
                 &mut cw,
             );
+        }
+        if byte_parity {
+            seed_data_class_pool(pool_seed(), &mut cw);
         }
     } // end `if c.has_primary_ctor`
 

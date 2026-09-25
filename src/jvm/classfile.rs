@@ -67,14 +67,6 @@ pub enum SeedSuperArg {
     Ctor { owner: String, desc: String },
 }
 
-/// A primary constructor with defaulted parameters: kotlinc emits the `$default` `<init>` overload
-/// right after the primary one, interning its marker descriptor, the default STRING constants and
-/// the delegating own-`<init>` Methodref BEFORE the accessors — the seeder mirrors that window.
-pub struct SeedCtorDefaults {
-    pub marker_desc: String,
-    pub string_consts: Vec<KtString>,
-}
-
 /// One backing field, as the plain-class pool seeder sees it.
 pub struct SeedField {
     pub name: String,
@@ -1610,24 +1602,24 @@ impl ClassWriter {
         }
     }
 
-    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this` and
-    /// its type; the parameters reuse the field entries), then the `$default` overload kotlinc
-    /// writes right after it — its marker descriptor, the default STRING constants its body `ldc`s
-    /// (in parameter order), then the delegating `invokespecial` to the real `<init>`.
+    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this`
+    /// and its type, then each named parameter), then the header descriptor of the `$default`
+    /// overload kotlinc writes right after it. The overload's body interns its own entries when it
+    /// is emitted, which is right after the primary.
     pub fn seed_plain_constructor_tail(
         &mut self,
         this_internal: &str,
-        ctor_desc: &str,
-        ctor_defaults: Option<&SeedCtorDefaults>,
+        parameter_locals: &[(String, String)],
+        default_marker_desc: Option<&str>,
     ) {
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
-        if let Some(d) = ctor_defaults {
-            self.cp.utf8(&d.marker_desc);
-            for s in &d.string_consts {
-                self.cp.string_kt(s);
-            }
-            self.cp.methodref(this_internal, "<init>", ctor_desc);
+        for (name, desc) in parameter_locals {
+            self.cp.utf8(name);
+            self.cp.utf8(desc);
+        }
+        if let Some(desc) = default_marker_desc {
+            self.cp.utf8(desc);
         }
     }
 
