@@ -6169,16 +6169,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `default_to_string_stops_at_a_raise`).
 - **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
   records the exception and comes back, so each runtime raise returns at once and each walk checks
-  for a pending exception after every `next` and every lambda it calls. That covers the lambda's own
-  exception and a `ConcurrentModificationException` from the list it walks. An out-of-bounds
+  for a pending exception after every `next`, every lambda it calls, and every element `equals`,
+  `hashCode` or `toString` it calls. That covers the lambda's own exception, an element member's,
+  and a `ConcurrentModificationException` from the list it walks. An element member that threw is
+  the last call into the program whatever placeholder it returned: a list's `indexOf`,
+  `lastIndexOf`, `contains`, `equals`, `hashCode` and `toString`, `joinToString`, and an array's
+  `contentEquals`, `contentHashCode` and `contentToString` ask no later element, and `remove` whose
+  comparison threw removes nothing. An out-of-bounds
   `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
   was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
   raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
   `xs.addAll(list)` appends the argument's elements as they were when the call began, so
   `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
   more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
-  of memory. `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the
-  string's length.
+  of memory. An `ArrayList` grown past what an `Int` capacity can double to stops the program as
+  out of memory, as the JVM's does, before any element is copied. `IndexedValue.hashCode` wraps
+  like Kotlin's `Int`. A string iterator is linear in the string's length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
@@ -6195,6 +6201,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
   `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
+  range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
+  the range: the builtin one for strings and boxed primitives, and the class's `compareTo` for a
+  program's own `Comparable`. The runtime never rediscovers the order from the bounds' descriptors,
+  which know only the builtin types. `isEmpty` is `start > end`; `contains(v)` asks `v` against
+  `start` and then `end`, as Kotlin's class does. A `compareTo` that raises ends the member there:
+  `contains` makes no second comparison, and neither member answers `true` for a comparison that
+  raised. `equals`, `hashCode` and `toString` stop likewise at the first bound member that raises.
+  Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`).
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
@@ -6208,6 +6223,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
+  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
+  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
+  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
+  so its name is Java's.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`).
 
 ## 8. Success criteria for the PoC
 
