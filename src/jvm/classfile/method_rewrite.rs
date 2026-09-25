@@ -28,6 +28,7 @@ use crate::jvm::bytecode_passes::{
     temporaries,
 };
 use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
+use crate::jvm::method_node::{LabelId, MethodNode};
 use finished_node::FinishedNode;
 
 /// What a method keeps so it can be rewritten when its class is written: its builder, for the
@@ -38,6 +39,14 @@ pub(super) struct RewriteSource {
     pub name: String,
     pub desc: String,
     pub builder: CodeBuilder,
+}
+
+/// The method a body belongs to, as the verifier's entry state and the frame computation need it.
+#[derive(Clone, Copy)]
+pub(super) struct MethodIdentity<'a> {
+    pub access: u16,
+    pub name: &'a str,
+    pub desc: &'a str,
 }
 
 /// A rewritten method's `Code` and every table that moved with it. Its frames and maxima are
@@ -88,6 +97,17 @@ pub(super) fn var_slot(insn: &Insn) -> Option<(u16, u16)> {
     })
 }
 
+impl MethodInfo {
+    /// Hold `rewritten` in place of the body and tables the method held.
+    pub(super) fn take_rewritten(&mut self, rewritten: Rewritten) {
+        self.code = Some(rewritten.code);
+        self.exceptions = rewritten.exceptions;
+        self.lnt = rewritten.lnt;
+        self.lvt = rewritten.lvt;
+        self.implicit_void_return_pc = rewritten.implicit_void_return_pc;
+    }
+}
+
 impl ClassWriter {
     /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
     pub(super) fn rewrite_methods(&mut self) {
@@ -98,12 +118,7 @@ impl ClassWriter {
             let Some(rewritten) = self.rewritten(&self.methods[index], &source) else {
                 continue;
             };
-            let method = &mut self.methods[index];
-            method.code = Some(rewritten.code);
-            method.exceptions = rewritten.exceptions;
-            method.lnt = rewritten.lnt;
-            method.lvt = rewritten.lvt;
-            method.implicit_void_return_pc = rewritten.implicit_void_return_pc;
+            self.methods[index].take_rewritten(rewritten);
             crate::trace_compiler!("bytecode", "rewrote {}{}", source.name, source.desc);
         }
     }
@@ -121,7 +136,7 @@ impl ClassWriter {
         }
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let FinishedNode {
-            mut node,
+            node,
             implicit_return,
         } = self.finished_node(method, source, bytes, &pool)?;
         // The builder's labels and branch fixups name offsets of the emitted bytes, so the node must
@@ -129,6 +144,26 @@ impl ClassWriter {
         if pool.missed() || node.assemble(&mut pool).ok()?.code != *bytes {
             return None;
         }
+        let identity = MethodIdentity {
+            access: source.access,
+            name: &source.name,
+            desc: &source.desc,
+        };
+        self.optimized(method, identity, node, implicit_return)
+    }
+
+    /// kotlinc's optimizer passes over `node`, the body `method` currently holds (its code, and the
+    /// tables keyed by its offsets), or `None` when none applies or the result could not be proven
+    /// to keep its frames. `implicit_return` labels the method's implicit `return`, if it has one.
+    pub(super) fn optimized(
+        &self,
+        method: &MethodInfo,
+        source: MethodIdentity<'_>,
+        mut node: MethodNode,
+        implicit_return: Option<LabelId>,
+    ) -> Option<Rewritten> {
+        let bytes = method.code.as_ref()?;
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
         if source.access & 0x0008 == 0 {
@@ -138,7 +173,7 @@ impl ClassWriter {
                 VerifType::ObjectName(self.internal_name.clone())
             });
         }
-        if !Self::append_param_verif_types(&source.desc, &mut entry) {
+        if !Self::append_param_verif_types(source.desc, &mut entry) {
             return None;
         }
         let entry = expand_slots(&entry);
@@ -169,8 +204,8 @@ impl ClassWriter {
                 .get_or_init(|| {
                     let body = stack_maps::Body {
                         access: source.access,
-                        name: &source.name,
-                        descriptor: &source.desc,
+                        name: source.name,
+                        descriptor: source.desc,
                         code: bytes,
                         exceptions: &method.exceptions,
                         labels: stack_maps::table_labels(&method.lnt, &method.lvt, bytes.len()),
@@ -263,8 +298,8 @@ impl ClassWriter {
         // for is written as emitted.
         self.compute_frames(&stack_maps::Body {
             access: source.access,
-            name: &source.name,
-            descriptor: &source.desc,
+            name: source.name,
+            descriptor: source.desc,
             code: &assembled.code,
             exceptions: &assembled.exception_table,
             labels: stack_maps::table_labels(&assembled.line_numbers, &lvt, assembled.code.len()),
