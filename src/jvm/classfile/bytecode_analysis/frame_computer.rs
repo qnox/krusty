@@ -23,7 +23,7 @@
 //! stood at; see [`FrameComputation::compute`].
 
 use super::control_graph::Handler;
-use super::frame_types::{method_types, step, FrameState, PoolView, VerificationType};
+use super::frame_types::{method_types, step_in_place, FrameState, PoolView, VerificationType};
 use crate::jvm::inline::{BranchTarget, Insn};
 
 const OBJECT: &str = "java/lang/Object";
@@ -158,37 +158,26 @@ impl FrameComputation<'_> {
         while let Some(b) = pending.pop() {
             queued[b] = false;
             let block = &blocks[b];
-            let entry_state = input[b].clone().expect("a queued block has an input");
-            let mut state = entry_state.clone();
+            let mut state = input[b].clone().expect("a queued block has an input");
+            // ASM enters a handler with the block's input locals merged in; keep them only when
+            // a handler covers the block.
+            let entry_locals = (!exceptional[b].is_empty()).then(|| state.locals.clone());
             max_stack = max_stack.max(words(&state.stack));
             for index in block.start..block.end {
-                state = step(self.insns, index, &state, self.pool, Some(self.this_class))
-                    .ok_or(Decline::Unsteppable(index))?;
+                step_in_place(
+                    self.insns,
+                    index,
+                    &mut state,
+                    self.pool,
+                    Some(self.this_class),
+                )
+                .ok_or(Decline::Unsteppable(index))?;
                 max_stack = max_stack.max(words(&state.stack));
             }
-            let mut successors: Vec<(usize, FrameState)> = Vec::new();
-            if block.falls_through && block.end < n {
-                successors.push((block_of[block.end], state.clone()));
-            }
-            for &to in &block.targets {
-                successors.push((block_of[to], state.clone()));
-            }
-            for (to, caught) in &exceptional[b] {
-                // ASM merges the block's output locals, then its input locals.
-                let mut locals = state.locals.clone();
-                merge_into(&mut locals, &entry_state.locals);
-                successors.push((
-                    *to,
-                    FrameState {
-                        locals,
-                        stack: vec![caught.clone()],
-                    },
-                ));
-            }
-            for (to, arriving) in successors {
+            let mut arrive = |to: usize, arriving: &FrameState| -> Result<(), Decline> {
                 let changed = match &mut input[to] {
                     slot @ None => {
-                        *slot = Some(arriving);
+                        *slot = Some(arriving.clone());
                         true
                     }
                     Some(existing) => {
@@ -203,6 +192,27 @@ impl FrameComputation<'_> {
                 if changed && !queued[to] {
                     queued[to] = true;
                     pending.push(to);
+                }
+                Ok(())
+            };
+            if block.falls_through && block.end < n {
+                arrive(block_of[block.end], &state)?;
+            }
+            for &to in &block.targets {
+                arrive(block_of[to], &state)?;
+            }
+            if let Some(entry_locals) = &entry_locals {
+                for (to, caught) in &exceptional[b] {
+                    // ASM merges the block's output locals, then its input locals.
+                    let mut locals = state.locals.clone();
+                    merge_into(&mut locals, entry_locals);
+                    arrive(
+                        *to,
+                        &FrameState {
+                            locals,
+                            stack: vec![caught.clone()],
+                        },
+                    )?;
                 }
             }
         }
