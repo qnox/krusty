@@ -46,6 +46,23 @@ impl Emitter<'_> {
                     self.emit_when(expression, branches, true, code);
                     return;
                 }
+                // A discarded `try` runs its branches as statements, as a discarded `when` does,
+                // but still holds the result temporary its type gives it.
+                IrExpr::Try {
+                    body,
+                    catches,
+                    finally,
+                    result,
+                } => {
+                    let parts = super::try_emission::TryParts {
+                        body: *body,
+                        catches,
+                        finally: *finally,
+                        result: *result,
+                    };
+                    self.emit_try(expression, parts, true, code);
+                    return;
+                }
                 IrExpr::Block {
                     value: Some(value), ..
                 } if matches!(self.ir.expr(*value), IrExpr::When { .. }) => {

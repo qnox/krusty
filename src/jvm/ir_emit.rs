@@ -6223,9 +6223,7 @@ fn emit_class(
                 for &(slot, t, _) in &temps {
                     load(t, slot, &mut ctor);
                 }
-                for &(_, _, lease) in &temps {
-                    e.release_temporary(lease);
-                }
+                e.release_operand_spills(&temps);
             } else {
                 ctor.aload(0);
                 for &a in &super_args {
@@ -9096,9 +9094,7 @@ fn emit_enum_class(
                         load(*ty, *slot, &mut clinit);
                     }
                 }
-                for &(_, _, lease) in &temps {
-                    e.release_temporary(lease);
-                }
+                e.release_operand_spills(&temps);
             } else {
                 let mut supplied = args.iter().copied();
                 for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
@@ -12095,21 +12091,6 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
-    /// Catch-all handler temporaries whose handler has finished, available for a later handler to
-    /// lease. The exception a handler parks is dead once that handler has rethrown, so a nested
-    /// handler's slot is reusable by the enclosing one — which is what kotlinc does, keeping the
-    /// store in its one-byte form. Every entry holds a `Throwable`, so any of them fits any handler.
-    ///
-    /// The pool belongs to ONE emitter and starts empty by construction, so a slot returned by one
-    /// method's handler can never be handed to another's: an emitter emits one body.
-    free_exception_slots: Vec<u16>,
-    /// Return-value spill slots reserved by the active `try`s that have a `finally`, outermost
-    /// first. A `return` out of such a `try` evaluates its value BEFORE the finalizer runs and
-    /// parks it, and kotlinc reserves that slot with the `try` rather than at the `return` — ahead
-    /// of the parked-exception slot and of every local the inlined finalizer copies declare.
-    /// Allocating it at the `return` instead put the finalizer's own locals underneath it and moved
-    /// everything the `try` reserves one slot up.
-    pending_return_spills: Vec<Option<u16>>,
     /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
     /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
     /// raised while the finalizer runs re-enters the same handler and runs it a second time.
@@ -12170,8 +12151,6 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
-            free_exception_slots: Vec::new(),
-            pending_return_spills: Vec::new(),
             finally_regions: Vec::new(),
             terminal_statement_target: None,
         }
@@ -13736,9 +13715,7 @@ impl<'a> Emitter<'a> {
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
-            for &(_, _, lease) in temps {
-                self.release_temporary(lease);
-            }
+            self.release_operand_spills(temps);
         } else {
             self.emit_value(value, code);
         }
@@ -14643,9 +14620,7 @@ impl<'a> Emitter<'a> {
                             );
                         }
                     }
-                    for &(_, _, lease) in &temps {
-                        self.release_temporary(lease);
-                    }
+                    self.release_operand_spills(&temps);
                     if use_accessor || !default_parameters.is_empty() {
                         self.mark_synthesized_run_start(e, true, &mut inside_run, code);
                     }
@@ -15785,9 +15760,7 @@ impl<'a> Emitter<'a> {
                             load(t, slot, code);
                             self.append_top(t, code);
                         }
-                        for &(_, _, lease) in &temps {
-                            self.release_temporary(lease);
-                        }
+                        self.release_operand_spills(&temps);
                     } else {
                         code.new_obj(sb);
                         code.dup();
@@ -16350,8 +16323,13 @@ impl<'a> Emitter<'a> {
                 result,
             } => {
                 let catches = catches.clone();
-                let result = *result;
-                self.emit_try(e, *body, &catches, *finally, &result, code);
+                let parts = try_emission::TryParts {
+                    body: *body,
+                    catches: &catches,
+                    finally: *finally,
+                    result: *result,
+                };
+                self.emit_try(e, parts, false, code);
             }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);
@@ -16368,9 +16346,7 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, lease) in &temps {
-                        self.release_temporary(lease);
-                    }
+                    self.release_operand_spills(&temps);
                 } else {
                     let ci = self.cw.class_ref(cls);
                     code.new_obj(ci);
@@ -16412,9 +16388,7 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, lease) in &temps {
-                        self.release_temporary(lease);
-                    }
+                    self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
                     self.emit_value(*value, code);
@@ -16456,9 +16430,7 @@ impl<'a> Emitter<'a> {
                             code.array_store(0x53, 1); // aastore
                         }
                     }
-                    for &(_, _, lease) in &temps {
-                        self.release_temporary(lease);
-                    }
+                    self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*func, code);
                     if high_arity {
@@ -16686,9 +16658,7 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 self.append_top(t, code);
             }
-            for &(_, _, lease) in &temps {
-                self.release_temporary(lease);
-            }
+            self.release_operand_spills(&temps);
         } else {
             code.new_obj(sb);
             code.dup();
@@ -17052,9 +17022,7 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 adapt(self, t, code);
             }
-            for &(_, _, lease) in &temps {
-                self.release_temporary(lease);
-            }
+            self.release_operand_spills(&temps);
         } else {
             for (operand_index, &o) in ops.iter().enumerate() {
                 self.mark_synthesized_operand_run(
@@ -17204,32 +17172,6 @@ impl<'a> Emitter<'a> {
             code.push_int(mask, self.cw);
             code.iand();
         }
-    }
-
-    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is leased (so a *later*
-    /// op's frames see the earlier temps as live, not `Top`); the caller loads them and then
-    /// releases them (they're dead once loaded). Returns `(slot, ty, lease)` per op.
-    fn spill_to_temps(
-        &mut self,
-        ops: &[u32],
-        code: &mut CodeBuilder,
-    ) -> Vec<(u16, Ty, backend_temporaries::TemporaryLease)> {
-        let mut temps = Vec::new();
-        for &o in ops {
-            self.emit_value(o, code);
-            let t = self.value_ty(o);
-            crate::trace_compiler!(
-                "splice",
-                "spill inline operand expression={o} node={:?} type={t:?}",
-                self.ir.expr(o)
-            );
-            let temp = self.frame.enter_temp(TempRole::OperandSpill, t);
-            let slot = temp.slot();
-            store(t, slot, code);
-            let lease = self.lease_frame_temporary(temp, t);
-            temps.push((slot, t, lease));
-        }
-        temps
     }
 
     fn emit_binop(
