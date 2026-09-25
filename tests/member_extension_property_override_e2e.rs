@@ -65,12 +65,20 @@ fn a_value_class_receiver_override_bridges_into_the_mangled_accessor() {
 
 /// Delegated member-extension properties, generic and not, over a value-class receiver. Each read
 /// and write links only if the forwarders and bridges exist under kotlinc's names, and a read
-/// through the generic interface boxes the receiver it passes.
+/// through the generic interface boxes the receiver it passes. The accessors are reached from
+/// plain extension helpers whose dispatch receiver is the delegating class, so no stdlib inline
+/// function is involved; member helpers would themselves be delegated and bypass the forwarders.
 #[test]
 fn delegated_member_extension_properties_forward_every_accessor() {
     let src = "@JvmInline value class S(val v: String)\n\
-               interface I { val S.x: String; var S.y: String }\n\
-               interface G<T> { val T.x: String; var T.y: String }\n\
+               interface I {\n\
+               \x20   val S.x: String\n\
+               \x20   var S.y: String\n\
+               }\n\
+               interface G<T> {\n\
+               \x20   val T.x: String\n\
+               \x20   var T.y: String\n\
+               }\n\
                object IImpl : I {\n\
                \x20   override val S.x: String get() = v\n\
                \x20   override var S.y: String\n\
@@ -87,11 +95,23 @@ fn delegated_member_extension_properties_forward_every_accessor() {
                }\n\
                class D : I by IImpl\n\
                class E : G<S> by GImpl\n\
-               fun <T> generic(g: G<T>, t: T): String = with(g) { t.y = \"w\"; t.x + t.y }\n\
+               fun I.readX(s: S): String = s.x\n\
+               fun I.readY(s: S): String = s.y\n\
+               fun I.writeY(s: S, value: String) { s.y = value }\n\
+               fun <T> G<T>.readX(t: T): String = t.x\n\
+               fun <T> G<T>.readY(t: T): String = t.y\n\
+               fun <T> G<T>.writeY(t: T, value: String) { t.y = value }\n\
+               fun <T> generic(g: G<T>, t: T): String {\n\
+               \x20   g.writeY(t, \"w\")\n\
+               \x20   return g.readX(t) + g.readY(t)\n\
+               }\n\
                fun box(): String {\n\
-               \x20   with(D()) { S(\"a\").y = \"b\"; if (S(\"c\").x + S(\"d\").y != \"cd!\") return \"I\" }\n\
+               \x20   val d = D()\n\
+               \x20   d.writeY(S(\"a\"), \"b\")\n\
+               \x20   if (d.readX(S(\"c\")) + d.readY(S(\"d\")) != \"cd!\") return \"I\"\n\
                \x20   if (IImpl.last != \"ab\") return \"I set\"\n\
-               \x20   with(E()) { if (S(\"e\").x + S(\"f\").y != \"ef?\") return \"G\" }\n\
+               \x20   val e = E()\n\
+               \x20   if (e.readX(S(\"e\")) + e.readY(S(\"f\")) != \"ef?\") return \"G\"\n\
                \x20   if (generic(E(), S(\"g\")) != \"gg?\") return \"generic\"\n\
                \x20   if (GImpl.last != \"gw\") return \"G set\"\n\
                \x20   return \"OK\"\n\
