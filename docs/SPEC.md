@@ -2735,6 +2735,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   tables. Metadata string tables merge consecutive plain records, and method attribute names use
   ASM's `StackMapTable`-before-debug-table order. Remaining byte-parity differences include dead
   slot reuse, branch fall-through elimination, and inline-local name mangling.
+- **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
+  its block end leaves each variable the block declared, and a variable left from the top of the
+  frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
+  statements after the block take the same numbers again (`if (c) { val a } else { val b }; val z`
+  puts all three in one slot). A `do` body's locals stay live through the condition, and a catch
+  parameter is left when its catch ends. Backend temporaries do not hand slots back yet: a released
+  temporary keeps the cursor, a variable left below one that is still live keeps it too, and a
+  `finally`'s parked-exception slot stays taken for the rest of the method because a later `try`
+  takes it from the reuse pool again. A `Nothing`-typed `try` (a body and catches that all
+  `return` or `throw`) still enters a one-slot result temporary once its body is emitted, as
+  kotlinc's `visitTry` enters one for every `try` that is not `Unit` (a `java/lang/Void` nothing
+  stores): it takes the slot the body's first local left, so the catch parameter sits above it
+  (`try { val x; return } catch (e) { return }` puts `x` in 1 and `e` in 2).
+  An inlined body is laid out from the frame size at its call, as kotlinc's is, so it reuses the
+  slots a block that ended before the call handed back: a stored inline argument's code starts at
+  that argument's parameter slot, and a materialized inline body (`Continuation(context) { }`)
+  stores its parameters from the frame size, not from the `max_locals` the block reached.
+  `tests/block_slot_reuse_e2e.rs` (full-byte against kotlinc
+  for sibling branches and a loop body; local-variable slots against kotlinc for a returning and a
+  throwing `try` body and for inline arguments after a block; the materialized splice base against
+  kotlinc's; runtime pins for `do`/`while`, catch parameters, inline calls after a block and the
+  parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
+  pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

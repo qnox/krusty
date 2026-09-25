@@ -4446,9 +4446,27 @@ shadow with no output change.
   make stay named operations until the stage that removes them: `rewind_to` (each spliced copy of
   a lambda body starts from one base) and `reserve_through` (a spliced inline body's locals) go
   with 4f, `give_back` (a vararg array's slot) with 4e.
-- ☐ 4b–4h. Slot reuse at block ends (4b) on lowering's scope facts (4c), variables entered before
-  their initializers (4d), backend temporaries on the stack (4e), inline-call frames (4f),
-  lowering's temporaries matching kotlinc's (4g) and coroutine locals at `max_locals` (4h).
+- ✅ 4b. Slots are reused at block ends: leaving a keyed local from the top of the frame hands its
+  slot back, so sibling branches, the next loop, later catch parameters and the statements after a
+  block reuse the numbers kotlinc reuses. Temporaries still keep the cursor when released; a
+  variable left below a live temporary keeps it too, and a `finally`'s pooled parked-exception
+  slot stays entered for the method (`FrameMap::keep_for_method`) until 4e deletes the pool.
+  A `Nothing`-typed `try` enters its one-slot result temporary after its body, as kotlinc's
+  `visitTry` does for every `try` that is not `Unit`, so its catch parameters sit above the slot
+  the body's locals left; a valued `try`'s temporary moves after its body with 4d. Every inline
+  splice (the MethodNode inliner and the materialized-lambda bridge) takes its base from the frame
+  size at the call, which a block that ended before the call has lowered, not from `max_locals`. In the 2.4.20
+  box corpus 2,285 of 25,936 classes change and no box outcome moves. Per method, the
+  local-variable slots of 220 changed methods now match kotlinc and 769 more are closer, against 2
+  that matched and no longer do and 79 further off; one class (`Advanced_when5Kt`) becomes
+  byte-identical (files 249 -> 250). The methods still off are off for 4d (kotlinc enters a
+  variable before its initializer: `kt27161_int`), 4e (a `finally`'s slots reserved at the `try`:
+  `break.kt` `qux`) and 4f (the inline splice base and fake locals: `kt5448`).
+- ☐ 4c–4h. Lowering's scope facts where an IR block is a kotlinc transparent scope (4c; the corpus
+  shows no such block yet — the `try` difference above was the result temporary's placement),
+  variables entered before their initializers (4d), backend temporaries on the stack (4e),
+  inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine locals at
+  `max_locals` (4h).
 - ☐ 5–6. kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
