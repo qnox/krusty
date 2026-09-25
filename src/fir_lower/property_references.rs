@@ -4,13 +4,12 @@ use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget,
     FirReferenceAdaptation,
 };
-use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction};
+use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn materialize_property_function_reference(
         &mut self,
         target: &FirPropertyReferenceTarget,
@@ -116,6 +115,40 @@ impl BodyLowering<'_> {
             None
         };
         let selected_receiver = captured_receiver.or(unbound_receiver);
+        // A specialized reference reads the property through its declaration's accessor, whose
+        // generic receiver and result are erased: the specialized scalar receiver is boxed into the
+        // accessor and the erased result is converted back, as a source read's checked
+        // conversions do.
+        let declaration = match target {
+            FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                let property = self
+                    .index
+                    .property(*property)
+                    .ok_or(FirLoweringFailure::MissingProperty(*property))?;
+                let result = self
+                    .index
+                    .signature(property.declaration)
+                    .ok_or(FirLoweringFailure::MissingProperty(property.id))?
+                    .result
+                    .get();
+                Some((property.extension_receiver.map(|ty| ty.get()), result))
+            }
+            _ => None,
+        };
+        let selected_receiver = match (selected_receiver, declaration, receiver_type) {
+            (Some(value), Some((Some(declared), _)), Some(selected))
+                if target_is_extension
+                    && !selected.get().is_reference()
+                    && declared.is_reference() =>
+            {
+                Some(self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: value,
+                    type_operand: declared,
+                }))
+            }
+            (receiver, ..) => receiver,
+        };
         let (dispatch_receiver, extension_receiver) = if target_is_extension {
             (None, selected_receiver)
         } else {
@@ -175,6 +208,16 @@ impl BodyLowering<'_> {
                 )
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
             }
+        };
+        let read = match declaration {
+            Some((_, declared)) if declared != property_type.get() => {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: read,
+                    type_operand: property_type.get(),
+                })
+            }
+            _ => read,
         };
         let body = self.callable_reference_adapter_body(read, property_type.get(), reference.ret);
         let mut parameters = capture_types;

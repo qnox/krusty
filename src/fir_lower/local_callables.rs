@@ -164,7 +164,7 @@ impl BodyLowering<'_> {
         target: FirLocalCallableRef,
         extension_receiver: Option<crate::fir::FirReceiver>,
         arguments: &[crate::fir::FirCallArgument],
-    ) -> Result<ExprId, FirLoweringFailure> {
+    ) -> Result<(ExprId, Ty), FirLoweringFailure> {
         let (realization, external) = self.local_function(&target)?;
         let captures = if external {
             target
@@ -178,28 +178,62 @@ impl BodyLowering<'_> {
         } else {
             self.bound_all_captures(target.body_depth, &realization)?
         };
-        let extension_receiver = extension_receiver
-            .map(|receiver| self.expression_with_conversion(receiver.value, receiver.conversion))
-            .transpose()?;
         let mut logical_parameter_types = self.ir.functions[realization.function as usize].params
             [realization.capture_count()..]
             .to_vec();
+        let extension_receiver = extension_receiver
+            .map(|receiver| {
+                let declared = logical_parameter_types
+                    .get(realization.context_parameter_count as usize)
+                    .copied()
+                    .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?;
+                let value = self.expression_with_conversion(receiver.value, receiver.conversion)?;
+                let source = self.converted_type(receiver.value, receiver.conversion)?;
+                Ok(self.box_into_erased_parameter(value, source, declared))
+            })
+            .transpose()?;
         if realization.has_extension_receiver {
             logical_parameter_types.remove(realization.context_parameter_count as usize);
         }
-        let arguments = self.lower_arguments(arguments, |parameter| {
+        let mut lowered = self.lower_arguments(arguments, |parameter| {
             logical_parameter_types
                 .get(parameter as usize)
                 .copied()
                 .ok_or(FirLoweringFailure::MissingExternalParameter { parameter })
         })?;
-        self.materialize_local_call(
+        // A local function is not specialized per call: its parameters keep their declared (erased)
+        // types, so a scalar argument for a generic parameter is boxed here, as a module call's is.
+        for (argument, lowered) in arguments.iter().zip(&mut lowered) {
+            let (
+                crate::fir::FirCallArgument::Expression {
+                    value: source,
+                    conversion,
+                    ..
+                },
+                crate::ir::IrCheckedArgument::Expression { parameter, value },
+            ) = (argument, lowered)
+            else {
+                continue;
+            };
+            let declared = logical_parameter_types
+                .get(*parameter as usize)
+                .copied()
+                .ok_or(FirLoweringFailure::MissingExternalParameter {
+                    parameter: *parameter,
+                })?;
+            let source = self.converted_type(*source, *conversion)?;
+            *value = self.box_into_erased_parameter(*value, source, declared);
+        }
+        let call = self.materialize_local_call(
             &target,
             &realization,
             captures,
             extension_receiver,
-            &arguments,
-        )
+            &lowered,
+        )?;
+        let declared = self.ir.functions[realization.function as usize].ret;
+        self.ir.call_declared_ret.insert(call, declared);
+        Ok((call, declared))
     }
 
     fn materialize_local_call(

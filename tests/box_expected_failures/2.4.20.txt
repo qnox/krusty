@@ -19,10 +19,8 @@ boxingOptimization/kt48394.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-bridges/simpleReturnType.kt
 bridges/special.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
-callableReference/adaptedReferences/extensionPropertyToFun.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
@@ -37,11 +35,9 @@ callableReference/function/local/extensionWithClosure.kt
 callableReference/genericConstructorReference.kt
 callableReference/genericLocalClassConstructorReference.kt
 callableReference/kt21014.kt
-callableReference/property/extensionPropertyReferenceWithExplicitType.kt
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 callableReference/property/privateSetterOutsideClass.kt
 casts/kt80795.kt
-casts/literalExpressionAsGenericArgument/superConstructor.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
 casts/mutableCollections/reifiedAsWithMutable.kt
@@ -54,9 +50,6 @@ classes/kt2224.kt
 classes/selfcreate.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
-closures/capturedLocalGenericFun.kt
-closures/closureCapturingGenericParam.kt
-closures/localGenericFun.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/abstractClasses.kt
@@ -83,7 +76,6 @@ contextParameters/genericPropertyWithContextParameters.kt
 contextParameters/kt51290.kt
 contextParameters/sameArgForContextAndExtension.kt
 contextParameters/sameExtensionContextAndDispatchReceiver.kt
-contextParameters/substitutedContextReceivers.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
@@ -151,7 +143,6 @@ defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
-delegatedProperty/genericSetValueViaSyntheticAccessor.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
@@ -220,8 +211,6 @@ functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/subclass.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-functions/kt1199.kt
-functions/localFunctions/kt4777.kt
 ieee754/inline.kt
 ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
 ieee754/smartCastToDifferentTypes_properIeeeComparisons.kt
@@ -241,7 +230,6 @@ inference/overrideGenericDefaultMethod.kt
 inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
 inference/pcla/issues/kt57707.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionFunctions.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionProperties.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
