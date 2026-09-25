@@ -12,7 +12,7 @@
 //! — fields, accessors, parameters and returns alike, and a `var`'s setter checked its argument
 //! for null.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::compare_with_kotlinc_plugin;
+use super::common::compare_with_kotlinc_plugin;
 
 const SOURCE: &str = "@JvmInline value class T(val s: String)\n\
     class H(val t: T?, var u: T? = null) {\n\

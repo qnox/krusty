@@ -275,22 +275,17 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                if let Some(declared) =
-                    declared_result.filter(|declared| *declared != expression.ty.get())
-                {
-                    // A retained inline body has already crossed and removed the declaration ABI:
-                    // its result slot is specialized to the call-site type. Ordinary calls still
-                    // return through the declaration's erased slot before this checked coercion.
-                    if !self.ir.inline_regions.contains(&lowered) {
-                        self.ir
-                            .physical_types
-                            .insert(lowered, declared.erased_recv());
-                    }
-                    self.ir.add_expr(IrExpr::TypeOp {
+                if declared_result.is_some_and(|declared| declared != expression.ty.get()) {
+                    // Preserve the checked semantic conversion from the declaration's result to
+                    // its call-site substitution. Whether that conversion crosses a physical ABI
+                    // boundary is target-owned; the JVM records its answer after generic erasure.
+                    let coercion = self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: lowered,
                         type_operand: expression.ty.get(),
-                    })
+                    });
+                    self.ir.declaration_result_coercions.insert(coercion);
+                    coercion
                 } else {
                     lowered
                 }
@@ -1140,99 +1135,7 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::When { subject, branches } => {
-                let mut prefix = Vec::new();
-                let subject = subject
-                    .map(|subject| {
-                        let subject_expression = self
-                            .body
-                            .expr(subject)
-                            .ok_or(FirLoweringFailure::MissingExpression(subject))?;
-                        let stable_local = match &subject_expression.kind {
-                            FirExprKind::ValueRead(value)
-                                if !self.local_value_is_mutable(*value) =>
-                            {
-                                Some(*value)
-                            }
-                            _ => None,
-                        };
-                        let subject_ty = subject_expression.ty.get();
-                        let value = self.expression(subject)?;
-                        // Only an immutable FIR value may replace the subject snapshot. An arbitrary
-                        // IR GetValue is not enough: a mutable `var` can change while earlier branch
-                        // conditions are evaluated, but every comparison must still see its original
-                        // subject value.
-                        if let Some(local) = stable_local {
-                            let slot = self.value_slot(local);
-                            if matches!(self.ir.expr(value), IrExpr::GetValue(read) if *read == slot) {
-                                return Ok::<_, FirLoweringFailure>(slot);
-                            }
-                        }
-                        let temporary = self.allocate_temporary();
-                        prefix.push(self.ir.add_expr(IrExpr::Variable {
-                            index: temporary,
-                            ty: subject_ty,
-                            init: Some(value),
-                            named: false,
-                        }));
-                        Ok::<_, FirLoweringFailure>(temporary)
-                    })
-                    .transpose()?;
-                let mut lowered_branches = Vec::with_capacity(branches.len());
-                for branch in branches {
-                    let mut condition = None;
-                    for candidate in branch.conditions.iter().copied() {
-                        let candidate = match candidate {
-                            crate::fir::FirWhenCondition::SubjectEquals(candidate) => {
-                                let candidate = self.expression(candidate)?;
-                                let subject =
-                                    subject.ok_or(FirLoweringFailure::MissingWhenSubject {
-                                        origin: branch.origin,
-                                    })?;
-                                let subject = self.ir.add_expr(IrExpr::GetValue(subject));
-                                self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::Eq,
-                                    lhs: subject,
-                                    rhs: candidate,
-                                })
-                            }
-                            crate::fir::FirWhenCondition::Predicate(candidate) => {
-                                self.expression(candidate)?
-                            }
-                        };
-                        condition = Some(match condition {
-                            Some(previous) => self.short_circuit_or(previous, candidate),
-                            None => candidate,
-                        });
-                    }
-                    if let Some(guard) = branch.guard {
-                        let guard = self.expression(guard)?;
-                        condition = Some(match condition {
-                            Some(previous) => self.short_circuit_and(previous, guard),
-                            None => guard,
-                        });
-                    }
-                    lowered_branches.push((condition, self.expression(branch.result)?));
-                }
-                let when = self.ir.add_expr(IrExpr::When {
-                    branches: lowered_branches,
-                });
-                let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
-                // Carry the checker's result into common IR for every exhaustive `when`. An `else`
-                // is exhaustive even when the result is `Unit`; omitting that case made the JVM
-                // backend re-derive a physical type from the last branch (`Unit.INSTANCE`) and
-                // disagree with a sibling branch implemented by a void write. A no-else `Unit`
-                // `when` remains the one genuinely non-exhaustive statement form.
-                if has_else || expression.ty.get() != crate::types::Ty::Unit {
-                    self.ir.exhaustive_whens.insert(when, expression.ty.get());
-                }
-                if prefix.is_empty() {
-                    when
-                } else {
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: prefix,
-                        value: Some(when),
-                    })
-                }
+                self.when_expression(*subject, branches, expression.ty.get())?
             }
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
@@ -1441,6 +1344,7 @@ impl BodyLowering<'_> {
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.record_callable_reference_provenance(expression_id, first_generated);
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
@@ -1465,6 +1369,69 @@ impl BodyLowering<'_> {
         self.record_expression_origins(first_generated, lowered, origin);
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
+    }
+
+    /// Attach the naming provenance of a source callable reference to the one reference node its
+    /// lowering produced. A reference whose owner has no common-IR class keeps no provenance.
+    fn record_callable_reference_provenance(
+        &mut self,
+        expression_id: crate::fir::FirExprId,
+        first_generated: usize,
+    ) {
+        let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
+            matches!(
+                self.ir.exprs[raw],
+                crate::ir::IrExpr::CallableReference(_)
+                    | crate::ir::IrExpr::Checked(
+                        crate::ir::IrCheckedOperation::CallableReference { .. }
+                            | crate::ir::IrCheckedOperation::PropertyReference { .. }
+                    )
+            )
+        });
+        let (Some(reference), None) = (references.next(), references.next()) else {
+            return;
+        };
+        if let Some(enclosure) = self.enclosure {
+            self.ir
+                .callable_reference_enclosures
+                .insert(reference as u32, enclosure);
+        }
+        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
+            return;
+        };
+        let lexical_owner = match provenance.lexical_owner {
+            Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
+                Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
+                None => match self
+                    .index
+                    .classifier_header(owner)
+                    .filter(|_| self.index.local_class_name_provenance(owner).is_none())
+                {
+                    Some(header) => Some(crate::ir::IrLocalClassOwner::External(header.classifier)),
+                    None => return,
+                },
+            },
+            None => None,
+        };
+        let Some(source) = self
+            .index
+            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
+            .map(|anchor| anchor.source)
+        else {
+            return;
+        };
+        let Some(package) = self.index.source_package(source) else {
+            return;
+        };
+        self.ir.callable_reference_provenance.insert(
+            reference as u32,
+            crate::ir::IrLocalClassNameProvenance {
+                source: crate::ir::IrModuleSource { source, package },
+                lexical_owner,
+                segments: provenance.segments.clone(),
+                ordinal: provenance.ordinal,
+            },
+        );
     }
 
     pub(super) fn expression_with_conversion(
@@ -1495,38 +1462,11 @@ impl BodyLowering<'_> {
             {
                 self.unit_value_after_effect(expression)
             }
-            FirConversionKind::NullabilityWidening { to } => {
-                let target = to.get();
-                // A generic declaration returns through an erased reference slot. FIR can then
-                // carry two already-checked conversions: that reference to a specialized primitive
-                // result, followed by the primitive's nullability widening (`Object -> Int ->
-                // Int?`). Realizing both would unbox a possibly-null reference only to box it again.
-                // Retarget the mechanical carrier coercion directly to the nullable wrapper; no
-                // assignability or declaration lookup is performed here.
-                let erased_nullable_carrier = match self.ir.exprs.get(expression as usize) {
-                    Some(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg,
-                        type_operand,
-                    }) if *type_operand == source_type
-                        && !source_type.is_reference()
-                        && target.nullable_primitive() == Some(source_type)
-                        && self
-                            .ir
-                            .physical_types
-                            .get(arg)
-                            .is_some_and(|physical| physical.is_reference()) =>
-                    {
-                        Some(*arg)
-                    }
-                    _ => None,
-                };
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: erased_nullable_carrier.unwrap_or(expression),
-                    type_operand: target,
-                })
-            }
+            FirConversionKind::NullabilityWidening { to } => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: expression,
+                type_operand: to.get(),
+            }),
             FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::TypeOp {
                 op: if to.get().is_reference() {
                     IrTypeOp::Cast
@@ -1638,18 +1578,26 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    pub(super) fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-        self.ir.add_expr(IrExpr::When {
+        let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), rhs), (None, false_value)],
-        })
+        });
+        self.ir
+            .short_circuits
+            .insert(when, crate::ir::IrShortCircuitKind::And);
+        when
     }
 
-    fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    pub(super) fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
         let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        self.ir.add_expr(IrExpr::When {
+        let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(lhs), true_value), (None, rhs)],
-        })
+        });
+        self.ir
+            .short_circuits
+            .insert(when, crate::ir::IrShortCircuitKind::Or);
+        when
     }
 
     /// Realize a checked boundary at which semantic `Unit` becomes a first-class value. Common IR

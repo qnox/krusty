@@ -26,7 +26,9 @@ mod member_specialization;
 mod overload_selection;
 mod qualified_classifiers;
 mod sam;
+mod scope_level_callables;
 mod selected_call_instantiation;
+mod source_view;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -63,6 +65,7 @@ use overload_selection::{
 };
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
 pub(crate) use sam::{semantic_sam_signature, SamSignature};
+use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LambdaCallShape {
@@ -1493,7 +1496,7 @@ pub struct SymbolResolver<'a> {
     /// Source-level library facts used during resolution.
     lib: &'a dyn SemanticPlatform,
     /// The aggregated resolution source: module declarations shadow library declarations of the same name.
-    src: crate::symbol_source::CompositeSource<'a>,
+    src: source_view::ResolverSource<'a>,
     /// The current compilation module, when present.
     module: Option<&'a dyn SymbolSource>,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
@@ -1971,64 +1974,6 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
-            module: None,
-            fn_scope: None,
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
-    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [TypeName]) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
-            module: None,
-            fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    /// The primary resolver: symbol resolution federates the current `module` over the classpath `lib`.
-    pub fn new_scoped_with_module(
-        lib: &'a dyn SemanticPlatform,
-        module: &'a dyn SymbolSource,
-        fn_scope: &'a [TypeName],
-    ) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
-            module: Some(module),
-            fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
-    pub(crate) fn new_import_scoped_with_module(
-        lib: &'a dyn SemanticPlatform,
-        module: &'a dyn SymbolSource,
-        fn_scope: &'a FunctionImportScope,
-    ) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
-            module: Some(module),
-            fn_scope: Some(FunctionScopeRef::Imports(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
     pub(crate) fn with_access_context(
         mut self,
         package: TypeName,
@@ -2240,9 +2185,11 @@ impl<'a> SymbolResolver<'a> {
             // tiers in `select_overload_tracking_with_functions`); an annotated declaration that
             // does not fit falls through to the ordinary candidates collected below.
             for level in &levels {
-                let scoped = callables_from_symbols(&level.symbols);
-                let mut ranked =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                let mut ranked = ranked_extension_candidates(
+                    &self.src,
+                    receiver,
+                    level_functions(&level.symbols),
+                );
                 self.retain_accessible_extensions(&mut ranked, &mut inaccessible_extensions, true);
                 functions.extend(ranked.into_iter().map(|(rank, _, function)| {
                     let mut function = function.clone();
@@ -2253,13 +2200,10 @@ impl<'a> SymbolResolver<'a> {
             }
             let mut extension_property_level_found = false;
             for (scope_rank, level) in levels.into_iter().enumerate() {
-                let scoped = callables_from_symbols(&level.symbols);
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope level name={name} receiver={receiver:?} functions={:?}",
-                    scoped
-                        .functions()
-                        .iter()
+                    level_functions(&level.symbols)
                         .map(|function| (function.kind, function.semantic_receiver()))
                         .collect::<Vec<_>>()
                 );
@@ -2267,8 +2211,11 @@ impl<'a> SymbolResolver<'a> {
                 // time here would put two copies of one declaration in the same priority bucket and
                 // read as an ambiguity. A level holding ONLY annotated declarations is therefore
                 // empty for tower purposes and the walk continues past it.
-                let mut extensions =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                let mut extensions = ranked_extension_candidates(
+                    &self.src,
+                    receiver,
+                    level_functions(&level.symbols),
+                );
                 self.retain_accessible_extensions(
                     &mut extensions,
                     &mut inaccessible_extensions,
@@ -2289,9 +2236,7 @@ impl<'a> SymbolResolver<'a> {
                 let extension_properties = if extension_property_level_found {
                     Vec::new()
                 } else {
-                    scoped
-                        .properties()
-                        .iter()
+                    level_properties(&level.symbols)
                         .filter(|property| property.kind == PropKind::Extension)
                         .cloned()
                         .collect::<Vec<_>>()
@@ -2721,8 +2666,11 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
         for symbols in self.symbol_levels_in_scope(name) {
-            let callables = callables_from_symbols(&symbols);
-            match self.select_extension_property_from_callables(receiver, name, &callables)? {
+            match self.select_extension_property_from_callables(
+                receiver,
+                name,
+                level_properties(&symbols),
+            )? {
                 Some(property) => return Ok(Some(property)),
                 None => continue,
             }
@@ -2730,22 +2678,20 @@ impl<'a> SymbolResolver<'a> {
         Ok(None)
     }
 
-    fn select_extension_property_from_callables(
+    fn select_extension_property_from_callables<'p>(
         &self,
         receiver: Ty,
         name: &str,
-        callables: &Callables,
+        properties: impl IntoIterator<Item = &'p PropertyInfo>,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
-        if callables.properties().is_empty() {
+        let mut properties = properties.into_iter().peekable();
+        if properties.peek().is_none() {
             return Ok(None);
         }
         let receiver_mro = ReceiverMro::new(&self.src, receiver);
-        let mut candidates = callables
-            .properties()
-            .iter()
+        let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| source_property_visible(self.lib, property))
-            .cloned()
             .filter(|property| {
                 generic_bounds_admit(
                     &self.src,
@@ -2764,7 +2710,7 @@ impl<'a> SymbolResolver<'a> {
                     property.setter.is_some(),
                     property.source_key,
                 );
-                rank.map(|rank| (rank, property))
+                rank.map(|rank| (rank, property.clone()))
             })
             .collect::<Vec<_>>();
         let Some(nearest) = candidates.iter().map(|(rank, _)| *rank).min() else {
@@ -3480,7 +3426,7 @@ impl<'a> SymbolResolver<'a> {
                     extension_call.is_some(),
                 );
                 let extension_property = self
-                    .select_extension_property_from_callables(ty, name, &callables)
+                    .select_extension_property_from_callables(ty, name, callables.properties())
                     .ok()
                     .flatten();
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
@@ -5631,20 +5577,6 @@ fn tagged_symbol_levels_in_function_scope(
     }
 }
 
-fn function_set_from_symbols(
-    symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>],
-) -> FunctionSet {
-    let capacity = symbols
-        .iter()
-        .map(|record| record.callables.functions().len())
-        .sum();
-    let mut overloads = Vec::with_capacity(capacity);
-    for record in symbols {
-        overloads.extend(record.callables.functions().iter().cloned());
-    }
-    FunctionSet { overloads }
-}
-
 fn callables_from_symbols(symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>]) -> Callables {
     let mut functions = FunctionSet::default();
     let mut properties = PropertySet::default();
@@ -7528,41 +7460,11 @@ mod tests {
     }
 
     fn fake_library_type(supertypes: Vec<String>, constructors: Vec<LibraryMember>) -> LibraryType {
-        LibraryType {
-            is_kotlin: true,
-            access: crate::libraries::ClassifierAccess::Public,
-            source_file: None,
-            stable_declaration: None,
-            is_nested: false,
-            outer_instance: None,
-            kind: TypeKind::Class,
-            inheritance: Default::default(),
-            supertypes: supertypes.into(),
-            supertype_templates: Vec::new(),
-            constructors,
-            hidden_member_properties: Default::default(),
-            declared_callables: std::collections::HashMap::new(),
-            declared_callable_order: Vec::new(),
-            members: vec![],
-            companion: vec![],
-            constants: std::collections::HashMap::new(),
-            sam_eligible: false,
-            callable_signature: None,
-            callable_signatures: Vec::new(),
-            companion_object: None,
-            value_underlying: None,
-            value_underlying_property: None,
-            alias_target: None,
-            type_parameters: crate::types::TypeParameters::default(),
-            own_type_parameter_count: 0,
-            sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: Vec::new(),
-            enum_entries_accessor: None,
-            named_parameter_lists: Vec::new(),
-            annotations: Vec::new(),
-            retention: None,
-            annotation_targets: None,
-        }
+        let mut classifier = LibraryType::declaration_header();
+        classifier.is_kotlin = true;
+        classifier.supertypes = supertypes.into();
+        classifier.constructors = constructors;
+        classifier
     }
 
     struct SamHierarchySource {

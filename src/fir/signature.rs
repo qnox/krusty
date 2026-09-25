@@ -16,6 +16,8 @@ use super::ResolvedParameterIdentity;
 
 mod selections;
 pub use selections::*;
+mod declaration_metadata;
+mod source_packages;
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1552,6 +1554,11 @@ pub struct ResolvedModuleIndex {
     /// Package identity for each source unit. This is declaration-header context, not a path or
     /// body coordinate; common lowering copies it only for referenced cross-file declarations.
     source_packages: HashMap<SourceFileId, TypeName>,
+    /// Every package some source unit publishes, with all of its enclosing packages: the
+    /// namespaces the source module contributes. Derived from `source_packages` as each identity
+    /// is published, so a package-child probe is one lookup instead of a walk of every source
+    /// unit's package chain (which made qualified-name resolution quadratic in the module).
+    source_package_namespaces: std::collections::HashSet<TypeName>,
     /// Stable declaration-stream ordinal computed while Pass-1 anchors are live. This is used for
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
@@ -1572,6 +1579,11 @@ pub struct ResolvedModuleIndex {
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// Fully checked declaration annotation applications. Values are folded against the selected
+    /// annotation constructor and keyed by stable declaration identity; consumers never join them
+    /// back to the identity-only header list by ordinal.
+    declaration_applied_annotations:
+        HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -1587,6 +1599,10 @@ pub struct ResolvedModuleIndex {
     /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
     /// generated name conventions.
     generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
+    /// Exact companion accessor contributed by the serialization frontend plugin for a source
+    /// classifier. The callable was selected while the generated symbol table was authoritative;
+    /// later consumers receive its owner and arity without recognizing a generated spelling.
+    serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -1642,6 +1658,11 @@ pub struct ResolvedModuleIndex {
     classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
     classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) callable_parameters: HashMap<CallableId, Box<[super::ResolvedValueParameterHeader]>>,
+    /// File-independent closed defaults for source annotation constructors. Ordinary executable
+    /// defaults stay in retained checked bodies; annotation construction needs this declaration
+    /// payload in every consuming source file.
+    pub(super) annotation_constructor_defaults:
+        HashMap<CallableId, Box<[Option<crate::libraries::DefaultValue>]>>,
     pub(super) callable_equality_bounds: HashMap<CallableId, ResolvedTy>,
     pub(super) callable_behaviors: HashMap<CallableId, super::ResolvedCallableBehavior>,
     pub(super) declaration_names: Vec<Box<str>>,
@@ -2139,38 +2160,6 @@ impl ResolvedModuleIndex {
         self.source_packages.get(&source).copied()
     }
 
-    /// Whether the finalized source module contributes the direct package child `name` below
-    /// `parent`.
-    ///
-    /// Pass 2 uses this while resolving qualified imports. The answer is derived solely from
-    /// stable source-package identities; retaining the legacy `SymbolTable::source_packages`
-    /// prefix set would duplicate the same declaration-header fact across the pass boundary.
-    pub(crate) fn source_package_child_exists(&self, parent: TypeName, name: &str) -> bool {
-        let Some(candidate) = crate::types::existing_type_name_child(parent, name) else {
-            return false;
-        };
-        self.source_packages.values().copied().any(|package| {
-            let mut current = Some(package);
-            while let Some(namespace) = current {
-                if namespace == candidate {
-                    return true;
-                }
-                if namespace == TypeName::ROOT {
-                    break;
-                }
-                current = namespace.parent();
-            }
-            false
-        })
-    }
-
-    pub(super) fn publish_source_package(&mut self, source: SourceFileId, package: TypeName) {
-        assert!(
-            self.source_packages.insert(source, package).is_none(),
-            "a source unit may publish one package identity"
-        );
-    }
-
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
         let order = self.source_orders.get(&declaration).copied();
         if order.is_none() {
@@ -2204,45 +2193,6 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
     ) -> Option<ResolvedDeclarationHeader> {
         self.declaration_headers.get(&declaration).copied()
-    }
-
-    pub fn declaration_annotations(&self, declaration: DeclarationId) -> &[TypeName] {
-        self.declaration_annotations
-            .get(&declaration)
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    pub fn declaration_annotation_string_arguments(
-        &self,
-        declaration: DeclarationId,
-        annotation_ordinal: u32,
-    ) -> &[Box<str>] {
-        self.declaration_annotation_string_arguments
-            .get(&(declaration, annotation_ordinal))
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    pub fn declaration_annotation_class_arguments(
-        &self,
-        declaration: DeclarationId,
-        annotation_ordinal: u32,
-    ) -> &[TypeName] {
-        self.declaration_annotation_class_arguments
-            .get(&(declaration, annotation_ordinal))
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    pub fn generated_classifiers(
-        &self,
-        declaration: DeclarationId,
-    ) -> &[crate::types::GeneratedClassifierFact] {
-        self.generated_classifiers
-            .get(&declaration)
-            .map(Box::as_ref)
-            .unwrap_or_default()
     }
 
     pub(crate) fn declaration_suppresses_invisible_reference(
@@ -2719,82 +2669,6 @@ impl ResolvedModuleIndex {
         }
     }
 
-    pub fn publish_declaration_annotations(
-        &mut self,
-        declaration: DeclarationId,
-        annotations: impl IntoIterator<Item = TypeName>,
-    ) {
-        let annotations = annotations
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        if annotations.is_empty() {
-            return;
-        }
-        assert!(
-            self.declaration_annotations
-                .insert(declaration, annotations)
-                .is_none(),
-            "a stable declaration may publish its annotation identities only once"
-        );
-    }
-
-    pub fn publish_declaration_annotation_string_arguments(
-        &mut self,
-        declaration: DeclarationId,
-        annotation_ordinal: u32,
-        arguments: impl IntoIterator<Item = Box<str>>,
-    ) {
-        let arguments = arguments.into_iter().collect::<Vec<_>>().into_boxed_slice();
-        if arguments.is_empty() {
-            return;
-        }
-        assert!(
-            self.declaration_annotation_string_arguments
-                .insert((declaration, annotation_ordinal), arguments)
-                .is_none(),
-            "a stable annotation occurrence may publish its string arguments only once"
-        );
-    }
-
-    pub fn publish_declaration_annotation_class_arguments(
-        &mut self,
-        declaration: DeclarationId,
-        annotation_ordinal: u32,
-        arguments: impl IntoIterator<Item = TypeName>,
-    ) {
-        let arguments = arguments.into_iter().collect::<Vec<_>>().into_boxed_slice();
-        if arguments.is_empty() {
-            return;
-        }
-        assert!(
-            self.declaration_annotation_class_arguments
-                .insert((declaration, annotation_ordinal), arguments)
-                .is_none(),
-            "a stable annotation occurrence may publish its class arguments only once"
-        );
-    }
-
-    pub fn publish_generated_classifiers(
-        &mut self,
-        declaration: DeclarationId,
-        classifiers: impl IntoIterator<Item = crate::types::GeneratedClassifierFact>,
-    ) {
-        let classifiers = classifiers
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        if classifiers.is_empty() {
-            return;
-        }
-        assert!(
-            self.generated_classifiers
-                .insert(declaration, classifiers)
-                .is_none(),
-            "a stable declaration may publish generated classifiers only once"
-        );
-    }
-
     pub fn publish_classifier_header(
         &mut self,
         declaration: DeclarationId,
@@ -3080,11 +2954,13 @@ impl ResolvedModuleIndex {
         self.declarations.is_empty()
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
+            && self.declaration_applied_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
+            && self.serialization_companion_accessors.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3482,6 +3358,7 @@ impl ResolvedModuleIndex {
         self.declarations.storage_payload_bytes()
             + self.source_packages.len()
                 * (std::mem::size_of::<SourceFileId>() + std::mem::size_of::<TypeName>())
+            + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())
@@ -3503,6 +3380,16 @@ impl ResolvedModuleIndex {
                 .declaration_annotations
                 .values()
                 .map(|annotations| annotations.len() * std::mem::size_of::<TypeName>())
+                .sum::<usize>()
+            + self.declaration_applied_annotations.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>())
+            + self
+                .declaration_applied_annotations
+                .values()
+                .map(|annotations| {
+                    annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+                })
                 .sum::<usize>()
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
@@ -3539,6 +3426,14 @@ impl ResolvedModuleIndex {
                             .map(|classifier| classifier.source_name.len())
                             .sum::<usize>()
                 })
+                .sum::<usize>()
+            + self.serialization_companion_accessors.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<(Box<str>, TypeName, usize)>())
+            + self
+                .serialization_companion_accessors
+                .values()
+                .map(|(field, _, _)| field.len())
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
@@ -3650,6 +3545,16 @@ impl ResolvedModuleIndex {
             + self.classifier_own_type_parameter_counts.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
             + self.callable_parameter_storage_payload_bytes()
+            + self.annotation_constructor_defaults.len()
+                * (std::mem::size_of::<CallableId>()
+                    + std::mem::size_of::<Box<[Option<crate::libraries::DefaultValue>]>>())
+            + self
+                .annotation_constructor_defaults
+                .values()
+                .map(|defaults| {
+                    defaults.len() * std::mem::size_of::<Option<crate::libraries::DefaultValue>>()
+                })
+                .sum::<usize>()
             + self
                 .declaration_names
                 .iter()

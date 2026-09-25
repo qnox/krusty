@@ -9,6 +9,8 @@ use super::{
 };
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
+
+use super::ExternalSerializer;
 use crate::types::{type_name, Ty, TypeName};
 
 #[derive(Clone)]
@@ -43,6 +45,14 @@ pub(super) enum ElementSerializerPlan {
         serializer_class: ClassId,
         field: u32,
     },
+    /// A classifier declared outside this file whose serializer its companion's generated
+    /// `serializer(…)` returns, called with one argument serializer per type parameter.
+    ExternalCompanion {
+        classifier: TypeName,
+        field: Box<str>,
+        companion: TypeName,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Builtin(TypeName),
 }
 
@@ -71,13 +81,18 @@ pub(super) fn child_cache_element_plan(
         return Ok(None);
     };
     // kotlinc caches every element whose serializer is a constructed instance rather than a
-    // singleton: a collection's, an enum's and an object's `ObjectSerializer`.
+    // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, or an
+    // external companion's accessor.
     let cacheable = constructed_standard_serializer(classifier).is_some()
         || ir
             .classes
             .iter()
             .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty())
-        || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some();
+        || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some()
+        || matches!(
+            ctx.external_serializer(classifier),
+            Some(ExternalSerializer::Object { .. } | ExternalSerializer::Companion { .. })
+        );
     if !cacheable {
         return Ok(None);
     }
@@ -468,13 +483,40 @@ pub(super) fn element_serializer_plan_in(
     // A provider-confirmed non-generic object is reachable through `INSTANCE`. A generic custom
     // serializer class needs an ordinary checked constructor call; this post-check plugin cannot
     // reconstruct overload selection from classifier arity, so that shape remains underivable.
-    if type_args.is_empty() {
-        if let Some(serializer) = ctx
-            .external_serializer(fq_name)
-            .filter(|&serializer| ctx.external_serializer_is_singleton(serializer))
-        {
+    match ctx.external_serializer(fq_name) {
+        Some(&ExternalSerializer::Singleton(serializer)) if type_args.is_empty() => {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
         }
+        Some(ExternalSerializer::Object {
+            serial_name,
+            serial_info_unsupported,
+        }) if type_args.is_empty() => {
+            return Some(ElementSerializerPlan::Object {
+                object: fq_name,
+                serial_name: serial_name.clone(),
+                serial_info_unsupported: *serial_info_unsupported,
+            });
+        }
+        Some(ExternalSerializer::Companion {
+            field,
+            companion,
+            type_parameters,
+        }) => {
+            if type_args.len() != *type_parameters {
+                return None;
+            }
+            let arguments = type_args
+                .iter()
+                .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(ElementSerializerPlan::ExternalCompanion {
+                classifier: fq_name,
+                field: field.clone(),
+                companion: *companion,
+                arguments,
+            });
+        }
+        _ => {}
     }
     if let Some(builtin) = builtin_element_serializer(ty) {
         // A builtin mapping is only usable when the ACTIVE runtime carries that class. The
@@ -643,12 +685,32 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 field: "INSTANCE".to_string(),
             })
         }
+        ElementSerializerPlan::ExternalCompanion {
+            classifier,
+            field,
+            companion,
+            arguments,
+        } => {
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| emit_narrowed_argument(ir, argument))
+                .collect();
+            super::call_external_companion_serializer(ir, classifier, &field, companion, arguments)
+                .expect("a companion is a classifier of its own")
+        }
         ElementSerializerPlan::Builtin(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
             owner: serializer,
             ty: serializer,
             field: "INSTANCE".to_string(),
         }),
     }
+}
+
+/// An argument serializer of a companion's `serializer(…)`: kotlinc narrows each operand to the
+/// `KSerializer` the callee takes, including the one a `.nullable` wraps and a collection's own.
+fn emit_narrowed_argument(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
+    let serializer = emit_element_serializer(ir, plan);
+    narrow_to_kserializer(ir, serializer)
 }
 
 /// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
@@ -682,4 +744,36 @@ pub(super) fn element_serializer_expr_in(
 ) -> Option<ExprId> {
     let plan = element_serializer_plan_in(ir, ctx, ty, scope)?;
     Some(emit_element_serializer(ir, plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_object_serial_info_remains_an_exact_residual() {
+        let object = type_name("fixtures/Singleton");
+        let mut ir = IrFile::default();
+        let expression = emit_element_serializer(
+            &mut ir,
+            ElementSerializerPlan::Object {
+                object,
+                serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
+                serial_info_unsupported: true,
+            },
+        );
+
+        assert_eq!(expression, 3);
+        assert_eq!(ir.exprs.len(), 4);
+        assert!(matches!(
+            ir.expr(2),
+            IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                kind: "object-serial-info-annotations",
+                exprs,
+                data,
+                types,
+            } if exprs.is_empty() && data.as_slice() == [object] && types.is_empty()
+        ));
+    }
 }

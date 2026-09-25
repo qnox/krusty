@@ -1,5 +1,6 @@
 //! Reified-operation marker recognition and concrete type-operand rewriting.
 
+use super::relocation::narrowest_ldc;
 use super::{methodref_target, set_pool_operand, utf8, Insn};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
@@ -58,30 +59,20 @@ fn is_reified_type_bearing(insn: &Insn, src_cp: &[C]) -> bool {
 }
 
 /// Overwrite the constant-pool operand of a reified type-bearing instruction with the concrete `Class`
-/// pool `idx`. Handles the 2-byte type-ops / `ldc_w` (via [`set_pool_operand`]) and the 1-byte `ldc`
-/// (widening it to `ldc_w` when `idx` exceeds one byte). Returns `false` only for a malformed
-/// compact `ldc` operand, so the caller can skip the splice instead of miscompiling.
+/// pool `idx`: the 2-byte type-ops via [`set_pool_operand`], an `ldc`/`ldc_w` in the form the host
+/// index needs ([`narrowest_ldc`]). Returns `false` only for a malformed compact `ldc` operand, so
+/// the caller can skip the splice instead of miscompiling.
 pub(super) fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
-    if let Insn::Plain { op, operands } = insn {
-        if *op == 0x12 {
-            if operands.is_empty() {
-                return false;
-            }
-            if idx > 0xff {
-                // `ldc` carries a ONE-byte pool index, and the concrete type's index in the HOST
-                // class can be anything — a file with a few hundred constants pushes it past a
-                // byte. Widen to `ldc_w` (0x13), the identical-semantics 2-byte form, exactly as
-                // `relocate_insns` does for the same overflow. Branch targets and frames are keyed
-                // by instruction INDEX, not byte offset, so the size change is handled downstream.
-                *op = 0x13;
-                *operands = vec![(idx >> 8) as u8, (idx & 0xff) as u8];
-                return true;
-            }
-            operands[0] = idx as u8;
-            return true;
-        }
+    match insn {
+        Insn::Plain { op: 0x12, operands } if operands.is_empty() => return false,
+        // The concrete type's index in the HOST class can be anything, so the form the
+        // placeholder took says nothing about it. Branch targets and frames are keyed by
+        // instruction INDEX, not byte offset, so a size change is handled downstream.
+        Insn::Plain {
+            op: 0x12 | 0x13, ..
+        } => *insn = narrowest_ldc(idx),
+        _ => set_pool_operand(insn, idx),
     }
-    set_pool_operand(insn, idx);
     true
 }
 
@@ -118,17 +109,7 @@ impl ReifiedRepoint {
             // The source may load its name with `ldc_w` (a large dependency pool); the host picks
             // the compact form whenever its own index fits, as kotlinc emits it.
             Self::Marker(at, name) => {
-                let idx = cw.const_string(name);
-                insns[*at] = match u8::try_from(idx) {
-                    Ok(idx) => Insn::Plain {
-                        op: 0x12,
-                        operands: vec![idx],
-                    },
-                    Err(_) => Insn::Plain {
-                        op: 0x13,
-                        operands: idx.to_be_bytes().to_vec(),
-                    },
-                };
+                insns[*at] = narrowest_ldc(cw.const_string(name));
                 true
             }
             Self::TypeOf(..) => false,
@@ -397,6 +378,23 @@ mod tests {
                 ref operands,
             } if operands == &[0x01, 0x23]
         ));
+    }
+
+    #[test]
+    fn wide_ldc_narrows_when_the_host_index_fits() {
+        let mut instruction = Insn::Plain {
+            op: 0x13,
+            operands: vec![0x01, 0x23],
+        };
+
+        assert!(set_reified_operand(&mut instruction, 0x2a));
+        assert_eq!(
+            instruction,
+            Insn::Plain {
+                op: 0x12,
+                operands: vec![0x2a],
+            }
+        );
     }
 
     #[test]

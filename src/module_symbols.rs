@@ -406,6 +406,7 @@ impl<'a> ModuleSymbols<'a> {
             supertype_templates,
             constructors,
             hidden_member_properties: Default::default(),
+            hidden_deprecated_callables: Default::default(),
             declared_callables: HashMap::new(),
             declared_callable_order: Vec::new(),
             members,
@@ -424,6 +425,9 @@ impl<'a> ModuleSymbols<'a> {
             companion_object: c
                 .companion_internal
                 .map(|companion| (companion.nested_segment_ref().to_string(), companion)),
+            // The dotted qualified name is a dependency fact read from `@Metadata`; a source
+            // classifier's own module derives it from the declaration graph instead.
+            qualified_name: None,
             // `LibraryType` is the provider-neutral classifier shape consumed by the federated
             // resolver. Preserve source value-class metadata here just as a classpath provider
             // does, so every downstream query (identity diagnostics included) can use the common
@@ -1525,6 +1529,7 @@ mod tests {
             source_decl: None,
             visibility: Visibility::Public,
             annotations: vec![],
+            applied_annotations: vec![],
             annotation_class_arguments: vec![],
             generated_nested_classifiers: vec![],
             props: vec![],

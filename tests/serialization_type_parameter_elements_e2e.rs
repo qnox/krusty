@@ -10,9 +10,8 @@
 //! resolved a type-parameter element only when it was the bare parameter, so `List<T>` and
 //! `Map<String, T>` were rejected as unsupported constructs.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, member_body, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::{both_compilers_box, both_compilers_box_files};
 
 const ENTRY: &str = "@Serializable data class Entry(val id: Int, val label: String)\n";

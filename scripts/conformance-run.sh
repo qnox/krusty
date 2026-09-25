@@ -31,6 +31,9 @@ report_dir="$(mktemp -d)"
 trap 'rm -rf "$report_dir"' EXIT
 passed=0
 scanned=0
+# A shard that fails its expected-failure check still writes its report: keep running the remaining
+# shards so one run lists every mismatch, then exit with the first failing status.
+failed=0
 for ((shard = 0; shard < shards; shard++)); do
   report="$report_dir/shard-$shard.report"
   set +e
@@ -43,13 +46,14 @@ for ((shard = 0; shard < shards; shard++)); do
   set -e
   if [ "$status" -eq 124 ]; then
     echo "conformance-run: timed out after ${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v, shard $((shard + 1))/$shards" >&2
-  fi
-  if [ "$status" -ne 0 ]; then
     exit "$status"
+  fi
+  if [ "$status" -ne 0 ] && [ "$failed" -eq 0 ]; then
+    failed="$status"
   fi
   [ -s "$report" ] || {
     echo "conformance test did not write its report: shard $((shard + 1))/$shards" >&2
-    exit 1
+    exit $((failed ? failed : 1))
   }
   read -r _pct shard_passed shard_scanned extra <"$report"
   case "$shard_passed:$shard_scanned" in
@@ -70,3 +74,4 @@ awk -v passed="$passed" -v scanned="$scanned" 'BEGIN {
   pct = scanned == 0 ? 0 : 100 * passed / scanned
   printf "%.1f %d %d\n", pct, passed, scanned
 }'
+exit "$failed"

@@ -1,8 +1,24 @@
 # The resolution engine
 
 The design of one type-resolution engine for krusty, replacing the several partial typers that
-answer "what is the type of this?" today. This document is the design; `RESOLUTION_ENGINE_PLAN.md`
-is the landing sequence. Semantics decided here are recorded in `SPEC.md` with tests, as always.
+answer "what is the type of this?" today. Semantics decided here are recorded in `SPEC.md` with
+tests, as always.
+
+The arc lands incrementally, and its acceptance criterion is a property of the tree rather than a
+checklist: **the duplicate typers are gone.** Each step deletes one of the retry-to-fixpoint
+machines that approximate demand ordering today, so no step is a pure addition. A step that adds
+engine surface while leaving the path it replaces alive has not finished. The gate
+(`./run-tests.sh`, real exit code, "all test binaries passed") is green at every landed step.
+
+To see what is left, ask the tree, not a list — `git grep` the duplicate typers by name. Demand-driven
+declaration typing and both module/file `preinfer_*_to_fixpoint` machines have gone; the literal
+inference entry points (`infer_lit_ty*`), the lambda-shape channels (`top_level_lambda_shape`,
+`lambda_shape_for_overload`, `extension_lambda_shape`) and the per-channel binding helpers in
+`src/symbol_resolver.rs` (`bind_ext_ret*`, `merge_generic_bindings*`,
+`complete_bottom_constraint_bindings`, and `unify_ty*` as public API) were still live when this
+paragraph was written. What remains after those is the consumer side: lowering's type queries and the
+LSP asking the engine, the `is_java` / `has_metadata` / `ctor_params.is_none()` provenance proxies in
+core, and a whole-corpus byte sweep with a before/after compile-time measurement taken in one process.
 
 ## 1. The problem: no engine, therefore several typers
 

@@ -263,7 +263,7 @@ pub(super) fn report_members(
             ),
             Ok(Rendered::Unmatched(rendered)) => diags.error(
                 member.name,
-                format!("'{rendered}' has no corresponding expected declaration"),
+                crate::diagnostic_wording::actual_without_expect(&rendered),
             ),
             Err(unreachable) => diags.error(
                 member.name,

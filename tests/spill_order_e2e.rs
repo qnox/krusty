@@ -7,9 +7,7 @@
 use std::path::PathBuf;
 
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 const SOURCE: &str = "import kotlin.coroutines.*\n\
     import kotlin.coroutines.intrinsics.*\n\
