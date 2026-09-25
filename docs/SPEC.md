@@ -6740,6 +6740,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
   `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
   `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
+- **Native: a generic result widened to a nullable primitive keeps its `null`.** `fun <T> f(): T`
+  read as `Int` and stored into an `Int?` arrives as two coercions, the erased reference to `Int` and
+  `Int` to `Int?`. Realized one after the other they unbox a reference that may be `null`, which
+  throws. Native folds the pair into one reference conversion, the fold the JVM backend makes at its
+  result boundary. Tests: `tests/native_boxed_numbers_e2e.rs`
+  (`a_generic_result_widened_to_a_nullable_primitive_keeps_its_null`); the box corpus's
+  `boxing/kt84727.kt` in the native lane.
 - **An extension receiver constrains its declared formal through the receiver's supertypes.** In
   `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
   `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
