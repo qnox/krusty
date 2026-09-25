@@ -936,6 +936,9 @@ struct Parser<'a> {
     /// Context parameters parsed at a declaration prefix (`context(a: A)`), consumed by the next
     /// `parse_fun` (mirrors `pending_annotations`). Cleared when taken.
     pending_context_params: Vec<Param>,
+    /// Set while an `expect` classifier (and so every classifier nested in it) is being parsed.
+    /// Such a class declares only the constructors it writes: it gets no implicit primary one.
+    in_expect_classifier: bool,
     /// Span of the `context` keyword introducing the buffered clause. Diagnostics about the clause
     /// itself are anchored here rather than on some later modifier, which is where kotlinc puts them.
     pending_context_span: Option<Span>,
@@ -1061,6 +1064,7 @@ impl<'a> Parser<'a> {
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
             pending_context_params: Vec::new(),
+            in_expect_classifier: false,
             pending_context_span: None,
             member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
@@ -1427,6 +1431,8 @@ impl<'a> Parser<'a> {
             // error, so the declarations carrying it are recorded exactly as the expects are.
             let is_actual = mods.iter().any(|m| m == "actual");
             let decls_before = self.file.decls.len();
+            // Every classifier nested in an `expect` one is itself `expect`.
+            self.in_expect_classifier = is_expect;
             match self.kind() {
                 TokenKind::Eof => break,
                 // A `package` directive may follow file-level annotations (`@file:...`), so also
@@ -3893,9 +3899,11 @@ impl<'a> Parser<'a> {
             base_type_args,
             base_args,
             // A class has a primary constructor when it wrote one (parens / `constructor` keyword) OR
-            // declares no secondary constructors at all (then an implicit no-arg primary exists). Only a
-            // class with secondary ctors and no header ctor has NO primary.
-            primary_ctor_annotations: (header_has_primary || secondary_ctors.is_empty())
+            // declares no secondary constructors at all (then an implicit no-arg primary exists). A
+            // class with secondary ctors and no header ctor has NO primary, and neither has an
+            // `expect` class that wrote none: kotlinc gives it no default constructor.
+            primary_ctor_annotations: (header_has_primary
+                || (secondary_ctors.is_empty() && !self.in_expect_classifier))
                 .then_some(primary_constructor_annotations),
             primary_ctor_annotation_args: primary_constructor_annotation_args,
             secondary_ctors,

@@ -4935,6 +4935,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   first line only; the listing is checked against the reference compiler directly. Test
   `no_expect_for_actual_e2e::a_classifier_owing_expected_members_is_reported`.
 
+  What a classifier owes is matched against the `actual` classifier's MEMBER SCOPE, not only what
+  it declares: a member it inherits from an ordinary supertype declared in the module actualizes
+  an `expect` member as a fake override (`actual class A : Base()` where `Base` declares `foo`),
+  and a nearer member hides an inherited one only when it overrides it (the same complete input
+  signature): a declared `choose(String)` leaves an inherited `choose(Int)` in the scope to
+  actualize `expect fun choose(value: Int)`. A private supertype member is
+  not inherited. An `expect class` that writes no constructor has NONE — kotlinc gives it no
+  implicit primary constructor (`A()` in common code is "'expect' class 'A' does not have default
+  constructor.") — so it owes no constructor, and its `actual` may declare any, such as
+  `actual class LibA constructor(actual val t: String)`. The same holds for every classifier
+  nested in an `expect` one. Tests `mpp_expect_actual_e2e::expect_member_actualized_by_inherited_member`,
+  `inherited_overload_beside_a_declared_one_actualizes_its_expect`,
+  `expect_class_without_constructor_actualized_by_constructor_property`.
+
   An `expect`/`actual` pair must SPELL its type parameters alike, and a rename is an
   incompatibility between two declarations already taken to be counterparts — `the 'expect' and
   the 'actual' declarations are incompatible.` at the implementation — not an implementation that
