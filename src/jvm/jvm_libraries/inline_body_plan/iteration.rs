@@ -1448,7 +1448,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing body for {}{}", callable.name, callable.descriptor));
         (
             inline::disassemble(&body.code).expect("valid stdlib iteration bytecode"),
-            body.source_cp,
+            body.source_cp.to_vec(),
             body.handlers,
         )
     }

@@ -13,6 +13,7 @@
 mod candidate_union;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
+mod method_body_cache;
 mod property_identity;
 
 pub(crate) use crate::libraries::{
@@ -22,6 +23,9 @@ pub(crate) use crate::libraries::{
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
 };
+use self::method_body_cache::{
+    global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
+};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -29,7 +33,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode, ReadError};
+use crate::jvm::classreader::{parse_class, ClassBodies, ClassInfo, MethodCode, ReadError};
 use crate::jvm::compilation_inputs::{
     classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
 };
@@ -988,43 +992,6 @@ fn global_entry_class_cache(key: &EntryKey) -> ClassCache {
         .clone()
 }
 
-/// Process-global cache of lazily-read method bodies, one [`EntryCache`] slot per classpath ENTRY
-/// like [`global_entry_class_cache`]. A body is keyed by the OWNING entry, so the classpath-order
-/// shadowing decision stays per-lookup and a body read from the stdlib jar by ANY thread under ANY
-/// classpath set is reused. Without this, every per-test classpath (a scratch lib dir + the same
-/// stdlib jar) re-read and re-disassembled the stdlib's inline bodies from cold — measured at
-/// hundreds of `read_method_code` round-trips per fresh `Classpath`.
-///
-/// SCOPE: these per-entry global caches hold values derivable from ONE entry's bytes alone —
-/// method bodies and `.kotlin_builtins` fragment parses. Composition-dependent records
-/// (`LibraryType`, `ClassMeta`) deliberately stay per-instance: they embed whole-classpath facts
-/// (mapped-builtin customization, shadowable supertypes, multifile parts resolved through the
-/// current set), so an entry-keyed global would serve one composition's derivation to another.
-type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
-type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
-fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
-    static CACHE: std::sync::OnceLock<EntryCache<std::sync::RwLock<BodyMap>>> =
-        std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(EntryCache::new)
-        .get_or_build(key, Default::default)
-}
-
-/// Process-global cache of raw class bytes read for method-body decoding. The body cache above is
-/// keyed by METHOD, while a Kotlin facade commonly owns dozens of inline overloads. Without this
-/// class-level layer, the first lookup of every distinct method seeks and inflates the same `.class`
-/// entry again. Values are entry-local immutable facts, so the same archive entry can safely share
-/// them across classpath compositions and compiler workers. Failed reads are never cached.
-type ClassBytesMap = HashMap<TypeName, std::sync::Arc<Vec<u8>>>;
-type ClassBytesCache = std::sync::Arc<std::sync::RwLock<ClassBytesMap>>;
-fn global_entry_class_bytes_cache(key: &EntryKey) -> ClassBytesCache {
-    static CACHE: std::sync::OnceLock<EntryCache<std::sync::RwLock<ClassBytesMap>>> =
-        std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(EntryCache::new)
-        .get_or_build(key, Default::default)
-}
-
 /// Process-global cache of parsed `.kotlin_builtins` fragments, one [`EntryCache`] slot per entry.
 /// The inner mutex serializes the ONE cold read for a package across compiler workers; its outer
 /// `None` means "not initialized/retry after a transient read failure". The inner result retains an
@@ -1922,11 +1889,11 @@ pub struct Classpath {
     /// post-resolution platform validation turns it into one terminal frontend diagnostic.
     class_load_error: RefCell<Option<(TypeName, ReadError)>>,
     entry_caches: Vec<ClassCache>,
-    /// Per-entry global body/class-bytes/builtins cache slots, resolved once at construction
+    /// Per-entry global body/class-bodies/builtins cache slots, resolved once at construction
     /// (parallel to `entries`); `None` for directory entries, which are per-test/module-local and
     /// never shared.
     entry_body_caches: Vec<Option<BodyCache>>,
-    entry_class_bytes_caches: Vec<Option<ClassBytesCache>>,
+    entry_class_bodies_caches: Vec<Option<ClassBodiesCache>>,
     entry_builtins_caches: Vec<Option<BuiltinsCache>>,
     /// Process-global inline-plan cache for this complete archive/jimage composition. A composition
     /// containing a mutable directory stays instance-local; see [`global_plan_cache`].
@@ -2141,12 +2108,12 @@ impl Classpath {
                 Entry::Dir(_) => None,
             })
             .collect();
-        let entry_class_bytes_caches: Vec<Option<ClassBytesCache>> = entries
+        let entry_class_bodies_caches: Vec<Option<ClassBodiesCache>> = entries
             .iter()
             .zip(&cache_key)
             .map(|(entry, key)| match entry {
                 Entry::Jar(_) | Entry::Jimage(_) | Entry::CtSym { .. } => {
-                    Some(global_entry_class_bytes_cache(key))
+                    Some(global_entry_class_bodies_cache(key))
                 }
                 Entry::Dir(_) => None,
             })
@@ -2179,7 +2146,7 @@ impl Classpath {
             class_load_error: RefCell::new(None),
             entry_caches: cache_key.iter().map(global_entry_class_cache).collect(),
             entry_body_caches,
-            entry_class_bytes_caches,
+            entry_class_bodies_caches,
             entry_builtins_caches,
             shared_inline_plans,
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
@@ -4367,10 +4334,13 @@ impl Classpath {
         catalog_complete: bool,
     ) -> Option<MethodCode> {
         let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
+        let read_once = || {
+            self.class_bytes(internal)
+                .and_then(|bytes| ClassBodies::parse(std::sync::Arc::new(bytes)))
+                .and_then(|class| class.method_code(name, descriptor))
+        };
         if self.stub_overlay.borrow().contains_key(&internal_id) {
-            return self
-                .class_bytes(internal)
-                .and_then(|b| read_method_code(&b, name, descriptor));
+            return read_once();
         }
         let owner = (catalog_complete)
             .then(|| self.owning_entry(internal_id))
@@ -4381,55 +4351,23 @@ impl Classpath {
                 .map(|cache| (entry_index, cache))
         });
         let Some((entry_index, global)) = global else {
-            return self
-                .class_bytes(internal)
-                .and_then(|b| read_method_code(&b, name, descriptor));
+            return read_once();
         };
         let key = (internal_id, name.to_string(), descriptor.to_string());
         if let Some(hit) = global.read().unwrap().get(&key) {
             return hit.clone();
         }
-        // Read the bytes from the OWNING entry itself, never via `class_bytes`' independent
+        // Read the class from the OWNING entry itself, never via `class_bytes`' independent
         // first-hit walk: the two walks have different acceptance rules (`owning_entry` follows the
         // parse-validated L2 records; `class_bytes` serves raw jar bytes), so an earlier corrupt or
         // name-mismatched copy could otherwise be cached under the clean entry's key. And only a
-        // SUCCESSFUL read may populate the process-global cache — "no bytes" here is a transient
+        // SUCCESSFUL read may populate the process-global cache — "no class" here is a transient
         // read failure or a changed entry, and publishing that `None` process-wide would silently
         // disable this body for every later compile sharing the entry.
-        let bytes = self.entry_class_bytes(entry_index, internal_id)?;
-        let code = read_method_code(&bytes, name, descriptor);
+        let class = self.entry_class_bodies(entry_index, internal_id)?;
+        let code = class.and_then(|class| class.method_code(name, descriptor));
         global.write().unwrap().insert(key, code.clone());
         code
-    }
-
-    /// The raw `.class` bytes of `internal` from ONE specific entry (no classpath walk), validated
-    /// for directory entries exactly like [`Self::physical_class_entry`] (a case-insensitive
-    /// filesystem happily serves a case-collided sibling).
-    fn entry_class_bytes(
-        &self,
-        entry_index: usize,
-        internal_id: TypeName,
-    ) -> Option<std::sync::Arc<Vec<u8>>> {
-        let cache = self.entry_class_bytes_caches.get(entry_index)?.as_ref();
-        if let Some(hit) = cache.and_then(|cache| cache.read().unwrap().get(&internal_id).cloned())
-        {
-            return Some(hit);
-        }
-        let internal = internal_id.render();
-        let name = format!("{internal}.class");
-        let bytes = match self.entries.get(entry_index)? {
-            Entry::Dir(d) => std::fs::read(d.join(&name))
-                .ok()
-                .filter(|b| parse_class(b).is_ok_and(|ci| ci.this_class_matches(&internal))),
-            Entry::Jar(j) => self.jar_entry(j, &name),
-            Entry::Jimage(_) => self.jimage_bytes(&internal),
-            Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, &internal),
-        }?;
-        let bytes = std::sync::Arc::new(bytes);
-        if let Some(cache) = cache {
-            cache.write().unwrap().insert(internal_id, bytes.clone());
-        }
-        Some(bytes)
     }
 
     /// The first classpath entry (classpath order) that CONTAINS the class — the entry whose bytes
@@ -7411,12 +7349,12 @@ mod fq_tests {
             &global_entry_body_cache(&b.cache_key[0])
         ));
         assert!(std::sync::Arc::ptr_eq(
-            &global_entry_class_bytes_cache(&a.cache_key[0]),
-            &global_entry_class_bytes_cache(&b.cache_key[1])
+            &global_entry_class_bodies_cache(&a.cache_key[0]),
+            &global_entry_class_bodies_cache(&b.cache_key[1])
         ));
         assert!(!std::sync::Arc::ptr_eq(
-            &global_entry_class_bytes_cache(&a.cache_key[0]),
-            &global_entry_class_bytes_cache(&b.cache_key[0])
+            &global_entry_class_bodies_cache(&a.cache_key[0]),
+            &global_entry_class_bodies_cache(&b.cache_key[0])
         ));
         let pkg = type_name("kotlin/collections");
         let file = std::sync::Arc::new(BuiltinsFile::from_package(
@@ -7442,7 +7380,7 @@ mod fq_tests {
         assert!(std::sync::Arc::ptr_eq(&hit, &file));
         // Directory entries never get a global slot: they are per-test/module-local.
         assert!(b.entry_body_caches[0].is_none());
-        assert!(b.entry_class_bytes_caches[0].is_none());
+        assert!(b.entry_class_bodies_caches[0].is_none());
         assert!(b.entry_builtins_caches[0].is_none());
     }
 
@@ -7599,6 +7537,41 @@ mod fq_tests {
             "the body must be read from the parse-validated owning entry (the later, clean jar), \
              not from the earlier jar's corrupt raw bytes"
         );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove temp dir");
+    }
+
+    // A facade part owns hundreds of inline bodies over one constant pool. Reading two bodies of
+    // one archived class must index the class once: both bodies share its single parsed pool.
+    #[test]
+    fn bodies_of_one_archived_class_share_its_parsed_constant_pool() {
+        let directory = test_temp_dir("shared-body-pool");
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        let mut cw = crate::jvm::classfile::ClassWriter::new("shared/Pool", "java/lang/Object");
+        for (name, value) in [("first", 1), ("second", 2)] {
+            let mut code = crate::jvm::classfile::CodeBuilder::new(0);
+            code.push_int(value, &mut cw);
+            code.ireturn();
+            cw.add_method(
+                crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
+                name,
+                "()I",
+                &code,
+            );
+        }
+        let jar = directory.join("pool.jar");
+        write_test_jar_with_entry(&jar, "shared/Pool.class", &cw.finish());
+
+        let classpath = Classpath::new(vec![jar]);
+        let first = classpath
+            .method_code("shared/Pool", "first", "()I")
+            .expect("first body");
+        let second = classpath
+            .method_code("shared/Pool", "second", "()I")
+            .expect("second body");
+        assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
+        assert_ne!(first.code, second.code);
 
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove temp dir");

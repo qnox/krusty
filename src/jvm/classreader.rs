@@ -354,7 +354,8 @@ pub struct MethodCode {
     pub max_locals: u16,
     pub code: Vec<u8>,
     /// The defining class's constant pool — needed to relocate `code`'s pool references on inlining.
-    pub source_cp: Vec<C>,
+    /// Shared by every body read from that class (see [`ClassBodies`]).
+    pub source_cp: std::sync::Arc<[C]>,
     /// The raw `StackMapTable` attribute body (the frame entries, without the attribute name/length
     /// header), or `None` if the method has none (a branchless body needs no frames). Required to
     /// splice a *branchy* body: its frames are relocated into the caller.
@@ -380,7 +381,7 @@ pub struct MethodCode {
     /// contains code inlined from elsewhere, and a line above its own source length only means
     /// something read back through this map. A present attribute that is not exact UTF-8 or a
     /// readable Kotlin SMAP makes the method body unavailable rather than becoming an absent map.
-    pub dependency_source_map: Option<crate::jvm::source_map::DependencyMap>,
+    pub dependency_source_map: Option<std::sync::Arc<crate::jvm::source_map::DependencyMap>>,
     /// The DEFINING class's `BootstrapMethods` entries, as `(method handle cp index, static argument
     /// cp indices)`. An `invokedynamic` names one by index into this table rather than into the
     /// constant pool, so relocating the instruction into another class means re-interning the entry
@@ -410,159 +411,11 @@ pub struct ExcEntry {
 
 /// Lazily read one method's `Code` (bytecode body) from class `bytes`, without parsing every other
 /// method's body — the foundation for the inline expander. `None` if the class/method/`Code` is
-/// absent (e.g. an abstract or native method).
+/// absent (e.g. an abstract or native method). A caller reading several bodies of one class should
+/// index it once with [`ClassBodies::parse`] instead: this one-shot form re-reads the whole
+/// constant pool on every call.
 pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<MethodCode> {
-    let mut r = Reader { b: bytes, i: 0 };
-    if r.u4().ok()? != 0xCAFEBABE {
-        return None;
-    }
-    r.u2().ok()?; // minor
-    r.u2().ok()?; // major
-    let cp = parse_constant_pool(&mut r).ok()?;
-    let utf8 = |i: u16| -> &str {
-        match cp.get(i as usize) {
-            Some(C::Utf8(s)) => s.as_str(),
-            _ => "",
-        }
-    };
-    r.u2().ok()?; // access_flags
-    let this_class = r.u2().ok()?;
-    let defining_class = match cp.get(this_class as usize) {
-        Some(C::Class(name)) => match cp.get(*name as usize) {
-            Some(C::Utf8(name)) if !name.is_empty() => name.clone(),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    r.u2().ok()?; // super_class
-    let ifaces = r.u2().ok()?;
-    for _ in 0..ifaces {
-        r.u2().ok()?;
-    }
-    // Skip fields (each: access, name, desc, attributes).
-    let nfields = r.u2().ok()?;
-    for _ in 0..nfields {
-        r.u2().ok()?;
-        r.u2().ok()?;
-        r.u2().ok()?;
-        skip_attributes(&mut r).ok()?;
-    }
-    // Methods — find the matching (name, descriptor), then its `Code` attribute.
-    let nmethods = r.u2().ok()?;
-    let mut found: Option<ScannedCode> = None;
-    for _ in 0..nmethods {
-        r.u2().ok()?; // access
-        let mname = utf8(r.u2().ok()?).to_string();
-        let mdesc = utf8(r.u2().ok()?).to_string();
-        let matches = mname == name && mdesc == descriptor;
-        let nattr = r.u2().ok()?;
-        for _ in 0..nattr {
-            let attr_name = utf8(r.u2().ok()?).to_string();
-            let attr_len = r.u4().ok()? as usize;
-            if matches && attr_name == "Code" {
-                let max_stack = r.u2().ok()?;
-                let max_locals = r.u2().ok()?;
-                let code_len = r.u4().ok()? as usize;
-                let code = r.take(code_len).ok()?.to_vec();
-                let exc_len = r.u2().ok()?;
-                let mut handlers = Vec::with_capacity(exc_len as usize);
-                for _ in 0..exc_len {
-                    handlers.push(ExcEntry {
-                        start_pc: r.u2().ok()?,
-                        end_pc: r.u2().ok()?,
-                        handler_pc: r.u2().ok()?,
-                        catch_type: r.u2().ok()?,
-                    });
-                }
-                // Code-attribute attributes: find `StackMapTable` (the verifier frames).
-                let nca = r.u2().ok()?;
-                let mut stackmap = None;
-                let mut locals = Vec::new();
-                let mut lines = Vec::new();
-                for _ in 0..nca {
-                    let an = utf8(r.u2().ok()?).to_string();
-                    let al = r.u4().ok()? as usize;
-                    let body = r.take(al).ok()?;
-                    if an == "StackMapTable" {
-                        stackmap = Some(body.to_vec());
-                    } else if an == "LineNumberTable" {
-                        let mut line_reader = Reader { b: body, i: 0 };
-                        let count = line_reader.u2().ok()?;
-                        for _ in 0..count {
-                            let start_pc = line_reader.u2().ok()?;
-                            let line = line_reader.u2().ok()?;
-                            lines.push((start_pc, line));
-                        }
-                        if line_reader.i != body.len() {
-                            return None;
-                        }
-                    } else if an == "LocalVariableTable" {
-                        let mut local_reader = Reader { b: body, i: 0 };
-                        let count = local_reader.u2().ok()?;
-                        for _ in 0..count {
-                            let start_pc = local_reader.u2().ok()?;
-                            let length = local_reader.u2().ok()?;
-                            let name = utf8(local_reader.u2().ok()?).to_string();
-                            let descriptor = utf8(local_reader.u2().ok()?).to_string();
-                            let slot = local_reader.u2().ok()?;
-                            locals.push(MethodLocal {
-                                start_pc,
-                                length,
-                                slot,
-                                name,
-                                descriptor,
-                            });
-                        }
-                        if local_reader.i != body.len() {
-                            return None;
-                        }
-                    }
-                }
-                found = Some((
-                    max_stack, max_locals, code, stackmap, handlers, locals, lines,
-                ));
-                continue;
-            }
-            r.take(attr_len).ok()?;
-        }
-        if matches && found.is_none() {
-            return None; // method found but has no Code (abstract/native)
-        }
-    }
-    let (max_stack, max_locals, code, stackmap, handlers, locals, lines) = found?;
-    // `BootstrapMethods` is a CLASS attribute, so it lies past the methods. An `invokedynamic` in the
-    // body indexes it rather than the constant pool, so a splice into another class cannot relocate
-    // one without it. Reached by finishing the scan rather than by parsing the class a second time:
-    // splicing is one of the hottest backend paths.
-    // A table that is THERE but unreadable makes the whole body untrustworthy: an `invokedynamic`
-    // in it names an entry by index, and an index into a table this reader could not parse is not
-    // something to guess at. Declining the body costs a real call at the call site; guessing costs
-    // a relocated entry naming the wrong handle.
-    let ClassAttributes {
-        bootstrap_methods,
-        source_file,
-        dependency_source_map,
-    } = read_class_attributes(&mut r, &cp)?;
-    if dependency_source_map
-        .as_ref()
-        .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
-    {
-        return None;
-    }
-    Some(MethodCode {
-        max_stack,
-        max_locals,
-        code,
-        source_cp: cp,
-        stackmap,
-        handlers,
-        locals,
-        lines,
-        source_file,
-        defining_class,
-        dependency_source_map,
-        bootstrap_methods,
-    })
+    ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))?.method_code(name, descriptor)
 }
 
 /// Return one class-level attribute body exactly as stored, including its original constant-pool
@@ -610,18 +463,218 @@ pub fn read_class_attribute(bytes: &[u8], attribute: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// One method's `Code` attribute as the single-method scan recovers it, before the class attributes
-/// that follow it are read: `(max_stack, max_locals, code, StackMapTable, handlers, debug locals,
-/// line table)`.
-type ScannedCode = (
-    u16,
-    u16,
-    Vec<u8>,
-    Option<Vec<u8>>,
-    Vec<ExcEntry>,
-    Vec<MethodLocal>,
-    Vec<(u16, u16)>,
-);
+/// Where one declared method's `Code` attribute lies in its class file: the byte range of the
+/// attribute's body, or `None` for a method declared without one (abstract or native).
+type CodeRange = Option<std::ops::Range<usize>>;
+
+/// One class file indexed for body reads: its constant pool parsed once and shared by every body
+/// read from it, each method's `Code` attribute located by `(name, descriptor)`, and the class
+/// attributes a spliced body needs. A Kotlin facade part owns hundreds of inline bodies over one
+/// large pool; reading them one by one used to re-decode that whole pool (every UTF-8 constant)
+/// and hand each body its own copy of it.
+#[derive(Debug)]
+pub struct ClassBodies {
+    bytes: std::sync::Arc<Vec<u8>>,
+    cp: std::sync::Arc<[C]>,
+    defining_class: String,
+    methods: std::collections::HashMap<(Box<str>, Box<str>), CodeRange>,
+    bootstrap_methods: Vec<(u16, Vec<u16>)>,
+    source_file: Option<String>,
+    dependency_source_map: Option<std::sync::Arc<crate::jvm::source_map::DependencyMap>>,
+}
+
+impl ClassBodies {
+    /// Index `bytes`: parse the constant pool, locate every method's `Code` attribute, and read
+    /// the class attributes. `None` when the class cannot be read or its class attribute table is
+    /// unreadable — no body of such a class is trustworthy (see [`read_class_attributes`]).
+    pub fn parse(bytes: std::sync::Arc<Vec<u8>>) -> Option<Self> {
+        let mut r = Reader { b: &bytes, i: 0 };
+        if r.u4().ok()? != 0xCAFEBABE {
+            return None;
+        }
+        r.u2().ok()?; // minor
+        r.u2().ok()?; // major
+        let cp = parse_constant_pool(&mut r).ok()?;
+        let utf8 = |i: u16| -> &str {
+            match cp.get(i as usize) {
+                Some(C::Utf8(s)) => s.as_str(),
+                _ => "",
+            }
+        };
+        r.u2().ok()?; // access_flags
+        let this_class = r.u2().ok()?;
+        let defining_class = match cp.get(this_class as usize) {
+            Some(C::Class(name)) => match cp.get(*name as usize) {
+                Some(C::Utf8(name)) if !name.is_empty() => name.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        r.u2().ok()?; // super_class
+        let ifaces = r.u2().ok()?;
+        for _ in 0..ifaces {
+            r.u2().ok()?;
+        }
+        // Skip fields (each: access, name, desc, attributes).
+        let nfields = r.u2().ok()?;
+        for _ in 0..nfields {
+            r.u2().ok()?;
+            r.u2().ok()?;
+            r.u2().ok()?;
+            skip_attributes(&mut r).ok()?;
+        }
+        let nmethods = r.u2().ok()?;
+        let mut methods = std::collections::HashMap::with_capacity(nmethods as usize);
+        for _ in 0..nmethods {
+            r.u2().ok()?; // access
+            let name = utf8(r.u2().ok()?);
+            let descriptor = utf8(r.u2().ok()?);
+            let nattr = r.u2().ok()?;
+            let mut code = None;
+            for _ in 0..nattr {
+                let attr_name = r.u2().ok()?;
+                let attr_len = r.u4().ok()? as usize;
+                let start = r.i;
+                r.take(attr_len).ok()?;
+                if utf8(attr_name) == "Code" {
+                    code = Some(start..r.i);
+                }
+            }
+            // A class file declares each `(name, descriptor)` once (JVMS 4.6). Should a malformed
+            // one repeat it, keep what a front-to-back scan answers: a first declaration without
+            // `Code` is the answer, otherwise the last `Code` seen.
+            match methods.entry((Box::<str>::from(name), Box::<str>::from(descriptor))) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(code);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if slot.get().is_some() && code.is_some() {
+                        slot.insert(code);
+                    }
+                }
+            }
+        }
+        // `BootstrapMethods` is a CLASS attribute, so it lies past the methods. An `invokedynamic`
+        // in a body indexes it rather than the constant pool, so a splice into another class
+        // cannot relocate one without it. A table that is THERE but unreadable makes every body
+        // untrustworthy: an `invokedynamic` names an entry by index, and an index into a table
+        // this reader could not parse is not something to guess at. Declining the body costs a
+        // real call at the call site; guessing costs a relocated entry naming the wrong handle.
+        let ClassAttributes {
+            bootstrap_methods,
+            source_file,
+            dependency_source_map,
+        } = read_class_attributes(&mut r, &cp)?;
+        Some(Self {
+            bytes,
+            cp: cp.into(),
+            defining_class,
+            methods,
+            bootstrap_methods,
+            source_file,
+            dependency_source_map: dependency_source_map.map(std::sync::Arc::new),
+        })
+    }
+
+    /// Decode one method's `Code` attribute against the shared constant pool. `None` when the
+    /// class declares no such method, declares it without `Code`, or its `Code` is unreadable.
+    pub fn method_code(&self, name: &str, descriptor: &str) -> Option<MethodCode> {
+        let range = self
+            .methods
+            .get(&(Box::<str>::from(name), Box::<str>::from(descriptor)))?
+            .clone()?;
+        let cp = &self.cp;
+        let utf8 = |i: u16| -> &str {
+            match cp.get(i as usize) {
+                Some(C::Utf8(s)) => s.as_str(),
+                _ => "",
+            }
+        };
+        let mut r = Reader {
+            b: self.bytes.get(range)?,
+            i: 0,
+        };
+        let max_stack = r.u2().ok()?;
+        let max_locals = r.u2().ok()?;
+        let code_len = r.u4().ok()? as usize;
+        let code = r.take(code_len).ok()?.to_vec();
+        let exc_len = r.u2().ok()?;
+        let mut handlers = Vec::with_capacity(exc_len as usize);
+        for _ in 0..exc_len {
+            handlers.push(ExcEntry {
+                start_pc: r.u2().ok()?,
+                end_pc: r.u2().ok()?,
+                handler_pc: r.u2().ok()?,
+                catch_type: r.u2().ok()?,
+            });
+        }
+        // Code-attribute attributes: find `StackMapTable` (the verifier frames).
+        let nca = r.u2().ok()?;
+        let mut stackmap = None;
+        let mut locals = Vec::new();
+        let mut lines = Vec::new();
+        for _ in 0..nca {
+            let an = utf8(r.u2().ok()?);
+            let al = r.u4().ok()? as usize;
+            let body = r.take(al).ok()?;
+            if an == "StackMapTable" {
+                stackmap = Some(body.to_vec());
+            } else if an == "LineNumberTable" {
+                let mut line_reader = Reader { b: body, i: 0 };
+                let count = line_reader.u2().ok()?;
+                for _ in 0..count {
+                    let start_pc = line_reader.u2().ok()?;
+                    let line = line_reader.u2().ok()?;
+                    lines.push((start_pc, line));
+                }
+                if line_reader.i != body.len() {
+                    return None;
+                }
+            } else if an == "LocalVariableTable" {
+                let mut local_reader = Reader { b: body, i: 0 };
+                let count = local_reader.u2().ok()?;
+                for _ in 0..count {
+                    let start_pc = local_reader.u2().ok()?;
+                    let length = local_reader.u2().ok()?;
+                    let name = utf8(local_reader.u2().ok()?).to_string();
+                    let descriptor = utf8(local_reader.u2().ok()?).to_string();
+                    let slot = local_reader.u2().ok()?;
+                    locals.push(MethodLocal {
+                        start_pc,
+                        length,
+                        slot,
+                        name,
+                        descriptor,
+                    });
+                }
+                if local_reader.i != body.len() {
+                    return None;
+                }
+            }
+        }
+        if self
+            .dependency_source_map
+            .as_ref()
+            .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
+        {
+            return None;
+        }
+        Some(MethodCode {
+            max_stack,
+            max_locals,
+            code,
+            source_cp: self.cp.clone(),
+            stackmap,
+            handlers,
+            locals,
+            lines,
+            source_file: self.source_file.clone(),
+            defining_class: self.defining_class.clone(),
+            dependency_source_map: self.dependency_source_map.clone(),
+            bootstrap_methods: self.bootstrap_methods.clone(),
+        })
+    }
+}
 
 /// The class attributes a spliced body needs: its `BootstrapMethods` entries as `(method handle cp
 /// index, static argument cp indices)`, and its `SourceFile`. `r` must be positioned at the start of
@@ -1610,6 +1663,56 @@ mod tests {
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");
+    }
+
+    #[test]
+    fn class_bodies_share_one_parsed_pool_across_every_body_of_the_class() {
+        let mut cw = ClassWriter::new("demo/Bodies", "java/lang/Object");
+        let mut add = CodeBuilder::new(2);
+        add.iload(0);
+        add.iload(1);
+        add.iadd();
+        add.ireturn();
+        cw.add_method(super::ACC_PUBLIC | super::ACC_STATIC, "add", "(II)I", &add);
+        let mut one = CodeBuilder::new(0);
+        one.push_int(1, &mut cw);
+        one.ireturn();
+        cw.add_method(super::ACC_PUBLIC | super::ACC_STATIC, "one", "()I", &one);
+        cw.add_abstract_method(super::ACC_PUBLIC | 0x0400, "later", "()V");
+        let bytes = cw.finish();
+
+        let class = ClassBodies::parse(std::sync::Arc::new(bytes.clone())).expect("index class");
+        let add_body = class.method_code("add", "(II)I").expect("add body");
+        let one_body = class.method_code("one", "()I").expect("one body");
+        assert!(
+            std::sync::Arc::ptr_eq(&add_body.source_cp, &one_body.source_cp),
+            "bodies of one class must share its single parsed constant pool"
+        );
+        assert_eq!(add_body.code, vec![0x1a, 0x1b, 0x60, 0xac]);
+        assert_eq!(add_body.defining_class, "demo/Bodies");
+        assert!(
+            class.method_code("later", "()V").is_none(),
+            "no Code attribute"
+        );
+        assert!(
+            class.method_code("add", "(I)I").is_none(),
+            "descriptor is part of the key"
+        );
+        assert!(class.method_code("missing", "()V").is_none());
+
+        // The one-shot reader answers exactly what the indexed class answers.
+        for (name, descriptor) in [("add", "(II)I"), ("one", "()I"), ("later", "()V")] {
+            let indexed = class.method_code(name, descriptor);
+            let one_shot = read_method_code(&bytes, name, descriptor);
+            assert_eq!(
+                indexed
+                    .as_ref()
+                    .map(|body| (&body.code, body.max_stack, body.max_locals)),
+                one_shot
+                    .as_ref()
+                    .map(|body| (&body.code, body.max_stack, body.max_locals)),
+            );
+        }
     }
 
     #[test]
