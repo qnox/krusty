@@ -933,3 +933,17 @@ fun local(y: Any): Int {\n\
         "SlotTempSafeCastKt",
     );
 }
+
+/// An `::Array` reference adapter numbers its temporaries after its own parameters, so the index
+/// it declares first does not overwrite the size it was passed.
+#[test]
+fn an_array_constructor_reference_keeps_its_parameters() {
+    let src =
+        "fun g(b: (Int, (Int) -> String) -> Array<String>): Array<String> = b(2) { \"O$it\" }\n\
+fun box(): String {\n\
+    val r = g(::Array).joinToString() + IntArray(3, ::twice).sum()\n\
+    return if (r == \"O0, O16\") \"OK\" else r\n\
+}\n\
+fun twice(i: Int) = i * 2\n";
+    assert_eq!(run(src), "OK");
+}
