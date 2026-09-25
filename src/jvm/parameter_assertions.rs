@@ -5,7 +5,7 @@
 //! erasure. Value-class lowering may subsequently remove a guard when the selected carrier is a
 //! primitive. No frontend phase records an intrinsic name or makes a JVM representation decision.
 
-use crate::ir::{FunId, IrFile};
+use crate::ir::{FunId, IrFile, IrParameterRole};
 use crate::types::Ty;
 use std::collections::HashSet;
 
@@ -29,11 +29,26 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
         .get(&function)
         .cloned()
         .unwrap_or_default();
+    // A guard quotes the parameter's name. A value parameter whose provider publishes none (a
+    // Java-declared parameter of a mapped collection interface, forwarded by delegation) has no
+    // spelling to quote, and a name is never invented for it.
+    let unnamed = ir
+        .function_parameter_identities(function)
+        .map(|identities| {
+            identities
+                .iter()
+                .map(|identity| {
+                    identity.role == IrParameterRole::Value && identity.source_name.is_none()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let checks = &mut ir.functions[function as usize].param_checks;
     checks.resize(parameters.len(), None);
     for (ordinal, ty) in parameters.into_iter().enumerate() {
         if checks[ordinal].is_some()
             || declared_nullable.get(ordinal).copied().unwrap_or(false)
+            || unnamed.get(ordinal).copied().unwrap_or(false)
             || !requires_reference_guard(ty)
         {
             continue;
@@ -62,6 +77,18 @@ pub(super) fn realize(ir: &mut IrFile) {
         };
         functions.extend(getter);
         functions.extend(setter);
+    }
+    // Interface-delegation forwarders are compiler-generated but public, and kotlinc checks their
+    // parameters like any source override's. Their exact identities are the override edges they
+    // publish.
+    for edges in ir.function_overrides.values() {
+        functions.extend(edges.iter().filter_map(|edge| edge.implementation_function));
+    }
+    for edges in ir.property_overrides.values() {
+        for edge in edges {
+            functions.extend(edge.implementation_getter);
+            functions.extend(edge.implementation_setter);
+        }
     }
     for function in functions {
         realize_function(ir, function);

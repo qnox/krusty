@@ -360,7 +360,12 @@ pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalProperty
                 ir.fn_decl_lines.insert(*function, line);
             }
         }
-        IrLocalPropertyLayout::MemberExtension { .. } => {}
+        IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+            ir.fn_decl_lines.insert(*getter, line);
+            if let Some(setter) = setter {
+                ir.fn_decl_lines.insert(*setter, line);
+            }
+        }
     }
 }
 
