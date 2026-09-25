@@ -1070,6 +1070,8 @@ mod member_property_inference_e2e;
 mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_array_signature_e2e.rs"]
 mod metadata_array_signature_e2e;
+#[path = "metadata_field_presence_e2e.rs"]
+mod metadata_field_presence_e2e;
 #[path = "metadata_jvm_field_e2e.rs"]
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]

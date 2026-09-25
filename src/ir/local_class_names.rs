@@ -790,7 +790,6 @@ impl super::IrFile {
             function.ret = ty(function.ret, names);
             function.receiver = function.receiver.map(|value| ty(value, names));
             package_type_parameters(&mut function.type_params, names);
-            function.equality_bound = function.equality_bound.map(|value| ty(value, names));
         }
         for property in &mut self.package_properties {
             property.ty = ty(property.ty, names);
@@ -879,9 +878,6 @@ impl super::IrFile {
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.exhaustive_whens
-            .values_mut()
-            .for_each(|value| *value = ty(*value, names));
-        self.fn_equality_bounds
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.suspend_calls

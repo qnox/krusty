@@ -1917,7 +1917,6 @@ fn build_class_metadata(
                                 .unwrap_or(false)
                         })
                         .collect(),
-                    equality_bound: ir.fn_equality_bounds.get(&fid).copied(),
                 })
             })
             .collect::<Vec<_>>()
@@ -1955,7 +1954,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             });
         }
         if synthesizes_copy {
@@ -1994,7 +1992,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             });
         }
         if ir
@@ -2021,10 +2018,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                // Kotlin's data-class flag makes the synthesized equals refinement implicit. kotlinc
-                // does not serialize ValueParameter.equality_bound_type for this member; our metadata
-                // reader reconstructs the semantic fact from IS_DATA plus SYNTHESIZED member kind.
-                equality_bound: None,
             });
         }
         if ir
@@ -2051,7 +2044,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             });
         }
         if ir
@@ -2078,7 +2070,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             });
         }
         m.extend(declared_methods());
@@ -2108,7 +2099,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: Some(class_ty),
             },
             FnMeta {
                 context_count: 0,
@@ -2130,7 +2120,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             },
             FnMeta {
                 context_count: 0,
@@ -2152,7 +2141,6 @@ fn build_class_metadata(
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
-                equality_bound: None,
             },
         ];
         methods.extend(declared_methods());
@@ -2331,7 +2319,10 @@ fn build_class_metadata(
             .iter()
             .find(|property| property.backing_field == Some(0))
             .expect("a value class must retain its semantic underlying property");
-        (property.name.as_str(), property.ty)
+        (
+            property.name.as_str(),
+            (!property.visibility.is_public_api()).then_some(property.ty),
+        )
     });
     // Metadata lists the declared superclass before interfaces.
     let super_internal = c.superclass.render();
