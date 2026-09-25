@@ -40,6 +40,36 @@ impl BodyLowering<'_, '_, '_> {
         Ok(call)
     }
 
+    /// Lower `build`, and when an exception leaves it, run `undo` before letting it go on.
+    ///
+    /// For the lazy initializers, which publish what they build before it is finished: a
+    /// constructor reaching back into its own object must find it under way, not start it again.
+    /// When that constructor throws, the half-built object must not stay published — Kotlin never
+    /// hands it out — so `undo` withdraws it and the exception carries on to the caller.
+    pub(super) fn undone_on_failure(
+        &mut self,
+        build: &mut dyn FnMut(&mut Self) -> Result<(), Unsupported>,
+        undo: &mut dyn FnMut(&mut Self) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let failed = self.builder.create_block();
+        self.handlers.push(failed);
+        let built = build(self);
+        self.handlers.pop();
+        built?;
+        let after = self.builder.create_block();
+        if !self.terminated {
+            self.builder.ins().jump(after, &[]);
+        }
+        self.continue_in(failed);
+        self.builder.seal_block(failed);
+        undo(self)?;
+        let onward = self.unwind_target();
+        self.builder.ins().jump(onward, &[]);
+        self.continue_in(after);
+        self.builder.seal_block(after);
+        Ok(())
+    }
+
     /// Call a runtime function WITHOUT the propagation check.
     ///
     /// For the handler machinery itself, and only for it. Deciding which clause takes the

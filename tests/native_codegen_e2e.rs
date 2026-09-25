@@ -194,8 +194,8 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
     // runtime. Every produced binary is asserted to be for the architecture asked for; the host's
     // is also RUN. The others cannot be executed here (no emulator), so for them the assertion is
     // that the link resolved every symbol and every relocation — a wrong relocation kind or an
-    // out-of-range field fails the link, not the run. The program calls, loops, recurses and
-    // builds a string, so the calls into the runtime are cross-compiled too, not only arithmetic.
+    // out-of-range field fails the link, not the run. The program uses a class hierarchy so the
+    // descriptors, vtables and constructor path are cross-compiled too, not only straight code.
     let mut linked = Vec::new();
     for &target in NativeTarget::ALL {
         if !krusty::native::can_link(target) {
@@ -205,17 +205,16 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
         let (artifacts, diagnostics) = compile(
             &[(
                 "Main",
-                "fun greet(who: String, n: Long): String = \"Hello, $who! $n\"\n\
+                "open class Greeting(val who: String) { open fun text(): String = \"Hello, $who!\" }\n\
+                 class Counted(who: String, val n: Long) : Greeting(who) {\n\
+                 \x20   override fun text(): String = super.text() + \" $n\"\n\
+                 }\n\
                  fun fib(n: Int): Int = if (n < 2) n else fib(n - 1) + fib(n - 2)\n\
                  fun main() {\n\
                  \x20   var total = 0L\n\
-                 \x20   var i = 0\n\
-                 \x20   while (i < 10) {\n\
-                 \x20       i = i + 1\n\
-                 \x20       if (i % 2 == 0) continue\n\
-                 \x20       total = total + fib(i)\n\
-                 \x20   }\n\
-                 \x20   println(greet(\"world\", total))\n\
+                 \x20   for (i in 1..10) { if (i % 2 == 0) continue; total = total + fib(i) }\n\
+                 \x20   val g: Greeting = Counted(\"world\", total)\n\
+                 \x20   println(g.text())\n\
                  }\n",
             )],
             target,
@@ -607,6 +606,126 @@ fn an_unsigned_integer_is_not_the_signed_one_sharing_its_bits() {
 }
 
 #[test]
+fn top_level_properties_initialize_before_main_and_hold_their_values() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Initializers run in declaration order, before the entry function — where the JVM would have
+    // run the facade's `<clinit>`. `tag` prints as each one is evaluated, so a reordering shows up
+    // in the output, and `derived` reads `base`, which only works if `base` was assigned first.
+    assert_eq!(
+        run("fun tag(s: String, n: Int): Int { println(s); return n }\n\
+             val base: Int = tag(\"base\", 4)\n\
+             val derived: Int = base * 10\n\
+             var counter: Int = 0\n\
+             val name: String = \"kotlin\"\n\
+             fun bump(): Int { counter = counter + 1; return counter }\n\
+             fun main() {\n\
+             \x20   println(base)\n\
+             \x20   println(derived)\n\
+             \x20   println(name)\n\
+             \x20   println(bump())\n\
+             \x20   println(bump())\n\
+             \x20   counter = 40\n\
+             \x20   println(bump())\n\
+             }\n"),
+        "base\n4\n40\nkotlin\n1\n2\n41\n"
+    );
+}
+
+#[test]
+fn a_top_level_property_is_a_collector_root() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `kept` holds a HEAP string (built by a template, so it is not a literal in static storage)
+    // and nothing else references it: only the registered global root keeps it alive. The loop
+    // then allocates far past the collection threshold, so the string survives many collections
+    // with its slot as its sole root. Without `kt_gc_add_global_root` this printed reused bytes.
+    assert_eq!(
+        run("val kept: String = \"kept-${1 + 1}\"\n\
+             var last: String = \"\"\n\
+             fun main() {\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 100000) {\n\
+             \x20       last = \"garbage-$i\"\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   println(kept)\n\
+             \x20   println(last)\n\
+             }\n"),
+        "kept-2\ngarbage-99999\n"
+    );
+}
+
+#[test]
+fn a_top_level_property_with_custom_accessors_runs_their_bodies() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `doubled` has no storage at all — a read is a call. `guarded` has storage and both accessors
+    // written in source; `field` inside them is the backing slot, not a recursive accessor call.
+    assert_eq!(
+        run("var backing: Int = 3\n\
+             val doubled: Int get() = backing * 2\n\
+             var guarded: Int = 1\n\
+             \x20   get() = field + 100\n\
+             \x20   set(v) { field = if (v < 0) 0 else v }\n\
+             fun main() {\n\
+             \x20   println(doubled)\n\
+             \x20   backing = 5\n\
+             \x20   println(doubled)\n\
+             \x20   println(guarded)\n\
+             \x20   guarded = -7\n\
+             \x20   println(guarded)\n\
+             \x20   guarded = 7\n\
+             \x20   println(guarded)\n\
+             }\n"),
+        "6\n10\n101\n100\n107\n"
+    );
+}
+
+#[test]
+fn structural_equality_on_references_asks_the_receiver() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `==` on references is `equals`, not an address comparison: two separately built strings with
+    // the same text are equal, a class with an overridden `equals` answers for itself, one without
+    // falls back to identity, and `null` equals only `null`. Every value here is built at runtime
+    // so no literal can be shared into a false positive.
+    assert_eq!(
+        run("class Point(val x: Int, val y: Int) {\n\
+             \x20   override fun equals(other: Any?): Boolean = other is Point && other.x == x && other.y == y\n\
+             \x20   override fun hashCode(): Int = x * 31 + y\n\
+             }\n\
+             class Opaque(val v: Int)\n\
+             fun build(n: Int): String = \"value-$n\"\n\
+             fun main() {\n\
+             \x20   println(build(1) == build(1))\n\
+             \x20   println(build(1) == build(2))\n\
+             \x20   println(Point(1, 2) == Point(1, 2))\n\
+             \x20   println(Point(1, 2) == Point(3, 4))\n\
+             \x20   println(Point(1, 2) != Point(3, 4))\n\
+             \x20   println(Opaque(1) == Opaque(1))\n\
+             \x20   val o = Opaque(1)\n\
+             \x20   println(o == o)\n\
+             \x20   val missing: String? = null\n\
+             \x20   println(missing == build(1))\n\
+             \x20   println(build(1) == missing)\n\
+             \x20   val boxed: Int? = 5\n\
+             \x20   println(boxed == 5)\n\
+             \x20   println(boxed == 6)\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn a_when_whose_arms_have_different_types_is_carried_as_a_reference() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -860,6 +979,559 @@ fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
 }
 
 #[test]
+fn the_unit_value_is_the_runtimes_own() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Unit` is one value for the whole program, so it is the runtime's rather than something each
+    // file declares — which is also why a file that merely mentions it needs nothing emitted.
+    assert_eq!(
+        run("fun nothing(): Unit = Unit\n\
+             fun main() {\n\
+             \x20   println(nothing())\n\
+             \x20   println(nothing() === Unit)\n\
+             \x20   val u: Any = Unit\n\
+             \x20   println(u == Unit)\n\
+             }\n"),
+        "kotlin.Unit\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn a_unit_tail_call_before_a_bare_return_becomes_a_loop() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // In a `Unit` function a call with nothing after it but `return` IS in tail position, so
+    // `tailrec` promises it costs no stack. A million frames is far past what any stack holds, so
+    // this program printing its answer is the whole assertion: were the call left recursive the
+    // process would die on its stack guard page instead. The non-tail call is the control — it
+    // stays an ordinary call, and recurses only the one level the source asks for.
+    assert_eq!(
+        run("var reached = 0\n\
+             tailrec fun countDown(n: Int) {\n\
+             \x20   if (n == 0) return\n\
+             \x20   if (n == 500000) reached = n\n\
+             \x20   countDown(n - 1)\n\
+             \x20   return\n\
+             }\n\
+             tailrec fun branchy(n: Int) {\n\
+             \x20   if (n > 500000) {\n\
+             \x20       branchy(n - 1)\n\
+             \x20   } else if (n > 0) {\n\
+             \x20       branchy(n - 1)\n\
+             \x20       return\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   countDown(1000000)\n\
+             \x20   println(reached)\n\
+             \x20   branchy(1000000)\n\
+             \x20   println(\"deep\")\n\
+             }\n"),
+        "500000\ndeep\n"
+    );
+}
+
+#[test]
+fn the_stdlib_scope_functions_are_expanded_at_the_call_site() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `apply`/`also` yield the receiver, `let`/`run` yield the block's result, and all four hand
+    // the block the receiver — evaluated exactly once, which the counter pins: `next()` runs once
+    // per call however often the block mentions the value it returned.
+    assert_eq!(
+        run("class Box(var n: Int) {\n\
+             \x20   fun twice(): Int = n * 2\n\
+             }\n\
+             var calls = 0\n\
+             fun next(): Box { calls = calls + 1; return Box(3) }\n\
+             fun main() {\n\
+             \x20   val applied = next().apply { n = n + 1 }\n\
+             \x20   println(applied.n)\n\
+             \x20   val also = next().also { it.n = it.n + 10 }\n\
+             \x20   println(also.n)\n\
+             \x20   println(next().let { it.n + it.twice() })\n\
+             \x20   println(next().run { n + twice() })\n\
+             \x20   val captured = 100\n\
+             \x20   println(next().let { it.n + captured })\n\
+             \x20   println(calls)\n\
+             }\n"),
+        "4\n13\n9\n9\n103\n5\n"
+    );
+}
+
+#[test]
+fn an_extension_property_is_read_and_written_through_its_accessors() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An extension property has no storage of its own — there is no object to keep a field in —
+    // so every access is a call to its accessor, with the receiver as an argument. A `var` one
+    // writes through its setter, and the receiver is what the setter changes.
+    assert_eq!(
+        run("class Cell(var value: Int)\n\
+             val Cell.doubled: Int get() = value * 2\n\
+             var Cell.raised: Int\n\
+             \x20   get() = value + 1\n\
+             \x20   set(next) { value = next - 1 }\n\
+             fun main() {\n\
+             \x20   val cell = Cell(20)\n\
+             \x20   println(cell.doubled)\n\
+             \x20   println(cell.raised)\n\
+             \x20   cell.raised = 100\n\
+             \x20   println(cell.value)\n\
+             \x20   println(cell.doubled)\n\
+             }\n"),
+        "40\n21\n99\n198\n"
+    );
+}
+
+#[test]
+fn a_data_class_gets_kotlins_equality_hashing_and_rendering() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A data class is only a data class if its synthesized members answer what Kotlin says. The
+    // checked lowering writes those members; what the generator supplies is the per-field hash and
+    // comparison they are written in terms of, and each is Kotlin's own answer rather than the
+    // machine's: a `Long` folds its halves so the high word survives the truncation to `Int`, a
+    // `Boolean` is 1231 or 1237, and a `String` field compares by content.
+    assert_eq!(
+        run("data class Point(val x: Int, val y: Int)\n\
+             data class Tagged(val name: String, val big: Long, val flag: Boolean)\n\
+             fun main() {\n\
+             \x20   println(Point(1, 2) == Point(1, 2))\n\
+             \x20   println(Point(1, 2) == Point(1, 3))\n\
+             \x20   println(Point(1, 2).hashCode() == Point(1, 2).hashCode())\n\
+             \x20   println(Point(1, 2).hashCode() == Point(2, 1).hashCode())\n\
+             \x20   println(Point(1, 2).toString())\n\
+             \x20   val (a, b) = Point(3, 4)\n\
+             \x20   println(a + b)\n\
+             \x20   println(Tagged(\"a\" + \"b\", 1L shl 40, true) == Tagged(\"ab\", 1L shl 40, true))\n\
+             \x20   println(Tagged(\"ab\", 1L, true) == Tagged(\"ab\", 2L, true))\n\
+             \x20   println(Tagged(\"ab\", 1L, true).hashCode() == Tagged(\"ab\", 1L, true).hashCode())\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\nPoint(x=1, y=2)\n7\ntrue\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn a_floating_point_data_class_field_compares_by_its_bits() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Double.equals` is not `==`, and it disagrees with it in BOTH directions: `NaN` equals
+    // itself, and the two zeroes are distinct. Comparing the reinterpreted bits is exactly Kotlin's
+    // rule, where the comparison instruction answers the other way round on both of those values.
+    // The hash follows from the same bits, which is what makes `NaN`'s hash a number at all.
+    assert_eq!(
+        run("data class Wide(val x: Double)\n\
+             data class Narrow(val y: Float)\n\
+             fun main() {\n\
+             \x20   println(Wide(1.5) == Wide(1.5))\n\
+             \x20   println(Wide(1.5) == Wide(2.5))\n\
+             \x20   println(Wide(Double.NaN) == Wide(Double.NaN))\n\
+             \x20   println(Wide(0.0) == Wide(-0.0))\n\
+             \x20   println(Wide(Double.NaN).hashCode() == Wide(Double.NaN).hashCode())\n\
+             \x20   println(Wide(0.0).hashCode() == Wide(-0.0).hashCode())\n\
+             \x20   println(Narrow(Float.NaN) == Narrow(Float.NaN))\n\
+             \x20   println(Narrow(0.0f) == Narrow(-0.0f))\n\
+             \x20   println(Wide(1.5))\n\
+             \x20   println(Narrow(2.5f))\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\nWide(x=1.5)\nNarrow(y=2.5)\n"
+    );
+}
+
+#[test]
+fn an_interface_dispatches_through_a_program_wide_slot() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A call through an interface-typed value knows only the interface, so the slot number it uses
+    // has to mean the same member in every class implementing it — which is what the program-wide
+    // numbering above every class's own slots buys. The cases that have to work: a plain override,
+    // a default body the class does not override, an interface property, a second interface on the
+    // same class, an interface extending another, and a method the class INHERITS rather than
+    // declares (`Sub` satisfies `Named` with `Base`'s method, and `Base` knows nothing of `Named`).
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   fun name(): String\n\
+             \x20   fun greet(): String = \"hi \" + name()\n\
+             \x20   val tag: String\n\
+             }\n\
+             interface Counted { fun count(): Int }\n\
+             interface Both : Named, Counted\n\
+             class One : Named {\n\
+             \x20   override fun name() = \"one\"\n\
+             \x20   override val tag = \"t1\"\n\
+             }\n\
+             class Two : Both {\n\
+             \x20   override fun name() = \"two\"\n\
+             \x20   override fun greet() = \"hey \" + name()\n\
+             \x20   override fun count() = 2\n\
+             \x20   override val tag = \"t2\"\n\
+             }\n\
+             open class Base { open fun name() = \"base\" }\n\
+             class Sub : Base(), Named { override val tag = \"t3\" }\n\
+             fun describe(named: Named): String = named.greet() + \"/\" + named.tag\n\
+             fun main() {\n\
+             \x20   println(describe(One()))\n\
+             \x20   println(describe(Two()))\n\
+             \x20   println(describe(Sub()))\n\
+             \x20   val both: Both = Two()\n\
+             \x20   println(both.count())\n\
+             \x20   val counted: Counted = Two()\n\
+             \x20   println(counted.count())\n\
+             }\n"),
+        "hi one/t1\nhey two/t2\nhi base/t3\n2\n2\n"
+    );
+}
+
+#[test]
+fn an_interface_answers_is_and_as() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An interface is not on the single-inheritance chain `is` walks, so each type carries the
+    // interfaces it implements — transitively, which is what makes the base of an interface, and
+    // an interface of a superclass, answer as well as the one the class names itself.
+    assert_eq!(
+        run("interface Base\n\
+             interface Derived : Base\n\
+             open class Holder : Derived\n\
+             class Sub : Holder()\n\
+             class Other\n\
+             fun main() {\n\
+             \x20   val sub: Any = Sub()\n\
+             \x20   println(sub is Derived)\n\
+             \x20   println(sub is Base)\n\
+             \x20   println(sub is Holder)\n\
+             \x20   val other: Any = Other()\n\
+             \x20   println(other is Base)\n\
+             \x20   println((sub as Base) === sub)\n\
+             \x20   println((other as? Base) == null)\n\
+             }\n"),
+        "true\ntrue\ntrue\nfalse\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn an_inherited_method_reaches_an_interfaces_number_through_a_bridge() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    let _ = target;
+    // `Raw.foo(): Int` is what `Boxed.foo(): Any` gets here, and the two disagree about the
+    // machine: one answers an unboxed integer, the other a reference. Pointing the interface's
+    // number at the inherited method would have a caller read that integer as a pointer, so the
+    // number holds a bridge wearing the interface's carrier instead — which is what the JVM emits
+    // a bridge method for.
+    //
+    // Nothing in this class is declared `override`: `Both` satisfies `Boxed.foo` with a method
+    // `Raw` knows nothing about, which is the fake override the interface pass registers.
+    assert_eq!(
+        run("interface Boxed { fun foo(): Any }\n\
+             open class Raw { fun foo(): Int = 42 }\n\
+             class Both : Raw(), Boxed\n\
+             fun main() {\n\
+             \x20   val b: Boxed = Both()\n\
+             \x20   println(b.foo())\n\
+             \x20   println(Both().foo())\n\
+             }\n"),
+        "42\n42\n"
+    );
+}
+
+#[test]
+fn an_inner_class_reaches_its_enclosing_instance() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An `inner` class carries its outer instance in a field, stored before the superclass
+    // constructor runs — Kotlin's own order, which a base-class `init` can observe. Reading
+    // `this@Outer`, or an outer member without qualifying it, is a load of that field; writing one
+    // reaches the same object the outer still holds, which is what the counter shows.
+    assert_eq!(
+        run("open class Base(val tag: String)\n\
+             class Outer(var n: Int) {\n\
+             \x20   inner class Inner : Base(\"inner\") {\n\
+             \x20       fun sum(): Int = n + 1\n\
+             \x20       fun qualified(): Int = this@Outer.n * 2\n\
+             \x20       fun bump() { n = n + 5 }\n\
+             \x20       fun label(): String = tag\n\
+             \x20   }\n\
+             \x20   inner class Deep {\n\
+             \x20       inner class Deeper {\n\
+             \x20           fun reach(): Int = this@Outer.n\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val outer = Outer(20)\n\
+             \x20   val inner = outer.Inner()\n\
+             \x20   println(inner.sum())\n\
+             \x20   println(inner.qualified())\n\
+             \x20   println(inner.label())\n\
+             \x20   inner.bump()\n\
+             \x20   println(outer.n)\n\
+             \x20   println(outer.Deep().Deeper().reach())\n\
+             }\n"),
+        "21\n40\ninner\n25\n25\n"
+    );
+}
+
+#[test]
+fn an_override_the_tables_do_not_record_still_dispatches() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A member EXTENSION's override has no entry in the frontend's override tables. Left at that,
+    // it takes a slot of its own and a call through the base's type reaches the base's body — a
+    // wrong answer with nothing to signal it. The IR still says what is needed: a declaration
+    // WITHOUT `override` is listed as a fresh one, so a method absent from that list which matches
+    // an inherited member by name and machine signature is that member's override.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open fun String.decorate(): String = \"base:\" + this\n\
+             }\n\
+             class Derived : Base() {\n\
+             \x20   override fun String.decorate(): String = \"derived:\" + this\n\
+             }\n\
+             fun render(base: Base): String { with(base) { return \"x\".decorate() } }\n\
+             fun main() {\n\
+             \x20   println(render(Base()))\n\
+             \x20   println(render(Derived()))\n\
+             }\n"),
+        "base:x\nderived:x\n"
+    );
+}
+
+#[test]
+fn a_class_may_have_more_than_one_constructor() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A secondary constructor delegates and then runs its own body, and Kotlin's order is what is
+    // being realized: a `this(…)` delegation reaches another constructor of the same class, which
+    // runs the class's initializers, while a `super(…)` one runs them here — a class with no
+    // primary constructor has nowhere else to run them. A chain of secondaries is the same rule
+    // applied twice.
+    assert_eq!(
+        run("var order = \"\"\n\
+             class Point(val x: Int, val y: Int) {\n\
+             \x20   init { order += \"p\" }\n\
+             \x20   constructor(both: Int) : this(both, both) { order += \"s\" }\n\
+             \x20   constructor() : this(7) { order += \"t\" }\n\
+             }\n\
+             open class Base(val tag: String) { init { order += \"b\" } }\n\
+             class Sub : Base {\n\
+             \x20   init { order += \"i\" }\n\
+             \x20   constructor(n: Int) : super(\"s\" + n) { order += \"c\" }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val square = Point(3)\n\
+             \x20   println(square.x + square.y)\n\
+             \x20   println(Point().x)\n\
+             \x20   order = \"\"\n\
+             \x20   println(Sub(1).tag)\n\
+             \x20   println(order)\n\
+             }\n"),
+        "6\n7\ns1\nbic\n"
+    );
+}
+
+#[test]
+fn a_class_declared_inside_a_function_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local class is a class: the checked lowering lifts it to the file with its captures turned
+    // into leading constructor parameters, so by the time the generator sees it there is nothing
+    // local left. That is what removing the decline showed — the model and the constructor path
+    // already handled it, and the decline was a claim about a difficulty that was not there.
+    assert_eq!(
+        run("fun make(base: Int): Int {\n\
+             \x20   class Adder(val extra: Int) { fun sum() = base + extra }\n\
+             \x20   return Adder(2).sum()\n\
+             }\n\
+             fun main() {\n\
+             \x20   class Counter(val n: Int) { fun twice() = n * 2 }\n\
+             \x20   class Box<T>(val v: T) { fun get(): T = v }\n\
+             \x20   println(Counter(21).twice())\n\
+             \x20   println(Box(42).get())\n\
+             \x20   println(make(40))\n\
+             }\n"),
+        "42\n42\n42\n"
+    );
+}
+
+#[test]
+fn an_object_expression_implements_its_supertypes() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `object : T { … }` is a class with one instance, built where it is written. Its constructor
+    // is NOT its class's first declaration, so the checked lowering cannot recognize it as primary
+    // and names it by its parameter list the way it names a secondary — which is why construction
+    // now falls back to the primary when the list is the primary's own.
+    assert_eq!(
+        run("interface A { fun a(): Int }\n\
+             interface B { fun b(): Int }\n\
+             abstract class Base(val n: Int) { abstract fun twice(): Int }\n\
+             interface P { fun p(): Int }\n\
+             class Holder(val n: Int) { fun make(): P = object : P { override fun p() = n } }\n\
+             fun supplier(n: Int): P = object : P { override fun p() = n + 1 }\n\
+             fun main() {\n\
+             \x20   val both = object : A, B {\n\
+             \x20       override fun a() = 20\n\
+             \x20       override fun b() = 22\n\
+             \x20   }\n\
+             \x20   println(both.a() + both.b())\n\
+             \x20   val based = object : Base(21) { override fun twice() = n * 2 }\n\
+             \x20   println(based.twice())\n\
+             \x20   println(Holder(42).make().p())\n\
+             \x20   println(supplier(41).p())\n\
+             \x20   val counter = object {\n\
+             \x20       var seen = 0\n\
+             \x20       fun next(): Int { seen += 1; return seen }\n\
+             \x20   }\n\
+             \x20   counter.next()\n\
+             \x20   println(counter.next() + 40)\n\
+             }\n"),
+        "42\n42\n42\n42\n42\n"
+    );
+}
+
+#[test]
+fn a_local_classs_properties_keep_their_own_identities() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local class's body properties are numbered from the body, while the legacy source
+    // coordinate numbers the constructor's `val` parameters first. Counting one against the other
+    // bound every read of a property to the NEXT one — `a` read `b` — so `val b = a + 1` saw
+    // nothing and `p.a` answered with `b`. Both backends were wrong in the same way, which is why
+    // this reads the same values through krusty's JVM backend too (see the dual run in
+    // `tests/common`).
+    assert_eq!(
+        run("fun box(): String {\n\
+             \x20   class P(val n: Int) {\n\
+             \x20       val a = n * 2\n\
+             \x20       val b = a + 1\n\
+             \x20       val c = b + 1\n\
+             \x20   }\n\
+             \x20   val p = P(3)\n\
+             \x20   return \"\" + p.n + \" \" + p.a + \" \" + p.b + \" \" + p.c\n\
+             }\n\
+             fun main() { println(box()) }\n"),
+        "3 6 7 8\n"
+    );
+}
+
+#[test]
+fn a_function_declared_inside_a_member_is_called_where_it_was_declared() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local function inside a member or an `init` block is lifted to a STATIC function owned by
+    // the class. That owner is a JVM placement fact — there is no facade here for the function to
+    // be placed differently from — so to this generator it is a function with a symbol, and the
+    // call is direct.
+    assert_eq!(
+        run("class Counted {\n\
+             \x20   val value: Int\n\
+             \x20   init {\n\
+             \x20       fun ten(): Int = 10\n\
+             \x20       value = ten()\n\
+             \x20   }\n\
+             \x20   fun doubled(): Int {\n\
+             \x20       fun twice(n: Int) = n * 2\n\
+             \x20       return twice(value)\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Counted().value)\n\
+             \x20   println(Counted().doubled())\n\
+             }\n"),
+        "10\n20\n"
+    );
+}
+
+#[test]
+fn a_companion_constant_is_read_wherever_it_is_named() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A `const val` in a companion is stored on the OUTER class on the JVM, and the IR records
+    // that owner. Here the owner says nothing — a slot is a slot — and what it could have said
+    // something about, WHEN the initializer runs, a `const` settles: the initializer is a
+    // compile-time constant, so program-start initialization is indistinguishable from the
+    // companion's own.
+    assert_eq!(
+        run("class Limits {\n\
+             \x20   companion object {\n\
+             \x20       const val MAX = 42\n\
+             \x20       const val NAME = \"limit\"\n\
+             \x20   }\n\
+             }\n\
+             object Solo { const val ONE = 1 }\n\
+             fun main() {\n\
+             \x20   println(Limits.MAX)\n\
+             \x20   println(Limits.NAME)\n\
+             \x20   println(Solo.ONE)\n\
+             }\n"),
+        "42\nlimit\n1\n"
+    );
+}
+
+#[test]
+fn a_secondary_constructor_may_delegate_to_the_root_class() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A class with no primary constructor whose secondary delegates to `super()` reaches
+    // `kotlin.Any`, which is not declared in any file — and needs nothing to be, because the root
+    // declares no state and no constructor to run. The class's own initializers still run, folded
+    // into this constructor's body by the checked lowering.
+    assert_eq!(
+        run("class Boxed {\n\
+             \x20   val label: String\n\
+             \x20   var seen = 0\n\
+             \x20   init { seen = 1 }\n\
+             \x20   constructor(text: String) { label = text }\n\
+             \x20   constructor() : this(\"none\")\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Boxed(\"here\").label)\n\
+             \x20   println(Boxed().label)\n\
+             \x20   println(Boxed().seen)\n\
+             }\n"),
+        "here\nnone\n1\n"
+    );
+}
+
+#[test]
 fn a_strings_length_counts_utf16_code_units() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -879,6 +1551,67 @@ fn a_strings_length_counts_utf16_code_units() {
              \x20   println((\"ab\" + \"cé中🙂\").length)\n\
              }\n"),
         "0\n3\n5\nabcé中🙂\n7\n"
+    );
+}
+
+#[test]
+fn the_root_class_can_be_constructed() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Any()` is declared in no file and needs none: the root has no state and no constructor, so
+    // the whole of constructing one is an object carrying the runtime's own `kotlin.Any` type. Two
+    // of them are distinct, and each is itself.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val a = Any()\n\
+             \x20   val b = Any()\n\
+             \x20   println(a === a)\n\
+             \x20   println(a === b)\n\
+             \x20   println(a == b)\n\
+             }\n"),
+        "true\nfalse\nfalse\n"
+    );
+}
+
+#[test]
+fn a_declaration_that_stores_a_default_stores_nothing() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `var flag = false` in a class body emits no store, and that is Kotlin's rule rather than an
+    // optimization: the base constructor's call to `setup()` reaches the override and writes the
+    // fields BEFORE the subclass's initializers would run, so a store here would overwrite what
+    // the program just observed. A later `init { … }` assigning the same value is a different
+    // statement and still runs, which is why the store's identity comes from the IR rather than
+    // from its shape.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open fun setup() {}\n\
+             \x20   init { setup() }\n\
+             }\n\
+             class Derived : Base() {\n\
+             \x20   override fun setup() {\n\
+             \x20       flag = true\n\
+             \x20       count = 4\n\
+             \x20       label = \"set\"\n\
+             \x20   }\n\
+             \x20   var flag = false\n\
+             \x20   var count = 0\n\
+             \x20   var label: String? = null\n\
+             \x20   var reset = 7\n\
+             \x20   init { reset = 0 }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val d = Derived()\n\
+             \x20   println(d.flag)\n\
+             \x20   println(d.count)\n\
+             \x20   println(d.label)\n\
+             \x20   println(d.reset)\n\
+             }\n"),
+        "true\n4\nset\n0\n"
     );
 }
 
@@ -1078,6 +1811,34 @@ fn a_result_declared_narrower_than_the_value_it_returns_is_converted() {
 }
 
 #[test]
+fn an_override_that_answers_unit_still_answers_the_base_a_value() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `A.foo(): Any` overridden by `B.foo(): Unit`. The override's slot produces no machine value,
+    // so the bridge standing in the base's slot returned nothing at all where the base's signature
+    // promises a reference. `Unit` is a real Kotlin value and the runtime owns the one instance of
+    // it; a caller going through `A` must get that instance back.
+    assert_eq!(
+        run("open class A {\n\
+             \x20   open fun foo(): Any = 42\n\
+             }\n\
+             open class B : A() {\n\
+             \x20   override fun foo(): Unit { }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val a: A = B()\n\
+             \x20   println(a.foo() == Unit)\n\
+             \x20   println(a.foo())\n\
+             \x20   val plain: A = A()\n\
+             \x20   println(plain.foo())\n\
+             }\n"),
+        "true\nkotlin.Unit\n42\n"
+    );
+}
+
+#[test]
 fn a_floating_point_comparison_stays_ieee_when_an_operand_arrives_boxed() {
     // Kotlin compares two floating-point operands by IEEE rules whenever both static types are the
     // floating-point type itself — including through a type parameter bounded by it and through its
@@ -1110,6 +1871,87 @@ fn a_floating_point_comparison_stays_ieee_when_an_operand_arrives_boxed() {
 }
 
 #[test]
+fn an_interface_property_implemented_at_another_representation_is_bridged() {
+    // `interface C { var size: Int }` implemented by `class B : C, A<Int>()` where `A<T>` declares
+    // `var size: T`. The interface's accessors carry a machine integer and the inherited ones carry
+    // a reference, so pointing the interface's number at them would have a caller read that integer
+    // as a pointer. The number takes a bridge wearing the interface's carrier instead — and the
+    // same holds in the other direction, where `D` overrides with an `Int` a base slot that carries
+    // a reference, so the base's own slot takes one too.
+    //
+    // A is neither `open` nor an override in `size`, and B overrides nothing: no declaration in the
+    // file says this property dispatches, which is why the fact has to be read off the interface it
+    // is handed to.
+    let source = "open class A<T> {\n\
+         \x20   open var size: T = 56 as T\n\
+         }\n\
+         interface C {\n\
+         \x20   var size: Int\n\
+         }\n\
+         open class B : C, A<Int>()\n\
+         open class D : B() {\n\
+         \x20   override var size: Int = 117\n\
+         }\n\
+         fun <T> widen(a: A<T>, value: T) {\n\
+         \x20   a.size = value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val b = B()\n\
+         \x20   if (b.size != 56) return \"fail 1: ${b.size}\"\n\
+         \x20   b.size = 55\n\
+         \x20   if (b.size != 55) return \"fail 2: ${b.size}\"\n\
+         \x20   val c: C = b\n\
+         \x20   if (c.size != 55) return \"fail 3: ${c.size}\"\n\
+         \x20   c.size = 57\n\
+         \x20   if (c.size != 57) return \"fail 4: ${c.size}\"\n\
+         \x20   widen(b, 42)\n\
+         \x20   if (b.size != 42) return \"fail 5: ${b.size}\"\n\
+         \x20   val d = D()\n\
+         \x20   if (d.size != 117) return \"fail 6: ${d.size}\"\n\
+         \x20   widen(d, 42)\n\
+         \x20   if (d.size != 42) return \"fail 7: ${d.size}\"\n\
+         \x20   val dc: C = d\n\
+         \x20   if (dc.size != 42) return \"fail 8: ${dc.size}\"\n\
+         \x20   dc.size = 7\n\
+         \x20   if (d.size != 7) return \"fail 9: ${d.size}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "IfaceProp");
+    common::expect_native_box(source, "IfaceProp", "OK");
+}
+
+#[test]
+fn a_unit_typed_local_is_still_a_value_that_can_be_read() {
+    // `Unit` is a VALUE in Kotlin and the runtime owns the one instance of it, so a local of that
+    // type holds no machine value — there is nothing to put in a variable. It is still readable:
+    // the declaration was dropped and every later mention of the local reported a slot that was
+    // never declared. A read now answers `Unit`, which a position wanting a reference turns into
+    // the singleton, exactly as a `Unit`-returning call's result does.
+    let source = "fun sideEffect(text: String): Unit {}\n\
+         fun explicit() {\n\
+         \x20   return Unit\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answered = sideEffect(\"first\")\n\
+         \x20   if (answered.toString() != \"kotlin.Unit\") return \"fail 1: $answered\"\n\
+         \x20   val returned = explicit()\n\
+         \x20   if (returned.toString() != \"kotlin.Unit\") return \"fail 2: $returned\"\n\
+         \x20   val written: Unit = Unit\n\
+         \x20   if (written != Unit) return \"fail 3\"\n\
+         \x20   if (answered != returned) return \"fail 4\"\n\
+         \x20   if (answered !== Unit) return \"fail 5\"\n\
+         \x20   val widened: Any = answered\n\
+         \x20   if (widened !== Unit) return \"fail 6\"\n\
+         \x20   var reassigned: Unit = Unit\n\
+         \x20   reassigned = sideEffect(\"second\")\n\
+         \x20   if (reassigned.toString() != \"kotlin.Unit\") return \"fail 7\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "UnitLocal");
+    common::expect_native_box(source, "UnitLocal", "OK");
+}
+
+#[test]
 fn a_do_while_condition_reads_what_its_body_declares() {
     // Kotlin scopes a `do`-block's locals into the `while` that closes it, so the condition is the
     // one place a loop test may read a local the BODY declares. The test was lowered before the
@@ -1133,6 +1975,163 @@ fn a_do_while_condition_reads_what_its_body_declares() {
          }\n";
     common::expect_box_ok_with_stdlib(source, "DoWhileScope");
     common::expect_native_box(source, "DoWhileScope", "OK");
+}
+
+#[test]
+fn a_break_a_diverging_finally_swallows_does_not_leave_the_loop() {
+    // `while (true) { try { break } finally { return x } }`: the `finally` returns before the
+    // `break` arrives, so the break never completes and the loop is never left. The exit was
+    // marked reachable at the `break` regardless, which made the position after the loop live —
+    // and a function whose body is a `while (true)` nothing leaves may end there, because that
+    // position is `Nothing`. Marking it reachable turned such a function into one that falls off
+    // its end. The mark now happens where the jump does.
+    let source = "class Trace {\n\
+         \x20   var seen = \"\"\n\
+         \x20   operator fun plus(step: String): Trace {\n\
+         \x20       seen += step\n\
+         \x20       return this\n\
+         \x20   }\n\
+         \x20   override fun toString(): String = seen\n\
+         }\n\
+         fun swallowed(): Trace {\n\
+         \x20   val trace = Trace()\n\
+         \x20   while (true) {\n\
+         \x20       try {\n\
+         \x20           trace + \"Try\"\n\
+         \x20           break\n\
+         \x20       } finally {\n\
+         \x20           return trace + \"Finally\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answered = swallowed().toString()\n\
+         \x20   if (answered != \"TryFinally\") return \"fail 1: $answered\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "SwallowedBreak");
+    common::expect_native_box(source, "SwallowedBreak", "OK");
+}
+
+#[test]
+fn an_exhaustive_when_whose_arms_all_return_ends_the_function() {
+    // A `when` over an enum or a sealed hierarchy needs no `else` because the frontend proved one
+    // unreachable. This generator cannot repeat that proof — it does not have the hierarchy — so
+    // the `when` keeps a fall-through edge, and a function whose every arm returns then looks like
+    // one that falls off its end. It was declined; the end is now the runtime's loud failure,
+    // which is where kotlinc puts `NoWhenBranchMatchedException` for the same reason.
+    let source = "enum class Single { ONLY }\n\
+         sealed class Outcome {\n\
+         \x20   class Failed(val why: String) : Outcome()\n\
+         \x20   class Worked(val answer: String) : Outcome()\n\
+         }\n\
+         fun overEnum(value: Single): String {\n\
+         \x20   when (value) {\n\
+         \x20       Single.ONLY -> return \"enum\"\n\
+         \x20   }\n\
+         }\n\
+         fun overSealed(outcome: Outcome): String {\n\
+         \x20   when (outcome) {\n\
+         \x20       is Outcome.Failed -> throw IllegalStateException(outcome.why)\n\
+         \x20       is Outcome.Worked -> return outcome.answer\n\
+         \x20   }\n\
+         }\n\
+         fun overBoolean(flag: Boolean): String {\n\
+         \x20   when (flag) {\n\
+         \x20       true -> return \"yes\"\n\
+         \x20       false -> return \"no\"\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (overEnum(Single.ONLY) != \"enum\") return \"fail 1\"\n\
+         \x20   if (overSealed(Outcome.Worked(\"worked\")) != \"worked\") return \"fail 2\"\n\
+         \x20   if (overBoolean(true) != \"yes\") return \"fail 3\"\n\
+         \x20   if (overBoolean(false) != \"no\") return \"fail 4\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ExhaustiveWhenEnd");
+    common::expect_native_box(source, "ExhaustiveWhenEnd", "OK");
+}
+
+#[test]
+fn an_is_check_asks_a_scalar_operand_through_its_box() {
+    // Kotlin has no subtyping among the primitive types, so an `is` check on a scalar reads as
+    // settled — but `5 is Number` and `1u is Comparable<UInt>` are true, and answering those needs
+    // a hierarchy this generator does not have. Each primitive's box carries the descriptor that
+    // does, an unsigned one its own, so boxing and asking the runtime is both correct and the only
+    // rule needed. `Unit` is the same question with the singleton as the operand.
+    let source = "fun <T> asGiven(value: T): T = value\n\
+         fun box(): String {\n\
+         \x20   val whole: Int = 5\n\
+         \x20   if (whole !is Number) return \"fail 1\"\n\
+         \x20   if (whole !is Comparable<Int>) return \"fail 2\"\n\
+         \x20   val wide: Long = 1L\n\
+         \x20   if (wide !is Long) return \"fail 3\"\n\
+         \x20   val fraction: Double = 1.1\n\
+         \x20   if (fraction !is Double) return \"fail 4\"\n\
+         \x20   val unsigned: UInt = 1u\n\
+         \x20   if (unsigned !is UInt) return \"fail 5\"\n\
+         \x20   val nothingness: Unit = asGiven(Unit)\n\
+         \x20   if (nothingness !is Unit) return \"fail 6\"\n\
+         \x20   val widened: Any = unsigned\n\
+         \x20   if (widened is Int) return \"fail 7\"\n\
+         \x20   if (widened !is UInt) return \"fail 8\"\n\
+         \x20   val boxed: Any = whole\n\
+         \x20   if (boxed !is Int) return \"fail 9\"\n\
+         \x20   if (boxed is Long) return \"fail 10\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "IsScalar");
+    common::expect_native_box(source, "IsScalar", "OK");
+}
+
+#[test]
+fn a_class_may_extend_an_exception_the_runtime_owns() {
+    // `kotlin.Throwable` and the exceptions Kotlin declares under it are classes no file declares,
+    // and the layout pass declined any class extending one. The runtime already carries a `KType`
+    // and a storage layout for each, which is the same arrangement `kotlin.Enum` has had all along:
+    // the base's fields come first, its `toString` fills `kotlin.Any`'s slot, and the subclass's
+    // descriptor points at the runtime's — which is the whole of what makes a `catch` clause take
+    // the subclass, since matching a clause walks exactly that chain.
+    let source = "class Plain : Exception(\"plain\")\n\
+         class Named(message: String) : Exception(message)\n\
+         class Silent : Throwable()\n\
+         class State(message: String) : IllegalStateException(message)\n\
+         fun box(): String {\n\
+         \x20   if (Named(\"foo\").message != \"foo\") return \"fail 1\"\n\
+         \x20   if (Silent().message != null) return \"fail 2: ${Silent().message}\"\n\
+         \x20   val caught = try {\n\
+         \x20       throw Plain()\n\
+         \x20   } catch (e: Throwable) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (caught != \"plain\") return \"fail 3: $caught\"\n\
+         \x20   val byBase = try {\n\
+         \x20       throw Named(\"base\")\n\
+         \x20   } catch (e: Exception) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (byBase != \"base\") return \"fail 4: $byBase\"\n\
+         \x20   val precise = try {\n\
+         \x20       throw State(\"precise\")\n\
+         \x20   } catch (e: IllegalStateException) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (precise != \"precise\") return \"fail 5: $precise\"\n\
+         \x20   var order = \"\"\n\
+         \x20   try {\n\
+         \x20       throw Silent()\n\
+         \x20   } catch (e: Exception) {\n\
+         \x20       order += \"wrong\"\n\
+         \x20   } catch (e: Throwable) {\n\
+         \x20       order += \"right\"\n\
+         \x20   }\n\
+         \x20   if (order != \"right\") return \"fail 6: $order\"\n\
+         \x20   if (Named(\"shown\").toString() != \"Named: shown\") return \"fail 7: ${Named(\"shown\")}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "RuntimeBase");
+    common::expect_native_box(source, "RuntimeBase", "OK");
 }
 
 /// A collection declines by the declaration it names rather than reaching a runtime function
@@ -1161,29 +2160,6 @@ fn a_function_value_declines_by_the_node_that_makes_it() {
          }\n",
         "FunctionValueDeclines",
         "Lambda",
-    );
-}
-
-/// A class declines before any of its file is lowered. Its layout, its descriptor and every
-/// member reached through it are one piece, and none of that is here yet.
-#[test]
-fn a_class_declines_by_its_name() {
-    common::expect_native_decline(
-        "class Box(val s: String)\n\
-         fun box(): String = Box(\"OK\").s\n",
-        "ClassDeclines",
-        "a class (`Box`)",
-    );
-}
-
-/// A top-level property declines too: its storage and its initializer run are the classes tier's.
-#[test]
-fn a_top_level_property_declines() {
-    common::expect_native_decline(
-        "val greeting = \"OK\"\n\
-         fun box(): String = greeting\n",
-        "TopLevelPropertyDeclines",
-        "a top-level property",
     );
 }
 

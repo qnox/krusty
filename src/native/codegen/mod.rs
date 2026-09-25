@@ -85,11 +85,16 @@ impl Backend for CraneliftBackend {
 
     fn lower_ir_file(
         &self,
-        file: CheckedIrFile<'_>,
+        mut file: CheckedIrFile<'_>,
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
+        // A local or anonymous classifier arrives with an opaque identity; this target names it
+        // from its provenance as Kotlin/Native does. There is no facade class here, so a
+        // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
+        // `box$1`. Everything below, the name a failed cast reports included, reads that name.
+        file.ir.realize_local_class_names_in_packages();
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),

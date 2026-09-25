@@ -120,6 +120,30 @@ fn run(source: &str) -> String {
 }
 
 #[test]
+fn a_volatile_property_compiles_and_reads_back_what_was_written() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `@Volatile` orders a field against OTHER THREADS. With one thread its meaning is exhausted
+    // by ordinary reads and writes, so compiling it as a plain property is not an approximation —
+    // there is no observer for it to be wrong for. This test exists to be re-read the day threads
+    // arrive, when the annotation acquires a meaning the generator does not yet implement.
+    assert_eq!(
+        run("@Volatile var flag: Boolean = false\n\
+             @Volatile var counter: Int = 0\n\
+             fun publish() { counter = 42; flag = true }\n\
+             fun main() {\n\
+             \x20   println(flag)\n\
+             \x20   publish()\n\
+             \x20   println(flag)\n\
+             \x20   println(counter)\n\
+             }\n"),
+        "false\ntrue\n42\n"
+    );
+}
+
+#[test]
 fn a_suspend_function_that_never_suspends_is_an_ordinary_function() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

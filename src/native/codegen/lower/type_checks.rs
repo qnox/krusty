@@ -67,9 +67,15 @@ impl<'a> FileLowering<'a> {
         Ok(id)
     }
 
-    /// The runtime descriptor for a type an `is`/`as` names: one the runtime declares.
+    /// The runtime descriptor for a type an `is`/`as` names: an in-file class or a built-in.
     pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.classes[class as usize].descriptor));
+        }
         let symbol = match target {
             Ty::String => "kt_type_string",
             Ty::Boolean => "kt_type_boolean",
@@ -133,6 +139,46 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::throwable_descriptor)
                     .expect("just matched")
             }
+            // A FUNCTION TYPE. The object is of a type of its own — one per lambda and per
+            // callable reference — so what a check asks about is the marker every such descriptor
+            // names, and the arity is what separates one from another.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::function_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::function_type_descriptor)
+                    .expect("just matched")
+            }
+            // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
+            // so both name a marker and that is what this compares against. Only where THIS FILE
+            // implements no list of its own: a class of the program standing behind the type would
+            // wear no marker, and answering `false` for one is a wrong answer rather than a
+            // decline. That file keeps declining, exactly as it did before.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::super::super::intrinsics::is_list_check_type)
+                && !self.implements_collection_shape(
+                    super::super::super::intrinsics::CollectionShape::Iterable,
+                ) =>
+            {
+                "kt_type_list_interface"
+            }
+            // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
+            // reference object's own type is one of a kind, so the markers are what it shares with
+            // the type written at the site.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                    .expect("just matched")
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)
@@ -140,6 +186,20 @@ impl<'a> FileLowering<'a> {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// Fail loudly on a null receiver, as the runtime's `kt_dispatch` did: a member access on
+    /// `null` is a checked failure, never a load from address zero.
+    pub(super) fn null_check(&mut self, receiver: Value) -> Result<(), Unsupported> {
+        let is_null = self.is_null(receiver);
+        let fail = self.builder.create_block();
+        let proceed = self.builder.create_block();
+        self.builder.ins().brif(is_null, fail, &[], proceed, &[]);
+        self.continue_in(fail);
+        self.runtime_call("kt_null_receiver", &[], Ty::Unit, &[])?;
+        self.builder.ins().trap(TrapCode::unwrap_user(2));
+        self.continue_in(proceed);
+        Ok(())
+    }
+
     /// The receiver of a member access, evaluated to a reference.
     pub(super) fn receiver(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
         let value = self.reference(receiver)?;
@@ -165,6 +225,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             _ => ty,
         };
         let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.file.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.file.classes[class as usize].descriptor));
+        }
         if carrier(target) != Carrier::Ref {
             return Ok(None);
         }

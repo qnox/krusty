@@ -30,6 +30,21 @@ fn a_value_type_is_comparable_even_when_it_is_not_a_number() {
 }
 
 #[test]
+fn an_ordinary_class_is_neither_unless_it_says_so() {
+    // The interface list is per type, so a class that declares nothing must answer false to both —
+    // otherwise the boxes' lists would be leaking through the shared `kotlin.Any` super.
+    let src = "class Plain\n\
+               fun box(): String {\n\
+               \x20   val plain: Any = Plain()\n\
+               \x20   if (plain is Number) return \"fail: Number\"\n\
+               \x20   if (plain is Comparable<*>) return \"fail: Comparable\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "PlainClassIsNeither");
+    expect_native_box(src, "PlainClassIsNeither", "OK");
+}
+
+#[test]
 fn an_unsigned_integer_is_comparable_but_not_a_number() {
     // The asymmetry stated on its own: an unsigned integer is a value class, so it is `Comparable`
     // and not a `Number`, which is the reference compiler's answer rather than my reading.

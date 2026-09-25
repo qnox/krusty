@@ -6777,6 +6777,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
   `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
   `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
+- **Native: a throwing initializer leaves nothing half-built.** An `object`'s instance is
+  published before its constructor runs (a constructor reaching back into its own object must find
+  it), and so are an enum's constants. When the constructor throws, the instance — or every
+  constant, and the enum's ready flag — is withdrawn and the exception carries on, so a later
+  access builds it again and throws again where Kotlin throws (the JVM answers that access with
+  `NoClassDefFoundError`; both are a throw). A top-level initializer that throws ends the program
+  before the entry's first statement, as the JVM's failed facade initializer does.
+  Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
+  `a_throwing_enum_constant_leaves_no_constants_behind`,
+  `a_throwing_top_level_initializer_stops_before_the_entry`).
+- **Native: a local classifier is named as Kotlin/Native names it.** The frontend gives a local or
+  anonymous classifier an opaque identity plus its naming provenance (lexical owner, source
+  segments, ordinal), and each target spells the name from that. The walk is shared
+  (`IrFile::realize_local_class_names`); a target supplies only where a name with no classifier
+  owner starts. The JVM nests it in the declaring file's facade (`AKt$box$Local`). Native has no
+  facade class, so it starts in the package: the class local to a top-level `box` is
+  `box$MyLocalObject`, the first anonymous object in it `box$1`, and that is the name a failed
+  cast reports.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does`); the box corpus's
+  `casts/nativeCCEMessage` cases in the native lane.
 - **Native: a generic result widened to a nullable primitive keeps its `null`.** `fun <T> f(): T`
   read as `Int` and stored into an `Int?` arrives as two coercions, the erased reference to `Int` and
   `Int` to `Int?`. Realized one after the other they unbox a reference that may be `null`, which
