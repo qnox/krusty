@@ -386,10 +386,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);
             }
             signature.push_str(")V");
-            // A `Signature` exists to say what the DESCRIPTOR cannot. One that spells the descriptor
-            // back carries nothing and kotlinc omits it — which is every constructor whose source
-            // types are already erased and whose owner prepends nothing.
-            (signature != sc_desc).then_some(signature)
+            // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —
+            // which is every constructor whose source types are already erased and whose owner
+            // prepends nothing. A synthetic constructor carries none either.
+            super::method_signatures::written_signature(sc_access, false, &sc_desc, Some(signature))
         })();
         // The debug locals are built BEFORE the method is added so their names and descriptors can
         // be interned first: `add_method` computes the `StackMapTable`, which interns each
