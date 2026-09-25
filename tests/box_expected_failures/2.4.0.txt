@@ -8,7 +8,6 @@ annotations/instances/arraysAndKClass.kt
 annotations/instances/enumAndKClass.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/platformDependent.kt
 argumentOrder/defaults.kt
 argumentOrder/kt17691WithEnabledFeature.kt
 basics/k42000_1.kt
@@ -34,10 +33,6 @@ callableReference/adaptedReferences/extensionPropertyToFun.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
-callableReference/callableReferenceOfCompanionMethod.kt
-callableReference/callableReferenceOfKotlinNestedClass.kt
-callableReference/callableReferenceOfObjectMethod.kt
-callableReference/equality/kpropertyWithCapturingInequality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorOfImplicitKFunctionType.kt
@@ -61,7 +56,6 @@ casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
 casts/objectToPrimitiveWithAssertion.kt
-classes/implementingInterfaceByParentClass.kt
 classes/kt2224.kt
 classes/selfcreate.kt
 classes/typedDelegation.kt
@@ -219,7 +213,6 @@ functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 functions/kt1199.kt
 functions/localFunctions/kt4777.kt
-ieee754/generic.kt
 ieee754/inline.kt
 ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
 ieee754/smartCastToDifferentTypes_properIeeeComparisons.kt
@@ -235,8 +228,6 @@ inference/overrideGenericDefaultMethod.kt
 inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
 inference/pcla/issues/kt57707.kt
-inference/pcla/labaledCall.kt
-inference/pcla/nullability.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionFunctions.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionProperties.kt
@@ -421,7 +412,6 @@ primitiveTypes/equalityWithObject/generated/primitiveEqObjectByte.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectInt.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectLong.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectShort.kt
-primitiveTypes/kt79977_withIncrementalCompilation.kt
 privateConstructors/inner.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
 properties/backingField/anySupertypeValueClassAnyMethodsWithExplicitBackingField.kt
@@ -456,7 +446,6 @@ reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
-regressions/intersectionOfEqualTypes.kt
 reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
 reified/extensionLambda.kt
