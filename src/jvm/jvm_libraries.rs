@@ -10,6 +10,7 @@ mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 mod static_properties;
+use static_properties::StaticAccessor;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use builtin_classifier_shapes::{
@@ -4727,185 +4728,20 @@ impl JvmLibraries {
                     mprops.iter().count(),
                 );
             }
-            for mp in mprops.iter() {
-                if mp.name != name {
-                    continue; // this property name
-                }
-                // Accessors carry context parameters first, then the extension receiver when one
-                // exists. These are declaration roles from metadata; the descriptor only verifies
-                // that the selected physical accessor realizes the same arity.
-                let context_count = mp.context_params.len();
-                let receiver_params = usize::from(mp.is_extension);
-                let mp = mp.clone();
-                let property_gsig = mp.generic_sig.clone();
-                let context_parameter_identities = mp.context_parameter_identities();
-                let Some(getter_sig) = mp.getter else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: metadata has no getter realization"
-                    );
-                    continue;
-                };
-                let Some(getter_method) =
-                    self.cp
-                        .facade_static(facade, &getter_sig.name, &getter_sig.desc)
-                else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter {}{} is absent from facade {}",
-                        getter_sig.name,
-                        getter_sig.desc,
-                        facade.render()
-                    );
-                    continue;
-                };
-                let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: malformed getter descriptor {}",
-                        getter_sig.desc
-                    );
-                    continue;
-                };
-                if gparams.len() != context_count + receiver_params {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter parameter count {} != metadata context/receiver count {}",
-                        gparams.len(),
-                        context_count + receiver_params,
-                    );
-                    continue;
-                }
-                let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
-                let receiver = mp.is_extension.then(|| {
-                    generic_receiver.unwrap_or_else(|| {
-                        mp.receiver_class
-                            .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
-                    })
-                });
-                let semantic_context = property_gsig
-                    .as_ref()
-                    .map(|signature| signature.params.clone())
-                    .unwrap_or_else(|| gparams[..context_count].to_vec());
-                let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
-                let property_ty = property_gsig.as_ref().map_or_else(
-                    || {
-                        if mp.ret_nullable {
-                            Ty::nullable(fallback_ret)
-                        } else {
-                            fallback_ret
-                        }
-                    },
-                    |gsig| gsig.ret,
-                );
-                let property_kind = if mp.is_extension {
-                    PropKind::Extension
-                } else {
-                    PropKind::TopLevel
-                };
-                let property_intrinsic = match namespace {
-                    SymbolNamespace::Package(package) => {
-                        crate::libraries::builtin_top_level_realization::property_realization(
-                            crate::libraries::builtin_declaration::BuiltinPropertyDeclaration {
-                                package,
-                                name,
-                                kind: property_kind,
-                                receiver,
-                                ty: property_ty,
-                                context_count,
-                                type_parameter_count: property_gsig
-                                    .as_ref()
-                                    .map_or(0, |signature| signature.formals.len()),
-                                mutable: mp.setter.is_some(),
-                            },
-                        )
-                    }
+            for mp in mprops.iter().filter(|property| property.name == name) {
+                let package = match namespace {
+                    SymbolNamespace::Package(package) => Some(package),
                     SymbolNamespace::Classifier(_) => None,
                 };
-                // An exact compiler intrinsic may deliberately have no callable public accessor.
-                // `coroutineContext` is a public `@InlineOnly` suspend property whose private JVM
-                // getter throws; the provider publishes its semantic declaration and marks the
-                // compiler realization instead of exposing that physical method as a fallback.
-                if !getter_method.public && property_intrinsic.is_none() {
-                    continue;
-                }
-                let mut getter = LibraryCallable::library(
-                    getter_method.owner,
-                    getter_sig.name,
-                    gparams,
-                    property_ty,
-                    gret,
-                    getter_sig.desc,
-                );
-                getter.params = semantic_context.iter().copied().chain(receiver).collect();
-                getter.source_receiver = receiver;
-                getter.context_count = context_count;
-                getter.generic_sig = property_gsig.clone().map(Box::new);
-                getter.compiler_intrinsic = property_intrinsic;
-                let setter = mp.setter.and_then(|setter_sig| {
-                    let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
-                        return None;
-                    }
-                    let setter_method =
-                        self.cp
-                            .facade_static(facade, &setter_sig.name, &setter_sig.desc)?;
-                    if !setter_method.public {
-                        return None;
-                    }
-                    let mut setter = LibraryCallable::library(
-                        setter_method.owner,
-                        setter_sig.name,
-                        sparams,
-                        Ty::Unit,
-                        sret,
-                        setter_sig.desc,
-                    );
-                    setter.params = semantic_context
-                        .iter()
-                        .copied()
-                        .chain(receiver)
-                        .chain(std::iter::once(property_ty))
-                        .collect();
-                    setter.source_receiver = receiver;
-                    setter.context_count = context_count;
-                    Some(setter)
-                });
-                props.push(PropertyInfo {
-                    return_value_status: Some(mp.return_value_status),
-                    name: name.to_string(),
-                    kind: property_kind,
-                    receiver,
-                    formals: property_gsig
-                        .as_ref()
-                        .map(|gsig| gsig.formals.clone())
-                        .unwrap_or_default(),
-                    ty: property_ty,
-                    context_count,
-                    context_param_names: mp
-                        .context_params
-                        .iter()
-                        .map(|parameter| parameter.name.clone())
-                        .collect(),
-                    context_parameter_identities,
-                    getter,
-                    setter,
-                    setter_visibility: mp.visibility,
-                    setter_parameter_name: mp.setter_parameter_name.clone(),
-                    is_const: mp.is_const,
-                    implicit_integer_coercion: false,
-                    compile_time_constant: None,
-                    visibility: mp.visibility,
-                    owner: facade,
-                    receiver_rank: 0,
-                    source_key: None,
-                    stable_declaration: None,
-                    getter_declaration: None,
-                    setter_declaration: None,
-                    source_member: None,
-                    accessor_derived: false,
-                    read_stability: crate::libraries::PropertyReadStability::Unstable,
-                });
+                let accessor = |jvm_name: &str, descriptor: &str| {
+                    self.cp
+                        .facade_static(facade, jvm_name, descriptor)
+                        .map(|method| StaticAccessor {
+                            owner: method.owner,
+                            public: method.public,
+                        })
+                };
+                props.extend(self.static_metadata_property(mp, facade, package, accessor));
             }
         }
         if let SymbolNamespace::Package(package) = namespace {
@@ -4939,7 +4775,7 @@ impl JvmLibraries {
                 .iter()
                 .find(|property| property.name == name)
             {
-                super::top_level_properties::merge_top_level_const(
+                super::top_level_properties::merge_metadata_const(
                     name, metadata, field, &mut props,
                 );
             }
