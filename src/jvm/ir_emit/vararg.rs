@@ -52,9 +52,7 @@ pub(super) fn emit(
         );
     }
     if let Some(temps) = temps {
-        for (_, _, lease) in temps {
-            emitter.release_temporary(lease);
-        }
+        emitter.release_operand_spills(&temps);
     }
 }
 
@@ -204,7 +202,7 @@ fn emit_packed_array(
     let array = emitter.frame.enter_temp(TempRole::VarargArray, array_type);
     let slot = array.slot();
     store(array_type, slot, code);
-    let array_lease = emitter.lease_temporary(slot, array_type);
+    let array_lease = emitter.lease_frame_temporary(array, array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
     let box_element = reference_array
@@ -222,7 +220,6 @@ fn emit_packed_array(
 
     load(array_type, slot, code);
     emitter.release_temporary(array_lease);
-    emitter.frame.give_back(array);
 }
 
 /// Build the same packed array with every element evaluated into a temp first. Used when any element
@@ -255,7 +252,7 @@ fn emit_packed_array_through_temps(
         .enter_temp(TempRole::VarargArray, jvm_array_type);
     let slot = array.slot();
     store(jvm_array_type, slot, code);
-    let array_lease = emitter.lease_temporary(slot, jvm_array_type);
+    let array_lease = emitter.lease_frame_temporary(array, jvm_array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
     let box_element = reference_array
@@ -270,11 +267,9 @@ fn emit_packed_array_through_temps(
         }
         code.array_store(store_op, width);
     }
-    for &(_, _, lease) in &temps {
-        emitter.release_temporary(lease);
-    }
 
+    // Newest first: the array was entered above the element temporaries.
     load(jvm_array_type, slot, code);
     emitter.release_temporary(array_lease);
-    emitter.frame.give_back(array);
+    emitter.release_operand_spills(&temps);
 }

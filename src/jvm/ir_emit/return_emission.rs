@@ -103,34 +103,23 @@ impl Emitter<'_> {
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
         // branchy finalizers run on an empty operand stack, then reload it only if none overrides.
-        // The enclosing `try` reserved this slot when it opened, so the finalizer copies it inlines
-        // declare their locals ABOVE it, as kotlinc's do. A `return` reached with no reservation —
-        // one the reservation scan could not see — still takes a slot of its own.
-        let (slot, entered) = match self.pending_return_spills.last().copied().flatten() {
-            Some(reserved) => (reserved, None),
-            None => {
-                let temp = self.frame.enter_temp(TempRole::ReturnValue, ret);
-                (temp.slot(), Some(temp))
-            }
-        };
-        store(ret, slot, code);
+        // kotlinc's `generateFinallyBlocksIfNeeded` enters the spill as a temporary HERE, above
+        // every local in scope at the `return`, so the finalizer copies declare their locals above
+        // it, and leaves it after the reload.
+        //
         // The pending return value is initialized before every active `finally` and remains live
-        // until the finalizer chain either completes or overrides the transfer. Any branch or
-        // handler frame created while emitting a finalizer must therefore carry this slot. Merely
-        // moving the frame cursor past it leaves it as `top`, which makes a later reload
-        // unverifiable after a branchy finalizer such as `null?.toString()`. It is a BACKEND
-        // temporary, not a semantic
-        // local: `slots` is keyed by real value ids, so parking it there under a reserved numeric
-        // range could overwrite a value with that id, be filtered out as unassigned, and then be
-        // removed when the transfer finishes.
-        let parked = match entered {
-            Some(temp) => self.lease_frame_temporary(temp, ret),
-            None => self.lease_temporary(slot, ret),
-        };
+        // until the finalizer chain either completes or overrides the transfer, so any branch or
+        // handler frame recorded while a finalizer is emitted must type it: the lease does that.
+        let temp = self.frame.enter_temp(TempRole::ReturnValue, ret);
+        let slot = temp.slot();
+        store(ret, slot, code);
+        let parked = self.lease_frame_temporary(temp, ret);
         let survives = self.emit_return_finalizers(code);
-        self.release_temporary(parked);
         if survives {
             load(ret, slot, code);
+        }
+        self.release_temporary(parked);
+        if survives {
             debug_lines::mark_return(self.ir, returned, code);
             emit_return(ret, code);
         }
