@@ -1,12 +1,9 @@
 //! A `private constructor` is `ACC_PRIVATE`, as kotlinc emits it.
 //!
 //! krusty made every constructor public, so `class C private constructor()` advertised a constructor
-//! its own author had hidden and any caller could invoke it. The reason was real but only covers one
-//! case: when ANOTHER class constructs the type (a companion factory is the common shape), kotlinc
-//! reaches the private constructor through a synthetic `DefaultConstructorMarker` bridge, and without
-//! that bridge `ACC_PRIVATE` would turn the cross-class `new` into an `IllegalAccessError`. So the
-//! flag now follows the actual construction sites: private when nothing outside constructs it, public
-//! (as before) when something does, until the bridge lands.
+//! its own author had hidden and any caller could invoke it. When ANOTHER class constructs the type
+//! (a companion factory is the common shape), kotlinc keeps the constructor private and reaches it
+//! through a public synthetic `DefaultConstructorMarker` accessor; krusty does the same.
 //!
 //! DIFFERENTIAL: the same source goes through the provisioned kotlinc and through krusty.
 use std::fs;
@@ -90,10 +87,8 @@ class Plain(val x: Int)
 }
 
 #[test]
-fn a_private_constructor_reached_from_another_class_stays_public() {
-    // Until the `DefaultConstructorMarker` bridge is emitted, a class its companion constructs keeps
-    // a public constructor: ACC_PRIVATE without the bridge is an IllegalAccessError at run time. The
-    // class must therefore still LOAD and construct.
+fn a_private_constructor_reached_from_another_class_goes_through_its_accessor() {
+    // The constructor stays private; the companion calls its `DefaultConstructorMarker` accessor.
     let src = r#"
 class Made private constructor(val x: Int) {
     companion object {
@@ -102,17 +97,15 @@ class Made private constructor(val x: Int) {
 }
 fun box(): String = if (Made.make().x == 7) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, _kotlinc_dir)) = compile_both("companion", src) else {
+    let Some((krusty_dir, kotlinc_dir)) = compile_both("companion", src) else {
         return; // toolchain not provisioned
     };
-    assert!(
-        constructors(&krusty_dir, "Made")
-            .iter()
-            .all(|entry| !entry.starts_with("private")),
-        "a constructor reached from the companion must stay public until the bridge exists: {:?}",
-        constructors(&krusty_dir, "Made")
+    assert_eq!(
+        constructors(&krusty_dir, "Made"),
+        constructors(&kotlinc_dir, "Made"),
+        "Made: a private constructor and its accessor must match kotlinc's"
     );
-    // And it must still RUN — the flag choice exists to keep the cross-class construction legal.
+    // And the cross-class construction runs through the accessor.
     assert_eq!(
         common::compile_and_run_box(
             src,
@@ -128,7 +121,7 @@ fun box(): String = if (Made.make().x == 7) "OK" else "FAIL"
 /// A DEFAULT ARGUMENT is evaluated at the call site, not in the declaring body, so a nested class
 /// whose parameter defaults to `Hidden2(…)` constructs the private constructor from a DIFFERENT JVM
 /// class. Reaching that expression means walking more than function bodies; missing it made krusty
-/// emit `ACC_PRIVATE` with no bridge, and the class died with `IllegalAccessError` at run time.
+/// emit `ACC_PRIVATE` with no accessor, and the class died with `IllegalAccessError` at run time.
 #[test]
 fn a_default_argument_in_a_nested_class_counts_as_an_outside_construction() {
     let src = r#"
@@ -146,15 +139,13 @@ class Hidden2 private constructor(val x: Int) {
 }
 fun box(): String = if (Hidden2.Maker().make() == 1 && Hidden2.viaSecondary() == 2) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, _kotlinc_dir)) = compile_both("nested_default", src) else {
+    let Some((krusty_dir, kotlinc_dir)) = compile_both("nested_default", src) else {
         return; // toolchain not provisioned
     };
-    assert!(
-        constructors(&krusty_dir, "Hidden2")
-            .iter()
-            .all(|entry| !entry.starts_with("private")),
-        "a constructor reached from a nested class's default argument must stay public: {:?}",
-        constructors(&krusty_dir, "Hidden2")
+    assert_eq!(
+        constructors(&krusty_dir, "Hidden2"),
+        constructors(&kotlinc_dir, "Hidden2"),
+        "Hidden2: a private constructor and its accessor must match kotlinc's"
     );
     assert_eq!(
         common::compile_and_run_box(
@@ -179,15 +170,13 @@ open class Base3 private constructor(val x: Int) {
 }
 fun box(): String = if (Base3.make().x == 5) "OK" else "FAIL"
 "#;
-    let Some((krusty_dir, _kotlinc_dir)) = compile_both("subclass", src) else {
+    let Some((krusty_dir, kotlinc_dir)) = compile_both("subclass", src) else {
         return; // toolchain not provisioned
     };
-    assert!(
-        constructors(&krusty_dir, "Base3")
-            .iter()
-            .all(|entry| !entry.starts_with("private")),
-        "a constructor a subclass delegates to must stay public: {:?}",
-        constructors(&krusty_dir, "Base3")
+    assert_eq!(
+        constructors(&krusty_dir, "Base3"),
+        constructors(&kotlinc_dir, "Base3"),
+        "Base3: a private constructor and its accessor must match kotlinc's"
     );
     assert_eq!(
         common::compile_and_run_box(

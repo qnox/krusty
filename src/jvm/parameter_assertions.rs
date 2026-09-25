@@ -95,9 +95,11 @@ pub(super) fn realize(ir: &mut IrFile) {
     }
 
     for class in &mut ir.classes {
-        // A sealed class's primary constructor is private in the class file, and kotlinc guards
-        // no private function's parameters.
-        if !class.is_source_declared || class.is_sealed {
+        // kotlinc guards no private function's parameters: a declared private primary, and a
+        // sealed class's, which is private in the class file.
+        let private = ir.ctor_visibilities.get(&class.fq_name_id())
+            == Some(&crate::types::Visibility::Private);
+        if !class.is_source_declared || class.is_sealed || private {
             continue;
         }
         let assertion_names = crate::jvm::parameter_names::constructor_assertions(&class.ctor_args);

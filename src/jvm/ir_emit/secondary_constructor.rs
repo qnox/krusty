@@ -157,6 +157,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     &[],
                 ),
             };
+            let target_owner = match &sc.delegate {
+                CtorDelegateTarget::Super { owner, .. } => *owner,
+                CtorDelegateTarget::This { .. } | CtorDelegateTarget::ImplicitEnumBase => {
+                    c.fq_name_id()
+                }
+            };
             let delegates_to_this = matches!(sc.delegate, CtorDelegateTarget::This { .. });
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
@@ -244,12 +250,16 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // A delegation target whose primary ctor takes a value-class param has a PRIVATE primary —
             // reach it through the `(…args, DefaultConstructorMarker)` accessor, from a subclass's
-            // `super(…)` and from the class's own `this(…)` alike. A sealed class's constructors
-            // are all reached that way.
+            // `super(…)` and from the class's own `this(…)` alike. So are a sealed class's
+            // constructors, and a private one that a nested subclass delegates to.
             let targets_hidden_primary = target.primary && e.ir.has_value_param_ctor(&target_class);
             if emitted_default_masks.is_empty()
                 && (targets_hidden_primary
-                    || super::sealed_constructors::reached_through_accessor(target))
+                    || super::constructor_accessors::reached_through_accessor(
+                        target,
+                        Some(c.fq_name_id()),
+                        target_owner,
+                    ))
             {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
@@ -316,7 +326,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         sctor.ensure_locals(sec_max);
         sctor.link();
         // A SEALED class hides its secondary ctor behind a PUBLIC `(…args, DefaultConstructorMarker)`
-        // accessor that `sealed_constructors` emits after the members. A VALUE-CLASS-parametered
+        // accessor that `constructor_accessors` emits after the members. A VALUE-CLASS-parametered
         // secondary ctor gets the same private+marker ABI (kotlinc's), its accessor right here.
         // An owner that carries a synthetic constructor prefix is an ENUM, whose constructors are
         // implicitly private in Kotlin and private in kotlinc's output. Emitting one public would
@@ -335,7 +345,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
             });
         let semantically_private =
-            super::sealed_constructors::hides_secondary(ir, c, secondary_ordinal)
+            super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
                 || sc.vc_params
                 || !owner_prefix_tys.is_empty()
                 || declared_access == 0x0002;
@@ -502,7 +512,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &sc.defaults,
                 Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
                 sc.vc_params
-                    || super::sealed_constructors::hides_secondary(ir, c, secondary_ordinal),
+                    || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
                 sc.annotations.deprecated(),
                 stub_access,
                 cw,
