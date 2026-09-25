@@ -6934,7 +6934,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member whose body declares them, in the member order by then; a private facade function's
   `access$…` bridge (SyntheticAccessorLowering) is appended after every declared and lifted member;
   and a class's lexical captures and outer instance (LocalDeclarationsLowering, InnerClassesLowering)
-  follow its declared fields. Bridge placement and value-class members are separate rules. Tests:
+  follow its declared fields. An enum class interleaves its generated members with those groups:
+  the frontend declares `values`/`valueOf`/`entries` with the source members, so they precede the
+  lifted local functions, and EnumClassLowering's `$values` sits between the local functions and
+  the lambdas. Bridge placement and value-class members are separate rules. Tests:
   `tests/class_member_order_e2e.rs` (the member lists of every class, names and descriptors in
   order, equal to kotlinc's).
 

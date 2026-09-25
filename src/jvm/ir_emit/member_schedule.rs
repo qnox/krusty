@@ -185,6 +185,47 @@ pub(super) fn split_around_primary_constructor<'a>(
     (before, after)
 }
 
+/// An enum class's methods in the groups kotlinc's lowerings add them in.
+///
+/// The frontend declares the source members and the `values`/`valueOf`/`entries` members together,
+/// so every declared member precedes those. `LocalDeclarationsLowering` then appends the lifted
+/// local functions, `EnumClassLowering` appends `$values`, and the indy lambdas' methods come last of
+/// the lowered members. Plugin-generated members (`_init_$_anonymous_`, `access$…`) follow them.
+pub(super) struct EnumMemberSchedule {
+    pub(super) declared: Vec<u32>,
+    pub(super) local_functions: Vec<u32>,
+    pub(super) lambdas: Vec<u32>,
+    pub(super) plugin_generated: Vec<u32>,
+}
+
+pub(super) fn enum_member_schedule(ir: &IrFile, class: &IrClass) -> EnumMemberSchedule {
+    let (plugin_generated, members): (Vec<u32>, Vec<u32>) = class
+        .methods
+        .iter()
+        .partition(|function| ir.synthetic_methods.contains(function));
+    let (mut lifted, declared): (Vec<u32>, Vec<u32>) = members
+        .into_iter()
+        .partition(|function| ir.lifted_functions.contains_key(function));
+    order_lifted_functions(ir, &mut lifted);
+    let (lambdas, local_functions) = lifted
+        .into_iter()
+        .partition(|function| is_lifted_lambda(ir, *function));
+    EnumMemberSchedule {
+        declared,
+        local_functions,
+        lambdas,
+        plugin_generated,
+    }
+}
+
+fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
+    ir.lifted_functions[&function]
+        .1
+        .path
+        .last()
+        .is_none_or(|step| step.name.is_none())
+}
+
 /// Reorder the functions lowered from lambdas and local functions inside `members` into kotlinc's
 /// placement, leaving every other member where it is.
 ///
@@ -212,13 +253,7 @@ pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
     }
     let sequence_rank = |sequence| sequences.iter().position(|&s| s == sequence);
     let site = |function: &u32| &ir.lifted_functions[function];
-    let is_lambda = |function: &u32| {
-        site(function)
-            .1
-            .path
-            .last()
-            .is_none_or(|step| step.name.is_none())
-    };
+    let is_lambda = |function: &u32| is_lifted_lambda(ir, *function);
     let (mut local_functions, lambdas): (Vec<u32>, Vec<u32>) = slots
         .iter()
         .map(|&slot| members[slot])

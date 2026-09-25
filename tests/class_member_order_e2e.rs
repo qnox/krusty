@@ -5,6 +5,8 @@
 //! - lifted local functions follow the declared members in LocalDeclarationPopupLowering's order:
 //!   bodies finish postfix, and each appends its own local functions in source order, so a nested
 //!   local function precedes the one that declares it; indy lambda methods come after all of them;
+//! - an enum's declared members precede `values`/`valueOf`/`getEntries`; its lifted local functions
+//!   come next, then EnumClassLowering's `$values`, then the indy lambda methods;
 //! - a synthetic `access$…` bridge (SyntheticAccessorLowering) is appended after every declared and
 //!   lifted member;
 //! - a class's lexical captures and outer instance (LocalDeclarationsLowering, InnerClassesLowering)
@@ -154,6 +156,22 @@ fn captured_and_outer_fields_follow_declared_fields() {
          fun build(seed: Int): Any {\n\
          \x20   class Local(val own: Int) { fun sum(): Int = own + seed }\n\
          \x20   return Local(1).sum() + Shell(2).Core(3).total()\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_enum_places_local_functions_before_values_array_and_lambdas_after_it() {
+    assert_same_member_order(
+        "EnumLifted",
+        "enum class Mode {\n\
+         \x20   ON, OFF;\n\
+         \x20   fun level(): Int {\n\
+         \x20       fun base() = 2\n\
+         \x20       val step = { base() + 1 }\n\
+         \x20       return step()\n\
+         \x20   }\n\
+         \x20   fun spare() = 5\n\
          }\n",
     );
 }
