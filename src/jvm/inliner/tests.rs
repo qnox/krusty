@@ -1,3 +1,4 @@
+use super::anonymous_object::MalformedType;
 use super::*;
 use crate::jvm::method_node::{Category, Constant, LabelId, LocalVariable, TryCatchBlock};
 
@@ -608,4 +609,45 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         .collect();
     // The body's line, the lambda's, and the body's again after the lambda.
     assert_eq!(lines, vec![7, 2, 7]);
+}
+
+/// Regenerates every object as `Main$g$$inlined$f$1` with an unchanged constructor.
+struct RenamingObjects;
+
+impl AnonymousObjects for RenamingObjects {
+    fn regenerate(&mut self, _class: &str, desc: &str) -> Result<(String, String), InlineError> {
+        Ok(("Main$g$$inlined$f$1".to_string(), desc.to_string()))
+    }
+}
+
+#[test]
+fn a_malformed_descriptor_at_the_call_site_declines_the_regeneration() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        Node::Insn(Insn::Type {
+            op: 0xbb,
+            class: "lib/A$f$1".to_string(),
+        }),
+        Node::Insn(Insn::Op(0x59)),
+        Node::Insn(Insn::Method {
+            op: 0xb7,
+            owner: "lib/A$f$1".to_string(),
+            name: "<init>".to_string(),
+            desc: "()V".to_string(),
+            interface: false,
+        }),
+        Node::Insn(Insn::Field {
+            op: 0xb5,
+            owner: "lib/A$f$1".to_string(),
+            name: "x".to_string(),
+            desc: "Llib/A$f$1".to_string(),
+        }),
+        Node::Insn(Insn::Op(0xb1)),
+    ];
+    assert_eq!(
+        object_regeneration::regenerate_objects(&mut node, &mut RenamingObjects),
+        Err(InlineError::Regeneration(RegenerationError::Malformed(
+            MalformedType("Llib/A$f$1".to_string())
+        )))
+    );
 }

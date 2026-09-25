@@ -4,9 +4,10 @@
 
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
-use super::anonymous_object::TypeRemapper;
+use super::anonymous_object::{MalformedType, TypeRemapper};
 use super::callee_shape::is_anonymous_class;
 use super::InlineError;
+use super::RegenerationError;
 
 const NEW: u8 = 0xbb;
 const INVOKESPECIAL: u8 = 0xb7;
@@ -78,15 +79,19 @@ pub(super) fn regenerate_objects(
                 continue;
             }
         }
-        remapper.remap_insn(insn);
+        remapper.remap_insn(insn).map_err(malformed)?;
     }
     for block in &mut node.try_catch_blocks {
         if let Some(class) = &mut block.catch_type {
-            *class = remapper.map_type(class);
+            *class = remapper.map_type(class).map_err(malformed)?;
         }
     }
     for local in &mut node.local_variables {
-        local.desc = remapper.map_desc(&local.desc);
+        local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
     }
     Ok(())
+}
+
+fn malformed(malformed: MalformedType) -> InlineError {
+    InlineError::Regeneration(RegenerationError::Malformed(malformed))
 }

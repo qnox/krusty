@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use crate::jvm::class_node::{Annotation, ElementValue};
 use crate::jvm::method_node::{Constant, Handle, Insn, MethodNode, Node};
 
+/// A descriptor, internal name or generic signature that does not parse. The regenerated class
+/// would keep whatever part of it names the original, so the whole regeneration is declined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MalformedType(pub String);
+
 /// The classes renamed so far, by internal name, and the inline function's type parameters.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TypeRemapper {
@@ -43,11 +48,13 @@ impl TypeRemapper {
     }
 
     /// `Remapper.mapType`: an internal name, or an array class's descriptor.
-    pub(crate) fn map_type(&self, class: &str) -> String {
+    pub(crate) fn map_type(&self, class: &str) -> Result<String, MalformedType> {
         if class.starts_with('[') {
             self.map_desc(class)
+        } else if class.is_empty() || class.contains(';') {
+            Err(MalformedType(class.to_string()))
         } else {
-            self.map(class)
+            Ok(self.map(class))
         }
     }
 
@@ -72,30 +79,73 @@ impl TypeRemapper {
         }
     }
 
-    /// `Remapper.mapDesc` / `mapMethodDesc`: every class a field or method descriptor names.
-    pub(crate) fn map_desc(&self, desc: &str) -> String {
+    /// `Remapper.mapDesc` / `mapMethodDesc`: every class a field or method descriptor names
+    /// (`V` stands for `void.class` in an annotation).
+    pub(crate) fn map_desc(&self, desc: &str) -> Result<String, MalformedType> {
+        let malformed = || MalformedType(desc.to_string());
+        let bytes = desc.as_bytes();
         let mut out = String::with_capacity(desc.len());
-        let mut rest = desc;
-        while let Some(start) = rest.find('L') {
-            out.push_str(&rest[..=start]);
-            let tail = &rest[start + 1..];
-            let Some(end) = tail.find(';') else {
-                out.push_str(tail);
-                return out;
-            };
-            out.push_str(&self.map(&tail[..end]));
-            out.push(';');
-            rest = &tail[end + 1..];
+        let end = if desc == "V" {
+            out.push('V');
+            1
+        } else if bytes.first() == Some(&b'(') {
+            out.push('(');
+            let mut at = 1;
+            while bytes.get(at) != Some(&b')') {
+                at = self
+                    .map_field_type(desc, at, &mut out)
+                    .ok_or_else(malformed)?;
+            }
+            out.push(')');
+            at += 1;
+            if bytes.get(at) == Some(&b'V') {
+                out.push('V');
+                at + 1
+            } else {
+                self.map_field_type(desc, at, &mut out)
+                    .ok_or_else(malformed)?
+            }
+        } else {
+            self.map_field_type(desc, 0, &mut out)
+                .ok_or_else(malformed)?
+        };
+        if end != desc.len() {
+            return Err(malformed());
         }
-        out.push_str(rest);
-        out
+        Ok(out)
+    }
+
+    /// The field type of `desc` at `at`, renamed onto `out`; where it ends.
+    fn map_field_type(&self, desc: &str, mut at: usize, out: &mut String) -> Option<usize> {
+        let bytes = desc.as_bytes();
+        while bytes.get(at) == Some(&b'[') {
+            out.push('[');
+            at += 1;
+        }
+        match *bytes.get(at)? {
+            byte @ (b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z') => {
+                out.push(byte as char);
+                Some(at + 1)
+            }
+            b'L' => {
+                let end = at + 1 + desc[at + 1..].find(';')?;
+                let name = &desc[at + 1..end];
+                if name.is_empty() {
+                    return None;
+                }
+                out.push('L');
+                out.push_str(&self.map(name));
+                out.push(';');
+                Some(end + 1)
+            }
+            _ => None,
+        }
     }
 
     /// `Remapper.mapSignature`: a generic signature, its class types renamed as
     /// `SignatureRemapper` renames them and each of the call's type parameters replaced by its
-    /// argument. The type parameters the signature declares shadow the call's from now on. A
-    /// signature that does not parse is returned unchanged.
-    pub(crate) fn map_signature(&mut self, signature: &str) -> String {
+    /// argument. The type parameters the signature declares shadow the call's from now on.
+    pub(crate) fn map_signature(&mut self, signature: &str) -> Result<String, MalformedType> {
         let mut remapped = SignatureRemapper {
             remapper: self,
             input: signature.as_bytes(),
@@ -103,39 +153,36 @@ impl TypeRemapper {
             out: String::with_capacity(signature.len()),
         };
         match remapped.signature() {
-            Some(()) if remapped.at == signature.len() => remapped.out,
-            _ => signature.to_string(),
+            Some(()) if remapped.at == signature.len() => Ok(remapped.out),
+            _ => Err(MalformedType(signature.to_string())),
         }
     }
 
     /// `MethodRemapper` over a body: its instructions, handlers and locals.
-    pub(crate) fn remap_method(&self, node: &mut MethodNode) {
-        node.desc = self.map_desc(&node.desc);
+    pub(crate) fn remap_method(&self, node: &mut MethodNode) -> Result<(), MalformedType> {
+        node.desc = self.map_desc(&node.desc)?;
         for entry in &mut node.nodes {
             if let Node::Insn(insn) = entry {
-                self.remap_insn(insn);
+                self.remap_insn(insn)?;
             }
         }
         for block in &mut node.try_catch_blocks {
             if let Some(class) = &mut block.catch_type {
-                *class = self.map_type(class);
+                *class = self.map_type(class)?;
             }
         }
         for local in &mut node.local_variables {
-            local.desc = self.map_desc(&local.desc);
+            local.desc = self.map_desc(&local.desc)?;
         }
+        Ok(())
     }
 
-    pub(crate) fn remap_insn(&self, insn: &mut Insn) {
+    pub(crate) fn remap_insn(&self, insn: &mut Insn) -> Result<(), MalformedType> {
         match insn {
-            Insn::Type { class, .. } => *class = self.map_type(class),
-            Insn::Field { owner, desc, .. } => {
-                *owner = self.map_type(owner);
-                *desc = self.map_desc(desc);
-            }
-            Insn::Method { owner, desc, .. } => {
-                *owner = self.map_type(owner);
-                *desc = self.map_desc(desc);
+            Insn::Type { class, .. } => *class = self.map_type(class)?,
+            Insn::Field { owner, desc, .. } | Insn::Method { owner, desc, .. } => {
+                *owner = self.map_type(owner)?;
+                *desc = self.map_desc(desc)?;
             }
             Insn::InvokeDynamic {
                 desc,
@@ -143,14 +190,14 @@ impl TypeRemapper {
                 arguments,
                 ..
             } => {
-                *desc = self.map_desc(desc);
-                self.remap_handle(bootstrap);
+                *desc = self.map_desc(desc)?;
+                self.remap_handle(bootstrap)?;
                 for argument in arguments {
-                    self.remap_constant(argument);
+                    self.remap_constant(argument)?;
                 }
             }
-            Insn::Ldc(constant) => self.remap_constant(constant),
-            Insn::MultiANewArray { desc, .. } => *desc = self.map_desc(desc),
+            Insn::Ldc(constant) => self.remap_constant(constant)?,
+            Insn::MultiANewArray { desc, .. } => *desc = self.map_desc(desc)?,
             Insn::Op(_)
             | Insn::Int { .. }
             | Insn::Var { .. }
@@ -159,42 +206,50 @@ impl TypeRemapper {
             | Insn::TableSwitch { .. }
             | Insn::LookupSwitch { .. } => {}
         }
+        Ok(())
     }
 
-    fn remap_constant(&self, constant: &mut Constant) {
+    fn remap_constant(&self, constant: &mut Constant) -> Result<(), MalformedType> {
         match constant {
-            Constant::Class(class) => *class = self.map_type(class),
-            Constant::MethodType(desc) => *desc = self.map_desc(desc),
-            Constant::Handle(handle) => self.remap_handle(handle),
+            Constant::Class(class) => *class = self.map_type(class)?,
+            Constant::MethodType(desc) => *desc = self.map_desc(desc)?,
+            Constant::Handle(handle) => self.remap_handle(handle)?,
             Constant::Int(_)
             | Constant::Float(_)
             | Constant::Long(_)
             | Constant::Double(_)
             | Constant::String(_) => {}
         }
+        Ok(())
     }
 
-    fn remap_handle(&self, handle: &mut Handle) {
-        handle.owner = self.map_type(&handle.owner);
-        handle.desc = self.map_desc(&handle.desc);
+    fn remap_handle(&self, handle: &mut Handle) -> Result<(), MalformedType> {
+        handle.owner = self.map_type(&handle.owner)?;
+        handle.desc = self.map_desc(&handle.desc)?;
+        Ok(())
     }
 
     /// `AnnotationRemapper`: the annotation's type and every class and enum its values name.
-    pub(crate) fn remap_annotation(&self, annotation: &mut Annotation) {
-        annotation.desc = self.map_desc(&annotation.desc);
+    pub(crate) fn remap_annotation(
+        &self,
+        annotation: &mut Annotation,
+    ) -> Result<(), MalformedType> {
+        annotation.desc = self.map_desc(&annotation.desc)?;
         for (_, value) in &mut annotation.values {
-            self.remap_value(value);
+            self.remap_value(value)?;
         }
+        Ok(())
     }
 
-    fn remap_value(&self, value: &mut ElementValue) {
+    fn remap_value(&self, value: &mut ElementValue) -> Result<(), MalformedType> {
         match value {
-            ElementValue::Enum(desc, _) => *desc = self.map_desc(desc),
-            ElementValue::Class(desc) => *desc = self.map_desc(desc),
-            ElementValue::Annotation(annotation) => self.remap_annotation(annotation),
+            ElementValue::Enum(desc, _) | ElementValue::Class(desc) => {
+                *desc = self.map_desc(desc)?
+            }
+            ElementValue::Annotation(annotation) => self.remap_annotation(annotation)?,
             ElementValue::Array(values) => {
                 for value in values {
-                    self.remap_value(value);
+                    self.remap_value(value)?;
                 }
             }
             ElementValue::Int(..)
@@ -203,6 +258,7 @@ impl TypeRemapper {
             | ElementValue::Double(_)
             | ElementValue::String(_) => {}
         }
+        Ok(())
     }
 }
 
@@ -368,7 +424,15 @@ impl SignatureRemapper<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::TypeRemapper;
+    use super::{MalformedType, TypeRemapper};
+
+    fn ok(text: &str) -> Result<String, MalformedType> {
+        Ok(text.to_string())
+    }
+
+    fn malformed(text: &str) -> Result<String, MalformedType> {
+        Err(MalformedType(text.to_string()))
+    }
 
     fn remapper() -> TypeRemapper {
         let mut remapper = TypeRemapper::default();
@@ -381,10 +445,13 @@ mod tests {
         let remapper = remapper();
         assert_eq!(
             remapper.map_desc("(Llib/A$f$1;[Llib/A$f$1;I)Llib/B;"),
-            "(LMain$g$$inlined$f$1;[LMain$g$$inlined$f$1;I)Llib/B;"
+            ok("(LMain$g$$inlined$f$1;[LMain$g$$inlined$f$1;I)Llib/B;")
         );
-        assert_eq!(remapper.map_type("[Llib/A$f$1;"), "[LMain$g$$inlined$f$1;");
-        assert_eq!(remapper.map_type("lib/A$f$1"), "Main$g$$inlined$f$1");
+        assert_eq!(
+            remapper.map_type("[Llib/A$f$1;"),
+            ok("[LMain$g$$inlined$f$1;")
+        );
+        assert_eq!(remapper.map_type("lib/A$f$1"), ok("Main$g$$inlined$f$1"));
     }
 
     #[test]
@@ -393,16 +460,16 @@ mod tests {
         assert_eq!(
             remapper
                 .map_signature("<T:Ljava/lang/Object;>Ljava/lang/Object;Llib/I<Llib/A$f$1;TT;>;"),
-            "<T:Ljava/lang/Object;>Ljava/lang/Object;Llib/I<LMain$g$$inlined$f$1;TT;>;"
+            ok("<T:Ljava/lang/Object;>Ljava/lang/Object;Llib/I<LMain$g$$inlined$f$1;TT;>;")
         );
         assert_eq!(
             remapper.map_signature("(TLlib/A$f$1;)V"),
-            "(TLlib/A$f$1;)V",
+            ok("(TLlib/A$f$1;)V"),
             "`TLlib/A$f$1;` is the type variable `Llib/A$f$1`, not a class"
         );
         assert_eq!(
             remapper.map_signature("<T::Ljava/lang/Comparable<-TT;>;>(Ljava/util/List<+TT;>;)TT;"),
-            "<T::Ljava/lang/Comparable<-TT;>;>(Ljava/util/List<+TT;>;)TT;"
+            ok("<T::Ljava/lang/Comparable<-TT;>;>(Ljava/util/List<+TT;>;)TT;")
         );
     }
 
@@ -413,7 +480,7 @@ mod tests {
         remapper.add_mapping("lib/Outer$Inner", "app/Outer$Inner");
         assert_eq!(
             remapper.map_signature("Llib/Outer<TT;>.Inner<TT;>;"),
-            "Lapp/Outer<TT;>.Inner<TT;>;"
+            ok("Lapp/Outer<TT;>.Inner<TT;>;")
         );
     }
 
@@ -425,20 +492,74 @@ mod tests {
         ]);
         assert_eq!(
             remapper.map_signature("Ljava/lang/Object;Llib/Box<TT;>;"),
-            "Ljava/lang/Object;Llib/Box<Ljava/lang/String;>;"
+            ok("Ljava/lang/Object;Llib/Box<Ljava/lang/String;>;")
         );
         assert_eq!(
             remapper.map_signature("([TT;)TU;"),
-            "([Ljava/lang/String;)TV;"
+            ok("([Ljava/lang/String;)TV;")
         );
         assert_eq!(
             remapper.map_signature("<T:Ljava/lang/Object;>(TT;)TU;"),
-            "<T:Ljava/lang/Object;>(TT;)TV;"
+            ok("<T:Ljava/lang/Object;>(TT;)TV;")
         );
         assert_eq!(
             remapper.map_signature("()TT;"),
-            "()TT;",
+            ok("()TT;"),
             "the declared `T` shadows the call's"
         );
+    }
+
+    #[test]
+    fn a_malformed_descriptor_is_refused_whole() {
+        let remapper = remapper();
+        for desc in [
+            "Llib/A$f$1",
+            "(Llib/A$f$1;",
+            "(Llib/A$f$1;)",
+            "()Llib/A$f$1;I",
+            "L;",
+            "[",
+            "Q",
+            "(V)V",
+            "",
+        ] {
+            assert_eq!(remapper.map_desc(desc), malformed(desc), "{desc:?}");
+        }
+        assert_eq!(
+            remapper.map_desc("V"),
+            ok("V"),
+            "`void.class` in an annotation"
+        );
+    }
+
+    #[test]
+    fn a_malformed_internal_name_is_refused() {
+        let remapper = remapper();
+        for class in ["", "lib/A$f$1;", "[Llib/A$f$1"] {
+            assert_eq!(remapper.map_type(class), malformed(class), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_signature_is_refused_whole() {
+        let mut remapper = TypeRemapper::with_type_arguments(&[(
+            "T".to_string(),
+            "Ljava/lang/String;".to_string(),
+        )]);
+        remapper.add_mapping("lib/A$f$1", "Main$g$$inlined$f$1");
+        for signature in [
+            "Ljava/lang/Object;Llib/I<Llib/A$f$1;TT;>",
+            "Ljava/lang/Object;Llib/I<Llib/A$f$1;",
+            "(TT;",
+            "(TT)V",
+            "<T>Ljava/lang/Object;",
+            "()TT;extra",
+        ] {
+            assert_eq!(
+                remapper.map_signature(signature),
+                malformed(signature),
+                "{signature:?}"
+            );
+        }
     }
 }

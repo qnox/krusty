@@ -25,7 +25,7 @@ use crate::jvm::metadata::MetadataDecodeError;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 use crate::jvm::source_map::{DependencyMap, SourceMap};
 
-pub(crate) use type_remapper::TypeRemapper;
+pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
 const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
@@ -54,6 +54,14 @@ pub(crate) enum RegenerationError {
     Copy(CopyError),
     /// The original's `@Metadata` could not be read.
     Metadata(MetadataDecodeError),
+    /// A descriptor or signature of the original does not parse.
+    Malformed(MalformedType),
+}
+
+impl From<MalformedType> for RegenerationError {
+    fn from(malformed: MalformedType) -> Self {
+        RegenerationError::Malformed(malformed)
+    }
 }
 
 /// The method an object is regenerated for (`InlineCallSiteInfo`).
@@ -117,8 +125,10 @@ pub(crate) fn regenerate(
     let signature = original
         .signature
         .as_deref()
-        .map(|s| remapper.map_signature(s));
-    let mut cw = ClassWriter::new_generic(new, signature.as_deref(), &remapper.map(super_name));
+        .map(|s| remapper.map_signature(s))
+        .transpose()?;
+    let mut cw =
+        ClassWriter::new_generic(new, signature.as_deref(), &remapper.map_type(super_name)?);
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
@@ -128,14 +138,14 @@ pub(crate) fn regenerate(
     }
     cw.set_major(original.major.max(regeneration.major));
     for interface in &original.interfaces {
-        cw.add_interface(&remapper.map(interface));
+        cw.add_interface(&remapper.map_type(interface)?);
     }
     cw.keep_visited_inner_classes();
     // The original's own `EnclosingMethod`, passed through before the transformer replaces it.
     if let Some(outer) = &original.outer_class {
-        cw.seed_class(&remapper.map(&outer.owner));
+        cw.seed_class(&remapper.map_type(&outer.owner)?);
         if let Some((name, desc)) = &outer.method {
-            cw.seed_name_and_type(name, &remapper.map_desc(desc));
+            cw.seed_name_and_type(name, &remapper.map_desc(desc)?);
         }
     }
     let mut metadata = None;
@@ -150,7 +160,7 @@ pub(crate) fn regenerate(
                 SOURCE_DEBUG_EXTENSION_DESC => {}
                 _ => {
                     let mut annotation = annotation.clone();
-                    remapper.remap_annotation(&mut annotation);
+                    remapper.remap_annotation(&mut annotation)?;
                     cw.add_copied_class_annotation(&annotation, visible);
                 }
             }
@@ -161,14 +171,17 @@ pub(crate) fn regenerate(
             continue;
         }
         let mut field = field.clone();
-        field.desc = remapper.map_desc(&field.desc);
-        field.signature = field.signature.map(|s| remapper.map_signature(&s));
+        field.desc = remapper.map_desc(&field.desc)?;
+        field.signature = field
+            .signature
+            .map(|s| remapper.map_signature(&s))
+            .transpose()?;
         for annotation in field
             .visible_annotations
             .iter_mut()
             .chain(&mut field.invisible_annotations)
         {
-            remapper.remap_annotation(annotation);
+            remapper.remap_annotation(annotation)?;
         }
         cw.add_copied_field(&field)
             .map_err(RegenerationError::Copy)?;
@@ -194,7 +207,7 @@ pub(crate) fn regenerate(
         cw.add_copied_field(&FieldNode {
             access: CAPTURED_FIELD_ACCESS,
             name: field.name.clone(),
-            desc: remapper.map_desc(&field.desc),
+            desc: remapper.map_desc(&field.desc)?,
             signature: None,
             value: None,
             visible_annotations: Vec::new(),
@@ -224,8 +237,11 @@ pub(crate) fn regenerate(
     for method in methods {
         let mut method = method.clone();
         check_captured_field_accesses(&method, old)?;
-        method.desc = remapper.map_desc(&method.desc);
-        method.signature = method.signature.map(|s| remapper.map_signature(&s));
+        method.desc = remapper.map_desc(&method.desc)?;
+        method.signature = method
+            .signature
+            .map(|s| remapper.map_signature(&s))
+            .transpose()?;
         for annotation in method
             .visible_annotations
             .iter_mut()
@@ -245,7 +261,7 @@ pub(crate) fn regenerate(
                     .flatten(),
             )
         {
-            remapper.remap_annotation(annotation);
+            remapper.remap_annotation(annotation)?;
         }
         if let Some(code) = &method.code {
             method.code = Some(copy_body(code, &remapper, &mut lines)?);
@@ -258,8 +274,12 @@ pub(crate) fn regenerate(
     cw.set_source_map(lines.map);
     for inner in &original.inner_classes {
         let spec = InnerClassSpec {
-            inner: remapper.map(&inner.name),
-            outer: inner.outer_name.as_deref().map(|outer| remapper.map(outer)),
+            inner: remapper.map_type(&inner.name)?,
+            outer: inner
+                .outer_name
+                .as_deref()
+                .map(|outer| remapper.map_type(outer))
+                .transpose()?,
             name: inner
                 .inner_name
                 .as_deref()
@@ -404,7 +424,7 @@ fn copy_body(
     lines: &mut CopiedLines,
 ) -> Result<MethodNode, RegenerationError> {
     let mut body = body.clone();
-    remapper.remap_method(&mut body);
+    remapper.remap_method(&mut body)?;
     // One `SourceMapCopier` per method: a line maps once and keeps that mapping.
     let mut mapped: HashMap<u16, u16> = HashMap::new();
     for entry in &mut body.nodes {
@@ -529,8 +549,8 @@ fn write_metadata(
             .transpose()
     };
     let original = MetadataStrings {
-        d1: strings("d1")?.unwrap_or_default(),
-        d2: strings("d2")?.unwrap_or_default(),
+        d1: strings("d1")?.ok_or(malformed.clone())?,
+        d2: strings("d2")?.ok_or(malformed.clone())?,
     };
     let copy = record_origin_name(kind, &original, old)
         .map_err(RegenerationError::Metadata)?
