@@ -1,6 +1,6 @@
 /* What a driver of the list and iteration runtime needs from tiers above it, on top of the
    exception slot `later_tiers.h` stands in for: the exceptions a list raises, the set and map
-   questions every walk asks before it reaches a range, and `hashCode`.
+   questions every walk asks before it reaches a range, and `equals` and `hashCode`.
 
    Every definition is WEAK for the reason `later_tiers.h` gives: the tier that defines the real one
    wins the link, and the driver then runs against it unchanged. Each keeps the real contract and no
@@ -42,6 +42,18 @@ __attribute__((weak)) kt_int kt_hash_code(KRef value) {
         return 0;
     }
     return ((kt_int(*)(KRef))type_of(value)->vtable[KT_SLOT_HASH_CODE])(value);
+}
+
+/* The real one: null equals only null, an object without a vtable compares by identity, and every
+   other asks the left operand's `equals` slot. */
+__attribute__((weak)) kt_boolean kt_equals(KRef a, KRef b) {
+    if (a == NULL) {
+        return b == NULL;
+    }
+    if (type_of(a)->vtable == NULL) {
+        return a == b;
+    }
+    return ((kt_boolean(*)(KRef, KRef))type_of(a)->vtable[KT_SLOT_EQUALS])(a, b);
 }
 
 /* Take the exception in flight off the slot and say whether it has the expected type. NULL, when
