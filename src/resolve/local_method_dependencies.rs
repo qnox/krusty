@@ -202,10 +202,11 @@ impl Checker<'_> {
         Some(provider)
     }
 
-    /// The first member rung visible on `receiver`, including headers published by classifiers in
-    /// the active bounded body. The immutable symbol provider cannot contain those headers when
+    /// The complete member family visible on `receiver`, including headers published by classifiers
+    /// in the active bounded body. The immutable symbol provider cannot contain those headers when
     /// their results are inferred on this Pass-2 lexical rung, so every member consumer must use
-    /// this one union instead of independently querying the provider or the transient overlay.
+    /// this one hierarchy traversal instead of independently querying the provider or transient
+    /// overlay.
     pub(super) fn body_local_member_overload_rung(
         &self,
         receiver: Ty,
@@ -216,13 +217,16 @@ impl Checker<'_> {
             .is_some_and(|owner| {
                 self.resolved_body_local_supertypes.contains_key(&owner)
                     || self.checked_local_methods.contains_key(&owner)
+                    // A local classifier whose header is already published (one declared in
+                    // another body) answers through the provider's member scope, inherited
+                    // members included; only a deferred header belongs to this body's rung.
                     || self.resolved_index.is_some_and(|index| {
-                        index
-                            .classifier_declaration(owner)
-                            .and_then(|declaration| index.declaration_header(declaration))
-                            .is_some_and(|header| {
-                                header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                            })
+                        index.classifier_declaration(owner).is_some_and(|declaration| {
+                            index.classifier_header(declaration).is_none()
+                                && index.declaration_header(declaration).is_some_and(|header| {
+                                    header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                                })
+                        })
                     })
             });
         if !body_local_receiver {
@@ -237,30 +241,49 @@ impl Checker<'_> {
                 false,
             );
         }
-        let (mut direct, contains_body_local) =
-            self.body_local_declared_member_candidates_at(receiver, name);
-        if !direct.is_empty() {
-            if let Some(owner) =
-                crate::symbol_resolver::member_scope_receiver(receiver).obj_internal()
-            {
-                for candidate in &mut direct {
+        let receiver = crate::symbol_resolver::member_scope_receiver(receiver);
+        let source = self.fed_source();
+        let mut functions = crate::libraries::FunctionSet::default();
+        let mut queue = std::collections::VecDeque::from([(receiver, 0u32)]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some((current, depth)) = queue.pop_front() {
+            let Some(owner) = crate::symbol_resolver::member_scope_receiver(current).obj_internal()
+            else {
+                continue;
+            };
+            if !seen.insert(owner) {
+                continue;
+            }
+            let (mut declared, _) = self.body_local_declared_member_candidates_at(current, name);
+            for candidate in &mut declared {
+                if self.resolved_body_local_supertypes.contains_key(&owner)
+                    || self.checked_local_methods.contains_key(&owner)
+                {
                     let _ = self.apply_inherited_body_local_defaults(owner, candidate);
                 }
+                candidate.receiver_rank += depth;
             }
-            return (
-                crate::symbol_resolver::member_scope_receiver(receiver),
-                direct,
-                contains_body_local,
+            functions.overloads.extend(declared);
+
+            // Ownership, not an empty result, selects the source of direct edges. An active local
+            // classifier with no declared supertype must not retry a provider path; an ordinary
+            // classifier always exposes its direct edges through the common hierarchy model.
+            let supertypes = if self.resolved_body_local_supertypes.contains_key(&owner) {
+                self.body_local_supertypes(current)
+            } else {
+                crate::symbol_resolver::direct_supertypes(&source, current)
+            };
+            queue.extend(
+                supertypes
+                    .into_iter()
+                    .map(|supertype| (supertype, depth + 1)),
             );
         }
-        for supertype in self.body_local_supertypes(receiver) {
-            let (inherited, contains_body_local) =
-                self.body_local_declared_member_candidates_at(supertype, name);
-            if !inherited.is_empty() {
-                return (supertype, inherited, contains_body_local);
-            }
-        }
-        (receiver, Vec::new(), false)
+        crate::symbol_resolver::normalize_inherited_member_functions(&source, &mut functions);
+        // This custom traversal exists only for an active body-local receiver. Even when the
+        // selected declaration itself comes from a provider supertype, callers must replace the
+        // provider-only root inventory with this complete hierarchy family.
+        (receiver, functions.overloads, true)
     }
 
     /// Candidate union at one exact receiver rung. The provider and active checked-local overlay
