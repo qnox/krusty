@@ -5,8 +5,10 @@
 //! function's classes point at that function (a lambda's at the named function around it), a
 //! top-level property initializer's at the file facade with no method, an instance property's or
 //! `init` block's at the primary constructor, an object's property at the object itself, and a
-//! companion's property at the class that stores it. A callable-reference class lists only itself
-//! in `InnerClasses`, as a `static final synthetic` class with no outer class.
+//! companion's property at the class that stores it. A local class is listed in `InnerClasses`
+//! under its source name with no outer class, and a class nested in it names it as its outer
+//! class. A callable-reference class lists only itself in `InnerClasses`, as a
+//! `static final synthetic` class with no outer class.
 
 use super::common;
 
@@ -36,6 +38,16 @@ class Scope(val base: Int) {\n\
 \x20       ConstructorLocal()\n\
 \x20   }\n\
 }\n\
+class Member {\n\
+\x20   fun make(): Any {\n\
+\x20       class Made { inner class Part }\n\
+\x20       return Made().Part()\n\
+\x20   }\n\
+\x20   val made: Any = run {\n\
+\x20       class InRun\n\
+\x20       InRun()\n\
+\x20   }\n\
+}\n\
 fun outer(): Int {\n\
 \x20   class Local { fun tag(): (String) -> String = ::label }\n\
 \x20   val probe = object { val tag: (String) -> String = ::label }\n\
@@ -49,7 +61,9 @@ fun box(): String {\n\
 \x20   scope.setterLocal = 3\n\
 \x20   val total = outer() + Registry.tag(\"a\").length + Holder(1).tag(\"a\").length +\n\
 \x20       Holder.shared(\"a\").length + generic(1)(\"a\").length\n\
+\x20   val member = Member()\n\
 \x20   return if (total == 12 && scope.setterLocal == 3 && scope.getterLocal != token &&\n\
+\x20       member.make() != member.made &&\n\
 \x20       factory()() != token && Registry.token != token) \"OK\" else \"fail: $total\"\n\
 }\n";
 
@@ -72,11 +86,16 @@ const ENCLOSED: &[&str] = &[
     "EnclosureKt$outer$probe$1",
     "Registry$token$1",
     "Holder$Companion",
+    "Scope$getterLocal$GetterLocal",
+    "Scope$setterLocal$SetterLocal",
+    "Scope$ConstructorLocal",
+    "Member$make$Made",
+    "Member$make$Made$Part",
+    "Member$made$1$InRun",
 ];
 
-/// Local classes in callable shapes that previously reached JVM emission without a recorded scope.
-/// Their `InnerClasses` simple-name parity belongs to the local-name migration in #1219; this PR
-/// compares the complete owner, callable name and descriptor of their `EnclosingMethod` attribute.
+/// Local classes in callable shapes that previously reached JVM emission without a recorded scope,
+/// compared by the complete owner, callable name and descriptor of their `EnclosingMethod`.
 const CALLABLE_ENCLOSED: &[&str] = &[
     "Scope$getterLocal$GetterLocal",
     "Scope$setterLocal$SetterLocal",
