@@ -1912,7 +1912,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (nullable-bound) `T`, the `& Any` intersection throws NPE on `null`
   (`tests/definitely_non_null_type_e2e.rs`). `as T?` and primitive
   casts are a plain `checkcast`/coercion. The safe cast `x as? T` lowers to
-  `{ val t = x; if (t is T) t as T else null }` — `instanceof` then `checkcast` on a match, `null` on a
+  `{ val t = x; if (t is T) t as T else null }` (with no `t` when `x` is a stable read of an
+  immutable local or parameter, which is tested and cast in place, as kotlinc's `irLetS` does)
+  — `instanceof` then `checkcast` on a match, `null` on a
   mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive
   `as? Int` would yield the boxed `Int?` wrapper — not yet modeled, so it skips). `SafeCast` in
   `tests/feature_box_e2e.rs`. `is`/`as`/`as?` targets resolve through the **same** name→internal map the
@@ -7891,6 +7893,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/block_slot_reuse_e2e.rs` (the catch parameter lands in slot 2, as kotlinc's does) and
   `a_finally_with_its_own_handler_types_the_parked_exception` in `tests/try_debug_lines_e2e.rs`
   (an `Int`/`Unit` statement `try` inside a finalizer, complete exception table and frames).
+
+- **Lowering declares the temporaries kotlinc's IR lowerings declare, and no others.** Each rule
+  below is read off kotlinc 2.4.20's source and checked against its `javap` output; lowering
+  records the choice in the IR, and the backend allocates whatever lowering declared. Ownership is
+  split exactly as in kotlinc: common lowering decides only the semantic snapshot/reuse shape
+  (whether a value is held in a temporary or re-read from a stable binding) and records that
+  temporary in the IR; it never reasons about stores, loads or slots. Removing a physical
+  store/load pair is owned by the JVM backend's bytecode temporaries pass (kotlinc's
+  `TemporaryVariablesEliminationTransformer`), which never re-decides the semantic shape:
+  - A `when` with a subject always holds the subject in a temporary, even when the subject reads
+    an immutable local. `Fir2IrVisitor.generateWhenSubjectVariable` creates `tmp_subject` for
+    every subject expression, and `JvmOptimizationLowering` puts a subject temporary whose
+    initializer is a variable read into `dontTouchTemporaryVals`, so it is not removed. Where the
+    subject is read once (a `tableswitch`, a single comparison), the bytecode temporaries pass
+    removes the store/load pair, as kotlinc's does.
+  - A destructuring declaration whose initializer is a stable read of an immutable local or
+    parameter declares no container: every `componentN` call reads the binding again.
+    `JvmOptimizationLowering.removeUnnecessaryTemporaryVariables` drops a `val` temporary
+    initialized by such a read (or by a constant). A mutable local, a call, or any other
+    initializer keeps its container temporary.
+  - A safe cast `x as? T` of a stable immutable read tests and casts `x` in place;
+    `TypeOperatorLowering` builds it with `irLetS`, which declares nothing for an `IrGetValue` of
+    an immutable value.
+  - `Array(size, init)`, `IntArray(size, init)` and the other primitive array constructors lower
+    as `ArrayConstructorLowering` does, declaring in this order: the index (`0`); the size, unless
+    it is a stable read or an integer constant; the array; the function value, unless it is a
+    lambda literal; and in the loop body the element index, a copy of the index taken before the
+    initializer runs. A lambda literal is spliced with its parameter bound to the element index,
+    as `IrInlinable.inline` remaps it, so it declares no local of its own. A non-lambda function
+    value is therefore evaluated after the array is allocated (arguments still run in source
+    order; only a negative size, which throws at the allocation, can observe the difference).
+  - A classifier callable-reference adapter (`::Array`, `::IntArray`) numbers its own
+    temporaries after its parameters, so a temporary it declares does not reuse a parameter's
+    value index.
+
+  The stability test is the read stability common IR publishes for each `GetValue`
+  (`IrFile::binding_read_stability`), not the shape of the FIR expression. In the 2.4.20 box
+  corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
+  `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
+  `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the
+  destructured loop element `$dest$…`, and inlines stdlib inline array constructors such as
+  `UIntArray(size) { … }`, whose lambda parameter keeps a local there.
+
+  Tests: `fir_lower::tests::lowering_temporaries` checks each lowered shape, and
+  `tests/block_slot_reuse_e2e.rs` compares full class bytes for destructuring, a `when`
+  subject, a safe cast and the array constructor with a stable, a computed and a constant size,
+  and local-variable slots for a destructured loop element. It runs an array constructor whose
+  size and function value log their evaluation (a negative size logs only the size, as under
+  kotlinc) and `::Array` and `::IntArray` references passed as functions.
 
 - **The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to
   it:** nothing stands between them, so the jump would be to the next instruction. Every other

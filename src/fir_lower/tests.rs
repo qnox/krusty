@@ -15,6 +15,7 @@ use crate::ir::{
 use crate::types::Ty;
 
 mod local_classifier_provenance;
+mod lowering_temporaries;
 
 use super::lower_body;
 
