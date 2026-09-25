@@ -139,7 +139,7 @@ pub(crate) use diagnostic_selection::unresolved_member_message;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
-pub use for_loop_iteration::{ProgressionMember, ProgressionPlan};
+pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
@@ -10513,7 +10513,7 @@ pub struct TypeInfo {
     /// operator call. Ordinary counted primitive progressions have no entry.
     pub for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
     /// `kotlin.ranges` progression classes a counted loop may read, with their selected members.
-    pub progression_plans: HashMap<Ty, ProgressionPlan>,
+    pub progression_plans: ProgressionPlans,
     /// Bound classpath/library property references selected while checking, keyed by the
     /// `Expr::CallableRef` expression. Lowering emits the recorded getter instead of re-resolving.
     /// Classpath/library constructors selected while checking, keyed by the construction call.
@@ -11547,9 +11547,6 @@ impl TypeInfo {
     }
     pub fn for_range_iterator_protocol(&self, s: StmtId) -> Option<&ForRangeIteratorTarget> {
         self.for_range_iterator_protocols.get(&s)
-    }
-    pub fn progression_plan(&self, class: Ty) -> Option<&ProgressionPlan> {
-        self.progression_plans.get(&class)
     }
     /// The resolved classpath/library constructor target for construction call `e`.
     pub fn resolved_constructor(&self, e: ExprId) -> Option<&ResolvedConstructor> {
@@ -37714,7 +37711,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_destructure_components: HashMap::new(),
         iterator_protocols: HashMap::new(),
         for_range_iterator_protocols: HashMap::new(),
-        progression_plans: HashMap::new(),
+        progression_plans: ProgressionPlans::default(),
         resolved_constructors: HashMap::new(),
         resolved_enum_entry_constructors: HashMap::new(),
         resolved_ctor_delegations: HashMap::new(),
@@ -40670,7 +40667,7 @@ struct Checker<'a> {
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
     iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
-    progression_plans: HashMap<Ty, ProgressionPlan>,
+    progression_plans: ProgressionPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,

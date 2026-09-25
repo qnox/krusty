@@ -262,19 +262,22 @@ impl BodyFirChecker<'_> {
     }
 
     /// The `getProgressionLastElement` overload resolution selected for the stepped progression's
-    /// class. A stepped progression without one is a missing stable target.
+    /// class. Only a `step` needs it: a stepped progression without one is a missing stable
+    /// target.
     fn progression_last_element(
         &self,
         stepped: FirExprId,
         source: ExprId,
     ) -> Result<FirRuntimeFunction, BodyCheckFailure> {
         let span = self.file.expr_span(source);
-        let plan = self
+        let function = self
             .body
             .expr(stepped)
-            .and_then(|stepped| self.info.progression_plan(stepped.ty.get().non_null()))
+            .and_then(|stepped| {
+                self.info
+                    .progression_last_element(stepped.ty.get().non_null())
+            })
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
-        let function = &plan.last_element;
         Ok(FirRuntimeFunction {
             function: function.function,
             parameters: function.parameters.clone(),

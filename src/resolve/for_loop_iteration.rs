@@ -6,6 +6,7 @@ use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 use crate::types::{wk, Ty};
+use std::collections::HashMap;
 
 use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
 
@@ -18,10 +19,40 @@ pub struct ProgressionPlan {
     pub first: ProgressionMember,
     pub last: ProgressionMember,
     pub step: ProgressionMember,
-    /// The `getProgressionLastElement` overload a stepped progression of this class moves its
-    /// `last` with (`getProgressionLastElementByReturnType`), over the element type, or `Int` for a
-    /// `Char` progression.
-    pub last_element: RuntimeFunction,
+}
+
+/// The progression facts a counted loop reads, keyed by progression class. A class's member plan
+/// and the `getProgressionLastElement` overload a `step` over it needs are selected independently,
+/// so a loop that never steps does not depend on the helper.
+#[derive(Clone, Debug, Default)]
+pub struct ProgressionPlans {
+    members: HashMap<Ty, ProgressionPlan>,
+    /// The overload a stepped progression of the class moves its `last` with
+    /// (`getProgressionLastElementByReturnType`), over the element type, or `Int` for a `Char`
+    /// progression.
+    last_elements: HashMap<Ty, RuntimeFunction>,
+}
+
+impl ProgressionPlans {
+    /// The selected `first`, `last` and `step` of progression class `class`.
+    pub fn plan(&self, class: Ty) -> Option<&ProgressionPlan> {
+        self.members.get(&class)
+    }
+
+    /// The `getProgressionLastElement` overload a `step` over progression class `class` calls.
+    pub fn last_element(&self, class: Ty) -> Option<&RuntimeFunction> {
+        self.last_elements.get(&class)
+    }
+}
+
+impl super::TypeInfo {
+    pub fn progression_plan(&self, class: Ty) -> Option<&ProgressionPlan> {
+        self.progression_plans.plan(class)
+    }
+
+    pub fn progression_last_element(&self, class: Ty) -> Option<&RuntimeFunction> {
+        self.progression_plans.last_element(class)
+    }
 }
 
 /// A stdlib function a counted loop calls on its own, selected from the provider's declarations.
@@ -144,7 +175,7 @@ impl Checker<'_> {
     /// counted loop that needs one is then rejected by the checker rather than iterated.
     fn record_progression_plan(&mut self, ty: Ty) {
         let ty = ty.platform_lower_bound().non_null();
-        if !ty.type_args().is_empty() || self.progression_plans.contains_key(&ty) {
+        if !ty.type_args().is_empty() || self.progression_plans.members.contains_key(&ty) {
             return;
         }
         let Some(class) = ty.obj_internal().and_then(wk::progression_class) else {
@@ -168,17 +199,18 @@ impl Checker<'_> {
         } else {
             first.ty
         };
-        let Some(last_element) = self.progression_last_element(element, step.ty) else {
-            return;
-        };
-        self.progression_plans.insert(
+        if let Some(last_element) = self.progression_last_element(element, step.ty) {
+            self.progression_plans
+                .last_elements
+                .insert(ty, last_element);
+        }
+        self.progression_plans.members.insert(
             ty,
             ProgressionPlan {
                 class,
                 first,
                 last,
                 step,
-                last_element,
             },
         );
     }
