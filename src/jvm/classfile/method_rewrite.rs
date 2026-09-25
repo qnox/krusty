@@ -228,16 +228,38 @@ impl ClassWriter {
         }
         let entry = expand_slots(&entry);
         let original_graph = ControlGraph::build(&insns, &handlers)?;
-        // The verifier's types before each original instruction, computed at most once. Rewrite
-        // selection follows the instruction graph itself; a semantic smart-cast fact, for example,
-        // cannot remove a `checkcast` after the value has been stored in a broader physical local.
+        // The verifier's types before each original instruction, computed at most once. Seed the
+        // walk with the frames the original bytecode itself implies: in particular, a typed catch
+        // handler enters with its declared exception class, not the generic `Throwable` used by an
+        // untyped exceptional edge. These are computed frames, never emitter-recorded semantic
+        // guesses; the rewritten body is computed and validated independently below.
+        let original_frames_cell = std::cell::OnceCell::new();
+        let original_frames = || {
+            original_frames_cell
+                .get_or_init(|| {
+                    let body = stack_maps::Body {
+                        access: source.access,
+                        name: &source.name,
+                        descriptor: &source.desc,
+                        code: bytes,
+                        exceptions: &method.exceptions,
+                        labels: stack_maps::table_labels(&method.lnt, &method.lvt, bytes.len()),
+                    };
+                    self.compute_frames(&body)
+                        .ok()
+                        .map(|computed| stack_maps::verif_frames(computed.frames()))
+                })
+                .as_deref()
+        };
         let flow_types_cell = std::cell::OnceCell::new();
         let flow_types = || {
             flow_types_cell
-                .get_or_init(|| FrameTypes::analyze(&insns, &original_graph, &entry, &[], self))
+                .get_or_init(|| {
+                    FrameTypes::analyze(&insns, &original_graph, &entry, original_frames()?, self)
+                })
                 .as_ref()
         };
-        let redundant_casts = redundant_checkcasts::select(self, &insns, || flow_types());
+        let redundant_casts = redundant_checkcasts::select(self, &insns, flow_types);
         // kotlinc's `RedundantNullCheckMethodTransformer`: a `checkNotNull*` of a value its
         // nullability analysis proves non-null goes (see `null_checks`).
         let redundant_null_checks = self.redundant_null_checks(
