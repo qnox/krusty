@@ -126,15 +126,47 @@ pub(crate) fn forwarded_member_types(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{BackendMemberFact, BackendMemberName};
+
+    fn dependency_member(
+        physical_params: &[Ty],
+        params: &[Ty],
+        suspend: bool,
+    ) -> BackendMemberFact {
+        BackendMemberFact {
+            name: BackendMemberName::Declared("run".into()),
+            physical_name: None,
+            owner: Some(crate::types::type_name("fixture/Api")),
+            physical_params: physical_params.into(),
+            params: params.into(),
+            ret: Ty::Unit,
+            physical_ret: Ty::Unit,
+            descriptor: "".into(),
+            realization: crate::libraries::MemberRealization::Dispatch,
+            suspend,
+            abstract_member: false,
+            visibility: crate::types::Visibility::Public,
+            parameter_identities: Box::new([]),
+        }
+    }
 
     #[test]
     fn a_suspend_dependency_keeps_its_source_carrier_and_drops_only_the_cps_tail() {
-        let semantic = [Ty::obj("fixture/Ticket")];
-        let physical = [Ty::Int, Ty::obj("kotlin/coroutines/Continuation")];
+        let semantic = Ty::obj("fixture/Ticket");
+        let continuation = Ty::obj("kotlin/coroutines/Continuation");
+        let member = dependency_member(&[Ty::Int, continuation], &[semantic], true);
 
-        assert_eq!(
-            dependency_source_physical_params(&physical, &semantic, true),
-            &[Ty::Int]
-        );
+        let types = forwarded_member_types(&IrFile::default(), &member, false);
+
+        assert_eq!(types.physical_params, vec![Ty::Int]);
+        assert_eq!(types.semantic_params, vec![semantic]);
+    }
+
+    #[test]
+    #[should_panic(expected = "publishes one source physical type per semantic parameter")]
+    fn a_dependency_member_without_a_complete_physical_shape_is_rejected() {
+        let member = dependency_member(&[], &[Ty::Int], false);
+
+        forwarded_member_types(&IrFile::default(), &member, false);
     }
 }
