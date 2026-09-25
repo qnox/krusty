@@ -17,17 +17,12 @@
 
 mod finished_node;
 
-use std::collections::BTreeSet;
-
 use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::constant_pool_queries::PoolLookup;
 use super::stack_maps;
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
-use crate::jvm::bytecode_passes::redundant_checkcasts::{self, StackTops};
-use crate::jvm::bytecode_passes::{
-    captured_vars, dead_code, local_slots, negated_jumps, redundant_boxing, redundant_gotos,
-    redundant_null_checks, stack_peephole, temporaries,
-};
+use crate::jvm::bytecode_passes::pipeline::{self, Outcome, PassContext};
+use crate::jvm::bytecode_passes::redundant_checkcasts::StackTops;
 use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
 use crate::jvm::method_node::{LabelId, MethodNode};
 use finished_node::FinishedNode;
@@ -231,10 +226,13 @@ impl ClassWriter {
         self.optimized(method, identity, node, implicit_return, pool)
     }
 
-    /// kotlinc's optimizer passes over `node`, the body `method` currently holds (its code, and the
-    /// tables keyed by its offsets), or `None` when none applies or the result could not be proven
-    /// to keep its frames. `implicit_return` labels the method's implicit `return`, if it has one.
-    /// The optimized body looks its constants up in `pool`, which records whether one was missing.
+    /// kotlinc's optimizer passes (see [`pipeline`]) over `node`, the body `method` currently holds
+    /// (its code, and the tables keyed by its offsets), or `None` when none applies or the result
+    /// could not be proven to keep its frames. `implicit_return` labels the method's implicit
+    /// `return`, if it has one. The optimized body looks its constants up in `pool`, which records
+    /// whether one was missing. This is the class-file boundary around the passes: it supplies the
+    /// method's entry state and the verifier's view of the emitted bytes, and lays the result out
+    /// again with its local-variable table re-keyed and its frames proven.
     pub(super) fn optimized(
         &self,
         method: &MethodInfo,
@@ -298,52 +296,17 @@ impl ClassWriter {
                 })
                 .as_ref()
         };
-        // kotlinc's `RedundantNullCheckMethodTransformer` and `RedundantCheckCastEliminationMethodTransformer`
-        // both judge the method as emitted; what they select goes before the temporaries pass.
-        let removed: BTreeSet<usize> = redundant_checkcasts::select(&node, flow_types)
-            .into_iter()
-            .chain(redundant_null_checks::select(&node))
-            .collect();
-        let mut position = 0;
-        node.nodes.retain(|_| {
-            position += 1;
-            !removed.contains(&(position - 1))
-        });
-        // kotlinc runs `CapturedVarsOptimizationMethodTransformer` first. The null-check and cast
-        // passes above judge the method as emitted and never select a `Ref`'s operations, so it
-        // runs after their removals here.
-        let refs_unboxed = captured_vars::eliminate(&mut node, &self.internal_name).ok()?;
-        // Then `RedundantBoxingMethodTransformer`, ahead of the temporaries pass.
-        let unboxed =
-            redundant_boxing::eliminate(&mut node, &self.internal_name, &*self.value_classes)
-                .ok()?;
-        let temporaries = temporaries::eliminate(&mut node);
-        let folded_any = !removed.is_empty() || refs_unboxed || unboxed || temporaries.is_some();
-        let pinned = temporaries.map(|done| done.pinned).unwrap_or_default();
-        // kotlinc's stack peephole runs after the temporaries pass, then its `goto` cleanup and
-        // its `NegatedJumpsMethodTransformer`, the last of its rewrites (see `stack_peephole`,
-        // `redundant_gotos`, `negated_jumps`).
-        let peephole_changed = stack_peephole::optimize(&mut node);
-        let gotos_changed = redundant_gotos::remove(&mut node, &pinned);
-        let jumps_negated = negated_jumps::negate(&mut node, &pinned);
-        // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
-        // above left unreachable goes, with its line numbers, empty protected ranges and emptied
-        // local variables, and the slots left unused close up (see `dead_code`, `local_slots`).
-        let dead = dead_code::eliminate(&mut node);
-        let removed_locals = dead
-            .as_ref()
-            .map_or(&[][..], |dead| &dead.removed_locals[..]);
-        let parameter_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
-        let renumbered = local_slots::compact(&mut node, &parameter_slots);
-        if !folded_any
-            && !peephole_changed
-            && !gotos_changed
-            && !jumps_negated
-            && dead.is_none()
-            && !renumbered
-        {
-            return None;
-        }
+        let stack_tops = || flow_types().map(|types| types as &dyn StackTops);
+        let context = PassContext {
+            owner: &self.internal_name,
+            value_classes: &*self.value_classes,
+            parameter_slots: u16::try_from(entry.len()).ok()?,
+            stack_tops: &stack_tops,
+        };
+        let removed_locals = match pipeline::optimize(&mut node, &context) {
+            Outcome::Changed { removed_locals } => removed_locals,
+            Outcome::Unchanged | Outcome::Declined => return None,
+        };
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
         let assembled = node.assemble(pool).ok()?;

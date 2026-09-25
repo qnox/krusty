@@ -33,7 +33,7 @@ fn is_reified_marker(insn: &Insn) -> bool {
 /// The node positions of the casts in `method` that can go without changing verifier or runtime
 /// behavior. `tops` is asked only when there is a cast to look at, and a method it has no answer
 /// for keeps every cast.
-pub(crate) fn select<'a, T: StackTops + 'a>(
+pub(crate) fn select<'a, T: StackTops + ?Sized + 'a>(
     method: &MethodNode,
     tops: impl FnOnce() -> Option<&'a T>,
 ) -> Vec<usize> {

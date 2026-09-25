@@ -13,11 +13,11 @@
 //!
 //! A pure push is a constant, a local load, a one-word or two-word `ldc`, or `Unit.INSTANCE`. The
 //! `nop`s this leaves go the way kotlinc's `nop` cleanup takes them (see
-//! [`super::redundant_gotos::required_nops`]).
+//! [`super::redundant_nops::required_nops`]).
 
 use std::collections::BTreeSet;
 
-use super::redundant_gotos::required_nops;
+use super::redundant_nops::required_nops;
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
 const NOP: u8 = 0x00;
