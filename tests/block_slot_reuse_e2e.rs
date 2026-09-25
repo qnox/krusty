@@ -863,10 +863,21 @@ fn a_destructured_loop_element_needs_no_container_slot() {
     operator fun component1() = i + 1\n\
     operator fun component2() = i + 2\n\
 }\n\
-fun loop(xs: List<C>): String {\n\
-    var s = \"\"\n\
+class Cs(val n: Int) {\n\
+    operator fun iterator() = CIterator(n)\n\
+}\n\
+class CIterator(val n: Int) {\n\
+    var k = 0\n\
+    operator fun hasNext(): Boolean = k < n\n\
+    operator fun next(): C {\n\
+        k += 1\n\
+        return C(k)\n\
+    }\n\
+}\n\
+fun loop(xs: Cs): Int {\n\
+    var s = 0\n\
     for ((a, b) in xs) {\n\
-        s += \"$a:$b;\"\n\
+        s += a * 10 + b\n\
     }\n\
     return s\n\
 }\n",
@@ -878,7 +889,7 @@ fun loop(xs: List<C>): String {\n\
 
 /// A `when` subject is always kotlinc's `tmp_subject`, even when it reads a parameter or an
 /// immutable local. The temporaries pass then drops the store where the subject is read once (a
-/// `tableswitch`, a single comparison) and keeps it where it is read again (`s` in `strings`), so
+/// `tableswitch`, a single comparison) and keeps it where it is read again (`s` in `keys`), so
 /// `y` and `r` keep kotlinc's slots and the whole class matches.
 #[test]
 fn a_when_subject_reading_an_immutable_binding_is_held_like_kotlinc() {
@@ -894,9 +905,10 @@ fun single(p: Int): Int {\n\
     val r = when (x) { 1 -> 5; else -> 3 }\n\
     return r\n\
 }\n\
-fun strings(s: String): Int {\n\
+class K(val v: Int)\n\
+fun keys(s: K, a: K, b: K): Int {\n\
     val y = 1\n\
-    val r = when (s) { \"a\" -> 1; \"b\" -> 2; else -> 3 }\n\
+    val r = when (s) { a -> 1; b -> 2; else -> 3 }\n\
     return r + y\n\
 }\n\
 class W(val n: Int)\n\

@@ -3,6 +3,10 @@
 //! Declaration forms differ structurally in checked FIR, but they all feed one backend-independent
 //! contract. Keeping that union here prevents consumers such as `when` lowering and JVM emission
 //! from growing subtly different definitions of an immutable binding.
+//!
+//! Common lowering uses these facts to decide the semantic snapshot/reuse shape (hold a value in a
+//! recorded temporary, or re-read a stable binding). The JVM backend's bytecode temporaries pass
+//! owns removing physical store/load pairs; it consumes the lowered shape and never re-decides it.
 
 use std::collections::HashMap;
 

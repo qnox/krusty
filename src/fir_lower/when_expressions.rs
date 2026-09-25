@@ -2,6 +2,10 @@
 //!
 //! The checker publishes one FIR identity for a subject and every predicate use. This boundary
 //! materializes the subject once, as kotlinc's `tmp_subject`, and redirects those uses to it.
+//!
+//! Lowering owns only that semantic shape: it records the temporary and every use reads it.
+//! Removing the physical store/load pair when the subject is read once belongs to the JVM
+//! backend's bytecode temporaries pass, never to this module.
 
 use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition};
 use crate::ir::{ExprId, IrBinOp, IrExpr};

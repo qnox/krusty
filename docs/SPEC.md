@@ -7830,7 +7830,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Lowering declares the temporaries kotlinc's IR lowerings declare, and no others.** Each rule
   below is read off kotlinc 2.4.20's source and checked against its `javap` output; lowering
-  records the choice in the IR, and the backend allocates whatever lowering declared:
+  records the choice in the IR, and the backend allocates whatever lowering declared. Ownership is
+  split exactly as in kotlinc: common lowering decides only the semantic snapshot/reuse shape
+  (whether a value is held in a temporary or re-read from a stable binding) and records that
+  temporary in the IR; it never reasons about stores, loads or slots. Removing a physical
+  store/load pair is owned by the JVM backend's bytecode temporaries pass (kotlinc's
+  `TemporaryVariablesEliminationTransformer`), which never re-decides the semantic shape:
   - A `when` with a subject always holds the subject in a temporary, even when the subject reads
     an immutable local. `Fir2IrVisitor.generateWhenSubjectVariable` creates `tmp_subject` for
     every subject expression, and `JvmOptimizationLowering` puts a subject temporary whose
