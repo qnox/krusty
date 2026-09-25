@@ -198,10 +198,12 @@ fn kotlinc_resolves_block_members_from_krusty_metadata() {
 #[test]
 fn library_block_members_are_statics_of_their_class() {
     const LIB: &str = "var initialized = false\n\
+        fun initialize(): String { initialized = true; return \"\" }\n\
         open class A {\n\
         \x20   companion {\n\
         \x20       fun foo() = \"O\"\n\
-        \x20       var bar: String = run { initialized = true; \"\" }\n\
+        \x20       var bar: String = initialize()\n\
+        \x20       const val SUFFIX = \"!\"\n\
         \x20   }\n\
         }\n";
     const MAIN: &str = "class B : A() {\n\
@@ -210,14 +212,14 @@ fn library_block_members_are_statics_of_their_class() {
         fun box(): String {\n\
         \x20   if (initialized) return \"a companion block initialized before its class\"\n\
         \x20   A.bar = B.own()\n\
-        \x20   return if (initialized) A.foo() + A.bar else \"writing A.bar did not initialize A\"\n\
+        \x20   if (!initialized) return \"writing A.bar did not initialize A\"\n\
+        \x20   return if (A.SUFFIX == \"!\") A.foo() + A.bar else \"A.SUFFIX is \" + A.SUFFIX\n\
         }\n";
     let result = common::expect_box_run_against(
         "companion-block-library",
         &format!("{LANGUAGE}{LIB}"),
         &format!("{LANGUAGE}{MAIN}"),
-    );
-    if let Some(result) = result {
-        assert_eq!(result, "OK");
-    }
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(result, "OK");
 }
