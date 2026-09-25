@@ -25,6 +25,7 @@
 //! preserve exactly the emitter-specific bookkeeping this path replaces.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use super::bytecode_analysis::{
     entry_frame, ComputedFrame, ComputedFrames, Decline, FrameComputation, Handler, PoolView,
@@ -72,10 +73,59 @@ impl Computed {
     }
 }
 
+/// Everything of a [`Body`] its frame computation reads.
+#[derive(PartialEq, Eq, Hash)]
+struct BodyKey {
+    access: u16,
+    name: Box<str>,
+    descriptor: Box<str>,
+    code: Box<[u8]>,
+    exceptions: Box<[(u16, u16, u16, u16)]>,
+    labels: Box<[usize]>,
+}
+
+impl BodyKey {
+    fn of(body: &Body<'_>) -> Self {
+        BodyKey {
+            access: body.access,
+            name: body.name.into(),
+            descriptor: body.descriptor.into(),
+            code: body.code.into(),
+            exceptions: body.exceptions.into(),
+            labels: body.labels.as_slice().into(),
+        }
+    }
+}
+
+/// The frames already computed for a class's bodies. A method's body is computed when it is added,
+/// when its rewrite is judged, and when the class is written, and those are often the same body.
+#[derive(Default)]
+pub(super) struct ComputedBodies(std::cell::RefCell<crate::name_tree::FxHashMap<BodyKey, Frames>>);
+
+/// One body's frames, or why the writer declines to compute them.
+type Frames = Result<Arc<Computed>, Decline>;
+
+impl ComputedBodies {
+    pub(super) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+}
+
 impl ClassWriter {
-    /// The frames `body` implies, or why none can be computed.
-    pub(super) fn compute_frames(&self, body: &Body<'_>) -> Result<Computed, Decline> {
-        self.compute_frames_from(body, None)
+    /// The frames `body` implies, or why none can be computed. The computation reads only the body,
+    /// the class's name and the classes its pool indices name, and pool entries never move, so the
+    /// answer for a body is remembered until the class is written.
+    pub(super) fn compute_frames(&self, body: &Body<'_>) -> Frames {
+        let key = BodyKey::of(body);
+        if let Some(known) = self.computed_bodies.0.borrow().get(&key) {
+            return known.clone();
+        }
+        let computed = self.compute_frames_from(body, None).map(Arc::new);
+        self.computed_bodies
+            .0
+            .borrow_mut()
+            .insert(key, computed.clone());
+        computed
     }
 
     /// [`Self::compute_frames`], entered with `entry` (one local per slot) instead of the method's
@@ -295,6 +345,8 @@ impl ClassWriter {
             }
             method.stackmap = stackmap;
         }
+        // The class is written: no body of it is computed again.
+        self.computed_bodies.clear();
     }
 }
 
@@ -485,6 +537,28 @@ mod tests {
             writer.compute_frames(&body).err(),
             Some(Decline::UnsupportedControlFlow)
         );
+    }
+
+    #[test]
+    fn a_body_is_computed_once_per_class() {
+        let writer = ClassWriter::new("C", "java/lang/Object");
+        let body = |code: &'static [u8]| Body {
+            access: 0x0008,
+            name: "f",
+            descriptor: "()V",
+            code,
+            exceptions: &[],
+            labels: Vec::new(),
+        };
+        let first = writer.compute_frames(&body(&[0x04, 0x57, 0xb1])).unwrap(); // iconst_1; pop; return
+        let again = writer.compute_frames(&body(&[0x04, 0x57, 0xb1])).unwrap();
+        let other = writer.compute_frames(&body(&[0x05, 0x57, 0xb1])).unwrap(); // iconst_2; pop; return
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(!Arc::ptr_eq(&first, &other));
+        writer.computed_bodies.clear();
+        let fresh = writer.compute_frames(&body(&[0x04, 0x57, 0xb1])).unwrap();
+        assert!(!Arc::ptr_eq(&first, &fresh));
+        assert_eq!(fresh.frames(), first.frames());
     }
 
     #[test]
