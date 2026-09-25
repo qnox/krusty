@@ -8,7 +8,9 @@
 //! `-nostdlib -static`, so nothing but the runtime itself answers its symbols — and runs it.
 //!
 //! A driver reports failure by exiting non-zero with a message on stderr (`KT_SYS_FAIL`), or by
-//! crashing; either fails the test with what it printed.
+//! crashing; either fails the test with what it printed. A driver that checks the runtime ENDS the
+//! program, as it does on exhausted memory, is instead expected to exit with the runtime's failure
+//! status and exactly the runtime's message; anything the driver prints itself fails the test.
 //!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
@@ -52,10 +54,9 @@ fn host_can_run() -> bool {
     false
 }
 
-/// Link `driver` with every runtime source and run it; the process must exit 0 and its stdout must
-/// end in `OK`. Returns the output for a driver whose test checks more than that. `None` when the
-/// host cannot run drivers at all.
-fn run_driver(driver: &str) -> Option<Output> {
+/// Link `driver` with every runtime source and run it. `None` when the host cannot run drivers at
+/// all.
+fn build_and_run(driver: &str) -> Option<Output> {
     if !host_can_run() {
         return None;
     }
@@ -80,6 +81,9 @@ fn run_driver(driver: &str) -> Option<Output> {
             "-Wall",
             "-Wextra",
             "-Werror",
+            // Runtime descriptors name the fields they define and intentionally leave the rest
+            // zero-initialized. Keep every other warning an error.
+            "-Wno-missing-field-initializers",
         ])
         .arg("-I")
         .arg(runtime_dir())
@@ -94,7 +98,13 @@ fn run_driver(driver: &str) -> Option<Output> {
         "{driver}: the driver and runtime did not build:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let output = Command::new(&executable).output().expect("run the driver");
+    Some(Command::new(&executable).output().expect("run the driver"))
+}
+
+/// Run `driver`; the process must exit 0 and its stdout must end in `OK`. Returns the output for a
+/// driver whose test checks more than that. `None` when the host cannot run drivers at all.
+fn run_driver(driver: &str) -> Option<Output> {
+    let output = build_and_run(driver)?;
     let stdout = &output.stdout;
     assert!(
         output.status.success() && stdout.ends_with(b"OK\n"),
@@ -104,6 +114,22 @@ fn run_driver(driver: &str) -> Option<Output> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(output)
+}
+
+/// Run `driver`, which must end the way the runtime ends a program it cannot continue
+/// (`kt_sys_fail`: status 134) with exactly `message` on stderr and nothing on stdout.
+fn run_driver_expecting_failure(driver: &str, message: &str) {
+    let Some(output) = build_and_run(driver) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.code() == Some(134) && stderr == message && output.stdout.is_empty(),
+        "{driver}: expected status 134 and stderr {message:?}, got {}\nstdout: {:?}\n\
+         stderr: {stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
@@ -124,6 +150,34 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
             .enumerate()
             .all(|(index, &byte)| byte == b'a' + (index % 26) as u8),
         "the payload arrives in order"
+    );
+}
+
+#[test]
+fn the_collector_frees_what_is_unreachable_and_reuses_it() {
+    run_driver("gc_collects_unreachable");
+}
+
+#[test]
+fn an_allocation_whose_size_would_wrap_runs_out_of_memory() {
+    run_driver_expecting_failure("gc_rejects_wrapping_size", "krusty: out of memory\n");
+}
+
+#[test]
+fn every_registered_global_root_is_kept_past_four_thousand() {
+    run_driver("gc_many_global_roots");
+}
+
+#[test]
+fn only_an_arrays_end_pointer_keeps_it_alive_and_no_neighbour_is_kept() {
+    run_driver("gc_end_pointer_keeps_object");
+}
+
+#[test]
+fn a_collection_started_during_a_collection_fails() {
+    run_driver_expecting_failure(
+        "gc_reentrant_collection_fails",
+        "krusty: a collection started during a collection\n",
     );
 }
 
@@ -172,7 +226,8 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+            "cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
              cargo:rerun-if-changed=build.rs\n\
@@ -211,14 +266,15 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` failed compiling `krusty_start.c` for \
+            "native runtime: `{}` failed compiling `krusty_gc.c` for \
              `x86_64-unknown-linux-gnu` (exit status: 1)\n",
             compiler.display()
         )
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
-        "cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+        "cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
          cargo:rerun-if-changed=build.rs\n\
