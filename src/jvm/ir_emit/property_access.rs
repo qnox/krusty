@@ -80,8 +80,6 @@ impl Emitter<'_> {
                         "(Ljava/lang/String;)V",
                     );
                     code.invokestatic(m, 1, 0);
-                    let st = self.verif_stack(jt);
-                    self.frame(lbl, st, code);
                     self.bind(lbl, code);
                 }
                 jt

@@ -43,7 +43,7 @@ impl Emitter<'_> {
     /// A forwarded `Unit` suspend function's result under Kotlin 2.4.20: the callee's
     /// `COROUTINE_SUSPENDED` is returned as is (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn`),
     /// and any other result is replaced by `Unit.INSTANCE`, which the caller's `return` then returns.
-    fn emit_unit_result_of_forward(&mut self, ret: crate::types::Ty, code: &mut CodeBuilder) {
+    fn emit_unit_result_of_forward(&mut self, code: &mut CodeBuilder) {
         let resumed = code.new_label();
         code.dup();
         let suspended = self.cw.methodref(
@@ -54,8 +54,6 @@ impl Emitter<'_> {
         code.invokestatic(suspended, 0, 1);
         code.if_acmpne(resumed);
         code.areturn();
-        let stack = self.verif_stack(ret);
-        self.frame(resumed, stack, code);
         self.bind(resumed, code);
         code.pop();
         let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
@@ -91,7 +89,7 @@ impl Emitter<'_> {
             return;
         }
         if self.unit_result_tail_forwards.contains(&returned) {
-            self.emit_unit_result_of_forward(ret, code);
+            self.emit_unit_result_of_forward(code);
         }
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {

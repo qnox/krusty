@@ -53,6 +53,9 @@ pub(crate) struct ComputedFrames {
     pub frames: Vec<ComputedFrame>,
     /// Instruction-index ranges of the unreachable blocks, in order; each is non-empty.
     pub unreachable: Vec<std::ops::Range<usize>>,
+    /// The deepest the operand stack gets, in words, as ASM's `COMPUTE_MAXS` counts it: over the
+    /// reachable instructions, and at least one when an unreachable block holds its `Throwable`.
+    pub max_stack: usize,
 }
 
 /// Why no frames could be computed.
@@ -90,7 +93,15 @@ impl FrameComputation<'_> {
         name: &str,
         descriptor: &str,
     ) -> Result<ComputedFrames, Decline> {
-        let entry = entry_locals(access, name, descriptor, self.this_class)?;
+        self.compute_from(entry_locals(access, name, descriptor, self.this_class)?)
+    }
+
+    /// The frames for this body entered with `entry`, one local per slot: a body whose entry holds
+    /// more than the method's arguments, such as one read while it is still being emitted.
+    pub(crate) fn compute_from(
+        &self,
+        entry: Vec<VerificationType>,
+    ) -> Result<ComputedFrames, Decline> {
         let n = self.insns.len();
         let blocks = self.blocks()?;
         let block_of = {
@@ -141,14 +152,23 @@ impl FrameComputation<'_> {
         let mut pending: Vec<usize> = vec![0];
         let mut queued = vec![false; blocks.len()];
         queued[0] = true;
+        let words = |stack: &[VerificationType]| -> usize {
+            stack
+                .iter()
+                .map(|value| 1 + usize::from(value.is_wide()))
+                .sum()
+        };
+        let mut max_stack = 0;
         while let Some(b) = pending.pop() {
             queued[b] = false;
             let block = &blocks[b];
             let entry_state = input[b].clone().expect("a queued block has an input");
             let mut state = entry_state.clone();
+            max_stack = max_stack.max(words(&state.stack));
             for index in block.start..block.end {
                 state = step(self.insns, index, &state, self.pool, Some(self.this_class))
                     .ok_or(Decline::Unsteppable(index))?;
+                max_stack = max_stack.max(words(&state.stack));
             }
             let mut successors: Vec<(usize, FrameState)> = Vec::new();
             if block.falls_through && block.end < n {
@@ -209,6 +229,7 @@ impl FrameComputation<'_> {
                         stack: vec![VerificationType::Reference(THROWABLE.to_string())],
                     });
                     unreachable.push(block.start..block.end);
+                    max_stack = max_stack.max(1);
                 }
                 None => {}
             }
@@ -216,6 +237,7 @@ impl FrameComputation<'_> {
         Ok(ComputedFrames {
             frames,
             unreachable,
+            max_stack,
         })
     }
 
@@ -583,6 +605,8 @@ mod tests {
         .compute(0x0008, "f", "()V")
         .expect("frames compute");
         assert_eq!(computed.unreachable, vec![1..3]);
+        // Nothing is ever pushed, but the rewritten block throws what its frame holds.
+        assert_eq!(computed.max_stack, 1);
         let frames = computed.frames;
         assert_eq!(
             frames,
@@ -592,6 +616,22 @@ mod tests {
                 stack: vec![reference(THROWABLE)],
             }]
         );
+    }
+
+    #[test]
+    fn the_deepest_stack_counts_wide_values_as_two_words() {
+        // static f(J)J = x + x
+        let insns = [plain(0x1e), plain(0x1e), plain(0x61), plain(0xad)];
+        let computed = FrameComputation {
+            insns: &insns,
+            handlers: &[],
+            labels: &[],
+            this_class: "p/K",
+            pool: &Pool,
+        }
+        .compute(0x0008, "f", "(J)J")
+        .expect("frames compute");
+        assert_eq!(computed.max_stack, 4);
     }
 
     #[test]

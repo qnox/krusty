@@ -27,7 +27,7 @@ pub(super) fn emit(
     // empty stack first. Spilling all of them preserves source order and exactly-once evaluation.
     let temps = elements
         .iter()
-        .any(|&element| emitter.records_frame(element))
+        .any(|&element| emitter.emits_control_flow(element))
         .then(|| emitter.spill_to_temps(elements, code));
     let element_type = array_jvm_element(array_type);
     if element_type.is_jvm_scalar() {
@@ -77,15 +77,14 @@ fn emit_primitive_spread(
     code.push_int(elements.len() as i32, emitter.cw);
     let init = emitter.cw.methodref(builder, "<init>", "(I)V");
     code.invokespecial(init, 1, 0);
-    let held = emitter.held_pair(builder);
     for (index, &element) in elements.iter().enumerate() {
         code.dup();
         if let Some(temps) = temps {
             let (slot, ty, _) = temps[index];
             load(ty, slot, code);
         } else {
-            // Preserve the established byte sequence when no child records a frame.
-            emitter.emit_value_over(element, &held, code);
+            // Preserve the established byte sequence when no child introduces control flow.
+            emitter.emit_value(element, code);
         }
         if spreads[index] {
             let add_spread = emitter.cw.methodref(
@@ -122,15 +121,14 @@ fn emit_reference_spread(
     let init = emitter.cw.methodref(builder, "<init>", "(I)V");
     code.invokespecial(init, 1, 0);
     let box_element = reference_array_scalar_adapter(element_type);
-    let held = emitter.held_pair(builder);
     for (index, &element) in elements.iter().enumerate() {
         code.dup();
         if let Some(temps) = temps {
             let (slot, ty, _) = temps[index];
             load(ty, slot, code);
         } else {
-            // Preserve the established byte sequence when no child records a frame.
-            emitter.emit_value_over(element, &held, code);
+            // Preserve the established byte sequence when no child introduces control flow.
+            emitter.emit_value(element, code);
         }
         let method = if spreads[index] {
             emitter
@@ -183,7 +181,7 @@ fn emit_packed_array(
     // are all ordinary keeps its existing emission byte for byte.
     if elements
         .iter()
-        .any(|&element| emitter.records_frame(element))
+        .any(|&element| emitter.emits_control_flow(element))
     {
         emit_packed_array_through_temps(emitter, array_type, elements, code);
         return;
@@ -208,7 +206,6 @@ fn emit_packed_array(
     store(array_type, slot, code);
     let array_lease = emitter.lease_temporary(slot, array_type);
 
-    let held = [emitter.verif_single(array_type), VerifType::Integer];
     let (store_op, width) = array_store_op(element_type, reference_array);
     let box_element = reference_array
         .then(|| reference_array_scalar_adapter(element_type))
@@ -216,7 +213,7 @@ fn emit_packed_array(
     for (index, &element) in elements.iter().enumerate() {
         load(array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
-        emitter.emit_value_over(element, &held, code);
+        emitter.emit_value(element, code);
         if let Some(primitive) = box_element {
             box_prim_free(emitter.cw, code, primitive);
         }
@@ -231,7 +228,7 @@ fn emit_packed_array(
 }
 
 /// Build the same packed array with every element evaluated into a temp first. Used when any element
-/// records a frame; see the caller for why the stack must be clean at that point.
+/// introduces control flow; see the caller for why the stack must be clean at that point.
 fn emit_packed_array_through_temps(
     emitter: &mut Emitter<'_>,
     array_type: &Ty,

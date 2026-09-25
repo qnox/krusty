@@ -192,7 +192,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 e.emit(statement, &mut sctor);
             }
             let dargs = sc.delegate_args.clone();
-            if dargs.iter().any(|&a| e.records_frame(a)) {
+            if dargs.iter().any(|&a| e.emits_control_flow(a)) {
                 let temps = e.spill_to_temps(&dargs, &mut sctor);
                 sctor.aload(0);
                 if forwards_owner_prefix {

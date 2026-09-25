@@ -15,8 +15,6 @@
 //!
 //! The same transformer then renumbers the local slots (see [`super::local_slots`]).
 
-use std::collections::BTreeSet;
-
 use super::bytecode_analysis::Handler;
 use super::temporaries::Placement;
 use crate::jvm::inline::{BranchTarget, Insn};
@@ -54,8 +52,6 @@ pub(crate) struct Elimination {
     pub removed_handlers: Vec<bool>,
     /// Per `LocalVariableTable` entry, whether its range lost its last instruction.
     pub removed_locals: Vec<bool>,
-    /// The labels a live jump, switch or handler still reaches: `(original index, late)`.
-    pub targeted: BTreeSet<(usize, bool)>,
 }
 
 /// Where a label bound at each original index stands among the nodes: in front of the group, and
@@ -274,19 +270,6 @@ pub(crate) fn eliminate(nodes: &mut Vec<(Insn, Placement)>, flow: &Flow) -> Opti
     if live.iter().all(|&live| live) {
         return None;
     }
-    let mut targeted = BTreeSet::new();
-    for (node, _) in nodes.iter().zip(&live).filter(|(_, &live)| live) {
-        targeted.extend(branch_target(node, flow));
-        targeted.extend(switch_targets(&node.0).into_iter().map(|to| (to, false)));
-    }
-    for (handler, _) in flow
-        .handlers
-        .iter()
-        .zip(&handler_live)
-        .filter(|(_, &live)| live)
-    {
-        targeted.insert((handler.handler, false));
-    }
     let removed_lines = removed_lines(nodes, &live, flow);
     let range_holds = |range: &Option<(usize, usize)>, keep: &dyn Fn(usize) -> bool| {
         range.is_some_and(|(start, end)| {
@@ -309,7 +292,6 @@ pub(crate) fn eliminate(nodes: &mut Vec<(Insn, Placement)>, flow: &Flow) -> Opti
         removed_lines,
         removed_handlers: handler_live.iter().map(|&live| !live).collect(),
         removed_locals,
-        targeted,
     })
 }
 
@@ -413,7 +395,6 @@ mod tests {
             ]
         );
         assert_eq!(elimination.removed_lines, vec![false, true, false]);
-        assert_eq!(elimination.targeted, BTreeSet::from([(5, false)]));
     }
 
     #[test]
@@ -510,7 +491,6 @@ mod tests {
             vec![op(0x03), op(IRETURN), op(0x4b), op(0x04), op(IRETURN)]
         );
         assert_eq!(elimination.removed_handlers, vec![false]);
-        assert_eq!(elimination.targeted, BTreeSet::from([(2, false)]));
     }
 
     #[test]
@@ -525,7 +505,7 @@ mod tests {
             (op(0x03), Placement::Original(3)),
             (op(IRETURN), Placement::Original(4)),
         ];
-        let (insns, elimination) =
+        let (insns, _) =
             run(&mut nodes.clone(), &Tables { late: &[1], ..NONE }).expect("the pop is dead");
         assert_eq!(
             insns,
@@ -537,7 +517,6 @@ mod tests {
                 op(IRETURN)
             ]
         );
-        assert_eq!(elimination.targeted, BTreeSet::from([(3, true)]));
         assert!(run(&mut nodes.clone(), &NONE).is_none());
     }
 

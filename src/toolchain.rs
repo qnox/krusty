@@ -25,23 +25,11 @@ pub fn stdlib_jar() -> Option<PathBuf> {
             return Some(j);
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    let roots = [
-        format!("{home}/.gradle"),
-        format!("{home}/.m2/repository/org/jetbrains/kotlin"),
-    ];
-    let mut found = Vec::new();
-    for r in &roots {
-        collect_stdlib_jars(std::path::Path::new(r), &mut found, 0);
-    }
-    // Prefer a jar whose scan actually yields aliases (a real, non-stub stdlib).
-    for jar in found {
-        let cp = Classpath::new(vec![jar.clone()]);
-        if !cp.scan_types().is_empty() {
-            return Some(jar);
-        }
-    }
-    None
+    let version = reference_version();
+    let jar = find_exact_dependency_jar("kotlin-stdlib", &version)
+        .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib", &version))?;
+    let cp = Classpath::new(vec![jar.clone()]);
+    (!cp.scan_types().is_empty()).then_some(jar)
 }
 
 /// A `Classpath` containing the located stdlib jar, or empty if none was found.
@@ -361,9 +349,11 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
 /// Locate a `kotlin-test` jar (`// WITH_STDLIB` adds it so `kotlin.test.*` resolves), from the dist,
 /// local caches, or Maven Central.
 pub fn kotlin_test_jar() -> Option<PathBuf> {
-    dist_jar("kotlin-test.jar")
-        .or_else(|| find_jar("kotlin-test-", &["junit", "testng", "annotations"]))
-        .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-test", &kotlin_version()))
+    dist_jar("kotlin-test.jar").or_else(|| {
+        let version = reference_version();
+        find_exact_dependency_jar("kotlin-test", &version)
+            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-test", &version))
+    })
 }
 
 /// The pinned kotlinx.serialization runtime version. The compiler plugin ships with the reference
@@ -436,35 +426,72 @@ pub fn jdk_symbols() -> Option<PathBuf> {
     symbols.is_file().then_some(symbols)
 }
 
-fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 8 || out.len() > 4 {
-        return;
+fn find_exact_dependency_jar(artifact: &str, version: &str) -> Option<PathBuf> {
+    let expected = format!("{artifact}-{version}.jar");
+    let home = std::env::var("HOME").ok()?;
+    let maven = PathBuf::from(&home)
+        .join(".m2/repository/org/jetbrains/kotlin")
+        .join(artifact)
+        .join(version)
+        .join(&expected);
+    if maven.is_file() {
+        return Some(maven);
+    }
+    let gradle = PathBuf::from(&home)
+        .join(".gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin")
+        .join(artifact)
+        .join(version);
+    find_exact_jar(&gradle, &expected, 0)
+}
+
+fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option<PathBuf> {
+    // A Gradle module version contains hash directories one level below this root. Keep the search
+    // bounded to that artifact/version instead of walking the user's entire dependency cache.
+    if depth > 2 {
+        return None;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+        return None;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_stdlib_jars(&p, out, depth + 1);
-        } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("kotlin-stdlib-")
-                && name.ends_with(".jar")
-                && !name.contains("sources")
-                && !name.contains("javadoc")
-                && !name.contains("common")
-                && !name.contains("-js")
-                && !name.contains("wasm")
-            {
-                out.push(p);
+            if let Some(found) = find_exact_jar(&p, expected, depth + 1) {
+                return Some(found);
             }
+        } else if p.file_name().and_then(|name| name.to_str()) == Some(expected) {
+            return Some(p);
         }
     }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_dependency_lookup_does_not_substitute_an_installed_version() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-toolchain-version-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let old = root.join("old");
+        let selected = root.join("selected");
+        std::fs::create_dir_all(&old).expect("old dependency directory");
+        std::fs::create_dir_all(&selected).expect("selected dependency directory");
+        std::fs::write(old.join("kotlin-stdlib-2.1.0.jar"), []).expect("old dependency");
+        let expected = selected.join("kotlin-stdlib-2.4.20.jar");
+        std::fs::write(&expected, []).expect("selected dependency");
+
+        assert_eq!(
+            find_exact_jar(&root, "kotlin-stdlib-2.4.20.jar", 0),
+            Some(expected)
+        );
+
+        std::fs::remove_dir_all(root).expect("remove toolchain lookup fixture");
+    }
 
     #[test]
     fn provisioned_paths_share_versioned_cache_layout() {

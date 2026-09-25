@@ -92,11 +92,9 @@ pub(crate) struct Body<'a> {
     pub expression_null_check: &'a dyn Fn(u16) -> bool,
 }
 
-/// The rewritten body, and every eliminated temporary as `(original store index, slot)`: its store
-/// was removed or turned into a `pop`, so the slot no longer holds its value anywhere it reached.
+/// The rewritten body.
 pub(crate) struct Rewrite {
     pub nodes: Vec<(Insn, Placement)>,
-    pub eliminated: Vec<(usize, u16)>,
     /// Branch targets a null-check rule left a value on the stack at: `(original index the
     /// target stood at, original indices of the loads whose value arrives there)`. The value's type
     /// is the loaded local's before each of those loads.
@@ -883,7 +881,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
             .map(|(index, insn)| (insn.clone(), Placement::Original(index)))
             .collect(),
     };
-    let mut eliminated = Vec::new();
     let earlier_removed =
         body.redundant_casts.contains(&true) || body.redundant_null_checks.contains(&true);
     working.nodes.retain(|(_, placement)| {
@@ -896,7 +893,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         move || {
             earlier_removed.then(|| Rewrite {
                 nodes,
-                eliminated: Vec::new(),
                 stack_at_target: Vec::new(),
                 late_labels: BTreeSet::new(),
             })
@@ -979,7 +975,7 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         let Some(store_at) = working.position(store) else {
             continue;
         };
-        let Some(VarOp::Store(kind, slot)) = var_op(&working.nodes[store_at].0) else {
+        let Some(VarOp::Store(kind, _)) = var_op(&working.nodes[store_at].0) else {
             continue;
         };
         let load_at: Vec<usize> = loads
@@ -992,7 +988,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         match load_at.as_slice() {
             [] => {
                 working.nodes[store_at].0 = plain(if kind.words() == 2 { POP2 } else { POP });
-                eliminated.push((store, slot));
                 changed = true;
             }
             [load_at] => {
@@ -1005,7 +1000,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
                     && (store_at + 1..=load_at).all(|next| !working.arrived(next));
                 if adjacent {
                     working.remove(&mut [store_at, load_at]);
-                    eliminated.push((store, slot));
                     changed = true;
                     continue;
                 }
@@ -1030,7 +1024,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
                         .insert(store_at + 2, (plain(SWAP), swap_placement));
                     // The load moved one position to the right past the inserted `swap`.
                     working.remove(&mut [store_at, load_at + 1]);
-                    eliminated.push((store, slot));
                     changed = true;
                 }
             }
@@ -1069,7 +1062,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
                     .insert(store_at + 2, (plain(DUP), dup_placement));
                 // `store`, the first load, and the last load (shifted by the inserted `dup`).
                 working.remove(&mut [store_at, store_at + 1, last + 1]);
-                eliminated.push((store, slot));
                 changed = true;
             }
             _ => {}
@@ -1077,7 +1069,6 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
     }
     changed.then_some(Rewrite {
         nodes: working.nodes,
-        eliminated,
         stack_at_target,
         late_labels,
     })
