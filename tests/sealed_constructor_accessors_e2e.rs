@@ -33,17 +33,20 @@ sealed class Shape(val label: String) : Named<String> {
 class Triangle : Shape(3, "-")
 
 fun box(): String {
-    val all = listOf(Shape.Square(), Shape.Circle(), Shape.Truth(), Triangle())
-    val names = all.joinToString(",") { it.name() }
-    return if (names == "gon4,circle,truth,-3" && Shape.count == 3) "OK" else names
+    if (Shape.Square().name() != "gon4") return "square"
+    if (Shape.Circle().name() != "circle") return "circle"
+    if (Shape.Truth().name() != "truth") return "truth"
+    if (Triangle().name() != "-3") return "triangle"
+    return if (Shape.count == 3) "OK" else "count"
 }
 "#;
 
 const BASE: &str = "sealed class Base {\n    class Nested : Base()\n}\n";
 const OUTSIDE: &str = "class Outside : Base()\n";
 const MAIN: &str = "fun box(): String {\n    \
-    val all = listOf<Base>(Base.Nested(), Outside())\n    \
-    return if (all.size == 2) \"OK\" else \"Fail\"\n}\n";
+    val nested: Base = Base.Nested()\n    \
+    val outside: Base = Outside()\n    \
+    return if (nested is Base.Nested && outside is Outside) \"OK\" else \"Fail\"\n}\n";
 
 #[test]
 fn every_sealed_constructor_is_reached_through_its_accessor() {
