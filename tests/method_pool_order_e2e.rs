@@ -221,3 +221,30 @@ fn an_anonymous_object_constructor_interns_this_before_its_members() {
 fn a_data_object_equals_interns_its_locals_with_its_body() {
     assert_identical("DataObjectLocals", "data object Marker\n", &["Marker"]);
 }
+
+/// An enum constructor interns every declared parameter's local with its own table, plain ones
+/// included, before `values`.
+#[test]
+fn an_enum_constructor_interns_its_plain_parameter_locals() {
+    assert_identical(
+        "EnumPlainParameter",
+        "enum class Level(weight: Int) {\n\
+         \x20   LOW(1)\n\
+         }\n",
+        &["Level"],
+    );
+}
+
+/// A nullable enum property's getter interns `@Nullable` with the declared members, before
+/// `values`, as a non-null one interns `@NotNull`.
+#[test]
+fn a_nullable_enum_property_interns_its_annotation_with_the_declared_members() {
+    assert_identical(
+        "EnumNullableProperty",
+        "enum class Node(val parent: Node?) {\n\
+         \x20   ROOT(null),\n\
+         \x20   LEAF(ROOT),\n\
+         }\n",
+        &["Node"],
+    );
+}

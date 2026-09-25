@@ -72,7 +72,8 @@ use annotation_impl::emit_annotation_impl_class;
 mod value_class_descriptors;
 mod value_class_signatures;
 use class_pool_seed::{
-    seed_data_class_pool, seed_plain_class_pool, seed_plain_constructor_tail, PlainClassPoolSeed,
+    seed_data_class_pool, seed_enum_constructor_locals, seed_plain_class_pool,
+    seed_plain_constructor_tail, PlainClassPoolSeed,
 };
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
@@ -8388,20 +8389,18 @@ fn emit_enum_class(
         cw.add_field(enum_field_acc(f), &f.name, &desc);
         cw.fieldref(&fq, &f.name, &desc);
     }
-    cw.reserve_method_name("this");
-    cw.reserve_descriptor(&self_desc);
-    cw.reserve_method_name("$enum$name");
-    cw.reserve_descriptor("Ljava/lang/String;");
-    cw.reserve_method_name("$enum$ordinal");
-    cw.reserve_descriptor("I");
+    seed_enum_constructor_locals(c, &self_desc, &mut cw);
     // The DECLARED members come next — kotlinc reaches a property's accessor (`getTag`, its
     // descriptor, its `@NotNull`) before any of the synthesized machinery below. Emitting them only
     // at their method visit left those strings after `values`/`$VALUES` and shifted the pool.
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.reserve_method_name(&property_getter_name(&f.name));
         cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        if field_nullability_kind(ir, &fq, &f.name, *t) == 1 {
-            cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
+        // The nullability comes from the declared type; `t` is its erased JVM form.
+        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
+            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
+            _ => {}
         }
     }
     // …then the synthesized members, in kotlinc's visit order, each with the entries its body
