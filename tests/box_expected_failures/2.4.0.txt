@@ -21,7 +21,6 @@ boxingOptimization/kt48394.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-bridges/kt2702.kt
 bridges/simpleReturnType.kt
 bridges/special.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
@@ -417,12 +416,8 @@ specialBuiltins/throwableImpl.kt
 statics/syntheticAccessor.kt
 strings/kt13213.kt
 strings/kt47917.kt
-super/kt14243.kt
-super/kt14243_2.kt
-super/kt14243_class.kt
 super/kt4982.kt
 syntheticAccessors/kt10047.kt
-traits/traitImplGenericDelegation.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 typeErasure/funWithReifiedTypeParameterInsideClass.kt
 typeErasure/funWithReifiedTypeParameterInsideInnerClass.kt

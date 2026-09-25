@@ -47006,7 +47006,6 @@ impl<'a> Checker<'a> {
                 let selected = self.select_property_setter(applied_owner, name)?;
                 let stable_declaration = selected.stable_declaration;
                 let callable = selected.callable;
-                let external_property = callable.external_property_identity;
                 if callable.is_abstract {
                     return None;
                 }
@@ -47022,6 +47021,7 @@ impl<'a> Checker<'a> {
                     owner: physical_owner,
                     name: callable.name,
                     params: callable.params,
+                    physical_params: callable.physical_params,
                     ret: callable.ret,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
@@ -47030,7 +47030,7 @@ impl<'a> Checker<'a> {
                     stable_declaration,
                     property_declaration,
                     source_member: selected.source_member,
-                    external_property,
+                    external_property: callable.external_property_identity,
                 })
             } else {
                 let member = self.select_property_member(applied_owner, name)?;

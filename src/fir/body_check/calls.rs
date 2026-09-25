@@ -2866,6 +2866,19 @@ impl BodyFirChecker<'_> {
             .non_null()
             .obj_internal()
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+        if target.physical_params.len() != parameters.len() {
+            return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
+        }
+        let declaration_parameters = target
+            .physical_params
+            .iter()
+            .copied()
+            .map(|parameter| {
+                ResolvedTy::new(parameter).map_err(|error| {
+                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(FirExprKind::Call(FirCall {
             target: FirCallTarget::Super {
                 owner: target.owner,
@@ -2873,7 +2886,7 @@ impl BodyFirChecker<'_> {
                 enclosing_dispatch: !target.receiver.current,
                 kind,
                 name: target.name.clone(),
-                parameters: parameters.clone().into_boxed_slice(),
+                parameters: declaration_parameters.into_boxed_slice(),
                 result,
                 interface: target.interface,
                 realization: target.realization,
