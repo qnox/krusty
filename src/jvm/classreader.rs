@@ -291,6 +291,19 @@ pub enum C {
     Other,
 }
 
+/// A class file's constant pool and the offset of the `access_flags` that follow it, for a reader
+/// that walks the rest of the class itself.
+pub(crate) fn read_constant_pool(bytes: &[u8]) -> Result<(Vec<C>, usize), ReadError> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4()? != 0xCAFEBABE {
+        return Err(ReadError::NotAClass);
+    }
+    r.u2()?; // minor
+    r.u2()?; // major
+    let cp = parse_constant_pool(&mut r)?;
+    Ok((cp, r.i))
+}
+
 /// Parse the constant pool (the reader must be positioned at `constant_pool_count`). Shared by the
 /// full class parse and the lazy method-body reader.
 fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {

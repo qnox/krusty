@@ -4645,8 +4645,21 @@ regress.
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
     coroutine transformer runs on inlined bytecode), value-class adapters, non-local returns,
     materialized lambdas and callee shapes of later stages; callable references are not ported.
-- ☐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
+- ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
+  - ◐ 4a. Anonymous objects of a classpath inline body with no lambda arguments, inlined into a
+    named function (`inliner::anonymous_object`, `inliner::object_regeneration`). The class file is
+    read into a `ClassNode` and written back in kotlinc's visit order (`classfile::copied_class`):
+    captured fields re-declared by the new constructor, `@Metadata` with the
+    `anonymousObjectOriginName` extension and cleared public-ABI flag, the class's own SMAP copied
+    through `SourceMapCopier`, `EnclosingMethod` naming the caller, `InnerClasses` in visited order,
+    and the call's type arguments written into generic signatures (`TypeParameterMappings`). Names
+    come from kotlinc's per-class name generators
+    (`<caller>$<function>$$inlined$<callee>$<n>`). Declined for now, leaving an ordinary call: coroutine
+    objects, a `<clinit>`, nested objects, captured-field reads outside `aload 0; getfield`, and
+    call sites in constructors, accessors, lambdas, suspend or inline functions.
+  - ☐ 4b. Crossinline lambdas captured by a regenerated object (the `$$inlined$Continuation$1` of
+    `runBlocking`).
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
 - ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).

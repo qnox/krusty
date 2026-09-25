@@ -24,6 +24,15 @@ fn temporaries(categories: &[Category]) -> Parameters {
     }
 }
 
+/// Objects are regenerated only by the call-site tests.
+struct NoObjects;
+
+impl AnonymousObjects for NoObjects {
+    fn regenerate(&mut self, _class: &str, _desc: &str) -> Result<(String, String), InlineError> {
+        panic!("a body without anonymous objects regenerates none")
+    }
+}
+
 /// Lines left as the callee's own.
 struct OwnLines;
 
@@ -54,7 +63,10 @@ fn inline_plain(
         inline_only,
         frame_base,
         reified_arguments,
-        &mut OwnLines,
+        InliningContext {
+            lines: &mut OwnLines,
+            objects: &mut NoObjects,
+        },
     )
 }
 
@@ -396,13 +408,19 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     let mut reified = MethodNode::new(ACC_STATIC, "r", "()V");
     reified.nodes = vec![method("needClassReification", "()V", false)];
     assert_eq!(
-        unsupported_shape(&reified),
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
         Some(super::callee_shape::UnsupportedShape::ClassReification),
     );
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
+        None
+    );
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
+        None
+    );
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![
@@ -530,7 +548,10 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         false,
         5,
         &Default::default(),
-        &mut OwnLines,
+        InliningContext {
+            lines: &mut OwnLines,
+            objects: &mut NoObjects,
+        },
     )
     .expect("inlines");
     let instructions: Vec<Node> = inlined
