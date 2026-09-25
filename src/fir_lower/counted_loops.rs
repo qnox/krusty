@@ -35,7 +35,9 @@ use crate::fir::{
     ControlTargetId, FirExprId, FirProgressionClass, FirRangeCounterKind, FirRangeOperation,
     LocalValueId,
 };
-use crate::ir::{ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrProgressionMember, IrTypeOp};
+use crate::ir::{
+    ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrProgressionMember, IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
@@ -103,8 +105,12 @@ impl ProgressionHeader {
             return false;
         }
         let (Some(step), Some(last)) = (
-            constant_bound(lowering, self.step.value).as_ref().and_then(integral_value),
-            constant_bound(lowering, self.last.value).as_ref().and_then(integral_value),
+            constant_bound(lowering, self.step.value)
+                .as_ref()
+                .and_then(integral_value),
+            constant_bound(lowering, self.last.value)
+                .as_ref()
+                .and_then(integral_value),
         ) else {
             return true;
         };
@@ -166,11 +172,13 @@ impl ProgressionHeader {
         variables: &LoopVariables,
         op: IrBinOp,
     ) -> ExprId {
-        let zero = lowering.ir.add_expr(IrExpr::Const(if self.step_ty == Ty::Long {
-            IrConst::Long(0)
-        } else {
-            IrConst::Int(0)
-        }));
+        let zero = lowering
+            .ir
+            .add_expr(IrExpr::Const(if self.step_ty == Ty::Long {
+                IrConst::Long(0)
+            } else {
+                IrConst::Int(0)
+            }));
         lowering.ir.add_expr(IrExpr::PrimitiveBinOp {
             op,
             lhs: variables.step,
@@ -368,10 +376,22 @@ impl BodyLowering<'_> {
             } else {
                 IrConst::Int(1)
             }));
-            (Operand { value: one, can_change: false }, Direction::Increasing)
+            (
+                Operand {
+                    value: one,
+                    can_change: false,
+                },
+                Direction::Increasing,
+            )
         } else {
             let step = member(self, IrProgressionMember::Step);
-            (Operand { value: step, can_change: true }, Direction::Unknown)
+            (
+                Operand {
+                    value: step,
+                    can_change: true,
+                },
+                Direction::Unknown,
+            )
         };
         Ok(ProgressionHeader {
             ty,

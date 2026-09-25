@@ -16,8 +16,10 @@ impl BodyFirChecker<'_> {
         let progression = FirProgressionClass::of(self.most_precise_type(iterable)?)
             .filter(|progression| progression.counter.ty() == variable_ty.get())?;
         let mut value = iterable;
-        while let Some(FirExprKind::ImplicitConversion { value: inner, conversion }) =
-            self.body.expr(value).map(|expression| &expression.kind)
+        while let Some(FirExprKind::ImplicitConversion {
+            value: inner,
+            conversion,
+        }) = self.body.expr(value).map(|expression| &expression.kind)
         {
             let progression_before = self
                 .body
