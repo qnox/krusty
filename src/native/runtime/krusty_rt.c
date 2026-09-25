@@ -982,6 +982,14 @@ KRef kt_string_plus(KRef a, KRef b) {
     KRef right_storage = NULL;
     const char *left = kt_render(a, &left_length, &left_storage);
     const char *right = kt_render(b, &right_length, &right_storage);
+    /* Summed in 64 bits: two lengths that each fit need not fit together, and a sum that wrapped
+       would name a buffer smaller than the copies below. Text longer than any array can hold is
+       memory the runtime cannot provide, and that is decided before either text is read. Joining a
+       pair below only shortens the text, by two bytes, so the exact bound follows the join. */
+    uint64_t most = (uint64_t)left_length + (uint64_t)right_length;
+    if (most > (uint64_t)INT32_MAX + 2u) {
+        kt_fail_oom();
+    }
     /* A text ending in a high half followed by one beginning with a low half is a character above
        U+FFFF assembled one `Char` at a time, as `"" + high + low` and `for (c in s) t += c` build
        it. Kotlin's answer is that character, equal to the literal that spells it; the two halves
@@ -992,7 +1000,11 @@ KRef kt_string_plus(KRef a, KRef b) {
                       && kt_is_surrogate_half(right, 0);
     kt_int kept_left = pair ? left_length - 3 : left_length;
     kt_int skipped_right = pair ? 3 : 0;
-    kt_int length = kept_left + (pair ? 4 : 0) + right_length - skipped_right;
+    uint64_t total = pair ? most - 2u : most;
+    if (total > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
+    }
+    kt_int length = (kt_int)total;
     KByteArray *joined = kt_bytes_new(length);
     char *out = kt_bytes_of(joined);
     memcpy(out, left, (size_t)kept_left);

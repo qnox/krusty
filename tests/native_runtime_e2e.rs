@@ -240,6 +240,11 @@ fn a_repeat_too_long_for_memory_is_out_of_memory() {
 }
 
 #[test]
+fn a_concatenation_too_long_for_memory_is_out_of_memory() {
+    run_driver_expecting_failure("string_plus_overflow", "krusty: out of memory\n");
+}
+
+#[test]
 fn surrogate_halves_concatenate_into_their_character() {
     run_driver("string_plus_surrogates");
 }

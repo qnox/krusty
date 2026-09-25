@@ -1421,8 +1421,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     concatenation joins a high half followed by a low half into the four-byte character they spell,
     so `"" + '\uD83D' + '\uDE00' == "😀"` as on the JVM. What stays apart from the JVM: text holding a
     pair whole does not `contain` either half, and slicing between the halves aborts, since UTF-8 has
-    no form for half a character. Tests: `string_whitespace`, `string_plus_surrogates` under
-    `tests/native_runtime/`.
+    no form for half a character. A concatenation whose text would be longer than an array can hold
+    ends the program as out of memory, as `repeat` does. The length is summed in 64 bits before
+    either text is read: two lengths that each fit can wrap together. Tests: `string_whitespace`,
+    `string_plus_surrogates`, `string_plus_overflow` under `tests/native_runtime/`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
