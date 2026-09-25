@@ -162,18 +162,21 @@ impl fmt::Display for TypeEncodeError {
     }
 }
 
-pub(crate) type TypeParameters = HashMap<String, u64>;
+/// How a `Type` refers to each type parameter in scope, keyed by source and semantic name.
+pub(crate) type TypeParameters = HashMap<String, TypeParameterRef>;
 
-/// Marker bit on a [`TypeParameters`] id: the parameter is CAPTURED from an enclosing class. Its
-/// `Type` reference then also records `type_parameter_name` (f9) — the isolated reader has no
-/// enclosing-chain context to resolve a bare joint index. In-scope parameters emit f7 alone,
-/// matching kotlinc's bytes (kotlinc never writes both for them).
-pub(crate) const CAPTURED_TYPE_PARAMETER: u64 = 1 << 32;
-
-/// Marker bit on a [`TypeParameters`] entry whose metadata reference is name-based. Package-level
-/// declarations use `Type.type_parameter_name` (f9), unlike class/member declarations whose
-/// in-scope parameter tables are addressed by `Type.type_parameter` (f7).
-pub(crate) const NAMED_TYPE_PARAMETER: u64 = 1 << 33;
+/// One in-scope type parameter as a `Type` records it. kotlinc's serializer names a parameter the
+/// declaration being written owns (`Type.type_parameter_name`, f9) and addresses an enclosing
+/// declaration's by table id (`Type.type_parameter`, f7), never both.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TypeParameterRef {
+    Id(u64),
+    /// Captured from an enclosing class: the joint index, plus the name (f9), since the isolated
+    /// reader has no enclosing-chain context to resolve a bare joint index.
+    Captured(u64),
+    /// Owned by the declaration being written, by its source name.
+    Named(String),
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct MetadataTypeParameter {
@@ -186,32 +189,18 @@ pub struct MetadataTypeParameter {
     pub upper_bound_spellings: Vec<Spelled>,
 }
 
-pub(crate) fn semantic_type_parameters<'a>(
-    names: impl Iterator<Item = &'a str>,
-    semantic_names: impl Iterator<Item = &'a str>,
-) -> TypeParameters {
-    names
-        .zip(semantic_names)
-        .enumerate()
-        .flat_map(|(index, (name, semantic))| {
-            [
-                (name.to_owned(), index as u64),
-                (semantic.to_owned(), index as u64),
-            ]
-        })
-        .collect()
-}
-
 pub(crate) fn semantic_named_type_parameters<'a>(
     names: impl Iterator<Item = &'a str>,
     semantic_names: impl Iterator<Item = &'a str>,
 ) -> TypeParameters {
     names
         .zip(semantic_names)
-        .enumerate()
-        .flat_map(|(index, (name, semantic))| {
-            let value = index as u64 | NAMED_TYPE_PARAMETER;
-            [(name.to_owned(), value), (semantic.to_owned(), value)]
+        .flat_map(|(name, semantic)| {
+            let reference = TypeParameterRef::Named(name.to_owned());
+            [
+                (name.to_owned(), reference.clone()),
+                (semantic.to_owned(), reference),
+            ]
         })
         .collect()
 }
@@ -355,9 +344,8 @@ fn encode_type_with_parameter(
         // so a pending type here is a broken invariant rather than a shape to encode.
         Ty::Pending => return Err(TypeEncodeError::NotDetermined),
         Ty::TyParam(name, _) => {
-            let index = type_parameters
+            let reference = type_parameters
                 .get(name)
-                .copied()
                 .ok_or_else(|| TypeEncodeError::MissingTypeParameter(name.to_owned()))?;
             if nullable {
                 message.field_varint(3, 1);
@@ -365,19 +353,16 @@ fn encode_type_with_parameter(
             if spelled.definitely_non_null {
                 message.field_varint(1, 2); // Type.flags: DEFINITELY_NOT_NULL_TYPE
             }
-            // `type_parameter` (f7) ALONE for an in-scope parameter — kotlinc writes either the
-            // table index or a `type_parameter_name` (f9), never both. A CAPTURED enclosing-class
-            // parameter also records f9: the reader has no enclosing-chain context for its bare
-            // joint index.
-            if index & NAMED_TYPE_PARAMETER != 0 {
-                let source_name = crate::types::type_parameter_source_name(name);
-                message.field_varint(9, strings.local(source_name) as u64);
-            } else {
-                message.field_varint(7, index & !(CAPTURED_TYPE_PARAMETER | NAMED_TYPE_PARAMETER));
-            }
-            if index & CAPTURED_TYPE_PARAMETER != 0 {
-                let source_name = crate::types::type_parameter_source_name(name);
-                message.field_varint(9, strings.local(source_name) as u64);
+            match reference {
+                TypeParameterRef::Id(id) => message.field_varint(7, *id),
+                TypeParameterRef::Captured(id) => {
+                    message.field_varint(7, *id);
+                    let source_name = crate::types::type_parameter_source_name(name);
+                    message.field_varint(9, strings.local(source_name) as u64);
+                }
+                TypeParameterRef::Named(source_name) => {
+                    message.field_varint(9, strings.local(source_name) as u64);
+                }
             }
         }
         Ty::Obj(classifier, arguments) => {
@@ -744,7 +729,7 @@ mod tests {
     #[test]
     fn definitely_non_null_type_parameter_sets_the_metadata_type_flag() {
         let mut strings = StringTable::default();
-        let parameters = semantic_type_parameters(["T"].into_iter(), ["T"].into_iter());
+        let parameters = TypeParameters::from([("T".to_owned(), TypeParameterRef::Id(0))]);
         let encoded = encode_declared_type(
             &mut strings,
             Ty::ty_param("T", Ty::obj("kotlin/Any")),

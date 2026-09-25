@@ -6988,6 +6988,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of a classifier that declares none, so `toString`/`equals`/`hashCode` overrides have override
   edges like any other. Measured against kotlinc 2.4.0, 2.4.10 and 2.4.20. Test:
   `tests/metadata_return_value_status_e2e.rs`.
+- **`@Metadata` field order and own type parameters.** Messages serialize fields in ascending
+  field-number order, as kotlinc's generated `writeTo` does, and a `Type` refers to a type parameter
+  its declaration owns by name and to an enclosing class's by id. Measured against kotlinc 2.4.0,
+  2.4.10 and 2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_type_reference_e2e.rs`.
 
 - **A member-extension property overrides and is delegated like any member.** Its accessors are
   methods taking the receiver (`getX(receiver)`, `setX(receiver, value)`), and the receiver is part

@@ -13,7 +13,8 @@
 
 use crate::metadata::type_encoder::{
     encode_annotation, encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
-    semantic_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
+    semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
+    TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, TypeName, Visibility};
@@ -691,10 +692,7 @@ pub fn build_class(
     let captured_count = tail.captured_type_params.len();
     let mut class_type_parameters = TypeParameters::new();
     for (index, semantic) in tail.captured_type_params.iter().enumerate() {
-        class_type_parameters.insert(
-            semantic.clone(),
-            index as u64 | crate::metadata::type_encoder::CAPTURED_TYPE_PARAMETER,
-        );
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -702,8 +700,8 @@ pub fn build_class(
         .zip(tail.type_param_bounds)
         .enumerate()
     {
-        let id = (captured_count + index) as u64;
-        class_type_parameters.insert(source.clone(), id);
+        let id = TypeParameterRef::Id((captured_count + index) as u64);
+        class_type_parameters.insert(source.clone(), id.clone());
         class_type_parameters.insert(parameter.semantic_name.clone(), id);
     }
     let tparam_msgs: Vec<Pb> = tail
@@ -810,21 +808,34 @@ pub fn build_class(
 
     let build_prop = |st: &mut StringTable, p: &PropMeta| {
         let mut prop = Pb::new();
+        // kotlinc's serializer names a type parameter the declaration being written owns
+        // (`Type.type_parameter_name`) and addresses an enclosing class's by table id.
         let mut property_type_parameters = class_type_parameters.clone();
-        for (index, parameter) in p.type_params.iter().enumerate() {
-            let id = captured_count + tail.type_params.len() + index;
-            property_type_parameters.insert(parameter.name.clone(), id as u64);
-            property_type_parameters.insert(parameter.semantic_name.clone(), id as u64);
-        }
-        let return_type = |st: &mut StringTable| {
+        property_type_parameters.extend(semantic_named_type_parameters(
+            p.type_params
+                .iter()
+                .map(|parameter| parameter.name.as_str()),
+            p.type_params
+                .iter()
+                .map(|parameter| parameter.semantic_name.as_str()),
+        ));
+        let return_type = |st: &mut StringTable, type_parameters: &TypeParameters| {
             type_pb_tp(
                 st,
                 p.ty,
                 p.tparam.map(|index| index + captured_count as u32),
                 &p.spellings.ret,
-                &property_type_parameters,
+                type_parameters,
             )
         };
+        // The setter is a declaration of its own: the property's type parameters are not its own,
+        // so its value parameter addresses them by table id.
+        let mut setter_type_parameters = class_type_parameters.clone();
+        for (index, parameter) in p.type_params.iter().enumerate() {
+            let id = TypeParameterRef::Id((captured_count + tail.type_params.len() + index) as u64);
+            setter_type_parameters.insert(parameter.name.clone(), id.clone());
+            setter_type_parameters.insert(parameter.semantic_name.clone(), id);
+        }
         // kotlinc records the setter's value parameter exactly when the setter word is not the
         // default one (`Flags.IS_NOT_DEFAULT`), and serializes it before the property's own name,
         // so its strings come first in `d2`. An unnamed parameter is `value` on a source-declared
@@ -840,7 +851,7 @@ pub fn build_class(
                 });
             let mut parameter = Pb::new();
             parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-            parameter.field_message(3, &return_type(st)); // ValueParameter.type = 3
+            parameter.field_message(3, &return_type(st, &setter_type_parameters)); // ValueParameter.type = 3
             parameter
         });
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
@@ -866,7 +877,7 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = return_type(st);
+        let ty = return_type(st, &property_type_parameters);
         prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
@@ -1052,15 +1063,11 @@ pub fn build_class(
             m.type_params.len(),
             "metadata member type parameters require semantic identities"
         );
-        let semantic_names = &m.semantic_type_params;
-        let own_type_parameters = semantic_type_parameters(
+        // Own type parameters are named, an enclosing class's addressed by id; see `build_prop`.
+        function_type_parameters.extend(semantic_named_type_parameters(
             m.type_params.iter().map(String::as_str),
-            semantic_names.iter().map(String::as_str),
-        );
-        for (key, own) in &own_type_parameters {
-            let id = captured_count + tail.type_params.len() + *own as usize;
-            function_type_parameters.insert(key.clone(), id as u64);
-        }
+            m.semantic_type_params.iter().map(String::as_str),
+        ));
         for (index, name) in m.type_params.iter().enumerate() {
             let id = captured_count + tail.type_params.len() + index;
             let parameter = encode_metadata_type_parameter(
@@ -1446,7 +1453,7 @@ pub fn build_class(
     prefix.varint(stt.as_bytes().len() as u64); // writeDelimitedTo length prefix
     bytes.extend_from_slice(&prefix.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
-    bytes.extend_from_slice(class.as_bytes());
+    bytes.extend_from_slice(class.canonical().as_bytes());
     (bytes, st.into_strings())
 }
 
@@ -1469,7 +1476,7 @@ pub fn build_anonymous_class(internal: &str, supertypes: &[Ty]) -> (Vec<u8>, Vec
     prefix.varint(stt.as_bytes().len() as u64); // writeDelimitedTo length prefix
     bytes.extend_from_slice(&prefix.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
-    bytes.extend_from_slice(class.as_bytes());
+    bytes.extend_from_slice(class.canonical().as_bytes());
     (bytes, st.into_strings())
 }
 

@@ -658,19 +658,18 @@ pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
         p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
     }
     p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
-                                                     // The alias's own parameters, and the target applied to its arguments over them. Without both,
-                                                     // a consumer reading this record back sees only the target CLASSIFIER and cannot place a use
-                                                     // site's arguments — `Box<String, Int>` would become `PBox<String, Int>`, an arity that type
-                                                     // does not have. kotlinc references an alias's own parameters BY NAME, which is what
-                                                     // `NAMED_TYPE_PARAMETER` selects in the shared encoder.
+
+    // The alias's own parameters, and the target applied to its arguments over them. Without both,
+    // a consumer reading this record back sees only the target CLASSIFIER and cannot place a use
+    // site's arguments — `Box<String, Int>` would become `PBox<String, Int>`, an arity that type
+    // does not have. kotlinc references an alias's own parameters BY NAME.
     let tps: TypeParameters = alias
         .formals
         .iter()
-        .enumerate()
-        .map(|(index, formal)| {
+        .map(|formal| {
             (
                 formal.clone(),
-                index as u64 | crate::metadata::type_encoder::NAMED_TYPE_PARAMETER,
+                crate::metadata::type_encoder::TypeParameterRef::Named(formal.clone()),
             )
         })
         .collect();
@@ -900,7 +899,7 @@ pub fn build_package(
     d1.varint(stt.as_bytes().len() as u64); // writeDelimitedTo: length prefix
     bytes.extend_from_slice(&d1.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
-    bytes.extend_from_slice(package.as_bytes());
+    bytes.extend_from_slice(package.canonical().as_bytes());
     (bytes, st.into_strings())
 }
 
