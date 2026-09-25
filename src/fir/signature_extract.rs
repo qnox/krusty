@@ -588,12 +588,15 @@ impl SignatureConstraintExtractor {
             self.lexical_values.push(bindings);
             self.lexical_types.push(HashMap::new());
             self.local_classifier_stack.push(classifier);
+            // A local-class member keeps an anonymous result regardless of declared visibility.
+            let approximate = std::mem::replace(&mut self.approximate_anonymous_result, false);
             let result = match &method.body {
                 crate::ast::FunBody::Expr(expression) | crate::ast::FunBody::Block(expression) => {
                     self.expression(file, *expression, scope, origin)
                 }
                 crate::ast::FunBody::None => Ok(self.known(Ty::Unit)),
             };
+            self.approximate_anonymous_result = approximate;
             self.local_classifier_stack.pop();
             self.lexical_types.pop();
             self.lexical_values.pop();
@@ -774,11 +777,12 @@ impl SignatureConstraintExtractor {
                 )?;
             }
 
-            let method_names = class
-                .methods
-                .iter()
-                .map(|method| method.name.as_str())
-                .collect::<std::collections::HashSet<_>>();
+            let mut method_names = Vec::new();
+            for method in &class.methods {
+                if !method_names.contains(&method.name.as_str()) {
+                    method_names.push(method.name.as_str());
+                }
+            }
             for method_name in method_names {
                 self.register_local_member_effects(
                     file,
@@ -1445,7 +1449,12 @@ impl SignatureConstraintExtractor {
                 unreachable!("an anonymous-object construction must name its synthetic class")
             };
             let constraint_count = self.graph.constraints().len();
-            self.register_local_classifier_constraints(file, declaration, scope, origin)?;
+            // Members set their own approximation; restore the enclosing expression's policy.
+            let approximate = self.approximate_anonymous_result;
+            let registered =
+                self.register_local_classifier_constraints(file, declaration, scope, origin);
+            self.approximate_anonymous_result = approximate;
+            registered?;
             let demands = self.declaration_demands_since(constraint_count);
             // Kotlin exposes a non-private anonymous-object result through its single declared
             // supertype. Keeping the synthetic classifier here leaks an unpublishable local type

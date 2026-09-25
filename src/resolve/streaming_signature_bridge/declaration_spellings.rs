@@ -183,6 +183,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         diagnostics: std::cell::RefCell::new(Vec::new()),
         selected_call_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
         source_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
     };
     let mut records = Vec::new();
     for stub in &headers.stubs {

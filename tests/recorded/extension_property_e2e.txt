@@ -1,0 +1,32 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[member_extension_property_resolution#inferred getter sees inherited receiver property]
+2.4.0..2.4.10:
+  unresolved reference 'missing'.
+2.4.20:
+  unresolved reference 'missing' on receiver of type 'String'.
+
+[member_extension_property_resolution#missing dispatch receiver]
+2.4.0..2.4.10:
+  unresolved reference 'marker'.
+2.4.20:
+  unresolved reference 'marker' on receiver of type 'Token'.
+
+[member_extension_property_resolution#receiver inference is declaration-order independent]
+2.4.0..2.4.10:
+  unresolved reference 'missing'.
+2.4.20:
+  unresolved reference 'missing' on receiver of type 'String'.
+
+[member_extension_property_resolution#repeated generic bindings use their common type]
+2.4.0..2.4.10:
+  unresolved reference 'length'.
+2.4.20:
+  unresolved reference 'length' on receiver of type 'Any'.
+
+[member_extension_receiver_inference_is_cross_file_order_independent]
+2.4.0..2.4.10:
+  unresolved reference 'missing'.
+2.4.20:
+  unresolved reference 'missing' on receiver of type 'String'.

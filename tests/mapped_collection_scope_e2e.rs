@@ -309,9 +309,9 @@ fn delegated_mapped_iterator_applies_visible_java_member_owner_type_parameters()
 
 #[test]
 fn java_only_members_are_not_in_the_kotlin_scope() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
     for (member, source) in [
+        // kotlinc keeps JDK 21's `getFirst` as a HIDDEN-deprecated candidate, which 2.4.20 still
+        // reports as a bare unresolved name; the others name the receiver there.
         ("getFirst", "fun f(l: List<Int>) { l.getFirst() }"),
         ("add", "fun f(l: List<Int>) { l.add(1) }"),
         // Mutating JDK defaults stay hidden on the read-only face.
@@ -326,14 +326,23 @@ fn java_only_members_are_not_in_the_kotlin_scope() {
             "fun f(m: Map<String, Int>) { m.putIfAbsent(\"k\", 1) }",
         ),
     ] {
-        let diagnostics =
-            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert_eq!(
-            diagnostics,
-            [format!("unresolved reference '{member}'.")],
-            "{source}"
-        );
+        assert_member_unresolved_as_kotlinc(member, source);
     }
+}
+
+/// krusty's complete ordered diagnostic ledger for `source` is kotlinc's, recorded per version.
+fn assert_member_unresolved_as_kotlinc(member: &str, source: &str) {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let expected =
+        common::recorded_named(member, || common::reference_error_messages("Main", source));
+    assert!(
+        !expected.is_empty(),
+        "kotlinc must reject {source}: {expected:?}"
+    );
+    let diagnostics =
+        common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
+    assert_eq!(diagnostics, expected, "{source}");
 }
 
 #[test]
@@ -433,13 +442,7 @@ fn whitelisted_mutating_members_resolve_only_on_mutable_receivers() {
             "fun f(m: Map<String, Int>) { m.remove(\"k\", 1) }",
         ),
     ] {
-        let diagnostics =
-            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert_eq!(
-            diagnostics,
-            [format!("unresolved reference '{member}'.")],
-            "{source}"
-        );
+        assert_member_unresolved_as_kotlinc(member, source);
     }
 }
 

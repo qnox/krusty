@@ -3,6 +3,7 @@
 //! This layer receives final semantic decisions. It never accepts parser arenas, resolver state,
 //! imports, or source spellings used for lookup.
 
+mod annotation_constructions;
 mod array_references;
 mod arrays;
 mod assertions;
@@ -44,6 +45,7 @@ mod statement;
 mod suspend_conversions;
 mod tailrec;
 mod type_operations;
+mod when_expressions;
 
 pub use error::*;
 pub use sink::*;
@@ -160,6 +162,7 @@ pub(crate) fn lower_body_with_context(
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
+    local_callables::record_lifting_sites(&body, index, ir);
     #[cfg(feature = "trace")]
     body_trace::trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());
@@ -177,6 +180,7 @@ pub(crate) fn lower_body_with_context(
         vec![HashMap::new()],
         local_callables.realizations.clone(),
     );
+    lowering.enclosure = root_enclosure(&body, index, lowering.ir, declaration);
     lowering.prepare_local_functions()?;
     lowering.realize_local_functions()?;
     let defaults = body
@@ -304,6 +308,63 @@ struct BodyLowering<'a> {
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
     expression_depth: u32,
+    /// The executable scope the classes this body declares or generates belong to.
+    enclosure: Option<crate::ir::IrEnclosure>,
+}
+
+/// The enclosure of a root body: its exact callable, or the file or classifier whose initialization
+/// it is part of. Default-argument fragments carry no declarations of their own.
+fn root_enclosure(
+    body: &FirBody,
+    index: &ResolvedModuleIndex,
+    ir: &IrFile,
+    declaration: crate::fir::DeclarationId,
+) -> Option<crate::ir::IrEnclosure> {
+    use crate::fir::DeclarationKind;
+    if body.is_default_fragment() {
+        return None;
+    }
+    let classifier = || {
+        let classifier = index.enclosing_classifier(declaration)?.classifier;
+        let class = ir
+            .classes
+            .iter()
+            .position(|class| class.fq_name == classifier)?;
+        Some(crate::ir::ClassId::try_from(class).expect("too many classes"))
+    };
+    let anchor = index.declaration_anchor(declaration)?;
+    match anchor.kind {
+        DeclarationKind::Function => index
+            .callable_for_declaration(declaration)
+            .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
+            .map(|&function| crate::ir::IrEnclosure::Function(function)),
+        DeclarationKind::Property => Some(
+            classifier().map_or(crate::ir::IrEnclosure::File, |classifier| {
+                crate::ir::IrEnclosure::ClassInitializer(classifier)
+            }),
+        ),
+        DeclarationKind::Accessor => {
+            let property_declaration = anchor.owner?;
+            let property = index.property_for_declaration(property_declaration)?;
+            match anchor.sibling {
+                0 => Some(crate::ir::IrEnclosure::PropertyAccessor {
+                    property,
+                    setter: false,
+                }),
+                1 => Some(crate::ir::IrEnclosure::PropertyAccessor {
+                    property,
+                    setter: true,
+                }),
+                _ => None,
+            }
+        }
+        DeclarationKind::Constructor => Some(crate::ir::IrEnclosure::Constructor {
+            class: classifier()?,
+            ordinal: anchor.sibling,
+        }),
+        DeclarationKind::Initializer => classifier().map(crate::ir::IrEnclosure::ClassInitializer),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +467,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
             control_path: Vec::new(),
+            enclosure: None,
             expression_depth: 0,
         }
     }

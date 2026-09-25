@@ -42,6 +42,8 @@ pub(crate) struct BackendPassFacts {
     /// Suspend functions whose state machine is built during emission because their only suspension
     /// lives inside a body the emitter splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
+    /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
+    unit_result_tail_forwards: crate::jvm::suspend::UnitResultTailForwards,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// What the property-reference pass selected for each synthesized reference class. The
@@ -68,26 +70,29 @@ pub(crate) struct BackendPassFacts {
 /// 4. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization. Common IR retains them for targets without zero-initialized fields.
 ///
-/// 5. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 5. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
+///    and fold its marked conversion chain; later representation passes may refine the slot.
+///
+/// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 6. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 7. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
 ///
-/// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
 ///
-/// 8. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
+/// 9. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
 ///    value-class lowering has fixed their physical carriers.
 ///
-/// 9. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+/// 10. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
 ///
-/// 10. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 11. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
 ///
-/// 11. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 12. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///     (`require`/`check`) message lambda; it is spliced at the call site.
 ///
-/// 12. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 13. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///     its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///     be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///     ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -125,6 +130,9 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
+    // Every body of the file is lowered, so each lifting sequence is whole: name its callables
+    // before any pass renders a debug name from them.
+    crate::jvm::lifted_names::number(ir);
     crate::jvm::module_calls::realize_super_calls(ir).map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -148,6 +156,7 @@ fn run_backend_passes_after_plugins(
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
     crate::jvm::reified_operations::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
+    crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
@@ -186,6 +195,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.continuation_metadata,
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
+        &mut facts.unit_result_tail_forwards,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -195,6 +205,8 @@ fn run_backend_passes_after_plugins(
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
+    // After reparenting: a lifted name is distinct only within the class the method lands in.
+    crate::jvm::lifted_names::realize(ir);
     Ok(())
 }
 
@@ -818,6 +830,7 @@ impl JvmBackend {
             facade: metadata.as_ref(),
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
+            unit_result_tail_forwards: &pass_facts.unit_result_tail_forwards,
             bridge_returns: &pass_facts.bridge_return_adaptations,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
@@ -925,9 +938,12 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
-        {
+        if let Err(target) = crate::jvm::function_references::realize(
+            &mut file.ir,
+            &self.cp,
+            &file.classifiers,
+            &facade,
+        ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!(

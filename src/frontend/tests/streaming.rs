@@ -179,10 +179,7 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
         &mut diagnostics,
     );
 
-    let streamed = analysis
-        .streamed
-        .as_ref()
-        .expect("an invalid signature must still publish compact diagnostic Pass-2 state");
+    let streamed = analysis.streamed.as_ref().unwrap();
     assert!(streamed.diagnostic_recovery);
     assert!(!streamed.module.index().retains_source_coordinates());
     assert!(
@@ -199,7 +196,8 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     );
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
-    assert_eq!(diagnostics.diags[0].msg, "unresolved reference 'missing'.");
+    let expected = crate::diagnostic_wording::unresolved_reference_on("missing", Some("String"));
+    assert_eq!(diagnostics.diags[0].msg, expected);
 }
 
 #[test]

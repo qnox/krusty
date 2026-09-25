@@ -1,42 +1,25 @@
-//! Relocated bytecode and verifier state produced by one inline splice.
+//! Relocated bytecode and side tables produced by one inline splice.
 
-use super::VType;
-
-/// The result of splicing a **branchy** body: the spliced bytes (laid out at the `start_offset` passed
-/// to `splice_unified`) plus the relocated `StackMapTable` frames the caller must add (each: ABSOLUTE
-/// byte offset, the *body* locals at that point, and the operand stack). The caller prepends its own
-/// locals (slots `0..base`). The **join** is where the body's returns land (empty body locals + the
-/// return value on the stack), bound by the caller right after the spliced bytes.
-pub struct BranchySplice {
+/// The result of splicing a body, laid out at the `start_offset` passed to `splice_unified`.
+/// Stack-map frames are deliberately absent: the class writer derives them from the final body after
+/// every splice and rewrite.
+pub struct SpliceResult {
     pub bytes: Vec<u8>,
-    /// Frames *inside* the body: (ABSOLUTE byte offset, body locals, stack). The caller prepends its own
-    /// locals and binds at the offset directly.
-    pub frames: Vec<(usize, Vec<VType>, Vec<VType>)>,
-    /// The operand stack at the **join** (where the body's returns land = the continuation right after
-    /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
-    /// post-splice position (not a precomputed end offset, which could fall at `code.len()`).
-    pub join_stack: Vec<VType>,
-    /// Whether the splice actually needs the relocated frames + a join frame bound (so it requires an
-    /// empty operand-stack baseline). `false` for a pure BRANCHLESS body — no branches, the single
-    /// trailing return dropped to fall through — which the caller can then append at ANY stack height
-    /// (mid-expression), exactly like the former `splice_branchless`.
-    pub join_required: bool,
+    /// Whether byte offsets in the result depend on its final position in the enclosing method.
+    /// Switch padding and absolute side-table/fixup offsets require a second layout at the real
+    /// position. Ordinary relative branches do not, and this is deliberately unrelated to frames.
+    pub needs_relayout: bool,
     /// Whether the transformed entry-to-end control-flow graph reaches the continuation after this
     /// splice. A method body with no reachable return (for example `TODO`, whose only exit is
     /// `athrow`) leaves the enclosing bytecode path unreachable even though its bytes were appended
     /// in bulk.
     pub falls_through: bool,
-    /// Every replaced lambda invocation. A single inline parameter can be invoked repeatedly; each
-    /// occurrence has its own byte position and host verifier state while referring back to the one
-    /// pre-built lambda body by `lambda_index`.
-    pub lambda_sites: Vec<RelocatedLambdaSite>,
     /// Operand-stack height the body needs beyond its own `max_stack`: an expanded `typeOf`
     /// realization replaces a one-word placeholder with a deeper sequence.
     pub stack_growth: u16,
     /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
     /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
-    /// catch-all/`finally`). The handler frames themselves are already in `frames` (a handler is a
-    /// StackMapTable target). Empty for a body with no handlers.
+    /// catch-all/`finally`). Empty for a body with no handlers.
     pub handlers: Vec<(usize, usize, usize, u16)>,
     /// Branch operands (absolute positions in the enclosing builder) whose destinations live outside
     /// this splice. The enclosing builder retains them until their owning loop label is bound.
@@ -55,13 +38,4 @@ pub struct BranchySplice {
     /// caller's source map gives it an output line, which is what the flag distinguishes. A spliced
     /// lambda's body is the caller's own source and keeps its own lines.
     pub lines: Vec<(u16, u16, bool)>,
-}
-
-pub struct RelocatedLambdaSite {
-    pub lambda_index: usize,
-    /// Which of that lambda's `bodies` this site received.
-    pub body_index: usize,
-    pub byte_start: usize,
-    pub host_locals: Vec<VType>,
-    pub stack_prefix: Option<Vec<VType>>,
 }

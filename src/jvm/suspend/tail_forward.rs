@@ -81,11 +81,12 @@ pub(super) fn rewrite_forward_body(
     suspend_functions: &HashSet<u32>,
     declared_return: Ty,
     forward: &TailForward,
-) {
+) -> Option<ExprId> {
     match forward {
         TailForward::Single(call) => make_forward_body(ir, body, *call),
         TailForward::Returned(calls) => {
-            forward_returned_tail_calls(ir, body, suspend_functions, declared_return, calls)
+            forward_returned_tail_calls(ir, body, suspend_functions, declared_return, calls);
+            None
         }
     }
 }
@@ -209,18 +210,21 @@ fn suspension_returns_unit(
     recorded_suspension_result(ir, expression).as_ref() == Some(&Ty::Unit)
 }
 
-/// Replace the semantic tail with a return of the selected physical CPS call.
-fn make_forward_body(ir: &mut IrFile, body: ExprId, call: ExprId) {
+/// Replace the semantic tail with a return of the selected physical CPS call, and name that return.
+fn make_forward_body(ir: &mut IrFile, body: ExprId, call: ExprId) -> Option<ExprId> {
     match ir.exprs[body as usize].clone() {
         IrExpr::Return(Some(_)) => {
             ir.exprs[body as usize] = IrExpr::Return(Some(call));
+            Some(body)
         }
         IrExpr::Block {
             mut stmts,
             value: Some(_),
         } => {
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            let returned = ir.add_expr(IrExpr::Return(Some(call)));
+            stmts.push(returned);
             ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+            Some(returned)
         }
         IrExpr::Block { stmts, value: None }
             if stmts.last().is_some_and(|last| {
@@ -229,14 +233,17 @@ fn make_forward_body(ir: &mut IrFile, body: ExprId, call: ExprId) {
         {
             let last = *stmts.last().expect("guard proved a trailing return");
             ir.exprs[last as usize] = IrExpr::Return(Some(call));
+            Some(last)
         }
         IrExpr::Block {
             mut stmts,
             value: None,
         } if stmts.last() == Some(&call) => {
             stmts.pop();
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            let returned = ir.add_expr(IrExpr::Return(Some(call)));
+            stmts.push(returned);
             ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+            Some(returned)
         }
         // `= unitCall(…)`: remove its (possibly coerced) call statement and the bare return.
         IrExpr::Block {
@@ -257,10 +264,12 @@ fn make_forward_body(ir: &mut IrFile, body: ExprId, call: ExprId) {
             } =>
         {
             stmts.truncate(stmts.len() - 2);
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            let returned = ir.add_expr(IrExpr::Return(Some(call)));
+            stmts.push(returned);
             ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+            Some(returned)
         }
-        _ => {}
+        _ => None,
     }
 }
 

@@ -1,0 +1,83 @@
+0: aload 1
+1: instanceof BKt$stack$1
+2: ifeq @18
+3: aload 1
+4: checkcast BKt$stack$1
+5: astore 5
+6: aload 5
+7: getfield BKt$stack$1.label:I
+8: ldc -2147483648
+9: iand
+10: ifeq @18
+11: aload 5
+12: dup
+13: getfield BKt$stack$1.label:I
+14: ldc -2147483648
+15: isub
+16: putfield BKt$stack$1.label:I
+17: goto @23
+18: new BKt$stack$1
+19: dup
+20: aload 1
+21: invokespecial BKt$stack$1.<init>(Lkotlin/coroutines/Continuation;)V
+22: astore 5
+23: aload 5
+24: getfield BKt$stack$1.result:Ljava/lang/Object;
+25: astore 4
+26: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+27: astore 6
+28: aload 5
+29: getfield BKt$stack$1.label:I
+30: tableswitch 0..1 [@31, @52] default @69
+31: aload 4
+32: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+33: iload 0
+34: istore 2
+35: iload 0
+36: aload 5
+37: aload 5
+38: iload 0
+39: putfield BKt$stack$1.I$0:I
+40: aload 5
+41: iload 2
+42: putfield BKt$stack$1.I$1:I
+43: aload 5
+44: iconst_1
+45: putfield BKt$stack$1.label:I
+46: invokestatic BKt.one(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;
+47: dup
+48: aload 6
+49: if_acmpne @61
+50: aload 6
+51: areturn
+52: aload 5
+53: getfield BKt$stack$1.I$1:I
+54: istore 2
+55: aload 5
+56: getfield BKt$stack$1.I$0:I
+57: istore 0
+58: aload 4
+59: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+60: aload 4
+61: astore 3
+62: iload 2
+63: aload 3
+64: checkcast java/lang/Number
+65: invokevirtual java/lang/Number.intValue()I
+66: iadd
+67: invokestatic kotlin/coroutines/jvm/internal/Boxing.boxInt(I)Ljava/lang/Integer;
+68: areturn
+69: new java/lang/IllegalStateException
+70: dup
+71: ldc "call to 'resume' before 'invoke' with coroutine"
+72: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+73: athrow
+line 3: 27
+line 3: 33
+line 3: 50
+line 3: 61
+line 3: 69
+local v I 0..74 slot 0
+local $completion Lkotlin/coroutines/Continuation; 0..74 slot 1
+local $continuation Lkotlin/coroutines/Continuation; 23..69 slot 5
+local $result Ljava/lang/Object; 26..69 slot 4

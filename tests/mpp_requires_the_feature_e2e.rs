@@ -38,6 +38,28 @@ fn compile(source: &str, multiplatform: bool) -> (bool, String) {
     (out.status.success(), report)
 }
 
+/// kotlinc's error ledger for `source` as a multiplatform `Main.kt` with `extra` arguments, in
+/// emission order, recorded per Kotlin version for the running test.
+fn kotlinc_ledger(source: &str, extra: &[&str]) -> Vec<String> {
+    common::recorded(|| {
+        let dir = common::scratch_dir().expect("scratch dir");
+        let src = dir.join("Main.kt");
+        std::fs::write(&src, source).unwrap();
+        let mut args = vec![
+            "-Xmulti-platform".to_string(),
+            "-d".to_string(),
+            dir.join("kotlinc-out").to_string_lossy().into_owned(),
+        ];
+        args.extend(extra.iter().map(ToString::to_string));
+        args.push(src.to_string_lossy().into_owned());
+        let (_, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc");
+        common::reported(&stderr)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    })
+}
+
 #[test]
 fn an_expect_declaration_needs_the_multiplatform_feature() {
     let (ok, report) = compile(
@@ -144,11 +166,15 @@ fn an_unmatched_expect_names_the_module_it_looked_in() {
 
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
+    let expected = kotlinc_ledger(SOURCE, &[]);
+    assert_eq!(
+        expected.len(),
+        3,
+        "kotlinc: one entry per header: {expected:?}"
+    );
     assert_eq!(
         ledger(&report),
-        [(3, "helper"), (5, "Holder"), (9, "prop")].map(|(line, name)| format!(
-            "Main.kt:{line}:1: expected {name} has no actual declaration in module <main> for JVM"
-        )),
+        expected,
         "the whole ledger, each at its own `expect` keyword:\n{report}"
     );
 }
@@ -156,9 +182,10 @@ fn an_unmatched_expect_names_the_module_it_looked_in() {
 /// And the module it names is the one `-module-name` gave it.
 #[test]
 fn the_module_a_diagnostic_names_is_the_declared_one() {
+    const SOURCE: &str = "package plib\n\nexpect fun helper(): Int\n";
     let dir = common::scratch_dir().expect("scratch dir");
     let src = dir.join("Main.kt");
-    std::fs::write(&src, "package plib\n\nexpect fun helper(): Int\n").unwrap();
+    std::fs::write(&src, SOURCE).unwrap();
     let out = std::process::Command::new(common::krusty_binary())
         .args([
             "-XXLanguage:+MultiPlatformProjects",
@@ -176,9 +203,10 @@ fn the_module_a_diagnostic_names_is_the_declared_one() {
         .expect("run krusty");
     let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
     report.push_str(&String::from_utf8_lossy(&out.stderr));
+    let expected = kotlinc_ledger(SOURCE, &["-module-name", "mylib"]);
     assert_eq!(
         ledger(&report),
-        ["Main.kt:3:1: expected helper has no actual declaration in module <mylib> for JVM"],
+        expected,
         "the whole ledger, naming the declared module rather than the default:\n{report}"
     );
 }

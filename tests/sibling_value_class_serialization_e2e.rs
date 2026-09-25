@@ -18,8 +18,9 @@
 //!
 //! Generated clients put each value class in a file of its own and use it from data classes in
 //! other files, so this is the ordinary shape there rather than an edge case.
+use super::common::method_instructions;
 use super::serialization_companion_byte_parity_e2e::{
-    compare_files_with_kotlinc_plugin, method_instructions, plugin_and_runtime,
+    compare_files_with_kotlinc_plugin, plugin_and_runtime,
 };
 use super::serialization_test_support::both_compilers_box_files;
 

@@ -1,12 +1,11 @@
 //! A classpath inline call taking a lambda splices under a non-empty operand stack.
 //!
 //! `Envelope(populate { … })` reaches the splice with `new Envelope; dup` already on the stack.
-//! The relocated StackMapTable frames carry no operand prefix, so a splice that records frames has
-//! to refuse a non-empty baseline — but the old test for "records frames" asked whether the lambda
-//! had a BODY, not whether any body produced a frame. Every inline call with a lambda argument
-//! answered yes and declined here. The fixtures deliberately use a repository-owned inline
-//! function rather than a stdlib builder. It is `@InlineOnly`, so there is no callable fallback:
-//! successful compilation and execution prove that the generic classpath splice happened.
+//! Final-body dataflow carries that prefix through the spliced control-flow graph; input stack-map
+//! frames are not relocated or treated as an empty-baseline requirement. The fixtures deliberately
+//! use a repository-owned inline function rather than a stdlib builder. It is `@InlineOnly`, so
+//! there is no callable fallback: successful compilation and execution prove that the generic
+//! classpath splice happened.
 use super::common;
 
 const LIB: &str = r#"
@@ -61,9 +60,9 @@ fun box(): String {
 }
 "#;
 
-/// The branchless lambda has no frame of its own, so the splice is free to land on the
-/// constructor's uninitialized prefix. `populate` has no callable fallback, so the file is emitted
-/// only if the user-defined inline body really splices; the JVM run also pins verifier correctness.
+/// The branchless lambda lands on the constructor's uninitialized prefix. `populate` has no callable
+/// fallback, so the file is emitted only if the user-defined inline body really splices; the JVM run
+/// also pins verifier correctness.
 #[test]
 fn a_branchless_inline_lambda_splices_under_a_constructor_prefix() {
     let output = run_against_kotlinc_library(
@@ -91,10 +90,11 @@ fun box(): String {
 }
 "#;
 
-/// A lambda body that does record a frame must still make the operand sequence spill the
-/// constructor prefix before the splice. The `@InlineOnly` callee again makes this fail closed.
+/// The branchy lambda exercises the same generic splice with control-flow joins. Whether emission
+/// retains or spills the constructor prefix is a layout choice; final-body dataflow must verify the
+/// resulting graph either way. The `@InlineOnly` callee again makes this fail closed.
 #[test]
-fn a_branchy_inline_lambda_still_reaches_an_empty_baseline() {
+fn a_branchy_inline_lambda_splices_under_a_constructor_prefix() {
     let output =
         run_against_kotlinc_library(BRANCHY_LAMBDA_IN_AN_ARGUMENT, "InlineLambdaOperandBranchy");
     assert_eq!(output, "OK");

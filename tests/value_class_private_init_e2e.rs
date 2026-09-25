@@ -8,9 +8,7 @@
 //! emits (each parameter's `check`), not re-derived from the field's type, so the two cannot
 //! disagree.
 use super::common;
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
 
 /// The `line N: pc` rows of the member whose header contains `marker`.
 fn line_rows(disassembly: &str, marker: &str) -> Vec<String> {

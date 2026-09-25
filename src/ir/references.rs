@@ -76,6 +76,14 @@ pub struct FuncRef {
     /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
     /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
     pub staticbound_recv_unbox: Option<TypeName>,
+    /// The carrier's own specialized `invoke`: a common-IR instance method of this class whose body
+    /// calls the referenced declaration directly, as kotlinc's `FunctionReferenceLowering` builds
+    /// it. The backend then writes that method and the erased `FunctionN.invoke` bridge to it
+    /// instead of a synthesized dispatching `invoke`.
+    pub invoke: Option<FunId>,
+    /// The reference's Kotlin function type: the generic interface the carrier implements, which
+    /// its class `Signature` spells.
+    pub function_type: Ty,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced

@@ -7,17 +7,32 @@
 
 use super::*;
 
+/// Exact function identities whose JVM realization this synthesis already finalized, so the
+/// signature pass that follows does not lower them a second time.
+#[derive(Default)]
+pub(super) struct SynthesizedValueMembers {
+    /// Instance entries synthesized while creating carrier implementations. They already have
+    /// their final instance ABI and must not be lowered again as user value-class members.
+    pub(super) instance_entries: HashSet<u32>,
+    /// Computed property accessors realized as static implementations over the carrier. Their
+    /// JVM name was chosen from the declared accessor signature; the carrier parameter they gained
+    /// here is not part of that signature and must not be hashed into the name again.
+    pub(super) accessors: HashSet<u32>,
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
-/// (field, `<init>`, getter) is already present in common IR.
+/// (field, `<init>`, getter) is already present in common IR. `callable_under` is the value-class set
+/// JVM member-name mangling consults (it additionally knows the native unsigned classes).
 pub(super) fn synth_value_members(
     ir: &mut IrFile,
     class_id: u32,
     under: &Under,
+    callable_under: &Under,
     has_init: bool,
     constructor_default: Option<ExprId>,
-    synthesized_instance_entries: &mut HashSet<u32>,
+    realized: &mut SynthesizedValueMembers,
 ) -> bool {
     let internal = ir.classes[class_id as usize].fq_name();
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
@@ -59,7 +74,19 @@ pub(super) fn synth_value_members(
     for (property_index, getter, setter, property_name, overrides_supertype) in computed_accessors {
         if let Some(getter) = getter {
             let source_name = property_getter_name(&property_name);
-            let jvm_name = format!("{}-impl", property_getter_name(&property_name));
+            // Named from the declared accessor signature, exactly like every other value-class
+            // member: `getX-impl`, or kotlinc's hash when that signature mentions a value class.
+            let jvm_name = {
+                let function = &ir.functions[getter as usize];
+                vc_member_impl_name(
+                    &source_name,
+                    &function.params,
+                    &function.ret,
+                    callable_under,
+                    false,
+                )
+            };
+            realized.accessors.insert(getter);
             let ret = {
                 let function = &mut ir.functions[getter as usize];
                 function.name.clone_from(&jvm_name);
@@ -106,15 +133,22 @@ pub(super) fn synth_value_members(
                     param_checks: vec![],
                 });
                 ir.classes[class_id as usize].methods.push(fid);
-                synthesized_instance_entries.insert(fid);
+                realized.instance_entries.insert(fid);
                 ir.open_methods.insert(fid);
             }
         }
         if let Some(setter) = setter {
-            let jvm_name = format!(
-                "{}-impl",
-                crate::names::property_setter_name(&property_name)
-            );
+            let jvm_name = {
+                let function = &ir.functions[setter as usize];
+                vc_member_impl_name(
+                    &crate::names::property_setter_name(&property_name),
+                    &function.params,
+                    &function.ret,
+                    callable_under,
+                    false,
+                )
+            };
+            realized.accessors.insert(setter);
             {
                 let function = &mut ir.functions[setter as usize];
                 function.name.clone_from(&jvm_name);

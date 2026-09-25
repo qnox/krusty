@@ -211,6 +211,10 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                 }
             }
             Decl::Class(class) => {
+                // Checked classifier metadata is published after stable signature finalization.
+                // Retain only the class declaration's own annotation expressions for that bounded
+                // pass; member annotations remain owned by their ordinary declaration units.
+                retained.roots(file, class.annotation_args.iter().flatten().copied());
                 retained.roots(
                     file,
                     class.props.iter().filter_map(|parameter| parameter.default),
@@ -252,13 +256,9 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     retained.roots(
                         file,
                         class
-                            .annotation_args
+                            .props
                             .iter()
-                            .flatten()
-                            .copied()
-                            .chain(class.props.iter().flat_map(|property| {
-                                property.annotation_args.iter().flatten().copied()
-                            }))
+                            .flat_map(|property| property.annotation_args.iter().flatten().copied())
                             .chain(class.body_props.iter().flat_map(|property| {
                                 property.annotation_args.iter().flatten().copied()
                             }))
@@ -400,6 +400,15 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
         retained.statements.len(),
     );
     retained
+}
+
+pub(super) fn has_classifier_annotation_arguments(file: &File) -> bool {
+    file.decl_arena.iter().any(|declaration| {
+        matches!(
+            declaration,
+            Decl::Class(class) if class.annotation_args.iter().any(|arguments| !arguments.is_empty())
+        )
+    })
 }
 
 fn expr_map(reachable: &Reachable) -> (Vec<ExprId>, HashMap<ExprId, ExprId>) {
@@ -911,6 +920,12 @@ pub(super) fn compact(file: &mut File) {
     file.anon_fun_receivers =
         remap_u32_map(std::mem::take(&mut file.anon_fun_receivers), &expressions);
     file.suspend_lambdas = remap_u32_set(std::mem::take(&mut file.suspend_lambdas), &expressions);
+    file.callable_reference_provenance = remap_u32_map(
+        std::mem::take(&mut file.callable_reference_provenance),
+        &expressions,
+    );
+    file.lambda_lifting_sites =
+        remap_u32_map(std::mem::take(&mut file.lambda_lifting_sites), &expressions);
     file.lambda_labels = remap_u32_map(std::mem::take(&mut file.lambda_labels), &expressions);
     file.base_arg_names = remap_u32_map(std::mem::take(&mut file.base_arg_names), &expressions);
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);
@@ -938,6 +953,14 @@ pub(super) fn compact(file: &mut File) {
         .filter_map(|(old, declaration)| {
             statements.get(&old).copied().map(|new| (new, declaration))
         })
+        .collect();
+    file.local_function_lifting_sites = std::mem::take(&mut file.local_function_lifting_sites)
+        .into_iter()
+        .filter_map(|(old, site)| statements.get(&old).copied().map(|new| (new, site)))
+        .collect();
+    file.local_delegate_lifting_sites = std::mem::take(&mut file.local_delegate_lifting_sites)
+        .into_iter()
+        .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();
     file.local_class_nested = std::mem::take(&mut file.local_class_nested)
         .into_iter()
@@ -1008,5 +1031,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["INVISIBLE_MEMBER", "INVISIBLE_REFERENCE"],
         );
+    }
+
+    #[test]
+    fn classifier_annotation_publication_retains_only_its_argument_fragment() {
+        let source = "annotation class Label(val value: String)\n\
+            @Label(\"kept\") class Subject { fun discarded(): String = \"body\" }\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+        assert!(has_classifier_annotation_arguments(&file));
+
+        compact(&mut file);
+
+        let subject = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == "Subject" => Some(class),
+                _ => None,
+            })
+            .expect("subject class");
+        let argument = subject.annotation_args[0][0];
+        assert_eq!(
+            file.const_string_value(argument)
+                .expect("retained annotation string")
+                .to_lossy(),
+            "kept",
+        );
+        assert!(matches!(
+            subject.methods[0].body,
+            FunBody::Expr(MISSING_EXPR)
+        ));
+        assert_eq!(file.expr_arena.len(), 1);
     }
 }

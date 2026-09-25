@@ -84,13 +84,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `krusty [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
   `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
 ### 4e — v52 + StackMapTable ✅ (exact version match with kotlinc)
-- ✅ All emitted methods now carry a valid `StackMapTable` attribute, required by Java 8
-  (class-file v52). Branch targets tracked via `rec()` / `rec_s()` in `FunctionEmitter`;
-  synthetic methods (`copy$default`, `equals`) register frames via `CodeBuilder.add_frame_if_new`.
-- ✅ `init_temp` pattern: any slot added to `self.slots` via `alloc_temp` or `alloc_slot` before a
-  `rec()` call gets a zero/null default store so the JVM's computed type matches the declared frame.
-- ✅ Divergence-aware codegen: `goto`/store after a `return`/`throw` branch is elided; frames for
-  dead code are filtered to avoid "bad offset" errors; duplicate-offset frames deduped.
+- ✅ Every non-empty emitted v52 method gets a valid `StackMapTable` computed from its final rewritten
+  bytecode, exception table, and method descriptor. Emission records no verifier frames.
+- ✅ The same final-body dataflow computes `max_stack` and `max_locals`; failure to analyze an emitted
+  instruction graph is an explicit backend invariant violation, with no recorded-frame fallback.
+- ✅ Divergence-aware codegen drops straight-line instructions after `return`/`throw`; final analysis
+  derives reachable blocks and merge states from the remaining graph.
 - ✅ All `cargo test` green; `-Xverify:all` passes on all emitted class files.
 
 ## Phase 5 — Differential harness vs kotlinc  🚧
@@ -1133,6 +1132,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   public member surface (`componentN`/`copy`/`equals`/`hashCode`/`toString` + accessors) matches the
   real kotlinc's exactly for `data class P(val x: Int, val y: String)`.
 
+## Known bytecode divergence — erased base-constructor slots  ⬜
+- **A `super(…)` argument in an ERASED base-constructor slot is not boxed — measured, and the
+  emitter is the WRONG place to fix it.** `open class Box<T>(val value: T)` declares `(Object)V`,
+  so `class LongBox : Box<Long>(42L)` emits `ldc2_w 42L; invokespecial Box."<init>":(Ljava/lang/Object;)V`
+  — `Type long_2nd … is not assignable to 'java/lang/Object'`. Corpus:
+  `codegen/box/delegatedProperty/genericSetValueViaSyntheticAccessor.kt` (where it masquerades as a
+  delegate-setter defect), and it is a plausible cause under
+  `closures/captureInSuperConstructorCall/`, `initializers/` and `classes/`.
+
+  Boxing at the emission site was tried and REVERTED: it fixed the isolated shape and cost 18 box
+  cases (6344 → 6326). The reason is that the emitter's `value_ty` reports the argument's SEMANTIC
+  type, so an argument the lowering already coerced reads as a scalar while the stack holds a box,
+  and the extra `box_prim_free` boxes a reference. Narrowing to a one-to-one parameter list and to
+  an exactly-`Object` slot recovered only 2 of the 18, which rules out prefix-parameter
+  misalignment as the cause. The coercion belongs in the LOWERING, beside the `super_args`, where
+  the physical type is still authoritative — the same conclusion the delegated-accessor result
+  reached (see `docs/SPEC.md`).
+
 ## Known bytecode divergence — `object` properties  ⬜
 - An `object`'s properties are emitted by krusty as **instance** fields (`private final int v`,
   `getfield`); the real kotlinc emits them as **static** fields on the singleton (`private static
@@ -1746,12 +1763,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   subject/condition temp.
 
 - ✅ **Phase 157 — spill branchy operands to temps (root-cause fix)** (146 → 147 box()=OK, 0 FAIL).
-  The recurring bug behind several `is_branchy` bail-guards: an expression that records a StackMapTable
-  frame (a primitive comparison, `when`, `while`) can't be emitted while other operands sit on the
-  stack — its merge frame omits them (VerifyError). Added `Emitter::records_frame(e)` (recurses the IR
-  subtree for frame-recording nodes) and, in `New` and the enum `<clinit>` entry construction, when an
-  argument records a frame, evaluate all args into temps **first** (clean stack) then construct. This
-  retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same `records_frame` spill
+  The recurring bug behind several `is_branchy` bail-guards: an expression that introduces control
+  flow (a primitive comparison, `when`, `while`) needs a consistent operand baseline at its joins.
+  `Emitter::emits_control_flow(e)` recurses through the IR; in `New` and enum `<clinit>` construction,
+  when an argument branches, all arguments are evaluated into temps **first** and then loaded. This
+  retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same control-flow spill
   should next be applied to `MethodCall`/`Call` argument lists.
 
 - ✅ **Phase 158 — finish the operand spill + single-eval branchy `when` subject** (147 → 148, 0 FAIL).
@@ -1766,8 +1782,8 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   Applied the spill to `emit_compare` (both the `Objects.equals` and primitive paths), retiring the
   last branchy-operand guard — the branchy `when` **condition** (`x == when{…}`) now compiles. Fixed a
   latent correctness bug in the spill itself: an earlier operand's temp is **live** while a later
-  branchy operand records frames, so the temps must be in `self.slots` during that window (else those
-  frames mark the slot `Top` → "Bad local variable type"). Centralized into `spill_to_temps` (registers
+  branchy operand executes, so the temp must stay in the backend-local plan during that window.
+  Centralized into `spill_to_temps` (registers
   each temp in `self.slots`, caller removes after load); `New`/`MethodCall`/`Call`/enum-`<clinit>`/
   `emit_compare` all share it. The branchy-operand-on-non-empty-stack VerifyError class is now fully
   closed.
@@ -4452,10 +4468,158 @@ single sequence per enclosing name. On master cb2dded, krusty's internal names r
   through FIR/common IR; `jvm::local_class_names` combines it with the physical facade/class owner.
 - ☐ 1b. Suspend lambdas as `SuspendLambda` classes named from the walk (today a static method plus a
   `…$fir_…$1` continuation).
-- ☐ 1c. Function and property reference classes named from the walk (today `Facade$fir$function$N`
-  and `Facade$fir$property$N`), with kotlinc's direct `invoke` in place of the adapter.
+- ◐ 1c. Function and property reference classes are named from the walk's provenance, recorded on
+  the reference expression and realized by `jvm::local_class_names`. Still open: kotlinc's direct
+  `invoke` in place of the adapter, and the reference class's flags and attributes.
 - ☐ 1d. Local functions and lambda bodies named as `InventNamesForLocalFunctions` does
   (`box$local`, `box$lambda$0`), replacing `name$fir_A_B_C`.
 - ✅ Local and anonymous source classifiers receive opaque semantic identities; the JVM naming pass
   realizes `AKt$box$Local`/`AKt$box$1` from exact ownership identities. JS/native can consume the
   same provenance with their own separators and container rules.
+
+## JVM method pipeline — computed stack-map frames, stage 1  ◐
+
+kotlinc writes classes with ASM `ClassWriter(COMPUTE_MAXS | COMPUTE_FRAMES)` and a
+`getCommonSuperClass` that always answers `java/lang/Object`, so its `StackMapTable` is a pure function
+of the final instructions and handlers. krusty records frames by hand during emission from declared
+types. The migration replaces recording with computation in stages; stage 1 adds the computer in
+shadow with no output change.
+
+- ✅ 1a. `bytecode_analysis::FrameComputation` ports ASM's `computeAllFrames`: blocks split at labels
+  and after jumps, switches, returns and throws; ASM's reference merge (null absorbs, equal array
+  dimension joins to that dimension of `Object`, otherwise `Object` at the lower dimension); handler
+  inputs merge every covered block's locals; frames only at reachable jump targets and handler
+  starts; unreachable blocks become `[] / [Throwable]` frames.
+- ✅ 1b. `jvm::frame_audit` and the `framecheck` binary compare a class file's `StackMapTable` with
+  the computed frames. On the kotlinc-built stdlib and coroutines jars every Kotlin method matches
+  (`tests/frame_computation_e2e.rs` guards it); javac-compiled classes are skipped.
+- ✅ 1c. Snapshot at stage 1 (kotlinc 2.4.20 box corpus, divergent files only): kotlinc's classes all
+  match; krusty's differ in 4,592 methods — locals dropped to top while still live, unreachable code
+  kept and framed, locals typed differently, frames with no jump, and a few dozen methods that do not
+  verify. These are historical counts, not a tracked figure.
+- ✅ 2a. Classes carry the computed frames (`jvm::classfile::stack_maps`): their classes intern when
+  a method is added, where kotlinc's writer interns them (from the body kotlinc's bytecode rewrites
+  leave, so a folded temporary's class is not interned), and the table is computed over the final
+  body when the class is written. Unreachable blocks become `nop`…`athrow` and leave the exception
+  table, as ASM does. A non-empty emitted body the analysis declines is an internal backend error;
+  recorded frames are not an output fallback. The joins the recorded frames had typed narrower than
+  `Object` now get kotlinc's coercion casts (a reassigned local, a box widened to `Number`).
+- ✅ 2b. `max_stack` and `max_locals` come from the final body as ASM's `COMPUTE_MAXS` counts them
+  (stack words across the dataflow, at least 1 when a block is dead; argument words, every slot a
+  load, store or `iinc` names, and every local-variable entry). kotlinc's bytecode rewrites
+  (`method_rewrite`) start from and validate against computed frames, so the recorded-frame editing
+  they carried (reference widenings, dropped temporaries, frame unification) is gone.
+- ✅ 2c. The emitter records no frame. `add_frame_if_new`, `Emitter::frame`, `needs_stackmap`,
+  `build_stackmap`, the per-label frame merge, held-operand stack typing and the inline splice's
+  frame binding are gone. The coroutine machine reads the spill types from frames computed over the
+  body (`ClassWriter::builder_frames`). A non-empty emitted body the computation declines remains an
+  explicit backend invariant failure; removing recorded frames does not introduce a second path.
+- ✅ 3a. kotlinc's bytecode rewrites carry the method as a `jvm::method_node::MethodNode`. A
+  finished method is read against the writer's own pool (`ConstantPoolView`), its passes still run
+  on the index-addressed instruction list through the `method_rewrite::node_bridge` adapter, and
+  the result is relabelled and laid out again without adding a pool entry. The exception, line and
+  local tables and the implicit return move with their labels; the per-offset remapping is gone.
+  A spliced `ldc_w` whose host index fits one byte is now written `ldc`, as ASM writes it (121
+  classes of the 2.4.20 box corpus); no other class changes.
+- ✅ 3b. The stack peephole, redundant-`goto` and `nop` cleanup, jump negation, dead-code
+  elimination and slot compaction run on the relabelled `MethodNode` (`jvm::bytecode_passes`),
+  over its labels, line numbers and ranges; no class of the 2.4.20 box corpus changes. The bridge
+  no longer carries removed-table masks or a slot renumbering; it pins the labels standing after a
+  null-check fold's inserted instruction, which the `goto` and jump passes leave alone.
+- ✅ 3c. The redundant-null-check, redundant-cast and temporaries passes (the null-check folds,
+  swaps, the expression-null-check `dup`, the `nop` cleanup) run on the `MethodNode` too
+  (`jvm::bytecode_passes`), and the bridge is gone: a finished method is read back with the labels
+  its builder bound (each linked jump names its own label, in bind order at its offset) and every
+  pass matches against labels, line numbers, ranges and try/catch blocks rather than instruction
+  indices. A null-check fold stands the labels after the folded jumps' own, and the target's line
+  numbers and local bounds, after the `pop` it inserts, and pins them for the `goto` and jump
+  passes. The redundant-cast pass still asks the class-file frame analysis of the emitted bytes
+  what each cast sees, by instruction number. No class of the 2.4.20 box corpus changes except
+  `JvmInlineKt` of `jvmInline`, whose temporary slots already vary from run to run before this
+  stage.
+- ☐ 4–6. A `FrameMap`-style slot allocator, and kotlinc's transformer order.
+
+## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
+- ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
+- ✅ One target release per process (`src/kotlin_version.rs`): `-Xkotlin-reference-version=`,
+  else `KRUSTY_LANGUAGE_VERSION`, else the newest manifest entry.
+- ✅ Version-keyed diagnostic wording and positions (`src/diagnostic_wording.rs`).
+- ✅ Test expectations recorded per version range from kotlinc (`tests/recorded/`,
+  `tests/common/recorded.rs`): a missing version records locally and fails under CI.
+- ✅ 2.4.20 backend deltas gated on the target: `@Metadata.xi` visibility bits for synthetic
+  classes, no nullability annotations on annotation implementation classes, anonymous context
+  parameters named in the `LocalVariableTable` and numbered `$1` rather than `#1`
+  (`src/jvm/parameter_names.rs`), and a forwarded `Unit` suspend tail call answering `Unit` unless
+  the callee suspended (`classpath_tail_forward_e2e`).
+- ⬜ CI runs the full suite on the newest version only; older versions run box conformance in CI
+  and the full suite locally through `just test-all`.
+- ⬜ A deferred builder-inference member error names no receiver; kotlinc 2.4.20 renders the
+  unfixed variable (`MutableList<TypeVariable(E)>`).
+- ⬜ A read whose flow type is the intersection of merged assignments (`x` after a loop writes `""`
+  and `42`) names krusty's declared `Any` as the receiver; kotlinc 2.4.20 names none, since the
+  intersection is not class-like (`a_proof_does_not_survive_a_loop_that_overwrites_it`).
+- ✅ Diagnostic ledgers are exact and ordered: diagnostics merged in recovery are sorted per file by
+  position, and `expect` declarations without an `actual` are reported after them in kotlinc's
+  actualization order (classifiers, then callables).
+- ✅ A pure qualifier prefix (a package, or a classifier with no object or companion value) that
+  misses its next segment reports that segment (`Thread.Missing.x` at `Missing`), and a root that
+  names both a default-imported classifier and a package commits to the classifier.
+- ✅ An inapplicable generic call reports the mismatched argument against the parameter type
+  under the receiver and expected result (`s.let(1)` expects `(String) -> Int`).
+- ⬜ With no expected result, kotlinc also reports CANNOT_INFER for the unfixed type parameter and
+  renders it `uninferred R (of fun <T, R> T.let)`; krusty renders the bound.
+- ✅ kotlinc 2.4.20 chooses among a rejected member and the rejected same-name extensions by
+  specificity, then non-generic over generic: one survivor reports its own errors, tied survivors
+  one NONE_APPLICABLE at the callee name, for plain and safe calls; earlier releases keep the
+  member's own error (`unselectable_but_existing_members_are_not_called_unresolved`,
+  `member_extension_function_e2e`).
+- ⬜ kotlinc types a call it resolved to one rejected candidate with that candidate's return type,
+  so `fun h(): Int = K().e()` against `fun K.e(x: Int): String` also reports RETURN_TYPE_MISMATCH;
+  krusty types the call as an error and reports only the missing argument (every version).
+- ⬜ A rejected member whose argument TYPES mismatch (not its mapping) is not weighed against the
+  extensions: `catalog.loadAll(true)` against `loadAll(String)` and `Catalog.loadAll(Int)` reports
+  the extension's mismatch; kotlinc reports the member's (2.4.10) or both together (2.4.20).
+- ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
+  names parameter `p0` where kotlinc names `other`, and 2.4.20 `s?.equals()` on a `String?` joins
+  the member with `String?.equals` but kotlinc also reports the member's missing `other`. Pinned as
+  a divergence (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
+- ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
+  its reasons, anchored at the callee name) differs from krusty's.
+
+## JVM unified inliner — one bytecode inliner ported from kotlinc's `MethodInliner`  ◐
+
+kotlinc inlines every call to an `inline` function the same way, whatever the callee's origin: it
+gets the callee as an ASM `MethodNode` (read from the class file for a library, compiled from IR for
+the current module), compiles each inline lambda argument to a `MethodNode` too, and lets
+`MethodInliner` merge them into the call site. The byte shape kotlinc users see comes out of that
+one transform as by-products: the `nop` line anchor, the `$i$f$`/`$i$a$` markers, the inline local
+names, the remapped `LineNumberTable` plus SMAP, and `$$inlined$` regeneration of anonymous objects.
+
+krusty has three paths instead, and none produces all of that: same-module calls are cloned in IR
+(`fir_lower/inlining.rs`), library calls with a recognized body shape are decoded into IR plans
+(`InlineBodyPlan`, `jvm_libraries/inline_body_plan/`), and the rest are spliced as bytes
+(`jvm::inline::splice_unified`). About 2,250 of the 6,283 divergent box files on 2.4.20 differ in
+inline-site shape (`nop` anchors 1,148 files, markers 811, the coroutine helper's
+`$runBlocking$$inlined$Continuation$1` 488). The migration replaces all three with one port, stage by
+stage; each stage reports box passes, byte-identical files and divergent classes, and none may
+regress.
+
+- ✅ 1. `jvm::method_node`: ASM's tree form (label, line and instruction nodes, symbolic operands,
+  try/catch and local ranges on labels), a reader from class-file bodies and an assembler against
+  any constant pool, interning in ASM `MethodWriter` order. Every method of the stdlib reads, lays
+  out and reads back unchanged. No output change.
+- ☐ 2. Call-site codegen and the `MethodInliner` core for callees without inline lambda arguments,
+  replacing `splice_unified`'s plain path: arguments stored to fresh temporaries (`IrInlineCodegen`),
+  the `nop` anchor, `$i$f$` markers, local remapping and renaming, return normalization, in-place
+  arguments for `@InlineOnly`, reified operations, `LineNumberTable` remapping and SMAP
+  (`SourceMapCopier`).
+- ☐ 3. Inline lambdas: each lambda body is emitted to a node, invoke sites are found by kotlinc's
+  source analysis (`markPlacesForInlineAndRemoveInlinable`), captured values and `$i$a$` markers,
+  non-local returns. Replaces the lambda splice (`try_inline_unified`).
+- ☐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
+  are regenerated as `$$inlined$` classes.
+- ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
+- ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
+  inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
+- ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
+  on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).

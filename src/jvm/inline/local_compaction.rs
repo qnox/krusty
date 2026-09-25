@@ -1,10 +1,9 @@
 //! JVM-local compaction for parameters removed by an inline splice.
 //!
-//! A removed `long` or `double` closes two physical slots even though it contributes one
-//! StackMapTable entry. Keeping those two views in one layout object prevents instruction locals,
-//! frames, debug locals, and the caller's `top_local` from disagreeing.
+//! A removed `long` or `double` closes two physical slots. Keeping that width in one layout object
+//! prevents instruction locals, debug locals, and the caller's `top_local` from disagreeing.
 
-use super::{param_store_ops, VType};
+use super::param_store_ops;
 
 #[derive(Clone, Debug)]
 pub(super) struct LocalCompaction {
@@ -50,25 +49,6 @@ impl LocalCompaction {
             .sum::<u16>();
         base + slot - closed
     }
-
-    /// Drop removed locals from a collapsed StackMapTable locals vector. Width is tracked by JVM
-    /// slot, not vector position: `long` and `double` occupy one entry but two physical slots.
-    pub(super) fn drop_entries(&self, collapsed: &[VType]) -> Vec<VType> {
-        let mut kept = Vec::with_capacity(collapsed.len());
-        let mut slot = 0u16;
-        for value in collapsed {
-            let width = if matches!(value, VType::Long | VType::Double) {
-                2
-            } else {
-                1
-            };
-            if !self.is_removed(slot) {
-                kept.push(*value);
-            }
-            slot += width;
-        }
-        kept
-    }
 }
 
 fn parameter_slots(descriptor: &str) -> Option<Vec<RemovedParameter>> {
@@ -88,13 +68,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wide_removed_parameters_close_two_instruction_and_frame_slots() {
+    fn wide_removed_parameters_close_two_instruction_slots() {
         let compact = LocalCompaction::all_parameters("(JI)V").expect("descriptor");
         assert_eq!(compact.compact(3, 7), 7);
         assert_eq!(compact.compact(4, 7), 8);
-        assert_eq!(
-            compact.drop_entries(&[VType::Long, VType::Int, VType::Float]),
-            vec![VType::Float]
-        );
     }
 }
