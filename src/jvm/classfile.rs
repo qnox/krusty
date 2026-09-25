@@ -12,6 +12,7 @@ mod constant_pool_queries;
 mod control_flow;
 mod coroutine_markers;
 mod dead_code;
+mod descriptor_mentions;
 mod line_numbers;
 mod local_slots;
 mod method_parameters;
@@ -23,6 +24,8 @@ mod redundant_gotos;
 mod stack_maps;
 mod stack_peephole;
 mod temporaries;
+
+use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 
@@ -191,15 +194,18 @@ enum Const {
 struct ConstPool {
     entries: Vec<Const>, // index 0 unused conceptually; we store 1-based via len()
     dedup: HashMap<Const, u16>,
-    /// Wide (`Long`/`Double`, 2-slot) entry count — lets `slot_count`/`entry_at` skip the O(n) slot walk
-    /// for the common all-narrow pool.
-    wide_count: u16,
+    /// The entry occupying each pool slot, by `slot - 1`. A `Long`/`Double` takes two slots, so
+    /// once one is interned slots and entries no longer line up; its second slot holds
+    /// [`Self::UNUSABLE_SLOT`], which names no entry.
+    slot_entries: Vec<u32>,
 }
 
 impl ConstPool {
+    const UNUSABLE_SLOT: u32 = u32::MAX;
+
     /// Number of slots used (long/double take 2). Pool count in the file = this + 1.
     fn slot_count(&self) -> u16 {
-        self.entries.len() as u16 + self.wide_count
+        self.slot_entries.len() as u16
     }
 
     fn intern(&mut self, c: Const) -> u16 {
@@ -207,8 +213,9 @@ impl ConstPool {
             return i;
         }
         let idx = self.slot_count() + 1; // 1-based
+        self.slot_entries.push(self.entries.len() as u32);
         if matches!(c, Const::Long(_) | Const::Double(_)) {
-            self.wide_count += 1;
+            self.slot_entries.push(Self::UNUSABLE_SLOT);
         }
         self.entries.push(c.clone());
         self.dedup.insert(c, idx);
@@ -608,38 +615,6 @@ pub(crate) fn split_declaration_annotations(
     )
 }
 
-/// Record every name a `contains("L<name>;")` search over `value` could have matched.
-///
-/// This is deliberately NOT a JVM descriptor parser, and must not be replaced by one. It reproduces
-/// a literal substring predicate, so it records every run from an `L` to the next `;` — including
-/// runs that begin at an `L` INSIDE another name, and including text that is not a well-formed
-/// descriptor at all. A conventional parser would visit only the class names a descriptor properly
-/// declares, and would silently change `InnerClasses` retention for exactly those inputs.
-fn record_mentioned_names(value: &str, names: &mut crate::name_tree::FxHashMap<String, ()>) {
-    for (index, byte) in value.as_bytes().iter().enumerate() {
-        if *byte != b'L' {
-            continue;
-        }
-        let rest = &value[index + 1..];
-        if let Some(end) = rest.find(';') {
-            names.insert(rest[..end].to_string(), ());
-        }
-    }
-}
-
-struct DescriptorMentionCache {
-    fields: usize,
-    methods: usize,
-    pool_entries: usize,
-    names: crate::name_tree::FxHashMap<String, ()>,
-}
-
-impl DescriptorMentionCache {
-    fn matches(&self, sizes: (usize, usize, usize)) -> bool {
-        (self.fields, self.methods, self.pool_entries) == sizes
-    }
-}
-
 pub struct ClassWriter {
     cp: ConstPool,
     /// Every internal class name mentioned in class-type position by a field/method descriptor or a
@@ -758,12 +733,7 @@ impl ClassWriter {
         }
         self.cp.record_typed_descriptor_names(&mut record);
         let answer = read(&names);
-        *self.mentioned_names.borrow_mut() = Some(DescriptorMentionCache {
-            fields: sizes.0,
-            methods: sizes.1,
-            pool_entries: sizes.2,
-            names,
-        });
+        *self.mentioned_names.borrow_mut() = Some(DescriptorMentionCache::new(sizes, names));
         answer
     }
 
@@ -4306,6 +4276,28 @@ mod tests {
         let a = cp.utf8("X");
         let b = cp.utf8("X");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_pool_index_past_a_wide_constant_names_the_entry_in_that_slot() {
+        let mut cp = ConstPool::default();
+        let first = cp.utf8("first");
+        let wide = cp.long(5);
+        let double = cp.double(2.5);
+        let next = cp.utf8("next");
+        let class = cp.class("pkg/Owner");
+        assert_eq!((first, wide, double, next, class), (1, 2, 4, 6, 8));
+        assert_eq!(cp.slot_count(), 8);
+        assert_eq!(cp.utf8_at(first), Some("first"));
+        assert!(matches!(cp.entry_at(wide), Some(Const::Long(5))));
+        assert!(matches!(cp.entry_at(double), Some(Const::Double(_))));
+        assert_eq!(cp.utf8_at(next), Some("next"));
+        assert_eq!(cp.class_name(class), Some("pkg/Owner"));
+        // The second slot of a wide constant, and any slot past the pool, name no entry.
+        assert!(cp.entry_at(wide + 1).is_none());
+        assert!(cp.entry_at(double + 1).is_none());
+        assert!(cp.entry_at(0).is_none());
+        assert!(cp.entry_at(class + 1).is_none());
     }
 
     #[test]
