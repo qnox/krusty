@@ -111,12 +111,25 @@ pub(super) fn vc_member_impl_name(
     under: &Under,
     is_suspend: bool,
 ) -> String {
-    let mangled = vc_mangle(source_name, params, ret, under, false, is_suspend);
+    let mangled = vc_member_entry_name(source_name, params, ret, under, is_suspend);
     if mangled == source_name {
         format!("{source_name}-impl")
     } else {
         mangled
     }
+}
+
+/// The name a value-class member answers to on the box: its declared name, mangled when its
+/// signature mentions a value class (`f-<hash>`). Its static implementation takes this name too,
+/// or `name-impl` when there is nothing to mangle.
+pub(super) fn vc_member_entry_name(
+    source_name: &str,
+    params: &[Ty],
+    ret: &Ty,
+    under: &Under,
+    is_suspend: bool,
+) -> String {
+    vc_mangle(source_name, params, ret, under, false, is_suspend)
 }
 
 /// kotlinc's name for a function whose JVM signature mentions a value class: `base-<hash>` (a
