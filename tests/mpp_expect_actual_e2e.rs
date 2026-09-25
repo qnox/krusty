@@ -287,3 +287,43 @@ fn expect_class_actualized_by_typealias_across_files() {
     };
     assert_eq!(got, "OK");
 }
+
+/// An `expect class` that writes no constructor has none to actualize (kotlinc gives it no default
+/// constructor), so its `actual` may declare any constructor, here with a property parameter.
+#[test]
+fn expect_class_without_constructor_actualized_by_constructor_property() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect class Holder {
+    val t: String
+}
+
+fun Holder.read(): String = t
+
+actual class Holder constructor(actual val t: String)
+
+fun box(): String = Holder("OK").read()
+"#);
+}
+
+/// An `expect` member is actualized by a member the `actual` class inherits from an ordinary
+/// supertype, as a fake override.
+#[test]
+fn expect_member_actualized_by_inherited_member() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect class A() {
+    fun foo(s: String): String
+    val bar: String
+}
+
+fun common(): String = A().foo("O") + A().bar
+
+open class Base {
+    fun foo(s: String) = s
+    val bar: String = "K"
+}
+
+actual class A : Base()
+
+fun box(): String = common()
+"#);
+}

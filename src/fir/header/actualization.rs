@@ -123,6 +123,55 @@ impl ActualizationTypeBindings {
     }
 }
 
+/// The source classifiers whose members make up `actual`'s member scope: `actual` itself first,
+/// then each supertype declared in this module, breadth first and each once. A supertype from a
+/// library contributes nothing here; only source declarations have headers to pair.
+fn actual_member_owners(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+    actual: DeclarationId,
+) -> Vec<DeclarationId> {
+    let classifiers = bindings
+        .by_declaration
+        .iter()
+        .map(|(declaration, name)| (*name, *declaration))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut owners = vec![actual];
+    let mut next = 0;
+    while next < owners.len() {
+        let owner = owners[next];
+        next += 1;
+        let Some(HeaderDeclarationKind::Classifier {
+            supertypes, base, ..
+        }) = headers.syntax.declaration(owner).map(|value| value.kind)
+        else {
+            continue;
+        };
+        let Some(source) = headers
+            .declarations
+            .anchor(owner)
+            .map(|anchor| anchor.source)
+        else {
+            continue;
+        };
+        for supertype in base
+            .into_iter()
+            .chain(headers.syntax.type_operands(supertypes).iter().copied())
+        {
+            let Some(declaration) = bindings
+                .type_classifier(source, supertype)
+                .and_then(|name| classifiers.get(&name).copied())
+            else {
+                continue;
+            };
+            if !owners.contains(&declaration) {
+                owners.push(declaration);
+            }
+        }
+    }
+    owners
+}
+
 /// [`Actualization::pairs`] alone, for callers that need no more.
 pub fn actualized_declaration_pairs(
     headers: &StreamedHeaderModule,
@@ -1071,14 +1120,32 @@ pub fn actualization(
             (DeclarationKind, String, ReceiverKey, usize),
             Vec<DeclarationId>,
         >::new();
-        for child in headers.stubs.iter().filter(|stub| {
-            headers
-                .declarations
-                .anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(pair.actual))
-        }) {
-            if let Some(key) = child_key(headers, child, bindings, &actualized_aliases) {
-                actual_children.entry(key).or_default().push(child.id);
+        // The actual classifier's member scope: what it declares, then what it inherits. kotlinc
+        // matches an `expect` member against that whole scope, so a member the actual class
+        // inherits from a (non-expect) supertype actualizes it as a fake override. A declared
+        // member hides an inherited one with the same key, as an override does.
+        for (depth, owner) in actual_member_owners(headers, bindings, pair.actual)
+            .into_iter()
+            .enumerate()
+        {
+            let mut owner_children = std::collections::HashMap::<_, Vec<DeclarationId>>::new();
+            for child in headers.stubs.iter().filter(|stub| {
+                headers
+                    .declarations
+                    .anchor(stub.id)
+                    .is_some_and(|anchor| anchor.owner == Some(owner))
+                    && (depth == 0
+                        || (matches!(
+                            stub.kind,
+                            DeclarationKind::Function | DeclarationKind::Property
+                        ) && stub.visibility != crate::types::Visibility::Private))
+            }) {
+                if let Some(key) = child_key(headers, child, bindings, &actualized_aliases) {
+                    owner_children.entry(key).or_default().push(child.id);
+                }
+            }
+            for (key, children) in owner_children {
+                actual_children.entry(key).or_insert(children);
             }
         }
         let mut owed = Vec::new();
