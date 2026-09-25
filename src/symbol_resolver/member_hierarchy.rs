@@ -340,6 +340,17 @@ pub(crate) fn members_in_hierarchy(
         );
     }
 
+    normalize_inherited_member_functions(source, &mut functions);
+    Callables::from_parts(functions, properties)
+}
+
+/// Normalize one complete, receiver-ranked member family after hierarchy traversal. The ordinary
+/// provider-backed walk and the checker's active body-local overlay both feed this same operation;
+/// providers continue to expose only declarations and direct supertypes.
+pub(crate) fn normalize_inherited_member_functions(
+    source: &dyn SymbolSource,
+    functions: &mut FunctionSet,
+) {
     // Kotlin operator conventions are inherited by an override even when the overriding declaration
     // does not repeat `operator` (`Comparable<T>.compareTo` is the common case). This is a relation
     // between declarations in the class model, so compute it here while the one core hierarchy is
@@ -366,9 +377,8 @@ pub(crate) fn members_in_hierarchy(
             function.flags.operator = true;
         }
     }
-    inherit_overridden_default_arguments(source, &mut functions);
-    retain_covariant_inherited_overrides(source, &mut functions);
-    Callables::from_parts(functions, properties)
+    inherit_overridden_default_arguments(source, functions);
+    retain_covariant_inherited_overrides(source, functions);
 }
 
 /// Publish inherited default-argument availability on the overriding declaration that remains the
@@ -705,6 +715,12 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
                     Ty::obj_name(existing.callable.owner),
                     Ty::obj_name(candidate.callable.owner),
                 );
+            // A nearer declaration reached by the same breadth-first receiver walk is an override
+            // slot even while an active local classifier has no provider-published owner edge yet.
+            // Unrelated direct supertypes remain at the same rank and still require the ordinary
+            // owner/result comparison below.
+            let candidate_rank_overrides = candidate.receiver_rank < existing.receiver_rank;
+            let existing_rank_overrides = existing.receiver_rank < candidate.receiver_rank;
             let same_result = candidate_is_subtype && existing_is_subtype;
             let candidate_implements_abstract = same_result
                 && candidate.receiver_rank == existing.receiver_rank
@@ -721,6 +737,7 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
             if candidate_implements_abstract
                 || (candidate_is_subtype
                     && (candidate_owner_overrides
+                        || candidate_rank_overrides
                         || (existing.receiver_rank == candidate.receiver_rank
                             && !existing_is_subtype)))
             {
@@ -729,6 +746,7 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
                 || both_abstract_fake_override
                 || (existing_is_subtype
                     && (existing_owner_overrides
+                        || existing_rank_overrides
                         || (existing.receiver_rank == candidate.receiver_rank
                             && !candidate_is_subtype)))
             {

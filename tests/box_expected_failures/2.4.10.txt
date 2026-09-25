@@ -22,7 +22,6 @@ boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/kt2702.kt
-bridges/returnTypeSignature.kt
 bridges/simpleReturnType.kt
 bridges/special.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
@@ -132,7 +131,6 @@ coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
-defaultArguments/complexInheritance.kt
 defaultArguments/convention/incWithDefaultInGetter.kt
 defaultArguments/function/kt36188.kt
 defaultArguments/function/kt36188_2.kt
@@ -146,7 +144,6 @@ delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegation/delegationDifferentModule.kt
-delegation/genericFunctionInGenericInterface.kt
 diagnostics/functions/tailRecursion/defaultArgs.kt
 diagnostics/functions/tailRecursion/defaultArgs2.kt
 diagnostics/functions/tailRecursion/defaultArgsWithSideEffects.kt
@@ -170,7 +167,6 @@ extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithInline.kt
-fakeOverride/intersectionInLocal.kt
 fieldRename/delegates.kt
 finally/kt31923_break.kt
 finally/kt31923_continue.kt
@@ -205,7 +201,6 @@ inference/capturedSelfInsideIntersection.kt
 inference/capturedTypeAsLambdaInputType.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/earlierReifiedFix.kt
-inference/kt10822.kt
 inference/kt67609.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
@@ -221,8 +216,6 @@ inference/whenAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
 initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
-inline/fakeOverrideInlining.kt
-inline/fakeOverrideInliningCrossModule.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
 inline/typeSubstitutionInFakeOverride.kt
@@ -303,13 +296,11 @@ inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric.
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 innerNested/superConstructorCall/deepInnerHierarchy.kt
-innerNested/superConstructorCall/deepLocalHierarchy.kt
 intrinsics/kt8666.kt
 ir/kt25405.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-ir/serializationRegressions/anonFakeOverride.kt
 kclass/kclass1.kt
 lateinit/innerIsInitialized.kt
 lazyCodegen/when.kt
@@ -320,8 +311,6 @@ localClasses/localClassInParameterInitializer.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/basic/expectActualFakeOverrides.kt
 multiplatform/k2/basic/extensionPropertyWithAnonymousExtension.kt
-multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
-multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/defaultArguments/dispatchReceiverValue.kt
@@ -341,9 +330,7 @@ nullCheckOptimization/kt22410.kt
 objects/flist.kt
 objects/interfaceCompanionObjectReference.kt
 objects/kt3684.kt
-objects/kt46136.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
-objects/substitutionFunctionFromSuper.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 platformTypes/primitives/unaryMinus.kt
 primitiveTypes/equalityWithObject/generated/boxedEqPrimitiveByte.kt
