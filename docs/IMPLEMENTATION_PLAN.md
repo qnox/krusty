@@ -4558,9 +4558,28 @@ shadow with no output change.
   instructions exactly. No box file becomes byte-identical (363 before and after); box pass/fail is
   unchanged. One cast before an `aastore` remains in the corpus (`inline/genericFunctionReference`,
   a method the rewrite keeps as emitted; 5g).
-- ☐ 5c–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
-  PopBackwardPropagation and the mid-pipeline DeadCode, the complete RedundantNullCheck), the first
-  three passes in kotlinc's order, no all-or-nothing rewrite, and the mandatory steps.
+- ✅ 5c. RedundantNullCheck, complete (`bytecode_passes/redundant_null_checks/`): kotlinc's
+  `RedundantNullCheckMethodTransformer` as a whole. Each round writes what each check of a local
+  teaches about it into a copy of the method (`assumptions`: `aconst_null`/`AS_NOT_NULL` stores on
+  the two edges of a null jump or `instanceof` test, after a `checkNotNull*`, and `aconst_null;
+  athrow` after a throwing `Intrinsics` helper), runs `NullabilityInterpreter` over the copy
+  (`nullability`: `new`, reference `ldc`, `Unit.INSTANCE`, boxing, new arrays and progression
+  iterators are non-null; `aconst_null` is null unless it is a `typeOf` placeholder; `checkcast`
+  keeps its operand's value unless it is a reified safe-as), and folds `ifnull`/`ifnonnull` into a
+  `goto` or nothing, `instanceof` of `null` into `false` and of a non-null value of exactly the
+  tested class into `true`, and the `checkNotNull*` calls as before; the rounds repeat while a jump
+  or `instanceof` folds. The old straight-line, locals-only analysis is gone. The pass hands the
+  redundant-cast pass (which still selects on the emitted method, 5f) where each node came from. In
+  the 2.4.20 box corpus 227 of 26,135 classes change against 5b (226 without `JvmInlineKt`), in about
+  219 box files, 256 methods: 20 methods become identical to kotlinc's instructions and none stops
+  being so; one more box file is byte-identical (360). Box pass/fail is unchanged. Where krusty now
+  folds a check kotlinc keeps, the fold is sound and comes from krusty's emitted shape: a safe call
+  or elvis through a temporary local (kotlinc uses `dup`) gives the analysis a local to learn from
+  (`kt245`, `fakeInlinerVariables`, `evaluationOrderForNullableArgument`'s `null in a..b`), or the
+  input is already miscompiled in an expected failure (a missing reified marker lets `x is T` fold).
+- ☐ 5d–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
+  PopBackwardPropagation and the mid-pipeline DeadCode), the first three passes in kotlinc's order,
+  no all-or-nothing rewrite, and the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

@@ -8,7 +8,7 @@ mod fast_analyzer;
 mod frame;
 mod liveness;
 
-pub(crate) use basic_values::{BasicInterpreter, BasicValue};
+pub(crate) use basic_values::{merge_references, BasicInterpreter, BasicValue};
 pub(crate) use control_flow::ControlFlowGraph;
 pub(crate) use fast_analyzer::{
     analyze, analyze_with, AnalyzerError, AnalyzerOptions, Executor, PlainFrames,
