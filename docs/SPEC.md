@@ -6880,6 +6880,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/class_member_order_e2e.rs` (the member lists of every class, names and descriptors in
   order, equal to kotlinc's).
 
+- **A type parameter bounded by a value class is that value class at the JVM boundary.** kotlinc's
+  type mapper maps a type parameter to its representative upper bound, made nullable when the
+  occurrence or any bound on its chain is nullable; `InlineClassAbi` mangles over the same erased
+  bound. So `fun <T : IC?> f(x: T): T` is declared, named and called exactly as
+  `fun f(x: IC?): IC?` would be: `T : Int?` is `Integer`, `T : A?` over a non-null reference
+  underlying is `A`'s carrier. A nullable type-parameter underlying keeps its nullability, so
+  `value class X<T : Any>(val x: T?)` carries `Any?` and `X?` is boxed. A position declared as a
+  type parameter with a nullable bound carries no nullability annotation, even after erasure made it
+  the bound's carrier. A dependency member that declares a bare type-parameter result records it as
+  its declared result (`jvm_libraries::metadata_declared_nonnull_nonsuspend_return`), like
+  top-level and source callables, and receiver specialization leaves that bare parameter
+  unsubstituted: `KProperty1<C, Z>.get` still reads a box, `fun <T : A?> f(): T` hands back the
+  carrier. A mangle suffix is always eight characters (`-` plus seven base64url digits), and a hash
+  may itself contain `-`, so an already-mangled name is recognized by its fixed-length suffix, not
+  by its last dash. Tests: `tests/value_class_type_parameter_erasure_e2e.rs` (an interface result
+  bounded by a nullable value class and a nullable type-parameter underlying byte-identical to
+  kotlinc; a consumer linking against kotlinc-built `<T : IC?>` functions; a dash inside a hash).
+  Corpus: `boxReturnValueOnOverride/overrideGenericWithNullableInlineClassUpperBound*` and
+  `inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes*`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

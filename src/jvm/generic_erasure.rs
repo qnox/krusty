@@ -47,9 +47,17 @@ fn resolve_primary_bound(
     bound
 }
 
+/// A type-parameter occurrence erases to its primary bound. kotlinc's type mapper keeps the
+/// occurrence's nullability on that bound (`T : Int?` maps as `Int?`, so `Integer`, not `int`; and
+/// `T : IC?` maps as the nullable value class), and a bare `T` is nullable when a bound along its
+/// chain is. A reference bound erases to the same class either way.
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     match ty {
-        Ty::TyParam(name, _) => erasures.get(name).copied().unwrap_or(ty),
+        Ty::TyParam(name, _) => match erasures.get(name).copied() {
+            Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
+            Some(erasure) => erasure,
+            None => ty,
+        },
         Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
             Ty::nullable(physical_type(*inner, erasures))
         }

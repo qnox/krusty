@@ -6,16 +6,61 @@
 //! spelling here from the declared signature, so the declaration and its uses cannot disagree.
 
 use super::Under;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
+use std::collections::HashSet;
+
+/// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased. A type parameter
+/// stands for whatever its bound erases to, whatever the nullability along the way.
+fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
+    let mut current = t.non_null();
+    let mut seen = HashSet::new();
+    loop {
+        match current {
+            Ty::Obj(fq_name, _) => return Some(fq_name),
+            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+            _ => return None,
+        }
+    }
+}
+
+/// A type-parameter occurrence whose erased upper bound is a value class, as the value-class type
+/// kotlinc's type mapper erases it to: the bound, made nullable when the occurrence is (marked, or
+/// through a nullable bound along its chain). `T : IC?` is represented exactly as `IC?` is. Any
+/// other type is returned unchanged.
+pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
+    if !matches!(t.non_null(), Ty::TyParam(..)) {
+        return t;
+    }
+    let mut bound = t.non_null();
+    let mut seen = HashSet::new();
+    while let Ty::TyParam(name, next) = bound {
+        if !seen.insert(name) {
+            return t;
+        }
+        bound = next.non_null();
+    }
+    match bound {
+        Ty::Obj(fq_name, _) if under.contains_key(&fq_name) => {
+            if t.is_nullable() || t.non_null().upper_bound_admits_null() {
+                Ty::nullable(bound)
+            } else {
+                bound
+            }
+        }
+        _ => t,
+    }
+}
 
 /// kotlinc's inline-class mangling info for an IR type, against the value classes in `under`.
+///
+/// kotlinc (`InlineClassAbi.asInfoForMangling`) reads a type through its erased upper bound, so
+/// `T : IC?` contributes `LIC?;` exactly as `IC?` does. A type parameter is nullable when it is
+/// marked so or any bound along its chain is (`IrType.isNullable`).
 fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMangling {
-    let (fq_name, is_value, is_nullable) = match t.non_null().obj_internal() {
-        Some(fq_name) => (
-            fq_name.render(),
-            under.contains_key(&fq_name),
-            t.is_nullable(),
-        ),
+    let is_nullable =
+        t.is_nullable() || matches!(t, Ty::TyParam(..)) && t.upper_bound_admits_null();
+    let (fq_name, is_value, is_nullable) = match erased_upper_bound(t) {
+        Some(fq_name) => (fq_name.render(), under.contains_key(&fq_name), is_nullable),
         None => (String::new(), false, false),
     };
     crate::jvm::inline_class::InfoForMangling {
@@ -29,9 +74,10 @@ fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMang
 }
 
 /// [`vc_mangle`] that leaves an ALREADY-mangled name alone: if `base` is exactly what this signature
-/// would produce from its own stem, it is returned unchanged. A JVM method name a Kotlin declaration
-/// produces never contains `-` unless kotlinc's value-class mangle put it there, so splitting at the
-/// last `-` and re-mangling the stem is an exact test for "this name is already the answer".
+/// would produce from its own stem, it is returned unchanged. The mangle appends a fixed-width
+/// suffix, `-` plus seven base64url characters, so the stem is everything before the last eight
+/// characters. The hash itself may contain `-` (`getS-C-fiWsc`, `memberFun--ndakOA`), so splitting
+/// at the last `-` would take a piece of the hash for the stem and mangle the name a second time.
 pub(super) fn vc_mangle_once(
     base: &str,
     params: &[Ty],
@@ -40,7 +86,12 @@ pub(super) fn vc_mangle_once(
     is_file_class: bool,
     is_suspend: bool,
 ) -> String {
-    if let Some((stem, _)) = base.rsplit_once('-') {
+    let stem = base
+        .len()
+        .checked_sub(crate::jvm::inline_class::MANGLE_SUFFIX_LEN)
+        .filter(|&at| base.is_char_boundary(at) && base[at..].starts_with('-'))
+        .map(|at| &base[..at]);
+    if let Some(stem) = stem {
         if vc_mangle(stem, params, ret, under, is_file_class, is_suspend) == base {
             return base.to_string();
         }

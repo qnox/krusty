@@ -1837,6 +1837,8 @@ mod value_class_structural_bodies_e2e;
 mod value_class_template_lambda_e2e;
 #[path = "value_class_text_e2e.rs"]
 mod value_class_text_e2e;
+#[path = "value_class_type_parameter_erasure_e2e.rs"]
+mod value_class_type_parameter_erasure_e2e;
 #[path = "value_param_constructor_accessor_e2e.rs"]
 mod value_param_constructor_accessor_e2e;
 #[path = "var_extension_property_e2e.rs"]
