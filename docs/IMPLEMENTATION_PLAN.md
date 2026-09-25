@@ -4419,8 +4419,13 @@ shadow with no output change.
   local tables and the implicit return move with their labels; the per-offset remapping is gone.
   A spliced `ldc_w` whose host index fits one byte is now written `ldc`, as ASM writes it (121
   classes of the 2.4.20 box corpus); no other class changes.
-- ☐ 3b–6. The rewrite passes ported onto `MethodNode` (retiring the bridge), a `FrameMap`-style
-  slot allocator, and kotlinc's transformer order.
+- ✅ 3b. The stack peephole, redundant-`goto` and `nop` cleanup, jump negation, dead-code
+  elimination and slot compaction run on the relabelled `MethodNode` (`jvm::bytecode_passes`),
+  over its labels, line numbers and ranges; no class of the 2.4.20 box corpus changes. The bridge
+  no longer carries removed-table masks or a slot renumbering; it pins the labels standing after a
+  null-check fold's inserted instruction, which the `goto` and jump passes leave alone.
+- ☐ 3c–6. The temporaries, redundant-cast and null-check passes ported onto `MethodNode`
+  (retiring the bridge), a `FrameMap`-style slot allocator, and kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

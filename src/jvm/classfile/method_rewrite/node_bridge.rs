@@ -158,13 +158,6 @@ pub(super) struct PassOutcome<'a> {
     pub late_branch: &'a dyn Fn(Placement) -> bool,
     /// The original indices a null-check fold left a value on the stack at.
     pub stack_targets: &'a [usize],
-    /// Per line number, per protected range and per local variable, whether dead-code
-    /// elimination removed it; empty when it removed nothing.
-    pub removed_lines: &'a [bool],
-    pub removed_handlers: &'a [bool],
-    pub removed_locals: &'a [bool],
-    /// A local slot's number after the passes renumbered them.
-    pub slot: &'a dyn Fn(u16) -> Option<u16>,
     /// The original index of the method's implicit `return`, if it has one.
     pub implicit_return: Option<usize>,
 }
@@ -173,6 +166,9 @@ pub(super) struct PassOutcome<'a> {
 pub(super) struct Relabelled {
     pub node: MethodNode,
     pub implicit_return: Option<LabelId>,
+    /// The labels standing after the instructions a rule inserted in front of an original index,
+    /// which the goto and jump passes leave jumps to alone.
+    pub pinned: BTreeSet<LabelId>,
 }
 
 /// Where the labels of each original index stand among the rewritten nodes: the early position is
@@ -224,7 +220,7 @@ impl Labels {
 }
 
 /// `rewritten` as a node over `original`'s tables: each original index's labels stand where its
-/// instructions landed, each removed table entry is gone, and each local has its new slot.
+/// instructions landed.
 pub(super) fn relabel(
     original: &MethodNode,
     indexed: &IndexedBody,
@@ -242,7 +238,6 @@ pub(super) fn relabel(
         .copied()
         .filter(|&target| positions.early[target] != positions.late[target])
         .collect();
-    let removed = |table: &[bool], at: usize| table.get(at).copied().unwrap_or(false);
 
     let mut node = original.clone();
     let mut labels = Labels {
@@ -269,17 +264,12 @@ pub(super) fn relabel(
     };
 
     let mut lines_at: BTreeMap<LabelId, Vec<u16>> = BTreeMap::new();
-    for (at, &(index, line)) in indexed.lines.iter().enumerate() {
-        if !removed(rewritten.removed_lines, at) {
-            let label = debug_label(&mut labels, &mut node, index);
-            lines_at.entry(label).or_default().push(line);
-        }
+    for &(index, line) in &indexed.lines {
+        let label = debug_label(&mut labels, &mut node, index);
+        lines_at.entry(label).or_default().push(line);
     }
     let mut try_catch_blocks = Vec::with_capacity(original.try_catch_blocks.len());
-    for (at, block) in original.try_catch_blocks.iter().enumerate() {
-        if removed(rewritten.removed_handlers, at) {
-            continue;
-        }
+    for block in &original.try_catch_blocks {
         let mut relabel = |label| labels.early(&mut node, indexed.index_of(label));
         try_catch_blocks.push(TryCatchBlock {
             start: relabel(block.start),
@@ -289,16 +279,13 @@ pub(super) fn relabel(
         });
     }
     let mut local_variables = Vec::with_capacity(original.local_variables.len());
-    for (at, local) in original.local_variables.iter().enumerate() {
-        if removed(rewritten.removed_locals, at) {
-            continue;
-        }
+    for local in &original.local_variables {
         local_variables.push(LocalVariable {
             name: local.name.clone(),
             desc: local.desc.clone(),
             start: debug_label(&mut labels, &mut node, indexed.index_of(local.start)),
             end: debug_label(&mut labels, &mut node, indexed.index_of(local.end)),
-            slot: (rewritten.slot)(local.slot)?,
+            slot: local.slot,
         });
     }
     let implicit_return = rewritten
@@ -397,6 +384,7 @@ pub(super) fn relabel(
     Some(Relabelled {
         node,
         implicit_return,
+        pinned: labels.late.values().copied().collect(),
     })
 }
 
@@ -497,10 +485,6 @@ mod tests {
                 nodes: &nodes,
                 late_branch,
                 stack_targets: &stack_targets,
-                removed_lines: &[],
-                removed_handlers: &[],
-                removed_locals: &[],
-                slot: &|slot| Some(slot + 1),
                 implicit_return,
             },
             &pool,
@@ -533,9 +517,8 @@ mod tests {
         assert_eq!(assembled.code, expected.code);
         assert_eq!(assembled.exception_table, expected.exception_table);
         assert_eq!(assembled.line_numbers, expected.line_numbers);
-        // Only the slot moved, by the renumbering the passes asked for.
         assert_eq!(assembled.local_variables.len(), 1);
-        assert_eq!(assembled.local_variables[0].slot, 1);
+        assert_eq!(assembled.local_variables[0].slot, 0);
         assert_eq!(
             (
                 assembled.local_variables[0].start_pc,

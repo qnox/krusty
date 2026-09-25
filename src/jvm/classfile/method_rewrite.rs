@@ -20,10 +20,13 @@ use std::collections::BTreeSet;
 
 use super::bytecode_analysis::{ControlGraph, FrameTypes};
 use super::constant_pool_queries::PoolLookup;
+use super::redundant_checkcasts;
+use super::stack_maps;
 use super::temporaries::{self, Body, Placement};
-use super::{dead_code, local_slots, negated_jumps, redundant_checkcasts, redundant_gotos};
-use super::{stack_maps, stack_peephole};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
+use crate::jvm::bytecode_passes::{
+    dead_code, local_slots, negated_jumps, redundant_gotos, stack_peephole,
+};
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::inline::{assemble, insn_offsets_at, BranchTarget, Insn};
 use crate::jvm::method_node::{CodeAttribute, MethodNode};
@@ -172,12 +175,9 @@ impl ClassWriter {
             arrivals[handler.handler] = true;
         }
         let mut marks = vec![false; n + 1];
-        let mut lines = vec![false; n + 1];
         for &(at, _) in &indexed.lines {
             marks[at] = true;
-            lines[at] = true;
         }
-        let mut variable_bounds = vec![false; n + 1];
         let mut named = Vec::new();
         for (range, local) in indexed.locals.iter().zip(&node.local_variables) {
             let Some((start, end)) = *range else {
@@ -185,8 +185,6 @@ impl ClassWriter {
             };
             marks[start] = true;
             marks[end] = true;
-            variable_bounds[start] = true;
-            variable_bounds[end] = true;
             named.push((start, end, local.slot));
         }
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
@@ -298,7 +296,7 @@ impl ClassWriter {
         };
         let folded = temporaries::eliminate(&body);
         let folded_any = folded.is_some();
-        let mut rewrite = folded.unwrap_or_else(|| temporaries::Rewrite {
+        let rewrite = folded.unwrap_or_else(|| temporaries::Rewrite {
             nodes: insns
                 .iter()
                 .enumerate()
@@ -307,111 +305,16 @@ impl ClassWriter {
             stack_at_target: Vec::new(),
             late_labels: BTreeSet::new(),
         });
-        let protected_starts: Vec<usize> = handlers.iter().map(|handler| handler.start).collect();
-        let rewrite_late = rewrite.late_labels.clone();
-        let no_late_branch = |_: usize| false;
-        let peephole_tables = redundant_gotos::Tables {
-            lines: &lines,
-            variable_bounds: &variable_bounds,
-            protected_starts: &protected_starts,
-            // The peephole only uses the tables for NOP retention.
-            late_branch: &no_late_branch,
-        };
-        // kotlinc's stack peephole runs after the temporaries pass and before the `goto` cleanup.
-        let handler_entries: Vec<usize> = handlers.iter().map(|handler| handler.handler).collect();
-        let peephole = stack_peephole::optimize(
-            &mut rewrite.nodes,
-            &peephole_tables,
-            &handler_entries,
-            &stack_peephole::Pool {
-                unit_instance: &|field| {
-                    matches!(
-                        self.cp.fieldref_parts(field),
-                        Some(("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;"))
-                    )
-                },
-                compare_int: &|method| {
-                    matches!(
-                        self.methodref_parts(method),
-                        Some(("kotlin/jvm/internal/Intrinsics", "compare", "(II)I"))
-                    )
-                },
-            },
-        );
-        for &(from, to) in &peephole.moved_branches {
-            branch_labels[to] = branch_labels[from].take();
-        }
-        let late_branch = |index: usize| {
-            branch_labels
-                .get(index)
-                .copied()
-                .flatten()
-                .is_some_and(|label| rewrite_late.contains(&label))
-        };
-        let tables = redundant_gotos::Tables {
-            lines: &lines,
-            variable_bounds: &variable_bounds,
-            protected_starts: &protected_starts,
-            late_branch: &late_branch,
-        };
-        let gotos_changed = redundant_gotos::remove(&mut rewrite.nodes, &tables);
-        let mut labelled: Vec<bool> = lines
-            .iter()
-            .zip(&variable_bounds)
-            .map(|(&line, &bound)| line || bound)
-            .collect();
-        for handler in handlers {
-            for at in [handler.start, handler.end, handler.handler] {
-                labelled[at] = true;
-            }
-        }
-        let jumps_negated = negated_jumps::negate(&mut rewrite.nodes, &labelled, &late_branch);
-        // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
-        // above left unreachable goes, with its line numbers, empty protected ranges and emptied
-        // local variables (see `dead_code`).
         let stack_targets: Vec<usize> = rewrite
             .stack_at_target
             .iter()
             .map(|(target, _)| *target)
             .collect();
-        let dead = dead_code::eliminate(
-            &mut rewrite.nodes,
-            &dead_code::Flow {
-                handlers,
-                late_branch: &late_branch,
-                lines: &indexed.lines,
-                line_after_inserted: &|index| stack_targets.contains(&index),
-                locals: &indexed.locals,
-            },
-        );
-        let removed_locals = dead
-            .as_ref()
-            .map_or(&[][..], |dead| &dead.removed_locals[..]);
-        let mut fixed_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
-        for (at, local) in node.local_variables.iter().enumerate() {
-            if removed_locals.get(at).copied().unwrap_or(false) {
-                continue;
-            }
-            fixed_slots.insert(local.slot);
-            if matches!(local.desc.as_str(), "J" | "D") {
-                fixed_slots.insert(local.slot + 1);
-            }
-        }
-        let renumbered = local_slots::compact(&mut rewrite.nodes, &fixed_slots);
-        if !folded_any
-            && !peephole.changed
-            && !gotos_changed
-            && !jumps_negated
-            && dead.is_none()
-            && renumbered.is_none()
-        {
-            return None;
-        }
 
         // Back to a node: each original index's labels stand where its instructions landed, so
         // every table moves with them when the node is laid out again.
         let late_label = |label: u32| rewrite.late_labels.contains(&label);
-        let relabelled = node_bridge::relabel(
+        let mut relabelled = node_bridge::relabel(
             &node,
             &indexed,
             &node_bridge::PassOutcome {
@@ -425,23 +328,36 @@ impl ClassWriter {
                     Placement::Before(_) | Placement::After(_) => false,
                 },
                 stack_targets: &stack_targets,
-                removed_lines: dead
-                    .as_ref()
-                    .map_or(&[][..], |dead| &dead.removed_lines[..]),
-                removed_handlers: dead
-                    .as_ref()
-                    .map_or(&[][..], |dead| &dead.removed_handlers[..]),
-                removed_locals,
-                slot: &|slot| match &renumbered {
-                    Some(renumbered) => renumbered.slot(slot),
-                    None => Some(slot),
-                },
                 implicit_return: method
                     .implicit_void_return_pc
                     .map(|pc| offsets.partition_point(|&at| at < usize::from(pc)).min(n)),
             },
             &pool,
         )?;
+        // kotlinc's stack peephole runs after the temporaries pass, then its `goto` cleanup and
+        // its `NegatedJumpsMethodTransformer`, the last of its rewrites (see `stack_peephole`,
+        // `redundant_gotos`, `negated_jumps`).
+        let peephole_changed = stack_peephole::optimize(&mut relabelled.node);
+        let gotos_changed = redundant_gotos::remove(&mut relabelled.node, &relabelled.pinned);
+        let jumps_negated = negated_jumps::negate(&mut relabelled.node, &relabelled.pinned);
+        // kotlinc always ends with `DeadCodeEliminationMethodTransformer`: whatever the passes
+        // above left unreachable goes, with its line numbers, empty protected ranges and emptied
+        // local variables, and the slots left unused close up (see `dead_code`, `local_slots`).
+        let dead = dead_code::eliminate(&mut relabelled.node);
+        let removed_locals = dead
+            .as_ref()
+            .map_or(&[][..], |dead| &dead.removed_locals[..]);
+        let parameter_slots: BTreeSet<u16> = (0..u16::try_from(entry.len()).ok()?).collect();
+        let renumbered = local_slots::compact(&mut relabelled.node, &parameter_slots);
+        if !folded_any
+            && !peephole_changed
+            && !gotos_changed
+            && !jumps_negated
+            && dead.is_none()
+            && !renumbered
+        {
+            return None;
+        }
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
         let assembled = relabelled.node.assemble(&mut pool).ok()?;
