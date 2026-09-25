@@ -7741,9 +7741,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     (`visitTryWithInfo$4.materializeAt`/`discard` call `leaveTemp`). Every finalizer copy and
     catch body therefore sits above it. kotlinc's `try` type is the join of its branches even
     where the value is discarded, so a statement `try` whose branches disagree
-    (`try { risky() } catch (e: E) { note() }`: `Int` and `Unit` join to `Any`) has one too. krusty's
-    checker types such a `try` as `Unit`, so the emitter enters an `Object` temporary whenever a
-    non-diverging branch value is neither `Unit` nor the `Unit` singleton. Nothing stores it.
+    (`try { sb.append(x) } catch (e: E) { note() }`: `StringBuilder` and `Unit` join to `Any`) has
+    one too. The checker records that join (below); the emitter enters the temporary from the
+    recorded type alone. A discarded `try` runs each branch as a statement, as kotlinc's does
+    (`sb.append(x)` is popped), so nothing stores the temporary.
   - Each catch parameter is `enter`ed at its handler (340) and left at the end of its catch body by
     `writeLocalVariablesInTable`, before that catch's finalizer copy.
   - The catch-all handler enters the caught throwable with `enterTemp(Throwable)` at the handler
@@ -7777,6 +7778,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at other types. `a_finally_with_its_own_handler_types_the_parked_exception` in
   `tests/try_debug_lines_e2e.rs` compares a complete exception table and frame list with a
   statement `try` inside a finalizer.
+
+- **A `try` whose branches disagree is typed as their common supertype where its value is
+  discarded.** kotlinc's FIR types every `try` as the join of its body and catch types, used or
+  not, and its JVM backend decides from that type alone whether the `try` holds a result temporary.
+  The checker records the same join for a statement `try` (`StringBuilder` and `Unit` give `Any`,
+  `Int` and `Unit` give `Any`), and the emitter reads it rather than inspecting branch shapes. A
+  discarded `try` stays a statement for every other purpose: no diagnostic, unused-value rule or
+  box outcome changes. Where the value IS used and the branch types disagree (`fun f() = try {
+  risky() } catch (e: E) { note() }`) the checker keeps its older lenient `Unit`, so such a function
+  still returns `kotlin.Unit` where kotlinc returns the body's boxed value; that is open.
+
+  Tests: `a_statement_try_whose_branches_disagree_enters_a_result_temporary` in
+  `tests/block_slot_reuse_e2e.rs` (the catch parameter lands in slot 2, as kotlinc's does) and
+  `a_finally_with_its_own_handler_types_the_parked_exception` in `tests/try_debug_lines_e2e.rs`
+  (an `Int`/`Unit` statement `try` inside a finalizer, complete exception table and frames).
 
 - **The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to
   it:** nothing stands between them, so the jump would be to the next instruction. Every other

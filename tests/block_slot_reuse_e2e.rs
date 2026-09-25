@@ -678,9 +678,10 @@ fn a_local_after_a_valued_try_reuses_its_result_temporary() {
     );
 }
 
-/// kotlinc types a `try` as the join of its branches even when its value is discarded, so a
-/// statement `try` whose body is a `StringBuilder` and whose catch is `Unit` still enters an
-/// (`Object`) result temporary after its body: `e` is 2 and `z` reuses 1.
+/// kotlinc types a `try` as the join of its branches even when its value is discarded, and the
+/// checker records the same join, so a statement `try` whose body is a `StringBuilder` and whose
+/// catch is `Unit` still enters an (`Object`) result temporary after its body: `e` is 2 and `z`
+/// reuses 1.
 #[test]
 fn a_statement_try_whose_branches_disagree_enters_a_result_temporary() {
     same_local_slots(

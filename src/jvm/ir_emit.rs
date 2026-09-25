@@ -16400,8 +16400,13 @@ impl<'a> Emitter<'a> {
                 result,
             } => {
                 let catches = catches.clone();
-                let result = *result;
-                self.emit_try(e, *body, &catches, *finally, &result, code);
+                let parts = try_emission::TryParts {
+                    body: *body,
+                    catches: &catches,
+                    finally: *finally,
+                    result: *result,
+                };
+                self.emit_try(e, parts, false, code);
             }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);

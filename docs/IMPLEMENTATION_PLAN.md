@@ -4490,8 +4490,10 @@ shadow with no output change.
   catch parameters, the catch-all's parked throwable (entered at the handler) and a `return`'s
   spill (entered at the `return`, per `generateFinallyBlocksIfNeeded`) follow `ExpressionCodegen`.
   The reservation at the `try` and its reuse pool (`pending_return_spills`, `free_exception_slots`,
-  `FrameMap::keep_for_method`) and the vararg `give_back` are deleted. A statement `try` whose
-  branches disagree gets the result temporary kotlinc's join type gives it. The krusty-only
+  `FrameMap::keep_for_method`) and the vararg `give_back` are deleted. The checker types a
+  statement `try` whose branches disagree as their join, as kotlinc's FIR does, and the emitter
+  enters the result temporary from the recorded type alone. A discarded `try` runs its branches as
+  statements under that temporary, as kotlinc's does, instead of storing and reloading a value. The krusty-only
   temporaries (`&&` operand, operand spills, vararg array) release their slots when loaded,
   newest first. In the 2.4.20 box corpus 229 of 25,236 classes change, no box outcome moves, and
   no class becomes or stops being byte-identical (files 269). Of the 98 methods whose
@@ -4509,9 +4511,12 @@ shadow with no output change.
   In 4d these matched only because the reserved parked slot lined up. `break.kt` `qux` still has
   `j` one slot high, now from the same `appendLine` receiver store (4f).
 - ☐ 4f–4h. Inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine
-  locals at `max_locals` (4h). Also open: krusty's checker types a statement `try` whose branches
-  disagree as `Unit` (kotlinc: their join), a discarded valued `try` still stores and reloads its
-  result, and a `try` operand's stack is spilled below the `try` rather than at `maxLocals`.
+  locals at `max_locals` (4h). Also open: a value-position `try` whose branches disagree with a
+  primitive among them is still typed `Unit` (kotlinc: their join, so `fun f() = try { risky() }
+  catch (e: E) { note() }` returns the boxed body value where krusty returns `kotlin.Unit`), the
+  bytecode rewrite keeps a method as emitted when a debug local's range empties (kotlinc drops the
+  local, e.g. a catch parameter whose body was a discarded constant), and a `try` operand's stack
+  is spilled below the `try` rather than at `maxLocals`.
 - ☐ 5–6. kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐

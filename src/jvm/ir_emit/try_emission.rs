@@ -15,6 +15,14 @@ use crate::types::Ty;
 use super::frame_map::{FrameKey, TempRole, TempSlot};
 use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, store, Emitter};
 
+/// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
+pub(super) struct TryParts<'a> {
+    pub(super) body: u32,
+    pub(super) catches: &'a [crate::ir::IrCatch],
+    pub(super) finally: Option<u32>,
+    pub(super) result: Ty,
+}
+
 /// One `try`'s protected region while it is being emitted.
 ///
 /// The region covers everything lexically inside the `try` EXCEPT the inlined copies of that try's
@@ -97,14 +105,19 @@ impl Emitter<'_> {
     pub(super) fn emit_try(
         &mut self,
         expression: u32,
-        body: u32,
-        catches: &[crate::ir::IrCatch],
-        finally: Option<u32>,
-        result: &Ty,
+        parts: TryParts<'_>,
+        discarded: bool,
         code: &mut CodeBuilder,
     ) {
-        let rt = ir_ty_to_jvm(result);
-        let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
+        let TryParts {
+            body,
+            catches,
+            finally,
+            result,
+        } = parts;
+        let rt = ir_ty_to_jvm(&result);
+        // A discarded `try` runs its branches as statements: no value reaches the result temporary.
+        let is_stmt = discarded || matches!(rt, Ty::Unit | Ty::Nothing);
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -146,34 +159,16 @@ impl Emitter<'_> {
         // kotlinc's `visitTry` enters a result temporary for every `try` that is not `Unit` once
         // the body is emitted, so it takes the slot the body's locals have just left and the catch
         // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores.
-        //
-        // kotlinc's `try` type is the join of its branches even where its value is discarded, so a
-        // statement `try` whose branches disagree (`try { risky() } catch (e: E) { note() }` joins
-        // `Int` and `Unit` to `Any`) has one as well. The checker types such a `try` as `Unit`,
-        // since nothing reads its value; its branches keep their own types, and one that is neither
-        // `Unit` nor the `Unit` singleton an inlined `Unit` call ends in gives it an `Object`
-        // temporary nothing stores.
-        let unit_object = Ty::obj("kotlin/Unit");
-        let discarded_value = rt == Ty::Unit
-            && std::iter::once(body)
-                .chain(catches.iter().map(|catch| catch.body))
-                .any(|branch| {
-                    let value = self.value_ty(branch);
-                    !self.diverges(branch) && value != Ty::Unit && value != unit_object
-                });
-        let result_temp = if rt != Ty::Unit {
-            let temp_ty = if is_stmt {
+        // A discarded `try` still enters it, at the `try`'s own type: kotlinc stores each branch
+        // there and drops the stores once nothing reads them.
+        let result_temp = (rt != Ty::Unit).then(|| {
+            let temp_ty = if rt == Ty::Nothing {
                 Ty::obj("java/lang/Void")
             } else {
                 rt
             };
-            Some(self.frame.enter_temp(TempRole::TryResult, temp_ty))
-        } else {
-            discarded_value.then(|| {
-                self.frame
-                    .enter_temp(TempRole::TryResult, Ty::obj("java/lang/Object"))
-            })
-        };
+            self.frame.enter_temp(TempRole::TryResult, temp_ty)
+        });
         let result_slot = result_temp
             .as_ref()
             .filter(|_| !is_stmt)
