@@ -62,21 +62,6 @@ impl ConstPool {
         ))
     }
 
-    /// The `(owner, name, descriptor)` named by a field reference.
-    pub(super) fn fieldref_parts(&self, idx: u16) -> Option<(&str, &str, &str)> {
-        let Const::Fieldref(class_idx, name_and_type) = self.entry_at(idx)? else {
-            return None;
-        };
-        let Const::NameAndType(name_idx, descriptor_idx) = self.entry_at(*name_and_type)? else {
-            return None;
-        };
-        Some((
-            self.class_name(*class_idx)?,
-            self.utf8_at(*name_idx)?,
-            self.utf8_at(*descriptor_idx)?,
-        ))
-    }
-
     /// The descriptor named by a field reference.
     pub(super) fn fieldref_descriptor(&self, idx: u16) -> Option<&str> {
         let Const::Fieldref(_, name_and_type) = self.entry_at(idx)? else {
