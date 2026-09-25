@@ -378,3 +378,8 @@ fn map_keys_and_entries_copy_without_comparing() {
 fn a_map_or_set_stops_where_an_element_member_threw() {
     run_driver("map_stops_at_a_raise");
 }
+
+#[test]
+fn a_default_to_string_whose_hash_code_throws_propagates_it() {
+    run_driver("default_to_string_stops_at_a_raise");
+}

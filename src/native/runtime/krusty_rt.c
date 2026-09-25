@@ -4445,17 +4445,41 @@ kt_int kt_map_size(KRef self) { return kt_list_size(((const KMap *)self)->keys);
 
 kt_boolean kt_map_is_empty(KRef self) { return kt_map_size(self) == 0; }
 
-/* Where a key sits, or -1. By `equals`, as Kotlin's own lookup is: two strings with the same text
-   are one key, and so are two boxes holding the same number. */
+/* Where `value` sits in one of a map's two lists, or -1. By `equals`, as Kotlin's own lookup is:
+   two strings with the same text are one key, and so are two boxes holding the same number.
+
+   A comparison that THREW ends the search with -1, whatever it answered. The pending slot is
+   checked after every one rather than only after a false answer, because a program's `equals` is
+   free to record an exception and return true: taken at its word, that answer would have `put`
+   overwrite, `remove` delete and `get` hand back the entry the failed comparison pointed at, and a
+   false one would have the search go on asking the elements after it. Kotlin's lookup does
+   neither; the throw leaves it. */
+static kt_int kt_map_search(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int length = kt_list_size(list);
+    for (kt_int at = 0; at < length; at++) {
+        kt_boolean same = kt_equals(kt_elements_of(elements)[at], value);
+        if (kt_pending_exception() != NULL) {
+            return -1;
+        }
+        if (same) {
+            return at;
+        }
+    }
+    return -1;
+}
+
+/* Where a key sits, or -1 -- which is also the answer when its search threw, so every caller that
+   acts on a found key acts only on one no exception stands behind. */
 static kt_int kt_map_index_of(KRef self, KRef key) {
-    return kt_list_index_of(((const KMap *)self)->keys, key);
+    return kt_map_search(((const KMap *)self)->keys, key);
 }
 
 kt_boolean kt_map_contains_key(KRef self, KRef key) { return kt_map_index_of(self, key) >= 0; }
 
 kt_boolean kt_map_contains_value(KRef self, KRef value) {
     const KMap *map = (const KMap *)self;
-    return map->values != NULL && kt_list_contains(map->values, value);
+    return map->values != NULL && kt_map_search(map->values, value) >= 0;
 }
 
 /* `m[k]`. Kotlin answers NULL for an absent key, which is why `Map.get` is declared nullable and
@@ -4471,6 +4495,11 @@ KRef kt_map_get(KRef self, KRef key) {
 
 KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback) {
     kt_int at = kt_map_index_of(self, key);
+    /* A search that threw found nothing, and it is no absent key either: the caller takes the
+       exception, not the fallback. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     return at < 0 ? fallback : kt_list_get(((const KMap *)self)->values, at);
 }
 
@@ -4629,14 +4658,21 @@ KRef kt_map_entry_key(KRef entry) { return ((const KMapEntry *)entry)->key; }
 
 KRef kt_map_entry_value(KRef entry) { return ((const KMapEntry *)entry)->value; }
 
-/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves. */
+/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves.
+
+   A key comparison that THREW ends the call before the values are compared, whatever it answered:
+   `&&` alone stops only on false, and a program's `equals` may record an exception and return
+   true. */
 static kt_boolean kt_map_entry_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_map_entry) {
         return false;
     }
     const KMapEntry *a = (const KMapEntry *)self;
     const KMapEntry *b = (const KMapEntry *)other;
-    return kt_equals(a->key, b->key) && kt_equals(a->value, b->value);
+    if (!kt_equals(a->key, b->key) || kt_pending_exception() != NULL) {
+        return false;
+    }
+    return kt_equals(a->value, b->value);
 }
 
 /* A half whose `hashCode` or `toString` throws ends the call there and the other half is not
@@ -4651,35 +4687,50 @@ static kt_int kt_map_entry_hash_code(KRef self) {
     return key ^ value;
 }
 
+/* Either half's `toString` that throws answers NULL with the exception pending, as the map's own
+   rendering does; the value's failed answer is never joined into a text. */
 static KRef kt_map_entry_to_string(KRef self) {
     const KMapEntry *entry = (const KMapEntry *)self;
     KRef key = kt_to_string(entry->key);
     if (kt_pending_exception() != NULL) {
         return NULL;
     }
+    KRef value = kt_to_string(entry->value);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     KRef text = kt_string_plus(key, kt_string_utf8("=", 1));
-    return kt_string_plus(text, kt_to_string(entry->value));
+    return kt_string_plus(text, value);
 }
 
 /* Two maps are equal when they hold the same entries, whatever ORDER they hold them in — Kotlin's
    `Map.equals` says nothing about order and a `LinkedHashMap` equals a `HashMap` of the same
    entries. The hash is the sum of the entry hashes, which is order-independent for the same
-   reason. */
+   reason.
+
+   Each key is looked up in the other map ONCE, and the value compared against what that one search
+   found. Asking twice -- `containsKey`, then `get` -- ran a stateful key comparison a second time,
+   and a second answer that threw left `get`'s NULL to be compared as though it were the value. A
+   comparison that threw ends the walk whatever it answered, key or value: a true answer after a
+   throw is no match to go on from. */
 static kt_boolean kt_map_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_map) {
         return false;
     }
     const KMap *a = (const KMap *)self;
+    const KMap *b = (const KMap *)other;
     if (kt_map_size(self) != kt_map_size(other)) {
         return false;
     }
     kt_int size = kt_list_size(a->keys);
     for (kt_int at = 0; at < size; at++) {
-        KRef key = kt_list_get(a->keys, at);
-        if (!kt_map_contains_key(other, key)) {
+        /* -1 when the search threw, so a raise stops here before any value is asked. */
+        kt_int found = kt_map_index_of(other, kt_list_get(a->keys, at));
+        if (found < 0) {
             return false;
         }
-        if (!kt_equals(kt_list_get(a->values, at), kt_map_get(other, key))) {
+        kt_boolean same = kt_equals(kt_list_get(a->values, at), kt_list_get(b->values, found));
+        if (!same || kt_pending_exception() != NULL) {
             return false;
         }
     }
@@ -4764,6 +4815,8 @@ static kt_boolean kt_set_equals(KRef self, KRef other) {
     KRef keys = ((const KMap *)self)->keys;
     kt_int size = kt_list_size(keys);
     for (kt_int at = 0; at < size; at++) {
+        /* A search that threw answers false and leaves the exception pending; the elements after
+           it are not looked for. */
         if (!kt_set_contains(other, kt_list_get(keys, at))) {
             return false;
         }
@@ -4864,10 +4917,16 @@ kt_int kt_any_hash_code(KRef self) {
     return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
 }
 
-/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. */
+/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. The hash is asked through the
+   object's own `hashCode`, as `Any.toString` asks it, so a class that overrides only `hashCode`
+   reaches its override here -- and one that throws ends the rendering with NULL and the exception
+   pending, before the text is built. */
 KRef kt_any_to_string(KRef self) {
     const KType *type = self->header.type;
     uint32_t hash = (uint32_t)kt_hash_code(self);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     char digits[8];
     kt_int digit_count = 0;
     do {
