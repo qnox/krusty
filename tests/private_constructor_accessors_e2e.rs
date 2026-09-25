@@ -33,11 +33,14 @@ class Defaults private constructor(val a: Int = 1, val b: String = "b") {
 
 fun box(): String {
     val p = Plain.make()
-    val parts = listOf(
-        p.y, p.own().y, p.anon().y, Plain.other().y, Plain.Sub().y, Plain.Sub2().y,
-        Defaults.make().b, Defaults.given().b,
-    )
-    return if (parts.joinToString(",") == "c,own,w,c2,sub,s2,b,c") "OK" else parts.joinToString(",")
+    if (p.y != "c") return "make"
+    if (p.own().y != "own") return "own"
+    if (p.anon().y != "w") return "anon"
+    if (Plain.other().y != "c2") return "other"
+    if (Plain.Sub().y != "sub") return "sub"
+    if (Plain.Sub2().y != "s2") return "sub2"
+    if (Defaults.make().b != "b") return "defaults"
+    return if (Defaults.given().b == "c") "OK" else "given"
 }
 "#;
 
