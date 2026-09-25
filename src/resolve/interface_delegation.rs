@@ -642,9 +642,7 @@ fn delegation_members(
             target,
             owner: declaration.owner,
             ty: ResolvedTy::new(declared_ty).ok()?,
-            interface: source
-                .classifier(declaration.owner)
-                .is_some_and(|classifier| classifier.is_interface()),
+            interface: declaration.getter.owner_is_interface,
         });
         members.push(ResolvedDelegatedMember::Property(
             ResolvedDelegatedProperty {

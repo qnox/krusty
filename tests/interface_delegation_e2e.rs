@@ -340,6 +340,35 @@ fn dependency_interface_delegation_uses_opaque_external_targets() {
     assert_eq!(output, "OK");
 }
 
+#[test]
+fn dependency_generic_property_delegation_uses_the_published_declaration() {
+    const LIB: &str = r#"
+        package api
+
+        interface Shelf<T> {
+            var item: T
+        }
+
+        class ShelfImpl(override var item: String) : Shelf<String>
+    "#;
+    const MAIN: &str = r#"
+        import api.Shelf
+        import api.ShelfImpl
+
+        private class ShelfDelegate(delegate: Shelf<String>) : Shelf<String> by delegate
+
+        fun box(): String {
+            val shelf: Shelf<String> = ShelfDelegate(ShelfImpl("fail"))
+            shelf.item = "OK"
+            return shelf.item
+        }
+    "#;
+    let Some(output) = common::expect_box_run_against_kotlinc(LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
 /// A delegated property whose interface declares it through a type parameter keeps kotlinc's shape:
 /// open accessors with the applied type plus bridges with the erased one. Without the bridges a
 /// read or write through the interface type fails with `AbstractMethodError`.
