@@ -358,7 +358,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             0x0002
         } else {
             declared_access
-        }) | if sc.synthetic { 0x1000 } else { 0 };
+        }) | if sc.synthetic { 0x1000 } else { 0 }
+            | super::method_access::secondary_constructor_varargs(sc);
         let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
         // A constructor whose OWNER prepends parameters has a descriptor its declaration did not
         // write, so kotlinc records the source shape in a generic `Signature` — `()V` for an enum's

@@ -2754,10 +2754,10 @@ pub struct IrFile {
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
     /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
-    /// SOURCE index of a member function's `vararg` parameter (receiver excluded) — class
-    /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
-    /// literal array (`too many arguments`).
-    pub fn_vararg_index: std::collections::HashMap<u32, usize>,
+    /// A declared function's `vararg` parameter — class `@Metadata` must emit
+    /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
+    /// arguments`).
+    pub fn_varargs: std::collections::HashMap<u32, IrVarargParameter>,
     /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
     /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
     /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
@@ -3589,7 +3589,7 @@ pub use generated_members::{
 mod function_parameters;
 pub use function_parameters::{
     FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
-    IrParameterProvenance, IrParameterRole,
+    IrParameterProvenance, IrParameterRole, IrVarargParameter,
 };
 mod traversal;
 pub use traversal::*;

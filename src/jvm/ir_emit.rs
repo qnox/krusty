@@ -57,6 +57,7 @@ mod interface_compatibility;
 mod local_updates;
 mod member_schedule;
 mod metadata_policy;
+mod method_access;
 mod non_null_operands;
 mod object_static_initialization;
 mod operand_representation;
@@ -1696,7 +1697,7 @@ fn build_class_metadata(
                 // Recorded exactly when a reader cannot rebuild the physical descriptor from the
                 // declared types (kotlinc's `requiresFunctionSignature`).
                 let physical = crate::jvm::names::method_descriptor(&f.params, f.ret);
-                let vararg_index = ir.fn_vararg_index.get(&fid).copied();
+                let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
                 let jvm_sig = super::metadata_method_signatures::requires_function_signature(
                     receiver,
                     logical_params
@@ -4371,27 +4372,6 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
     }
 }
 
-/// Whether `fid` is the implementation selected for a class-realized closure. This consumes the
-/// explicit IR edge from a lambda to its implementation; generated method spelling is never used as
-/// identity, and mixed `-Xlambdas`/`-Xsam-conversions` modes select only the matching closure kind.
-fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) -> bool {
-    ir.exprs.iter().any(|expression| {
-        let IrExpr::Lambda {
-            impl_fn,
-            arity,
-            sam,
-            ..
-        } = expression
-        else {
-            return false;
-        };
-        *impl_fn == fid
-            && (sam.as_ref().is_some_and(|target| target.function_adapter)
-                || modes.for_sam(sam.is_some()) == LambdaMode::Class
-                || (sam.is_none() && is_high_arity_function(*arity)))
-    })
-}
-
 /// Attach any user annotations recorded for `field` (by name) to the most recently added field.
 /// The annotations on a property's synthetic `$annotations` marker — the PROPERTY's own, which
 /// `@Metadata` records as `Property.annotation`. Both retentions rejoin into the single list a
@@ -5982,7 +5962,7 @@ fn emit_class(
             }
         };
         cw.add_method_sig(
-            ctor_access,
+            ctor_access | method_access::primary_constructor_varargs(c),
             "<init>",
             &ctor_desc,
             &ctor,
@@ -7980,7 +7960,13 @@ fn emit_enum_class(
     // constant pool interns in kotlinc's order.
     let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
     if emits_primary_ctor {
-        cw.add_method_sig(base_ctor_acc, "<init>", &ctor_desc, &ctor, Some(&ctor_sig));
+        cw.add_method_sig(
+            base_ctor_acc | method_access::primary_constructor_varargs(c),
+            "<init>",
+            &ctor_desc,
+            &ctor,
+            Some(&ctor_sig),
+        );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
     }
     if emits_primary_ctor {
@@ -9592,88 +9578,14 @@ fn emit_method_inner_with_holder(
     let _ = code.erase_markers();
     code.ensure_locals(e.frame.max());
     code.link();
-    // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
-    // instance method of a *final* class (nothing extends it) is also `final` and can never be
-    // overridden, so marking it is safe; in an open/extended class we conservatively leave it
-    // non-`final` (a method-level `open`/`override` model would refine this).
-    let access = if holder_receiver.is_some() {
-        // STATIC, with the member's own visibility: a private interface member's body is a PRIVATE
-        // static on the holder, as kotlinc emits it.
-        if ir.private_methods.contains(&fid) {
-            0x000a // PRIVATE | STATIC
-        } else {
-            0x0009 // PUBLIC | STATIC
-        }
-    } else if instance {
-        // kotlinc keeps an `Object`-override (a data class's toString/hashCode/equals) open even in a
-        // final class, so honor `open_methods`; otherwise a method of a final class is itself final.
-        let final_class = !ir.classes.iter().any(|o| o.superclass_matches(owner));
-        // An interface default method must NOT be `final` (the JVM rejects a final interface method).
-        let owner_is_iface = ir
-            .classes
-            .iter()
-            .any(|o| o.fq_name_matches(owner) && o.is_interface);
-        let fin = final_class && !ir.open_methods.contains(&fid) && !owner_is_iface;
-        // A `private set` setter is `private final` (kotlinc); else `public` (+`final` per above).
-        let vis = if ir.private_methods.contains(&fid) {
-            0x0002
-        } else {
-            0x0001
-        };
-        // A private method is `final` on a CLASS, but a private INTERFACE method must NOT carry `ACC_FINAL`
-        // (`ClassFormatError: illegal modifiers 0x12`) — private already makes it non-virtual.
-        vis | if fin || (ir.private_methods.contains(&fid) && !owner_is_iface) {
-            0x0010
-        } else {
-            0
-        }
-    } else {
-        // A `static` method is `<vis> static final` (kotlinc) — EXCEPT on an interface, where a `final`
-        // static method is illegal (`ClassFormatError`), or a value class's `constructor-impl`/
-        // `<name>-impl` delegate members, which kotlinc emits `public static` (non-`final`) and marks via
-        // `open_methods`. `box-impl`/`equals-impl0` stay `public static final` (not opened). Visibility
-        // derives from the member's own (a private declaration — or a lambda impl, which kotlinc always
-        // emits private — is `ACC_PRIVATE`).
-        let owner_is_iface = ir
-            .classes
-            .iter()
-            .any(|o| o.fq_name_matches(owner) && o.is_interface);
-        let vis = if ir.private_methods.contains(&fid) {
-            // Under `-Xlambdas=class` the body is called from the lambda's OWN class, so a private
-            // impl would be an `IllegalAccessError` at the delegating `invoke`. kotlinc has no such
-            // method to place — it moves the body into `invoke` — so package-private here is the
-            // narrowest visibility that keeps the delegation working.
-            // A static interface method must carry exactly one of ACC_PUBLIC / ACC_PRIVATE
-            // (JVMS 4.6), so an interface's impl opens all the way to public instead.
-            let called_from_lambda_class =
-                lambda_impl_uses_class_strategy(ir, fid, env.lambda_modes);
-            match (called_from_lambda_class, owner_is_iface) {
-                (true, true) => 0x0001,
-                (true, false) => 0x0000,
-                (false, _) => 0x0002,
-            }
-        } else {
-            0x0001
-        };
-        if owner_is_iface || ir.open_methods.contains(&fid) {
-            vis | 0x0008 // <vis> | STATIC
-        } else {
-            vis | 0x0018 // <vis> | STATIC | FINAL
-        }
-    };
-    // A value class's `box-impl`/`unbox-impl` are compiler-manufactured box adapters — kotlinc marks them
-    // `ACC_SYNTHETIC`.
-    let access = access
-        | if ir.synthetic_methods.contains(&fid) {
-            0x1000
-        } else {
-            0
-        }
-        | if ir.bridge_methods.contains(&fid) {
-            0x0040 // ACC_BRIDGE
-        } else {
-            0
-        };
+    let access = method_access::declared_method_access(
+        ir,
+        fid,
+        owner,
+        instance,
+        holder_receiver.is_some(),
+        env.lambda_modes,
+    );
     // A method with own type parameters (`fun <T> …`) → the tparam-based signature; otherwise a method
     // whose concrete param/return type is PARAMETERIZED (`getXs(): List<String>`, `copy(List<String>)`)
     // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/

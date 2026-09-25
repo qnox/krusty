@@ -358,3 +358,12 @@ mod tests {
         }));
     }
 }
+
+/// The `vararg` parameter of a declared function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrVarargParameter {
+    /// SOURCE index among the value parameters (receiver excluded).
+    pub index: usize,
+    /// No value parameter follows it.
+    pub is_last: bool,
+}
