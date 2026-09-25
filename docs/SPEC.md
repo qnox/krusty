@@ -6182,6 +6182,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
+  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
+  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
+  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
+  so its name is Java's.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`).
 
 ## 8. Success criteria for the PoC
 

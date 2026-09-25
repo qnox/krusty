@@ -267,6 +267,16 @@ fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
 }
 
 #[test]
+fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_line_throwing_to_string");
+}
+
+#[test]
+fn a_negative_builder_capacity_throws_negative_array_size_exception() {
+    run_driver("builder_negative_capacity");
+}
+
+#[test]
 fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
     run_driver("builder_from_program_char_sequence");
 }
