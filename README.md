@@ -13,56 +13,34 @@
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
-**krusty** is a memory-conscious **Kotlin compiler written in Rust**, built as a **drop-in
-replacement for `kotlinc`** on the JVM: the same command-line flags in, and `.class` files that are
-byte-for-byte identical to `kotlinc`'s out. Its frontend builds a module-wide source and
-symbol view. Its backend lowers one checked file per call while carrying the state needed to
-finalize module metadata. It emits `.class` files,
-`@kotlin.Metadata`, and `META-INF/*.kotlin_module` for the supported language subset.
+krusty is a drop-in replacement for `kotlinc` on the JVM. It takes the same command-line flags and
+emits `.class` files byte-for-byte identical to `kotlinc`'s, from a single native binary.
 
-**Goal:** emit bytecode that is **byte-for-byte identical** to the reference `kotlinc` for every
-construct krusty supports, not only ABI-compatible output. Differential bytecode tests, Kotlin/Java
-consumer tests, and the Kotlin `codegen/box` corpus provide the oracle for that goal.
+[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest)
 
-Website: [krustythecompiler.dev](https://krustythecompiler.dev) · Downloads: [latest release](https://github.com/qnox/krusty/releases/latest)
+## Install
 
----
+Download the archive for your platform from the
+[latest release](https://github.com/qnox/krusty/releases/latest) (Linux, macOS and Windows, on
+x86_64 and arm64), extract `krusty`, and put it on your `PATH`.
 
-## Contents
+krusty needs a JDK for `java.*` classes: it uses `JAVA_HOME`, or pass `-jdk-home <dir>`. It takes
+`kotlin-stdlib` from your Gradle or Maven cache, or downloads it from Maven Central; pass
+`-no-stdlib` to supply your own on the classpath.
 
-- [Motivation](#motivation)
-- [Why memory-lean matters](#why-memory-lean-matters)
-- [What it does](#what-it-does)
-- [Compiler plugins](#compiler-plugins)
-- [Design](#design)
-- [Project layout](#project-layout)
-- [Build & test](#build--test)
-- [Language server](#language-server)
-  - [Zed setup](#zed-setup)
-- [Status](#status)
+## Usage
 
----
+```sh
+krusty src/ -d out/                          # compile a source tree to a class directory
+krusty src/ -d mylib.jar -module-name mylib  # or to a jar
+krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
+krusty -help                                 # all options
+```
 
-## Motivation
+krusty matches the newest supported Kotlin release by default. To match an older one, pass
+`-Xkotlin-reference-version=<version>`.
 
-krusty began as an agent-driven experiment: could a Kotlin compiler be rebuilt in Rust and driven by
-differential tests all the way to executable JVM bytecode? The implementation explores compact,
-index-based compiler data and file-oriented backend lowering while retaining the module-wide
-frontend state needed for Kotlin name and type resolution.
-
-## Why memory-lean matters
-
-Compilation is repeated across local builds, pull requests, merge queues, and version matrices.
-Memory use limits how many jobs can share a runner and which runner size a build requires, so reducing
-resident compiler state can improve capacity as well as latency.
-
-The compiler currently retains parsed files, module symbols, and checked frontend data for the
-source set, so total memory is not bounded by the largest source file. The backend API processes one
-checked file per `lower_file` call and carries explicit module state into finalization. This boundary
-makes memory behavior measurable and leaves room to shorten frontend lifetimes without changing the
-backend contract.
-
-## What it does
+## Features
 
 - **Compiles Kotlin to the JVM.** Output is `.class` files, `@kotlin.Metadata` and
   `META-INF/*.kotlin_module`, written to a directory or a `.jar`.
@@ -72,149 +50,38 @@ backend contract.
   `kotlinc`'s, then compile Kotlin and Java consumers against krusty's output. Every build also runs
   JetBrains' `codegen/box` tests; the conformance badge shows the share that passes.
 - **Inlines from compiled libraries.** Calls to `inline` functions in library jars copy the callee's
-  compiled bytecode, as `kotlinc` does, rather than special-casing known functions.
+  compiled bytecode, as `kotlinc` does.
 - **Supports kotlinx.serialization and KSP.** Serialization runs as a built-in compiler pass, and KSP
-  processors run through a bundled host (see [Compiler plugins](#compiler-plugins)).
-- **Ships a language server.** `krusty-lsp` serves editors from the same compiler, with a Zed
-  extension (see [Language server](#language-server)).
+  processors run through a bundled host. Other compiler plugins are not supported yet.
 
-## Compiler plugins
+## Editor support
 
-krusty does not implement the general Kotlin compiler-plugin extension ABI. Plugin behavior is
-integrated through narrower contracts that the compiler can validate explicitly:
+`krusty-lsp` is a Kotlin language server built on the same compiler. It provides diagnostics,
+completion, hover, signature help, go-to-definition, find references, rename and document symbols,
+and reads Gradle, Maven and BSP project models. Each release ships it for every platform, together
+with a [Zed extension](editors/zed/README.md).
 
-- **kotlinx.serialization** uses a native IR pass for `@Serializable` synthesis
-  ([`src/plugins/serialization.rs`](src/plugins/serialization.rs)).
-- **KSP (Kotlin Symbol Processing)** uses a version-pinned code-generation host for external KSP
-  processors and feeds generated source back through compilation
-  ([`src/plugins/ksp.rs`](src/plugins/ksp.rs)).
+## Roadmap
 
-Other third-party Kotlin compiler plugins are currently unsupported. See
-[`docs/PLUGIN_API.md`](docs/PLUGIN_API.md) for the implemented paths, test matrix, and remaining
-limitations.
+- **Full JVM conformance:** every Kotlin `codegen/box` test passing with output identical to
+  `kotlinc`'s.
+- **Kotlin/Native:** in progress. A native backend with its own runtime, code generator and linker,
+  reading Kotlin/Native's own standard library.
+- **Kotlin/Wasm:** planned.
+- **Compose:** planned. Support for the Jetpack Compose compiler plugin.
 
-## Design
-
-- **Data-oriented AST** — nodes are arena indices rather than a pointer graph. Each file has its own
-  arenas, while the source set remains available for module-wide checking.
-- **Module frontend, file backend** — parse source set → collect module signatures → check source
-  set → lower each checked file → finalize module artifacts.
-- **Hand-written class-file writer** — constant pool, `Code` attribute with automatic
-  `max_stack`/`max_locals`, branch fixups; no external bytecode dependency.
-- **Correctness by differential testing** — the source of truth is the real `kotlinc`: ABI
-  signatures (`javap`) must match, and Kotlin/Java consumers must compile and run identically.
-- **Conformance** — krusty runs against JetBrains/Kotlin's own `codegen/box` suite: it skips what it
-  can't yet compile, runs `box()` on the JVM for what it can, and is asserted to **never miscompile a
-  case it accepts**. The conformance badge reports the current pass share.
-
-## Project layout
-
-```
-src/lexer.rs, parser.rs, ast.rs   front end (Pratt expressions, arena AST)
-src/types.rs, resolve.rs          type model + signature collection + per-file typecheck
-src/ir.rs, ir_lower.rs            backend-neutral IR + AST→IR lowering
-src/jvm/                          IR→bytecode emit, class-file writer, .class reader, jar/dir
-                                  classpath, bytecode inliner (inline.rs)
-src/metadata/                     @kotlin.Metadata protobuf + .kotlin_module emitters
-crates/krusty-cli/                kotlinc-compatible batch executable and command parsing
-crates/krusty-lsp/                compiler-backed analysis, JSON-RPC/LSP, compact query state
-tests/                            differential + round-trip harness vs real kotlinc
-docs/SPEC.md                      language subset + Kotlin-semantics decisions
-docs/IMPLEMENTATION_PLAN.md       phased plan (each phase ends green)
-docs/METADATA_NOTES.md            reverse-engineered @Metadata schema
-docs/CONTRACTS.md                 contract IR + @Metadata wire notes
-```
-
-## Build & test
+## Building from source
 
 ```sh
-cargo build
-./run-tests.sh                   # normal full-suite gate; no parameters needed
-just test                        # equivalent harness entrypoint
+cargo build --release -p krusty-cli   # the compiler
+cargo build --release -p krusty-lsp   # the language server
+./run-tests.sh                        # full test suite against the real kotlinc
 ```
 
-kotlinc-style usage for the supported subset:
-
-```sh
-krusty src/ -d out/                          # compile a source tree to a class dir
-krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
-krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
-krusty -version | -help
-```
-
-The harness self-provisions the reference Kotlin compiler and box corpus through `just` when
-available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass
-arguments only for a focused Cargo test/filter. Do not use `--release` for tests: the longer build
-cycle outweighs the faster run. See [`docs/TEST_HARNESS.md`](docs/TEST_HARNESS.md) for the full
-harness reference, including profiling knobs and the `KRUSTY_KOTLINC` / `KRUSTY_REF_JAVA_HOME` /
-`KRUSTY_KOTLIN_STDLIB` environment overrides.
-
-## Language server
-
-krusty ships a compiler-backed LSP server over JSON-RPC (stdin/stdout). Releases publish separate
-compiler and language-server archives per platform.
-
-```sh
-cargo build -p krusty-lsp
-target/debug/krusty-lsp --stdio -cp deps.jar:classes/
-```
-
-It analyzes all open Kotlin documents as one source set through a restartable compiler worker that
-keeps process-lifetime interning bounded over long editor sessions. Supported requests:
-
-- diagnostics, semantic highlighting, hover
-- completion (with resolve) and signature help
-- go-to-definition, -type-definition, and -implementation
-- find references and rename
-- hierarchical document symbols
-
-Navigation and symbol data are served from compact, interned, integer-indexed snapshots rather than
-retained compiler ASTs. A restartable worker limits the lifetime of compiler analysis state.
-
-### Zed setup
-
-Zed can't launch an arbitrary server from `settings.json`, so krusty ships a small dev extension in
-[`editors/zed`](editors/zed) that registers `krusty-lsp` as a second server for the `Kotlin`
-language (grammar and syntax still come from the official Kotlin extension). Quick start:
-
-1. Build the server: `cargo build --release -p krusty-lsp`.
-2. Install the **Kotlin** extension from Zed's gallery (for the tree-sitter grammar).
-3. Install this repo's extension: command palette → `zed: install dev extension` → select
-   `editors/zed`.
-4. Point Zed at the binary and turn off the other Kotlin servers in `settings.json`:
-
-   ```json
-   {
-     "languages": {
-       "Kotlin": {
-         "language_servers": ["krusty-lsp", "!kotlin-lsp", "!kotlin-language-server", "..."]
-       }
-     },
-     "lsp": {
-       "krusty-lsp": {
-         "binary": {
-           "path": "/absolute/path/to/krusty/target/release/krusty-lsp",
-           "arguments": ["--stdio"]
-         }
-       }
-     }
-   }
-   ```
-
-   Omit `binary.path` to take `krusty-lsp` from `PATH`.
-
-The extension forwards the worktree shell environment, so `JAVA_HOME` (from the shell, mise, or
-direnv) reaches the server; without a JDK it resolves no `java.*` symbols. The server detects BSP /
-Gradle / Maven project models and refreshes the classpath on build-file changes; passing `-cp` in
-`arguments` pins a fixed classpath instead. The extension launches the same server and capabilities
-listed above. See [`editors/zed/README.md`](editors/zed/README.md) for the full guide.
-
-## Status
-
-A working compiler for a real, growing subset of Kotlin, with `kotlinc`-matching output for what it
-supports, Java interop, and Kotlin-consumer round-trips passing. The roadmap in
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) widens the language surface, each step
-gated by the same differential harness. It is a proof of concept, not yet a production compiler.
+With [`just`](https://github.com/casey/just) installed, the test harness downloads the reference
+`kotlinc` and test corpus itself. See
+[`docs/TEST_HARNESS.md`](docs/TEST_HARNESS.md) for details, [`AGENTS.md`](AGENTS.md) for contributor
+rules, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the compiler is organized.
 
 ## License
 
