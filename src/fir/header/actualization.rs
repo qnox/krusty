@@ -123,6 +123,68 @@ impl ActualizationTypeBindings {
     }
 }
 
+/// The source classifiers whose members make up `actual`'s member scope: `actual` itself first,
+/// then each supertype declared in this module, breadth first and each once. A supertype from a
+/// library contributes nothing here; only source declarations have headers to pair.
+fn actual_member_owners(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+    actual: DeclarationId,
+) -> Vec<DeclarationId> {
+    // An expect and its implementation deliberately bind to the same qualified identity, so
+    // reversing `by_declaration` through a map would choose one by randomized iteration order.
+    // Member lookup needs the IMPLEMENTATION declaration. Prefer the explicit actual, while an
+    // ordinary non-expect source class remains a valid supertype of an actual class.
+    let implementation_classifier = |name: crate::types::TypeName| {
+        let mut ordinary = None;
+        for stub in headers.stubs.iter().filter(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && !stub.flags.has(DeclarationFlags::EXPECT)
+                && bindings.declaration_classifier(stub.id) == Some(name)
+        }) {
+            if stub.flags.has(DeclarationFlags::ACTUAL) {
+                return Some(stub.id);
+            }
+            ordinary.get_or_insert(stub.id);
+        }
+        ordinary
+    };
+    let mut owners = vec![actual];
+    let mut next = 0;
+    while next < owners.len() {
+        let owner = owners[next];
+        next += 1;
+        let Some(HeaderDeclarationKind::Classifier {
+            supertypes, base, ..
+        }) = headers.syntax.declaration(owner).map(|value| value.kind)
+        else {
+            continue;
+        };
+        let Some(source) = headers
+            .declarations
+            .anchor(owner)
+            .map(|anchor| anchor.source)
+        else {
+            continue;
+        };
+        for supertype in base
+            .into_iter()
+            .chain(headers.syntax.type_operands(supertypes).iter().copied())
+        {
+            let Some(declaration) = bindings
+                .type_classifier(source, supertype)
+                .and_then(implementation_classifier)
+            else {
+                continue;
+            };
+            if !owners.contains(&declaration) {
+                owners.push(declaration);
+            }
+        }
+    }
+    owners
+}
+
 /// [`Actualization::pairs`] alone, for callers that need no more.
 pub fn actualized_declaration_pairs(
     headers: &StreamedHeaderModule,
@@ -850,6 +912,48 @@ pub fn actualization(
         (matching.len() == 1).then(|| matching[0])
     }
 
+    /// Whether `nearer`, a member of a classifier or of a nearer supertype, overrides `inherited`:
+    /// the same kind with the same complete input signature. Type parameters pair positionally,
+    /// because an override may name its own differently.
+    fn overrides(
+        headers: &StreamedHeaderModule,
+        nearer: DeclarationId,
+        inherited: DeclarationId,
+        actualized_aliases: &[ActualizedAlias],
+        bindings: &ActualizationTypeBindings,
+    ) -> bool {
+        let kind = |id: DeclarationId| {
+            headers
+                .stubs
+                .iter()
+                .find(|stub| stub.id == id)
+                .map(|stub| stub.kind)
+        };
+        match (kind(nearer), kind(inherited)) {
+            (Some(DeclarationKind::Function), Some(DeclarationKind::Function)) => {
+                callable_parameter_shapes_match(
+                    headers,
+                    nearer,
+                    inherited,
+                    actualized_aliases,
+                    bindings,
+                    TypeParameterScope::Positional,
+                )
+            }
+            (Some(DeclarationKind::Property), Some(DeclarationKind::Property)) => {
+                property_input_shapes_match(
+                    headers,
+                    nearer,
+                    inherited,
+                    actualized_aliases,
+                    bindings,
+                    TypeParameterScope::Positional,
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn path(headers: &StreamedHeaderModule, range: LookupNameRange, separator: &str) -> String {
         headers
             .scopes
@@ -1071,14 +1175,42 @@ pub fn actualization(
             (DeclarationKind, String, ReceiverKey, usize),
             Vec<DeclarationId>,
         >::new();
-        for child in headers.stubs.iter().filter(|stub| {
-            headers
-                .declarations
-                .anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(pair.actual))
-        }) {
-            if let Some(key) = child_key(headers, child, bindings, &actualized_aliases) {
-                actual_children.entry(key).or_default().push(child.id);
+        // The actual classifier's member scope: what it declares, then what it inherits. kotlinc
+        // matches an `expect` member against that whole scope, so a member the actual class
+        // inherits from a (non-expect) supertype actualizes it as a fake override. A nearer
+        // member hides an inherited one only when it overrides it, with the same complete
+        // signature; a different overload under the same coarse key stays in the scope.
+        for (depth, owner) in actual_member_owners(headers, bindings, pair.actual)
+            .into_iter()
+            .enumerate()
+        {
+            let mut owner_children = std::collections::HashMap::<_, Vec<DeclarationId>>::new();
+            for child in headers.stubs.iter().filter(|stub| {
+                headers
+                    .declarations
+                    .anchor(stub.id)
+                    .is_some_and(|anchor| anchor.owner == Some(owner))
+                    && (depth == 0
+                        || (matches!(
+                            stub.kind,
+                            DeclarationKind::Function | DeclarationKind::Property
+                        ) && stub.visibility != crate::types::Visibility::Private))
+            }) {
+                if let Some(key) = child_key(headers, child, bindings, &actualized_aliases) {
+                    owner_children.entry(key).or_default().push(child.id);
+                }
+            }
+            for (key, children) in owner_children {
+                let visible = actual_children.entry(key).or_default();
+                let inherited = children
+                    .into_iter()
+                    .filter(|child| {
+                        !visible.iter().any(|nearer| {
+                            overrides(headers, *nearer, *child, &actualized_aliases, bindings)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                visible.extend(inherited);
             }
         }
         let mut owed = Vec::new();
@@ -1358,6 +1490,88 @@ mod tests {
             resolve(&headers, SourceFileId::from_raw(0), &["Int"]),
             Some(crate::types::type_name("kotlin/Int")),
             "the common default import binds Int to its qualified builtin identity",
+        );
+    }
+
+    /// Both sides of an expect/actual classifier pair have the same qualified identity. Walking
+    /// an actual class's supertype scope must therefore select the ACTUAL declaration for that
+    /// identity, never whichever side a hash-map iteration happens to retain.
+    #[test]
+    fn inherited_member_pairs_with_the_actual_supertype_declaration() {
+        let headers = headers(&[
+            (
+                "Common",
+                "// LANGUAGE: +MultiPlatformProjects\n\
+                 package fixture\n\
+                 \n\
+                 expect open class Base() { fun inherited() }\n\
+                 expect class Child() { fun inherited() }\n",
+            ),
+            (
+                "Platform",
+                "// LANGUAGE: +MultiPlatformProjects\n\
+                 package fixture\n\
+                 \n\
+                 actual open class Base { actual fun inherited() {} }\n\
+                 actual class Child : Base()\n",
+            ),
+        ]);
+        let named_classifier = |source: u32, expected_name: &str| {
+            headers
+                .stubs
+                .iter()
+                .find(|stub| {
+                    stub.source == SourceFileId::from_raw(source)
+                        && stub.kind == DeclarationKind::Classifier
+                        && headers.declarations.anchor(stub.id).is_some_and(|anchor| {
+                            anchor.owner.is_none()
+                                && stub
+                                    .lookup_name
+                                    .and_then(|lookup| headers.lookup_names.get(lookup))
+                                    == Some(expected_name)
+                        })
+                })
+                .expect("named classifier")
+                .id
+        };
+        let named_member = |source: u32, owner: DeclarationId, expected_name: &str| {
+            headers
+                .stubs
+                .iter()
+                .find(|stub| {
+                    stub.source == SourceFileId::from_raw(source)
+                        && stub.kind == DeclarationKind::Function
+                        && headers
+                            .declarations
+                            .anchor(stub.id)
+                            .is_some_and(|anchor| anchor.owner == Some(owner))
+                        && stub
+                            .lookup_name
+                            .and_then(|lookup| headers.lookup_names.get(lookup))
+                            == Some(expected_name)
+                })
+                .expect("named member")
+                .id
+        };
+        let expect_child = named_classifier(0, "Child");
+        let actual_base = named_classifier(1, "Base");
+        let expected = named_member(0, expect_child, "inherited");
+        let implementation = named_member(1, actual_base, "inherited");
+        let bindings = crate::resolve::actualization_type_bindings(
+            &headers,
+            &crate::libraries::EmptySymbolSource,
+        );
+
+        let inherited_pair = actualization(&headers, &bindings)
+            .pairs
+            .into_iter()
+            .find(|pair| pair.expect == expected);
+        assert_eq!(
+            inherited_pair,
+            Some(ActualizedDeclarationPair {
+                expect: expected,
+                actual: implementation,
+            })
         );
     }
 }
