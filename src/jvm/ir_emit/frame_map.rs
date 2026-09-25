@@ -79,6 +79,10 @@ struct Entry {
     id: u32,
     occupant: Occupant,
     slot: u16,
+    words: u16,
+    /// This entry backs a method-wide reuse pool, so an inline-call/frame rewind must not discard
+    /// its reservation even when the entry was created after the rewind mark.
+    kept_for_method: bool,
 }
 
 /// A live unkeyed temporary. Not `Copy`: leaving it consumes it, so it is left at most once.
@@ -187,16 +191,24 @@ impl FrameMap {
         }
     }
 
-    /// Release every entry made since `mark`, in any order, as kotlinc's `Mark.dropTo` does.
+    /// Release every call-local entry made since `mark`, in any order, as kotlinc's `Mark.dropTo`
+    /// does. Method-wide reservations survive: their numeric slots remain in a reuse pool after the
+    /// construct that first entered them.
     pub(super) fn drop_to(&mut self, mark: Mark) {
-        self.entries.retain(|entry| entry.id < mark.id);
+        self.entries
+            .retain(|entry| entry.id < mark.id || entry.kept_for_method);
     }
 
     /// Release everything entered since `mark` AND move the cursor back to it: the next spliced copy
     /// of a lambda body is laid out from the same base as the one before it.
     pub(super) fn rewind_to(&mut self, mark: Mark) {
         self.drop_to(mark);
-        self.size = mark.size;
+        self.size = self
+            .entries
+            .iter()
+            .filter(|entry| entry.kept_for_method)
+            .map(|entry| entry.slot + entry.words)
+            .fold(mark.size, u16::max);
     }
 
     /// Leave a temporary, and return its slot to the cursor when nothing was allocated above it
@@ -220,15 +232,31 @@ impl FrameMap {
         let id = self.next_id;
         self.next_id += 1;
         let slot = self.size;
-        self.entries.push(Entry { id, occupant, slot });
-        self.size += slot_words(ty);
+        let words = slot_words(ty);
+        self.entries.push(Entry {
+            id,
+            occupant,
+            slot,
+            words,
+            kept_for_method: false,
+        });
+        self.size += words;
         self.max = self.max.max(self.size);
         (id, slot)
     }
 
     /// Keep a temporary entered for the rest of the method: its owner hands the slot out again after
     /// the code that entered it ends, so no later local may be given it.
-    pub(super) fn keep_for_method(&mut self, _temp: TempSlot) {}
+    pub(super) fn keep_for_method(&mut self, temp: TempSlot) {
+        match self.entries.iter_mut().find(|entry| entry.id == temp.id) {
+            Some(entry) => entry.kept_for_method = true,
+            None => crate::trace_compiler!(
+                "slots",
+                "keep temporary at slot {} for method: already dropped",
+                temp.slot
+            ),
+        }
+    }
 
     /// Remove one entry. kotlinc throws "Descriptor can be left only if it is last" when it is not
     /// the top one; here that is reported and the cursor is kept. A keyed local left from the top
@@ -340,6 +368,28 @@ mod tests {
             frame.occupants(),
             vec![(Occupant::Temp(TempRole::CaughtException), 1)]
         );
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 2);
+    }
+
+    #[test]
+    fn a_method_kept_temporary_survives_a_rewind_to_an_earlier_mark() {
+        let mut frame = FrameMap::default();
+        frame.enter(FrameKey::Receiver, Ty::obj("A"));
+        let inline_call = frame.mark();
+        let parked = frame.enter_temp(TempRole::CaughtException, Ty::obj("java/lang/Throwable"));
+        frame.keep_for_method(parked);
+        frame.enter(FrameKey::Value(0), Ty::Long);
+
+        frame.rewind_to(inline_call);
+
+        assert_eq!(
+            frame.occupants(),
+            vec![
+                (Occupant::Key(FrameKey::Receiver), 0),
+                (Occupant::Temp(TempRole::CaughtException), 1),
+            ]
+        );
+        assert_eq!(frame.size(), 2);
         assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 2);
     }
 
