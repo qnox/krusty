@@ -40,6 +40,7 @@ mod default_arguments;
 mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
+mod overrides;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
@@ -53,6 +54,7 @@ pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondar
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -3110,49 +3112,6 @@ pub struct IrModuleClassifier {
 pub struct IrAppliedClassifier {
     pub classifier: TypeName,
     pub applied: Ty,
-    pub depth: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrPropertyOverride {
-    pub implementation: crate::fir::ResolvedPropertyOverrideTarget,
-    /// Common-IR getter of a compiler-generated implementation (see `IrFunctionOverride`).
-    pub implementation_getter: Option<FunId>,
-    pub implementation_owner: TypeName,
-    pub overridden: crate::fir::ResolvedPropertyOverrideTarget,
-    pub overridden_owner: TypeName,
-    pub overridden_is_interface: bool,
-    pub name: String,
-    pub declared_type: Ty,
-    pub applied_type: Ty,
-    pub implementation_type: Ty,
-    pub overridden_mutable: bool,
-    pub implementation_mutable: bool,
-    pub has_kotlin_superclass_override: bool,
-    pub depth: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrFunctionOverride {
-    pub implementation: crate::fir::ResolvedFunctionOverrideTarget,
-    /// Exact common-IR implementation for a compiler-generated declaration such as an interface
-    /// delegation forwarder. Source overrides use their stable callable identity and leave this
-    /// empty; backends consume either edge without matching a method by name.
-    pub implementation_function: Option<FunId>,
-    pub implementation_owner: TypeName,
-    pub overridden: crate::fir::ResolvedFunctionOverrideTarget,
-    pub overridden_owner: TypeName,
-    pub overridden_is_interface: bool,
-    pub name: String,
-    pub declared_parameters: Vec<Ty>,
-    pub declared_result: Ty,
-    pub applied_parameters: Vec<Ty>,
-    pub applied_result: Ty,
-    pub implementation_parameters: Vec<Ty>,
-    pub implementation_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub implementation_result: Ty,
-    pub suspend: bool,
-    pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }
 

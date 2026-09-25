@@ -1842,6 +1842,8 @@ pub enum ResolvedDelegatedMember {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedProperty {
     pub name: Box<str>,
+    /// A member-extension property's own type parameters (`val <T> T.id: T`).
+    pub type_parameters: Box<[ResolvedDelegatedTypeParameter]>,
     pub ty: ResolvedTy,
     pub context_parameters: Box<[ResolvedDelegatedContextParameter]>,
     pub getter: ResolvedDelegatedCall,
@@ -1856,6 +1858,8 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub owner: TypeName,
     /// Unsubstituted declared type, the one the overridden accessors are erased from.
     pub ty: ResolvedTy,
+    /// Unsubstituted declared receiver of a member-extension property, erased likewise.
+    pub receiver: Option<ResolvedTy>,
     pub interface: bool,
 }
 
@@ -1878,6 +1882,18 @@ impl ResolvedDelegatedCall {
     }
 }
 
+fn type_parameters_payload_bytes(parameters: &[ResolvedDelegatedTypeParameter]) -> usize {
+    parameters.len() * std::mem::size_of::<ResolvedDelegatedTypeParameter>()
+        + parameters
+            .iter()
+            .map(|parameter| {
+                parameter.name.len()
+                    + parameter.semantic_name.len()
+                    + parameter.bounds.len() * std::mem::size_of::<ResolvedTy>()
+            })
+            .sum::<usize>()
+}
+
 impl ResolvedInterfaceDelegation {
     fn storage_payload_bytes(&self) -> usize {
         self.members.len() * std::mem::size_of::<ResolvedDelegatedMember>()
@@ -1887,23 +1903,14 @@ impl ResolvedInterfaceDelegation {
                 .map(|member| match member {
                     ResolvedDelegatedMember::Function(function) => {
                         function.name.len()
-                            + function.type_parameters.len()
-                                * std::mem::size_of::<ResolvedDelegatedTypeParameter>()
-                            + function
-                                .type_parameters
-                                .iter()
-                                .map(|parameter| {
-                                    parameter.name.len()
-                                        + parameter.semantic_name.len()
-                                        + parameter.bounds.len() * std::mem::size_of::<ResolvedTy>()
-                                })
-                                .sum::<usize>()
+                            + type_parameters_payload_bytes(&function.type_parameters)
                             + function.overridden.parameters.len()
                                 * std::mem::size_of::<ResolvedTy>()
                             + function.call.storage_payload_bytes()
                     }
                     ResolvedDelegatedMember::Property(property) => {
                         property.name.len()
+                            + type_parameters_payload_bytes(&property.type_parameters)
                             + property.context_parameters.len()
                                 * std::mem::size_of::<ResolvedDelegatedContextParameter>()
                             + property

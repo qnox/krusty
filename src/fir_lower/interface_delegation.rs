@@ -258,21 +258,7 @@ fn materialize_delegation(
                     ir.signatures.insert(
                         function,
                         crate::ir::IrGenericSig {
-                            type_params: member
-                                .type_parameters
-                                .iter()
-                                .map(|parameter| crate::ir::IrTypeParameter {
-                                    name: parameter.name.to_string(),
-                                    semantic_name: parameter.semantic_name.to_string(),
-                                    bounds: parameter
-                                        .bounds
-                                        .iter()
-                                        .map(|bound| (bound.get(), false))
-                                        .collect(),
-                                    variance: crate::types::TypeVariance::Invariant,
-                                    reified: false,
-                                })
-                                .collect(),
+                            type_params: ir_type_parameters(&member.type_parameters),
                             params,
                             ret: Some(member.call.result.get()),
                             supers: Vec::new(),
@@ -350,13 +336,28 @@ fn materialize_delegation(
                     .iter()
                     .map(|(_, _, parameter)| *parameter)
                     .collect::<Vec<_>>();
+                // A member extension's receiver follows its context parameters in every accessor.
+                let extension_receiver = property
+                    .getter
+                    .extension_receiver_parameter
+                    .map(|position| {
+                        property
+                            .getter
+                            .parameters
+                            .get(position as usize)
+                            .map(|receiver| receiver.get())
+                            .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))
+                    })
+                    .transpose()?;
+                let mut getter_parameters = context_types.clone();
+                getter_parameters.extend(extension_receiver);
                 let delegate = delegate_field_read(ir, class, field);
                 let getter_call = delegated_call(ir, &property.getter, delegate)?;
                 let getter = add_forwarder(
                     ir,
                     class,
                     crate::names::property_getter_name(&name),
-                    context_types.clone(),
+                    getter_parameters.clone(),
                     ty,
                     getter_call,
                 );
@@ -366,7 +367,7 @@ fn materialize_delegation(
                     .map(|setter| {
                         let delegate = delegate_field_read(ir, class, field);
                         delegated_call(ir, setter, delegate).map(|call| {
-                            let mut parameters = context_types.clone();
+                            let mut parameters = getter_parameters.clone();
                             parameters.push(ty);
                             add_forwarder(
                                 ir,
@@ -382,6 +383,31 @@ fn materialize_delegation(
                 // Like a delegated function, a delegated property is an overridable override.
                 ir.open_methods
                     .extend(std::iter::once(getter).chain(setter));
+                // The accessors' parameters, as a source accessor declares them: its context
+                // parameters, the extension receiver, then the setter's value.
+                let mut identities = context_params
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, (name, kind, _))| {
+                        context_parameter_identity(ordinal as u32, name, *kind)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+                if extension_receiver.is_some() {
+                    identities.push(crate::ir::IrParameterIdentity::extension_receiver());
+                    for accessor in std::iter::once(getter).chain(setter) {
+                        ir.fn_source_names.insert(accessor, name.clone());
+                    }
+                }
+                ir.fn_params.insert(
+                    getter,
+                    crate::ir::FnParamInfo::identities(identities.clone()),
+                );
+                if let Some(setter) = setter {
+                    identities.push(crate::ir::IrParameterIdentity::property_setter_value());
+                    ir.fn_params
+                        .insert(setter, crate::ir::FnParamInfo::identities(identities));
+                }
                 let implementation_owner = ir.classes[class as usize].fq_name;
                 ir.property_overrides
                     .entry(implementation_owner)
@@ -391,6 +417,7 @@ fn materialize_delegation(
                         // declaration; `implementation_getter` names their generated body.
                         implementation: property.overridden.target,
                         implementation_getter: Some(getter),
+                        implementation_setter: setter,
                         implementation_owner,
                         overridden: property.overridden.target,
                         overridden_owner: property.overridden.owner,
@@ -399,11 +426,50 @@ fn materialize_delegation(
                         declared_type: property.overridden.ty.get(),
                         applied_type: ty,
                         implementation_type: ty,
+                        declared_receiver: property
+                            .overridden
+                            .receiver
+                            .map(crate::fir::ResolvedTy::get),
+                        implementation_receiver: extension_receiver,
                         overridden_mutable: setter.is_some(),
                         implementation_mutable: setter.is_some(),
                         has_kotlin_superclass_override: false,
                         depth: 0,
                     });
+                let type_params = ir_type_parameters(&property.type_parameters);
+                if !type_params.is_empty() {
+                    for accessor in std::iter::once(getter).chain(setter) {
+                        let signature = &ir.functions[accessor as usize];
+                        ir.signatures.insert(
+                            accessor,
+                            crate::ir::IrGenericSig {
+                                type_params: type_params.clone(),
+                                params: signature.params.clone(),
+                                ret: Some(signature.ret),
+                                supers: Vec::new(),
+                            },
+                        );
+                    }
+                }
+                if let Some(receiver) = extension_receiver {
+                    // A member extension is not a class property: it has no field and its
+                    // accessors take the receiver, so it is recorded with the member extensions.
+                    ir.member_ext_props
+                        .entry(implementation_owner)
+                        .or_default()
+                        .push(crate::ir::MemberExtProp {
+                            name,
+                            receiver,
+                            ty,
+                            is_var: setter.is_some(),
+                            is_abstract: false,
+                            getter,
+                            setter,
+                            visibility: crate::types::Visibility::Public,
+                            type_params,
+                        });
+                    continue;
+                }
                 ir.classes[class as usize].properties.push(IrProperty {
                     name,
                     context_params,
@@ -596,6 +662,44 @@ fn delegate_field_read(ir: &mut IrFile, class: crate::ir::ClassId, field: u32) -
         class,
         index: field,
     })
+}
+
+fn ir_type_parameters(
+    parameters: &[crate::fir::ResolvedDelegatedTypeParameter],
+) -> Vec<crate::ir::IrTypeParameter> {
+    parameters
+        .iter()
+        .map(|parameter| crate::ir::IrTypeParameter {
+            name: parameter.name.to_string(),
+            semantic_name: parameter.semantic_name.to_string(),
+            bounds: parameter
+                .bounds
+                .iter()
+                .map(|bound| (bound.get(), false))
+                .collect(),
+            variance: crate::types::TypeVariance::Invariant,
+            reified: false,
+        })
+        .collect()
+}
+
+fn context_parameter_identity(
+    ordinal: u32,
+    name: &str,
+    kind: crate::types::ContextParameterKind,
+) -> Option<crate::ir::IrParameterIdentity> {
+    match kind {
+        crate::types::ContextParameterKind::Named => {
+            Some(crate::ir::IrParameterIdentity::context_value(name))
+        }
+        crate::types::ContextParameterKind::Anonymous => Some(
+            crate::ir::IrParameterIdentity::anonymous_context_parameter(ordinal),
+        ),
+        crate::types::ContextParameterKind::LegacyReceiver => {
+            Some(crate::ir::IrParameterIdentity::context_receiver(ordinal))
+        }
+        crate::types::ContextParameterKind::None => None,
+    }
 }
 
 fn add_forwarder(

@@ -365,11 +365,26 @@ pub(super) fn function_assertions(
     let identities = ir.function_parameter_identities(function)?;
     let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
     let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
+    // kotlinc replaces a function whose signature the value-class ABI mangles (or moves to a static
+    // `-impl`) with a copy whose extension receiver is an ordinary parameter, named as the
+    // receiver's local variable. Its guard then quotes that name rather than `<this>`.
+    let replaced = ir
+        .vc_declared_sigs
+        .get(&function)
+        .zip(ir.functions.get(function as usize))
+        .is_some_and(|((declared, ..), physical)| *declared != physical.name);
     Some(
         identities
             .iter()
             .enumerate()
-            .map(|(index, identity)| anonymous[index].clone().or_else(|| assertion(identity)))
+            .map(|(index, identity)| {
+                anonymous[index].clone().or_else(|| match identity.role {
+                    IrParameterRole::ExtensionReceiver if replaced => {
+                        function_local_variable(ir, function, identity)
+                    }
+                    _ => assertion(identity),
+                })
+            })
             .collect(),
     )
 }
