@@ -1373,31 +1373,11 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            // `+CompanionBlocksAndExtensions`: `companion fun/val/var C.member …` is a real
-            // top-level declaration modifier. It is intentionally consumed only at file scope;
-            // inside a classifier, `companion object` and `companion { … }` select member grammar
-            // productions and must remain visible to that dispatcher.
-            if self.at(TokenKind::Ident) && self.keyword_text("companion") {
-                let save = self.i;
-                self.bump(); // `companion`
-                let mut tail = if self.at(TokenKind::At) || self.at_modifier() {
-                    self.skip_decl_prefix()
-                } else {
-                    Vec::new()
-                };
-                self.skip_newlines();
-                if matches!(
-                    self.kind(),
-                    TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar
-                ) {
-                    mods.push("companion".to_string());
-                    mods.append(&mut tail);
-                } else {
-                    self.i = save;
-                }
-            }
-            // `context` is a soft keyword and only starts a clause before a declaration.
+            self.take_top_level_companion_modifier(&mut mods);
+            // `context` is a soft keyword and only starts a clause before a declaration. Like any
+            // modifier, `companion` may follow it (`context(_: A) companion fun C.f()`).
             mods.extend(self.maybe_parse_context_receivers());
+            self.take_top_level_companion_modifier(&mut mods);
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is

@@ -258,6 +258,79 @@ pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[S
     );
 }
 
+/// Every error kotlinc reports for named sources with its complete message, flattened: each
+/// error's `file:line:column: first line`, then each further message line as `| line`. kotlinc's
+/// trailing source-line and caret excerpt is not part of the message.
+pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let _ = std::fs::remove_dir_all(work);
+    error_blocks(&stderr, true)
+}
+
+/// [`reference_error_blocks`] for krusty's CLI.
+pub fn krusty_error_blocks(sources: &[(&str, &str)]) -> Vec<String> {
+    let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let output = Command::new(common::krusty_binary())
+        .arg("-d")
+        .arg(work.join("krusty-out"))
+        .arg("-no-reflect")
+        .args(&source_paths)
+        .output()
+        .expect("run krusty diagnostic fixture");
+    let _ = std::fs::remove_dir_all(work);
+    error_blocks(&String::from_utf8_lossy(&output.stderr), false)
+}
+
+/// Assert krusty's CLI reports exactly kotlinc's errors for `sources`, complete multi-line
+/// messages included, as recorded for the running test under the reference version.
+pub fn assert_error_blocks_match_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
+    let expected =
+        super::recorded_support::recorded(|| reference_error_blocks(sources, reference_args));
+    assert!(!expected.is_empty(), "kotlinc reported no error");
+    assert_eq!(
+        krusty_error_blocks(sources),
+        expected,
+        "krusty's complete errors against kotlinc {}",
+        krusty::kotlin_version::target()
+    );
+}
+
+fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
+    let located = |line: &str| {
+        line.split_once(": error: ")
+            .or_else(|| line.split_once(": warning: "))
+            .or_else(|| line.split_once(": info: "))
+            .is_some_and(|(location, _)| location.rsplitn(3, ':').count() == 3)
+    };
+    let mut blocks = Vec::new();
+    let mut lines = stderr.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !located(line) || !line.contains(": error: ") {
+            continue;
+        }
+        let Some(header) = render_errors(line).pop() else {
+            continue;
+        };
+        let mut continuation = Vec::new();
+        while let Some(next) = lines.peek() {
+            if located(next) || next.starts_with("krusty:") {
+                break;
+            }
+            continuation.push(format!("| {}", lines.next().expect("peeked line")));
+        }
+        let caret = |line: &String| line.trim_start_matches("| ").trim().starts_with('^');
+        if excerpted && continuation.last().is_some_and(caret) {
+            continuation.truncate(continuation.len().saturating_sub(2));
+        }
+        blocks.push(header);
+        blocks.extend(continuation);
+    }
+    blocks
+}
+
 /// Assert the frontend reports exactly the messages kotlinc reports for `source` compiled against
 /// the stdlib, as recorded for the running test under the reference version.
 pub fn assert_messages_match_kotlinc(source: &str) {
@@ -480,22 +553,21 @@ pub fn expect_box_same_as_kotlinc(source: &str, stem: &str) {
 }
 
 /// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
-/// `box()` result on the shared JVM.
+/// `box()` result on the shared JVM. The fixture's `// LANGUAGE:` directives become kotlinc flags.
 pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
     let source_paths = write_fixture_sources(&work, &[("Main.kt", source)]);
     let output = work.join("out");
-    let extra_args = if classpath.is_empty() {
-        Vec::new()
-    } else {
-        vec![
-            "-cp".to_string(),
+    let mut extra_args = common::language_directives::kotlinc_args(source);
+    if !classpath.is_empty() {
+        extra_args.push("-cp".to_string());
+        extra_args.push(
             std::env::join_paths(classpath)
                 .expect("build reference-runtime classpath")
                 .to_string_lossy()
                 .into_owned(),
-        ]
-    };
+        );
+    }
     let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &extra_args);
     assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
     let stdlib = common::stdlib_jar();

@@ -59,6 +59,24 @@ impl Checker<'_> {
         classifiers
     }
 
+    /// The implicit rungs of `scope`, in the order compact signature solving walks them: a class's
+    /// static scope directly follows its own instance receiver.
+    pub(super) fn implicit_rungs(
+        &self,
+        scope: &CheckerScope<'_>,
+    ) -> Vec<super::implicit_rungs::ImplicitRung<ImplicitReceiver>> {
+        super::implicit_rungs::implicit_rungs(
+            self.implicit_receivers(scope),
+            self.static_scope_classifiers(scope),
+            |receiver| {
+                receiver
+                    .class_receiver
+                    .then(|| receiver.ty.kotlin_class_internal())
+                    .flatten()
+            },
+        )
+    }
+
     /// Select `name(args)` among one rung's associated `candidates` and record the selected callable
     /// as a receiver-less call. `probe_mark` is the argument probe to retire once a candidate is
     /// selected, when the caller typed the arguments through one.
@@ -374,6 +392,17 @@ impl Checker<'_> {
         }
     }
 
+    /// A companion-associated function as kotlinc lists a block member among candidates.
+    fn associated_candidate_display(
+        name: &str,
+        function: &crate::libraries::FunctionInfo,
+    ) -> String {
+        format!(
+            "companion {}",
+            Self::callable_candidate_display(name, function)
+        )
+    }
+
     /// `C::name`, or `::name` from `C`'s static scope, naming one of `classifier`'s associated
     /// declarations: the same receiver-less reference as `::topLevel`. `None` when no associated
     /// declaration named `name` is reachable.
@@ -410,10 +439,14 @@ impl Checker<'_> {
                     self.record_top_level_function_ref(expression, name, selected, ty)
                 }
                 _ => {
-                    self.diags.error(
-                        self.member_name_span(expression, name),
-                        format!("overload resolution ambiguity for callable reference '{name}'"),
-                    );
+                    let mut message =
+                        "overload resolution ambiguity between candidates:".to_string();
+                    for candidate in &functions {
+                        message.push('\n');
+                        message.push_str(&Self::associated_candidate_display(name, candidate));
+                    }
+                    self.diags
+                        .error(self.member_name_span(expression, name), message);
                     Ty::Error
                 }
             });

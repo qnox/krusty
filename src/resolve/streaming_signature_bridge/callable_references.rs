@@ -7,6 +7,130 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    /// Select, against the expected function type, the receiver-less function a callable reference
+    /// names among `candidates` (top-level functions, or an open static scope's associated ones),
+    /// each with its finalized signature. More than one distinct applicable shape is a failure.
+    pub(super) fn select_receiverless_function_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        candidates: Vec<crate::libraries::FunctionInfo>,
+        expected: &'static crate::types::FnSig,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let mut candidates_with_finalized_signatures = Vec::with_capacity(candidates.len());
+        for mut candidate in candidates {
+            let signature = match self.demanded_source_signature(
+                Some(scope),
+                candidate.stable_declaration,
+                demand,
+            )? {
+                Some(signature) => Some(signature),
+                None => self.demanded_member_signature(candidate.stable_declaration, demand)?,
+            };
+            if let Some(signature) = signature {
+                let parameters = signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
+                let result = signature.result.get();
+                if let Some(generic) = candidate.generic_sig.as_mut() {
+                    generic.params = parameters;
+                    generic.ret = result;
+                } else {
+                    candidate.callable.params = parameters;
+                    candidate.callable.ret = result;
+                }
+            }
+            candidates_with_finalized_signatures.push(candidate);
+        }
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let oracle = crate::symbol_resolver::SourceOracle(&source);
+        let context = crate::assignable::TyCtx::new();
+        let selected = candidates_with_finalized_signatures
+            .into_iter()
+            .filter(|candidate| {
+                candidate.kind == crate::libraries::FnKind::TopLevel
+                    || candidate.callable.singleton_dispatch.is_some()
+            })
+            .filter(|candidate| !candidate.callable.suspend || expected.suspend)
+            .filter_map(|mut candidate| {
+                let specialized = super::super::callable_reference_selection::specialize_candidate(
+                    &source,
+                    &mut candidate,
+                    None,
+                    Some(&expected.params),
+                    Some(expected.ret),
+                    |actual, bound| {
+                        crate::assignable::is_subtype(&context, &oracle, actual, bound)
+                    },
+                );
+                if specialized
+                    != super::super::callable_reference_selection::CallableRefSpecialization::Specialized
+                {
+                    return None;
+                }
+                super::super::callable_reference_selection::parameter_plan(
+                    &candidate.callable.params,
+                    &candidate.call_sig,
+                    &expected.params,
+                    |actual, target| {
+                        crate::assignable::is_subtype(&context, &oracle, actual, target)
+                    },
+                )?;
+                if !super::super::callable_reference_selection::is_compatible(
+                    &expected.params,
+                    candidate.callable.ret,
+                    candidate.callable.suspend,
+                    expected,
+                    true,
+                    |actual, target| {
+                        crate::assignable::is_subtype(&context, &oracle, actual, target)
+                    },
+                ) {
+                    return None;
+                }
+                let mut parameters = expected.params.clone();
+                for (parameter, declared) in
+                    parameters.iter_mut().zip(&candidate.callable.params)
+                {
+                    if matches!(parameter.non_null(), Ty::TyParam(..)) {
+                        *parameter = *declared;
+                    }
+                }
+                let result = if matches!(expected.ret.non_null(), Ty::TyParam(..)) {
+                    candidate.callable.ret
+                } else {
+                    expected.ret
+                };
+                Some(Ty::fun_with_shape(
+                    parameters,
+                    result,
+                    expected.context_count,
+                    expected.has_receiver,
+                    expected.suspend,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let selected = selected.into_iter().fold(Vec::new(), |mut unique, ty| {
+            if !unique.contains(&ty) {
+                unique.push(ty);
+            }
+            unique
+        });
+        let [selected] = selected.as_slice() else {
+            return Err(Self::failure());
+        };
+        crate::fir::ResolvedTy::new(*selected).map_err(|_| Self::failure())
+    }
+
     pub(super) fn applied_source_alias_expansion(
         &self,
         scope: crate::fir::SignatureScope,

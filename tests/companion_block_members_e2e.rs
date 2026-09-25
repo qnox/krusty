@@ -208,6 +208,70 @@ fn bare_classifier_call_invokes_block_and_extension_operators() {
 }
 
 #[test]
+fn companion_extensions_with_context_parameters_see_their_classifier_scope() {
+    const SRC: &str = "class A { val k = \"K\" }\n\
+        class C\n\
+        context(a: A)\n\
+        companion val C.o get() = \"O\"\n\
+        context(a: A)\n\
+        companion fun C.k() = a.k\n\
+        context(_: A)\n\
+        companion fun C.ok(): String = o + k()\n\
+        fun <T, R> within(value: T, block: T.() -> R): R = value.block()\n\
+        fun box() = within(A()) { C.ok() }\n";
+    assert_eq!(run(SRC).expect("context companion extensions"), "OK");
+}
+
+#[test]
+fn references_inside_a_block_name_block_members() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       lateinit var value: String\n\
+        \x20       fun initialized() = ::value.isInitialized\n\
+        \x20       fun k() = \"K\"\n\
+        \x20       fun ref() = ::k\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   if (C.initialized()) return \"initialized\"\n\
+        \x20   C.value = \"O\"\n\
+        \x20   return C.value + C.ref()()\n\
+        }\n";
+    assert_eq!(run(SRC).expect("block member references"), "OK");
+}
+
+#[test]
+fn static_scope_writes_and_increments_companion_properties() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       var n = 0\n\
+        \x20       var s = \"\"\n\
+        \x20       fun bump() { n++; ++n; n += 2; s += \"K\" }\n\
+        \x20   }\n\
+        }\n\
+        companion var C.m = 1\n\
+        companion fun C.more() { m++; m *= 3 }\n\
+        fun box(): String {\n\
+        \x20   C.bump()\n\
+        \x20   C.more()\n\
+        \x20   return if (\"${C.n}${C.s}${C.m}\" == \"4K6\") \"OK\" else \"${C.n}${C.s}${C.m}\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("static-scope writes"), "OK");
+}
+
+#[test]
+fn companion_extension_has_no_value_receiver() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class C { fun m() = 1 }\n\
+        companion fun C.f() = this\n\
+        companion fun C.g() = m()\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
 fn kotlinc_resolves_block_members_from_krusty_metadata() {
     const LIB: &str = "class A {\n\
         \x20   companion {\n\
@@ -474,4 +538,75 @@ fn library_internal_block_property_is_invisible_outside_its_module() {
         ),
         Vec::<String>::new()
     );
+}
+
+/// An overloaded `::f` naming a block function from its class's static scope is selected by the
+/// expected function type, in an inferred signature as in a body.
+#[test]
+fn static_scope_reference_is_selected_by_the_expected_function_type() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       fun f(x: Int): String = \"int\"\n\
+        \x20       fun f(x: String): String = \"string\"\n\
+        \x20   }\n\
+        \x20   fun pick() = apply1(::f)\n\
+        \x20   fun body(): String {\n\
+        \x20       val g: (Int) -> String = ::f\n\
+        \x20       return g(1)\n\
+        \x20   }\n\
+        }\n\
+        fun apply1(g: (String) -> String) = g(\"s\")\n\
+        fun box(): String {\n\
+        \x20   val r = C().pick() + \",\" + C().body()\n\
+        \x20   return if (r == \"string,int\") \"OK\" else r\n\
+        }\n";
+    assert_eq!(run(SRC).expect("expected reference type"), "OK");
+}
+
+/// Without an expected type the same overloaded `::f` is kotlinc's ambiguity, reported with both
+/// candidates.
+#[test]
+fn static_scope_reference_without_an_expected_type_is_ambiguous() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class C {\n\
+        \x20   companion {\n\
+        \x20       fun f(x: Int): String = \"int\"\n\
+        \x20       fun f(x: String): String = \"string\"\n\
+        \x20   }\n\
+        \x20   fun pick() = ::f\n\
+        }\n";
+    common::assert_error_blocks_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+/// A class's static scope directly follows its own instance receiver in the unqualified tower, so
+/// an inner class's block declaration shadows the outer class's member of the same name, for a
+/// call, a read and a `::f` reference, in checked bodies and inferred signatures alike.
+#[test]
+fn inner_static_scope_precedes_an_outer_implicit_receiver() {
+    const SRC: &str = "class Outer {\n\
+        \x20   fun f(): String = \"outer\"\n\
+        \x20   val p: String get() = \"outer\"\n\
+        \x20   inner class Inner {\n\
+        \x20       companion {\n\
+        \x20           fun f(): String = \"inner\"\n\
+        \x20           val p: String get() = \"inner\"\n\
+        \x20       }\n\
+        \x20       fun call(): String = f()\n\
+        \x20       fun read(): String = p\n\
+        \x20       fun ref(): String = (::f)()\n\
+        \x20       fun inferredCall() = f()\n\
+        \x20       fun inferredRead() = p\n\
+        \x20       fun inferredRef() = ::f\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val i = Outer().Inner()\n\
+        \x20   val r = i.call() + i.read() + i.ref() + i.inferredCall() + i.inferredRead() +\n\
+        \x20       i.inferredRef()()\n\
+        \x20   return if (r == \"innerinnerinnerinnerinnerinner\") \"OK\" else r\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "InnerStaticScope");
 }

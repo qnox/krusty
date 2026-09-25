@@ -65,6 +65,7 @@ mod finalized_projection;
 mod for_loop_iteration;
 pub(crate) mod function_type_parameters;
 mod generic_call_bindings;
+mod implicit_rungs;
 mod inspection_analysis;
 mod interface_delegation;
 mod invoke_selection;
@@ -23649,11 +23650,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let implicit_receivers = self.implicit_receivers(scope);
                 // A class's static scope, holding its associated declarations, directly follows its
                 // own receiver; a companion-associated declaration's follows its context receivers.
                 // Inapplicable associated candidates join the final report.
-                let mut static_scopes = self.static_scope_classifiers(scope);
                 let mut inapplicable_associated = Vec::new();
                 let associated_site = classifier_associated::AssociatedCallSite {
                     call_args: CallArgs {
@@ -23665,7 +23664,23 @@ impl<'a> Checker<'a> {
                     explicit_type_args: &explicit_type_args,
                     expected,
                 };
-                for implicit_receiver in implicit_receivers.iter().copied() {
+                let mut receivers_closed = false;
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            if let Some(ret) = self.static_scope_call(
+                                scope,
+                                associated_site,
+                                (&fname, classifier),
+                                &mut inapplicable_associated,
+                            ) {
+                                return ret;
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(_) if receivers_closed => continue,
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
                     if receiver == Ty::String || matches!(receiver, Ty::Obj(..) | Ty::TyParam(..)) {
@@ -23725,7 +23740,8 @@ impl<'a> Checker<'a> {
                             // rung below. Stop before an OUTER implicit receiver can steal the call;
                             // the shared second probe either commits an applicable receiver-less
                             // declaration or reselects this nearest imported extension.
-                            break;
+                            receivers_closed = true;
+                            continue;
                         }
                         match &extension.selection {
                             Some(CallableCandidateSelection::Selected(_))
@@ -23752,35 +23768,6 @@ impl<'a> Checker<'a> {
                             }
                             None | Some(CallableCandidateSelection::MissingContext(_)) => {}
                         }
-                    }
-                    let class_scope =
-                        implicit_receiver
-                            .ty
-                            .kotlin_class_internal()
-                            .filter(|classifier| {
-                                implicit_receiver.class_receiver
-                                    && static_scopes.contains(classifier)
-                            });
-                    if let Some(classifier) = class_scope {
-                        static_scopes.retain(|scope| *scope != classifier);
-                        if let Some(ret) = self.static_scope_call(
-                            scope,
-                            associated_site,
-                            (&fname, classifier),
-                            &mut inapplicable_associated,
-                        ) {
-                            return ret;
-                        }
-                    }
-                }
-                for classifier in static_scopes {
-                    if let Some(ret) = self.static_scope_call(
-                        scope,
-                        associated_site,
-                        (&fname, classifier),
-                        &mut inapplicable_associated,
-                    ) {
-                        return ret;
                     }
                 }
                 // Companion members are the next implicit-receiver level after the ordinary
@@ -68935,8 +68922,22 @@ impl<'a> Checker<'a> {
                     // the cached dispatch binding: an extension receiver or receiver lambda is nearer
                     // and its same-named property wins. The selected property supplies the type; using
                     // the cached dispatch type after selecting another receiver turned
-                    // `Token.value: String` into `Container.value: Int`.
-                    for receiver in self.implicit_receivers(scope) {
+                    // `Token.value: String` into `Container.value: Int`. A nearer class's static
+                    // scope is a rung of that tower too.
+                    for rung in self.implicit_rungs(scope) {
+                        let receiver = match rung {
+                            implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                                let selection =
+                                    self.select_static_scope_property(scope, classifier, &n);
+                                if let Some(ty) =
+                                    self.record_receiverless_property_read(e, &n, selection)
+                                {
+                                    return self.set(e, ty);
+                                }
+                                continue;
+                            }
+                            implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                        };
                         if let Some(selected_ty) =
                             self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                         {
@@ -69059,8 +69060,20 @@ impl<'a> Checker<'a> {
                 let mut deferred_receivers = Vec::new();
                 let implicit_receivers = self.implicit_receivers(scope);
                 // A class's static scope directly follows its own receiver; see the call tower.
-                let mut static_scopes = self.static_scope_classifiers(scope);
-                for implicit_receiver in implicit_receivers.iter().copied() {
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            let selection =
+                                self.select_static_scope_property(scope, classifier, &n);
+                            if let Some(ty) =
+                                self.record_receiverless_property_read(e, &n, selection)
+                            {
+                                return self.set(e, ty);
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     if !implicit_receiver.current
                         && implicit_receiver.ty.obj_internal() == deferred_companion
                     {
@@ -69071,27 +69084,6 @@ impl<'a> Checker<'a> {
                         self.read_implicit_receiver_name(scope, e, &n, implicit_receiver)
                     {
                         self.mark_implicit_receiver_selection(e, implicit_receiver);
-                        return self.set(e, ty);
-                    }
-                    let class_scope =
-                        implicit_receiver
-                            .ty
-                            .kotlin_class_internal()
-                            .filter(|classifier| {
-                                implicit_receiver.class_receiver
-                                    && static_scopes.contains(classifier)
-                            });
-                    if let Some(classifier) = class_scope {
-                        static_scopes.retain(|scope| *scope != classifier);
-                        let selection = self.select_static_scope_property(scope, classifier, &n);
-                        if let Some(ty) = self.record_receiverless_property_read(e, &n, selection) {
-                            return self.set(e, ty);
-                        }
-                    }
-                }
-                for classifier in static_scopes {
-                    let selection = self.select_static_scope_property(scope, classifier, &n);
-                    if let Some(ty) = self.record_receiverless_property_read(e, &n, selection) {
                         return self.set(e, ty);
                     }
                 }
@@ -71950,7 +71942,27 @@ impl<'a> Checker<'a> {
                     let (params, ret) = Self::local_function_reference_shape(&sig, None);
                     return self.set(e, Ty::fun(params, ret));
                 }
-                for implicit_receiver in self.implicit_receivers(scope) {
+                // The static scopes open here name associated declarations without a receiver.
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            let resolver = self.resolver();
+                            let functions =
+                                resolver.static_scope_associated_callables(classifier, &name);
+                            let properties =
+                                resolver.static_scope_associated_properties(classifier, &name);
+                            if let Some(ty) = self.associated_callable_ref(
+                                e,
+                                &name,
+                                (functions, properties),
+                                expected,
+                            ) {
+                                return self.set(e, ty);
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     let receiver = implicit_receiver.ty;
                     let candidates = self.callable_ref_candidates(receiver, &name);
                     if let Some(selection) = self.select_bound_callable_ref(&candidates, expected) {
@@ -71983,17 +71995,6 @@ impl<'a> Checker<'a> {
                         if ty != Ty::Error {
                             self.mark_implicit_receiver_selection(e, implicit_receiver);
                         }
-                        return self.set(e, ty);
-                    }
-                }
-                // The static scopes open here name associated declarations without a receiver.
-                for classifier in self.static_scope_classifiers(scope) {
-                    let resolver = self.resolver();
-                    let functions = resolver.static_scope_associated_callables(classifier, &name);
-                    let properties = resolver.static_scope_associated_properties(classifier, &name);
-                    if let Some(ty) =
-                        self.associated_callable_ref(e, &name, (functions, properties), expected)
-                    {
                         return self.set(e, ty);
                     }
                 }
