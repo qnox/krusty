@@ -483,6 +483,8 @@ fn materialize_delegation(
                     backing_field: None,
                     is_var: property.setter.is_some(),
                     is_open: true,
+                    modifiers: Default::default(),
+                    delegate_field: None,
                     is_private: false,
                     setter_is_private: false,
                     getter: Some(getter),

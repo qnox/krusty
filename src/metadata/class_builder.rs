@@ -32,10 +32,11 @@ pub struct PropMeta {
     pub has_constant: bool,
     /// Whether the property is declared `const`.
     pub is_const: bool,
-    /// An ABSTRACT property (an interface member, or `abstract val`): kotlinc records the abstract
-    /// modality in `Property.flags` and, since there is no backing field, omits the
-    /// `JvmPropertySignature.field` entry entirely.
-    pub is_abstract: bool,
+    /// Modality, declared accessors, delegation and `lateinit`, recorded in `Property.flags` and
+    /// the accessor flag words.
+    pub modifiers: crate::ir::IrPropertyModifiers,
+    /// A `var` whose setter alone is `private`.
+    pub setter_is_private: bool,
     /// Whether this declaration owns a backing field. A concrete computed property has accessor code
     /// but no field, just like an abstract property has no field, so modality cannot encode this fact.
     pub has_backing_field: bool,
@@ -257,7 +258,7 @@ pub(crate) fn records_annotations(annotations: &[crate::ir::AppliedAnnotation]) 
 fn property_flags(prop: &PropMeta) -> u64 {
     let visibility = match prop.visibility {
         Visibility::Internal => 0,
-        Visibility::Private => 2,
+        Visibility::Private => PRIVATE_VISIBILITY,
         Visibility::Protected => 4,
         Visibility::Public => 6,
         Visibility::PackagePrivate => {
@@ -283,11 +284,44 @@ fn property_flags(prop: &PropMeta) -> u64 {
         } else {
             0
         }
-        | if prop.is_abstract {
-            property_flags::MODALITY_ABSTRACT
+        | modality_bits(prop.modifiers.modality)
+        | if prop.modifiers.lateinit {
+            property_flags::IS_LATEINIT
         } else {
             0
         }
+        | if prop.modifiers.delegated {
+            property_flags::IS_DELEGATED
+        } else {
+            0
+        }
+}
+
+/// kotlinc's name for a setter value parameter source did not name
+/// (`SpecialNames.IMPLICIT_SET_PARAMETER`).
+const IMPLICIT_SETTER_PARAMETER: &str = "<set-?>";
+/// kotlinc's name for the unnamed value parameter of a setter source declares without a body
+/// (`private set`).
+const DECLARED_SETTER_PARAMETER: &str = "value";
+/// `private` in the visibility bits (1-3) of a property or accessor flag word.
+const PRIVATE_VISIBILITY: u64 = 2;
+
+/// A `var`'s setter is not kotlinc's default accessor when source wrote its body, when it is
+/// delegated, or when it narrows the property's visibility (`private set`). A bodiless `set`, even
+/// an annotated one, stays the default accessor.
+fn setter_is_not_default(p: &PropMeta) -> bool {
+    p.is_var
+        && (p.modifiers.declared_setter
+            || (p.setter_is_private && p.visibility != Visibility::Private))
+}
+
+/// `Property.flags` bits 4-5, which the accessor flag words share.
+fn modality_bits(modality: crate::ir::IrPropertyModality) -> u64 {
+    match modality {
+        crate::ir::IrPropertyModality::Final => 0,
+        crate::ir::IrPropertyModality::Open => property_flags::MODALITY_OPEN,
+        crate::ir::IrPropertyModality::Abstract => property_flags::MODALITY_ABSTRACT,
+    }
 }
 
 fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb {
@@ -773,12 +807,42 @@ pub fn build_class(
 
     let build_prop = |st: &mut StringTable, p: &PropMeta| {
         let mut prop = Pb::new();
-        prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
         let mut property_type_parameters = class_type_parameters.clone();
         for (index, parameter) in p.type_params.iter().enumerate() {
             let id = captured_count + tail.type_params.len() + index;
             property_type_parameters.insert(parameter.name.clone(), id as u64);
             property_type_parameters.insert(parameter.semantic_name.clone(), id as u64);
+        }
+        let return_type = |st: &mut StringTable| {
+            type_pb_tp(
+                st,
+                p.ty,
+                p.tparam.map(|index| index + captured_count as u32),
+                &p.spellings.ret,
+                &property_type_parameters,
+            )
+        };
+        // kotlinc records the setter's value parameter exactly when the setter word is not the
+        // default one (`Flags.IS_NOT_DEFAULT`), and serializes it before the property's own name,
+        // so its strings come first in `d2`. An unnamed parameter is `value` on a source-declared
+        // setter (`private set`) and `<set-?>` on a delegated property's generated one.
+        let setter_parameter = setter_is_not_default(p).then(|| {
+            let name = p
+                .setter_parameter_name
+                .as_deref()
+                .unwrap_or(if p.modifiers.delegated {
+                    IMPLICIT_SETTER_PARAMETER
+                } else {
+                    DECLARED_SETTER_PARAMETER
+                });
+            let mut parameter = Pb::new();
+            parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+            parameter.field_message(3, &return_type(st)); // ValueParameter.type = 3
+            parameter
+        });
+        prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        for (index, parameter) in p.type_params.iter().enumerate() {
+            let id = captured_count + tail.type_params.len() + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
@@ -799,13 +863,7 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = type_pb_tp(
-            st,
-            p.ty,
-            p.tparam.map(|index| index + captured_count as u32),
-            &p.spellings.ret,
-            &property_type_parameters,
-        );
+        let ty = return_type(st);
         prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
@@ -813,11 +871,8 @@ pub fn build_class(
             let rt = type_pb_declared(st, recv, &p.spellings.receiver, &property_type_parameters);
             prop.field_message(5, &rt);
         }
-        if let Some(name) = &p.setter_parameter_name {
-            let mut parameter = Pb::new();
-            parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-            parameter.field_message(3, &ty); // ValueParameter.type = 3
-            prop.field_message(6, &parameter); // Property.setter_value_parameter = 6
+        if let Some(parameter) = &setter_parameter {
+            prop.field_message(6, parameter); // Property.setter_value_parameter = 6
         }
         for (name, kind, ty) in &p.context_params {
             if *kind == crate::types::ContextParameterKind::LegacyReceiver {
@@ -857,16 +912,35 @@ pub fn build_class(
         // That derivation is `Flags.getAccessorFlags(visibility, modality)` over the PROPERTY's own
         // word — the two share bits 1-5 — so a `protected`/`internal` declaration's accessors carry
         // ITS visibility, not the public default (`@Mark protected val` records getter_flags 4, and
-        // an `internal` one records 0). Only the property's `hasAnnotations` bit and its
-        // property-only bits are dropped.
-        let accessor_flags =
-            pflags & (property_flags::VISIBILITY_MASK | property_flags::MODALITY_MASK);
+        // an `internal` one records 0). An accessor source declares, or a delegated property's, is
+        // not the default one and sets `isNotDefault`; a `private set` also narrows the setter's
+        // visibility.
+        let shared = pflags & (property_flags::VISIBILITY_MASK | property_flags::MODALITY_MASK);
+        let default_accessor = shared | u64::from(annotated);
+        let not_default = |declared: bool| {
+            if declared {
+                property_flags::ACCESSOR_IS_NOT_DEFAULT
+            } else {
+                0
+            }
+        };
+        let getter_flags = shared | not_default(p.modifiers.declared_getter);
+        if getter_flags != default_accessor {
+            prop.field_varint(7, getter_flags); // Property.getter_flags = 7
+        }
         // The setter word rides on the DECLARATION being a `var`, not on a JVM setter signature
         // being recorded: a `@JvmField var` has no setter method at all and still records the word.
-        if annotated {
-            prop.field_varint(7, accessor_flags); // Property.getter_flags = 7
-            if p.is_var {
-                prop.field_varint(8, accessor_flags); // Property.setter_flags = 8
+        if p.is_var {
+            let setter_visibility = if p.setter_is_private {
+                PRIVATE_VISIBILITY
+            } else {
+                shared & property_flags::VISIBILITY_MASK
+            };
+            let setter_flags = (shared & !property_flags::VISIBILITY_MASK)
+                | setter_visibility
+                | not_default(setter_is_not_default(p));
+            if setter_flags != default_accessor {
+                prop.field_varint(8, setter_flags); // Property.setter_flags = 8
             }
         }
         if pflags != property_flags::DEFAULT {
@@ -1412,7 +1486,8 @@ mod tests {
                 visibility,
                 has_constant: true,
                 is_const: true,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1485,7 +1560,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1520,6 +1596,65 @@ mod tests {
                 0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
                 0x05, 0x52, 0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00,
                 0x1a, 0x04, 0x08, 0x06, 0x10, 0x07,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.20 `package app; class A { var x: Int = 0 private set }`. A bodiless
+    // `private set` is not the default setter; its unnamed value parameter is `value`, serialized
+    // before the property name. kotlinc emits no `setX` for it, so no setter signature is recorded.
+    #[test]
+    fn private_setter_records_value_parameter_before_the_property_name() {
+        let (d1, d2) = build_class(
+            crate::types::type_name("app/A"),
+            &[],
+            "()V",
+            &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                name: "x".into(),
+                ty: Ty::Int,
+                context_params: Vec::new(),
+                is_var: true,
+                has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
+                modifiers: Default::default(),
+                setter_is_private: true,
+                has_backing_field: true,
+                tparam: None,
+                receiver: None,
+                type_params: Vec::new(),
+                getter: Some(("getX".into(), "()I".into())),
+                setter: None,
+                setter_parameter_name: None,
+                field_desc: None,
+                field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
+                moved_from_interface_companion: false,
+            }],
+            &[],
+            &[],
+            &ClassTail::default(),
+        );
+        assert_eq!(
+            d2,
+            vec!["Lapp/A;", "", "<init>", "()V", "value", "", "x", "getX", "()I"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "d2 string table",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x14, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02, 0x08, 0x03,
+                0x0a, 0x02, 0x10, 0x08, 0x0a, 0x02, 0x08, 0x03, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01,
+                0x42, 0x07, 0xa2, 0x06, 0x04, 0x08, 0x02, 0x10, 0x03, 0x52, 0x1e, 0x10, 0x06, 0x1a,
+                0x02, 0x30, 0x05, 0x32, 0x06, 0x10, 0x04, 0x1a, 0x02, 0x30, 0x05, 0x40, 0x42, 0x58,
+                0x86, 0x0e, 0xa2, 0x06, 0x08, 0x0a, 0x00, 0x1a, 0x04, 0x08, 0x07, 0x10, 0x08,
             ],
             "d1 protobuf",
         );
@@ -1668,7 +1803,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1692,7 +1828,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1765,7 +1902,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1917,7 +2055,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1977,7 +2116,8 @@ mod tests {
                 has_constant: false,
                 is_const: false,
                 visibility: Visibility::Public,
-                is_abstract: false,
+                modifiers: Default::default(),
+                setter_is_private: false,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -2045,7 +2185,8 @@ mod tests {
                     has_constant: false,
                     is_const: false,
                     visibility: Visibility::Public,
-                    is_abstract: false,
+                    modifiers: Default::default(),
+                    setter_is_private: false,
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,
@@ -2069,7 +2210,12 @@ mod tests {
                     has_constant: false,
                     is_const: false,
                     visibility: Visibility::Public,
-                    is_abstract: false,
+                    // A named setter parameter exists only on a setter with a written body.
+                    modifiers: crate::ir::IrPropertyModifiers {
+                        declared_setter: true,
+                        ..Default::default()
+                    },
+                    setter_is_private: false,
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,
