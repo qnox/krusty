@@ -1069,14 +1069,27 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
     return self->as.string.bytes;
 }
 
+/* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
+   one is not read as zero: Kotlin/JVM's builder allocates its storage as `new byte[capacity]`, so
+   `StringBuilder(-1)` throws that allocation's `NegativeArraySizeException`, whose message is the
+   capacity in decimal, and makes no builder. The same is raised here before the builder is
+   allocated, and the NULL returned is never read: the call site tests for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
+    if (capacity < 0) {
+        /* An `Int` is at most eleven bytes in decimal, the sign included: `-2147483648`. */
+        KByteArray *digits = kt_bytes_new(11);
+        kt_int length = kt_render_long(capacity, kt_bytes_of(digits));
+        KRef message = kt_string_of((KRef)digits, kt_bytes_of(digits), length);
+        kt_throw(kt_throwable_new(&kt_type_negative_array_size_exception, message));
+        return NULL;
+    }
     KStringBuilder *builder =
         (KStringBuilder *)kt_gc_allocate(&kt_type_string_builder, sizeof(KStringBuilder));
     builder->byte_length = 0;
     /* Stored before the array is allocated, so a collection triggered by that allocation never
        traces an uninitialized field. */
     builder->storage = NULL;
-    builder->storage = (KRef)kt_bytes_new(capacity > 0 ? capacity : 0);
+    builder->storage = (KRef)kt_bytes_new(capacity);
     return (KRef)builder;
 }
 
@@ -1234,6 +1247,11 @@ KRef kt_string_builder_append(KRef self, KRef value) {
    target: `StringBuilder.appendLine` is specified as `\n` and not as the platform separator. */
 KRef kt_string_builder_append_line(KRef self, KRef value) {
     self = kt_string_builder_append(self, value);
+    /* The append stopped on an exception the value's `toString` threw, leaving the builder as it
+       was; the newline stops there too, or the builder the caller catches it around has changed. */
+    if (kt_pending_exception() != NULL) {
+        return self;
+    }
     kt_string_builder_reserve(self, 1);
     KStringBuilder *builder = (KStringBuilder *)self;
     kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
