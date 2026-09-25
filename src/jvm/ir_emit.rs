@@ -804,10 +804,6 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .collect()
 }
 
-/// `String` literals a class `init_body` assigns to a field, by field index. kotlinc interns each as
-/// an `ldc` constant just before that property's store.
-/// Field indices a class `init_body` actually stores into. A body property initialized to `null` is
-/// not among them — the JVM's zero-initialization already does the job, so kotlinc emits no store.
 /// The value an initializer STORES, seeing through a value-class construction: the value-class pass
 /// rewrites `val k: K = K("OK")` to `K.constructor-impl("OK")`, whose stored value is still the constant
 /// the `ldc` pushes. Anything else is its own operand.
