@@ -2799,12 +2799,10 @@ pub struct IrFile {
     /// Value classes REFERENCED in this file but declared elsewhere (fq identity → declared
     /// underlying semantic type): sibling-file declarations and dependencies share this one table.
     /// Checked classifier facts populate it before plugins run, and a representation backend may
-    /// extend it while inventorying the rest of the file. Native unsigned builtins keep their
-    /// dedicated `Ty`/runtime handling and are not recorded here.
+    /// extend it while inventorying the rest of the file. A value class the type model carries as a
+    /// native scalar (the unsigned integers) is recorded like any other; its representation is the
+    /// backend's question.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
-    /// Value classes with a target-native carrier (the unsigned integers) whose checked declaration
-    /// a backend recorded for callable naming only; see [`Self::names_callable_value_class`].
-    callable_boundary_value_classes: std::collections::HashSet<TypeName>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
     /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
     /// generated helper's spelling: a source `new` remains distinguishable from an unrelated static call

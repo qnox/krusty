@@ -26,6 +26,7 @@ mod member_names;
 mod module_members;
 mod operation_relocation;
 mod property_references;
+mod representation;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
@@ -36,6 +37,10 @@ use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operation_relocation::clone_below_representation_wrapper;
+pub(crate) use representation::{
+    boxed_value_class_names, boxed_value_class_terminal_underlying, boxed_value_class_underlying,
+    is_boxed_value_class,
+};
 use std::collections::{HashMap, HashSet};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
@@ -54,13 +59,6 @@ impl crate::value_classes::RepresentationPolicy for JvmUnderlyingProjection {
     ) -> bool {
         !nullable_is_boxed(classifier, declarations)
     }
-}
-
-fn is_native_unsigned(fq: TypeName) -> bool {
-    fq.matches("kotlin/UByte")
-        || fq.matches("kotlin/UShort")
-        || fq.matches("kotlin/UInt")
-        || fq.matches("kotlin/ULong")
 }
 
 /// JVM reference form of a value-class classifier. Native unsigned classifiers are also semantic

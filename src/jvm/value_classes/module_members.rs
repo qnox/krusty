@@ -33,7 +33,7 @@ fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
         if declarations.contains_key(&classifier) {
             continue;
         }
-        let Some(underlying) = ir.value_class_underlying_name(classifier) else {
+        let Some(underlying) = super::boxed_value_class_underlying(ir, classifier) else {
             continue;
         };
         declarations.insert(

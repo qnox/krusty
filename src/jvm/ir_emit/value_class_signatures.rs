@@ -54,7 +54,7 @@ fn physical_positions(
 ) -> Option<(Vec<Ty>, Option<Ty>)> {
     let (_, declared_params, declared_ret) = ir.vc_declared_sigs.get(&fid)?;
     // A value class written as such; a type parameter bounded by one keeps its own name (`TT;`).
-    let is_value_class = |ty: &Ty| matches!(ty.non_null(), Ty::Obj(classifier, _) if ir.is_value_class_name(classifier));
+    let is_value_class = |ty: &Ty| matches!(ty.non_null(), Ty::Obj(classifier, _) if crate::jvm::value_classes::is_boxed_value_class(ir, classifier));
     let carrier = usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
     assert_eq!(
         params.len(),

@@ -52,7 +52,7 @@ pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
 }
 
 /// The value classes a signature is mangled against: the value-class pass's underlying map, or,
-/// once it has run, the value classes the file names callables by, natively carried ones included.
+/// once it has run, every value class the file knows, natively carried ones included.
 pub(super) trait ValueClassNames {
     fn names_value_class(&self, classifier: TypeName) -> bool;
 }
@@ -65,7 +65,7 @@ impl ValueClassNames for Under {
 
 impl ValueClassNames for crate::ir::IrFile {
     fn names_value_class(&self, classifier: TypeName) -> bool {
-        self.names_callable_value_class(classifier)
+        self.is_value_class_name(classifier)
     }
 }
 

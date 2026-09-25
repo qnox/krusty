@@ -1,5 +1,6 @@
-//! The value classes an [`IrFile`] knows by name: its own declarations, the checked declarations of
-//! other files and dependencies, and the natively carried ones only callable naming reads.
+//! The value classes an [`IrFile`] knows by name: its own declarations and the checked declarations
+//! of other files and dependencies. These are semantic facts; how a target represents a value class
+//! (for example the JVM's native unsigned carriers) is the target's own question.
 
 use super::IrFile;
 use crate::types::{Ty, TypeName};
@@ -65,20 +66,5 @@ impl IrFile {
             .iter()
             .any(|c| c.is_value && c.fq_name == internal)
             || self.has_external_value_class_name(internal)
-    }
-
-    /// Record a checked value-class declaration whose target carrier is native (the unsigned
-    /// integers). It stays out of the general value-class table, whose readers would re-box its
-    /// carrier, and reaches only the callable naming that kotlinc mangles by value-class identity.
-    pub(crate) fn insert_callable_boundary_value_class(&mut self, internal: TypeName) {
-        self.callable_boundary_value_classes.insert(internal);
-    }
-
-    /// Whether a callable signature mentioning `internal` is mangled as a value-class signature:
-    /// any value class [`Self::is_value_class_name`] knows, or a natively carried one recorded
-    /// from its checked declaration.
-    pub(crate) fn names_callable_value_class(&self, internal: TypeName) -> bool {
-        self.is_value_class_name(internal)
-            || self.callable_boundary_value_classes.contains(&internal)
     }
 }

@@ -5,7 +5,8 @@
 //! JVM erasure map converts only semantic scalar spellings; boxing, storage, and descriptors remain
 //! owned by their later representation operations.
 
-use super::{is_native_unsigned, Under};
+use super::representation::has_native_carrier;
+use super::Under;
 use crate::ir::{Callee, IrExpr, IrFile};
 use crate::types::{Ty, TypeName};
 use std::collections::{HashMap, HashSet};
@@ -210,15 +211,14 @@ pub(super) fn merge_referenced(
         let Some(underlying) = declared else {
             continue;
         };
+        ir.insert_external_value_class_name(classifier, underlying);
         collect_classifier_names(underlying, &mut pending);
-        // Unsigned integers are value classes whose carrier is target-native: their checked
-        // declaration reaches callable naming, which kotlinc mangles by value-class identity, but
-        // not the general value-class table or the rewrite map, whose readers would box the carrier.
-        if is_native_unsigned(classifier) {
-            ir.insert_callable_boundary_value_class(classifier);
+        // A value class the type model carries as a native scalar (the unsigned integers) is still
+        // a checked value-class declaration, but its JVM slot is that scalar: it stays out of the
+        // rewrite map, whose entries box and unbox through the class's own `box-impl`.
+        if has_native_carrier(classifier) {
             continue;
         }
-        ir.insert_external_value_class_name(classifier, underlying);
         declarations.insert(
             classifier,
             underlying.scalar_value_repr().unwrap_or(underlying),
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_unsigned_declaration_reaches_callable_naming_only() {
+    fn checked_unsigned_declaration_is_semantic_but_not_rewritten() {
         let uint = crate::types::type_name("kotlin/UInt");
         let mut ir = IrFile::default();
         let mut holder = crate::plugins::synthetic_class("fixture/Holder");
@@ -259,8 +259,9 @@ mod tests {
         let mut declarations = Under::new();
 
         assert!(merge_referenced(&mut ir, &UnsignedFacts, &mut declarations).is_some());
-        assert!(ir.names_callable_value_class(uint));
-        assert!(!ir.is_value_class_name(uint));
+        assert_eq!(ir.value_class_underlying_name(uint), Some(Ty::Int));
+        assert!(ir.is_value_class_name(uint));
+        assert!(!super::super::is_boxed_value_class(&ir, uint));
         assert!(!declarations.contains_key(&uint));
     }
 

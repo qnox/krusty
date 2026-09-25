@@ -1158,7 +1158,8 @@ fn build_class_metadata(
             // Same-file and classpath declarations are in the unified lookup. A sibling source
             // declaration is deliberately not materialized into this file's IR, so the module-origin
             // subset is also positive identity for that one case; it is not a second underlying map.
-            (ir.is_value_class_name(fq_name) || ir.module_source_value_classes.contains(&fq_name))
+            (crate::jvm::value_classes::is_boxed_value_class(ir, fq_name)
+                || ir.module_source_value_classes.contains(&fq_name))
                 && !value_class_is_readable(ir, fq_name)
         })
     };
@@ -2546,7 +2547,7 @@ fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> 
         return None;
     }
     if let Some(owner) = ty.non_null().obj_internal() {
-        if ir.value_class_underlying_name(owner).is_some() {
+        if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
             return Some(owner.render());
         }
     }
@@ -4653,7 +4654,9 @@ fn emit_backing_field_read_adaptation(
             .storage_ty
             .and_then(|ty| ty.non_null().obj_internal())
         {
-            if ir.is_value_class_name(storage) && field_jvm.is_jvm_scalar() {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage)
+                && field_jvm.is_jvm_scalar()
+            {
                 emit_box_impl(ir, cw, &Ty::obj_name(storage), code);
                 return;
             }
@@ -4687,7 +4690,7 @@ fn emit_backing_field_write_adaptation(
             .storage_ty
             .and_then(|ty| ty.non_null().obj_internal())
         {
-            if ir.is_value_class_name(storage) {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
                 let class = cw.class_ref(&storage.render());
                 code.checkcast(class);
                 emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);

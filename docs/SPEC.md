@@ -7048,9 +7048,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its lowered shape: a value-class parameter or result is its carrier in the descriptor, the debug
   tables, the null guards and the nullability annotations. Which classes are value classes comes
   from checked declarations, never from a class name. A stdlib unsigned type (`kotlin/UInt`, as in
-  `inlineClasses/kt51157`) is hashed from its metadata declaration, which is recorded for callable
-  naming only: its carrier is target-native, so it stays out of the value-class table that
-  emission reads and keeps its unboxed slots. Its `DefaultImpls` forwarder has no line number, as
+  `inlineClasses/kt51157`) is hashed from its metadata declaration, which the IR records like any
+  other value class. Its JVM carrier is a native scalar, so the backend's representation predicate
+  (`jvm::value_classes::is_boxed_value_class`) excludes it: its slots stay unboxed and it boxes
+  through its wrapper, not through the value-class `box-impl` rewrite. Its `DefaultImpls` forwarder has no line number, as
   kotlinc's has none for any inherited member. Tests:
   `tests/value_class_inherited_default_names_e2e.rs`, the `declaration_inventory` unit tests.
 

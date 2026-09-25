@@ -220,7 +220,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 || backing
                     .ty
                     .obj_internal()
-                    .is_some_and(|name| ir.is_value_class_name(name))
+                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
                 || (!is_jvm_field && !inert_receiver)
             {
                 continue;
