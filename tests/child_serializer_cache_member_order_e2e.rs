@@ -14,9 +14,8 @@
 //! Member order decides constant-pool layout, so this sits in front of any byte comparison of these
 //! classes.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// `items` holds a collection of a `@Serializable` class, which is what gives `Holder` a cache at
 /// all — a class whose every element serializer is a singleton has no accessor to order.

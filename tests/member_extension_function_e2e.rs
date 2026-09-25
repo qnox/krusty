@@ -426,28 +426,35 @@ fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receive
     );
 }
 
+/// Both the generic member and the source extension reject the call. kotlinc 2.4.10 reports the
+/// member's missing argument; 2.4.20 prefers the non-generic extension and reports its missing
+/// argument and its unexpected type argument instead.
 #[test]
 fn arity_inapplicable_member_still_errors_when_source_extension_inapplicable() {
-    const SOURCE: &str = r#"
-        interface Catalog {
-            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
-        }
-        fun Catalog.loadAll(extra: Int): List<String> = emptyList()
+    const SOURCE: &str = "interface Catalog {
+    fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+}
+fun Catalog.loadAll(extra: Int): List<String> = emptyList()
 
-        class Entry
+class Entry
 
-        fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
-    "#;
+fun entries(catalog: Catalog): Any = catalog.loadAll<Entry>()
+";
+    common::assert_errors_match_kotlinc(&[("Main.kt", SOURCE)], &[]);
+}
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("value passed for parameter 'type'")),
-        "expected member arity diagnostic, got: {diagnostics:?}"
-    );
+/// Equally specific candidates that all reject the call: kotlinc 2.4.20 reports the member and the
+/// extension together, where 2.4.10 reports the member alone.
+#[test]
+fn equally_specific_rejected_member_and_extension_are_reported_by_version() {
+    const SOURCE: &str = "interface Catalog {
+    fun loadAll(type: String): Int = 1
+}
+fun Catalog.loadAll(extra: Int): Int = 1
+
+fun entries(catalog: Catalog): Any = catalog.loadAll()
+";
+    common::assert_errors_match_kotlinc(&[("Main.kt", SOURCE)], &[]);
 }
 
 #[test]

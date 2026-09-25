@@ -6,6 +6,7 @@ mod nullable_actual;
 use nullable_actual::nullable_generic_actual;
 mod bound_relations;
 mod call_constraints;
+mod call_site_variables;
 mod postponed_result;
 
 use bound_relations::complete_dependent_bound_bindings;
@@ -22,6 +23,7 @@ pub(crate) use call_constraints::{
     infer_generic_call_constraints_with_argument_ordinals,
     infer_generic_call_constraints_with_receiver_from_symbols, AssignabilityConstraints,
 };
+pub(crate) use call_site_variables::CallSiteVariables;
 pub(crate) use postponed_result::{
     instantiate_unconstrained_result, unconstrained_result_bindings,
 };

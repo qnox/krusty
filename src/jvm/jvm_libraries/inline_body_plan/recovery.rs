@@ -334,7 +334,7 @@ mod tests {
 
     struct DecoderFixture {
         instructions: Vec<Insn>,
-        source_cp: Vec<C>,
+        source_cp: std::sync::Arc<[C]>,
         offsets: Vec<usize>,
         handlers: Vec<ExcEntry>,
         invoke: usize,

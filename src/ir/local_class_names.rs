@@ -899,6 +899,9 @@ impl super::IrFile {
         for values in self.call_declared_params.values_mut() {
             tys(values, names);
         }
+        for values in self.construction_declared_params.values_mut() {
+            tys(values, names);
+        }
         for (_, value) in self.property_selected_accessors.values_mut() {
             *value = ty(*value, names);
         }
@@ -975,7 +978,8 @@ impl super::IrFile {
 }
 
 impl super::IrFile {
-    /// Rename every local classifier to the physical name a target gives it, from its provenance.
+    /// Rename every local classifier to the physical name a target gives it, from its provenance,
+    /// and name the class every source callable reference compiles to the same way.
     ///
     /// A name is its lexical owner's physical name followed by its source segments and then its
     /// ordinal, each a nested component. A classifier with no lexical owner starts from
@@ -996,6 +1000,18 @@ impl super::IrFile {
         for class in classes {
             physical_name(class, &root, self, &mut physical);
         }
+        // A source callable reference compiles to a class of its own, named by the same walk.
+        let references = self
+            .callable_reference_provenance
+            .iter()
+            .map(|(&expression, provenance)| {
+                (
+                    expression,
+                    provenance_name(provenance, &root, self, &mut physical),
+                )
+            })
+            .collect();
+        self.callable_reference_names = references;
         let identities = physical
             .into_iter()
             .map(|(class, physical)| (self.classes[class as usize].fq_name, physical))
@@ -1027,6 +1043,19 @@ fn physical_name(
     let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
         return ir.classes[class as usize].fq_name;
     };
+    let name = provenance_name(provenance, root, ir, cache);
+    cache.insert(class, name);
+    name
+}
+
+/// The name a naming provenance describes: its lexical owner's physical name (or `root` for its
+/// first component), then its source segments and generated ordinal.
+fn provenance_name(
+    provenance: &IrLocalClassNameProvenance,
+    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    ir: &super::IrFile,
+    cache: &mut HashMap<ClassId, TypeName>,
+) -> TypeName {
     let ordinal = provenance.ordinal.map(|ordinal| ordinal.to_string());
     let mut components = provenance
         .segments
@@ -1039,13 +1068,12 @@ fn physical_name(
         None => {
             let first = components
                 .next()
-                .expect("a local classifier's provenance names at least one component");
+                .expect("a naming provenance names at least one component");
             root(provenance.source, first)
         }
     };
     for component in components {
         name = crate::types::type_name_nested_child(name, component);
     }
-    cache.insert(class, name);
     name
 }

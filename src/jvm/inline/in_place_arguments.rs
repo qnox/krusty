@@ -214,7 +214,7 @@ fn whitelisted_static(insn: &Insn, body: &MethodCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{splice_unified, spliced_frame, ParameterBinding, ReifiedArguments, VType};
+    use super::super::{splice_unified, spliced_frame, ParameterBinding, ReifiedArguments};
     use super::*;
     use crate::jvm::classfile::ClassWriter;
 
@@ -223,7 +223,7 @@ mod tests {
             max_stack: 3,
             max_locals,
             code,
-            source_cp: vec![C::Other],
+            source_cp: vec![C::Other].into(),
             stackmap: None,
             handlers: vec![],
             locals: vec![],
@@ -322,7 +322,7 @@ mod tests {
             code: vec![
                 0x1e, 0x1c, 0x88, 0x60, 0x3e, 0x1d, 0x99, 0x00, 0x05, 0x04, 0xac, 0x03, 0xac,
             ],
-            source_cp: vec![C::Other],
+            source_cp: vec![C::Other].into(),
             // full_frame at bytecode offset 11: locals = [long, int, int], stack = [].
             stackmap: Some(vec![
                 0x00, 0x01, 0xff, 0x00, 0x0b, 0x00, 0x03, 0x04, 0x01, 0x01, 0x00, 0x00,
@@ -362,7 +362,6 @@ mod tests {
                 0x88, 0x60, 0x36, 0x04, 0x15, 0x04, 0x99, 0x00, 0x07, 0x04, 0xa7, 0x00, 0x04, 0x03
             ]
         );
-        assert_eq!(splice.frames, vec![(13, vec![VType::Int], vec![])]);
         assert_eq!(splice.locals, vec![(2, 12, 4, "sum$iv".into(), "I".into())]);
     }
 

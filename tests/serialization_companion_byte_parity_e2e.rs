@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use krusty::types::Ty;
 
-use super::common;
+use super::common::{self, compare_with_kotlinc_plugin, method_instructions, ReferenceComparison};
 use super::common_core;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
@@ -67,100 +67,6 @@ fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
             let name = path.file_name()?.to_string_lossy().into_owned();
             (name.contains(substring) && name.ends_with(".jar")).then_some(path)
         })
-}
-
-pub(super) struct ReferenceComparison {
-    pub(super) reference: String,
-    pub(super) krusty: String,
-    pub(super) reference_bytes: Vec<u8>,
-    pub(super) krusty_bytes: Vec<u8>,
-}
-
-/// Build one class with the reference serialization plugin and with krusty.
-pub(super) fn compare_with_kotlinc_plugin(
-    name: &str,
-    src: &str,
-    class: &str,
-    cp_jars: &[PathBuf],
-    jvm_target: &str,
-    kotlinc_extra: &[String],
-) -> Option<ReferenceComparison> {
-    let dir = common::scratch_dir()?;
-    let reference_dir = dir.join("ref");
-    let krusty_dir = dir.join("out");
-    std::fs::create_dir_all(&reference_dir).ok()?;
-    std::fs::create_dir_all(&krusty_dir).ok()?;
-    let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
-
-    let mut arguments = vec![
-        "-d".to_string(),
-        reference_dir.to_string_lossy().into_owned(),
-        "-jvm-target".to_string(),
-        jvm_target.to_string(),
-    ];
-    if !cp_jars.is_empty() {
-        arguments.push("-classpath".to_string());
-        arguments.push(
-            cp_jars
-                .iter()
-                .map(|jar| jar.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(":"),
-        );
-    }
-    arguments.extend(kotlinc_extra.iter().cloned());
-    arguments.push(source.to_string_lossy().into_owned());
-    let (code, stderr) = common::kotlinc_compile(&arguments)?;
-    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-
-    let class_major = jvm_target
-        .parse::<u16>()
-        .ok()
-        .filter(|target| (9..=99).contains(target))
-        .map(|target| target + 44)
-        .unwrap_or_else(|| panic!("unknown -jvm-target {jvm_target}"));
-    let classes = common::compile_in_process_metadata_cp_module_target(
-        src,
-        name,
-        cp_jars,
-        "main",
-        Some(class_major),
-    )
-    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
-    for (internal, bytes) in &classes {
-        let path = krusty_dir.join(format!("{internal}.class"));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
-        }
-        std::fs::write(path, bytes).ok()?;
-    }
-
-    let reference = common::javap(&[
-        "-p",
-        "-c",
-        "-v",
-        "-cp",
-        &reference_dir.to_string_lossy(),
-        class,
-    ])?;
-    let krusty = common::javap(&[
-        "-p",
-        "-c",
-        "-v",
-        "-cp",
-        &krusty_dir.to_string_lossy(),
-        class,
-    ])?;
-    let reference_bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
-    let krusty_bytes = std::fs::read(krusty_dir.join(format!("{class}.class"))).ok()?;
-    let _ = std::fs::remove_dir_all(dir);
-    Some(ReferenceComparison {
-        reference,
-        krusty,
-        reference_bytes,
-        krusty_bytes,
-    })
 }
 
 /// Multi-file form of [`compare_with_kotlinc_plugin`], used for module facts that cannot be tested
@@ -1669,48 +1575,6 @@ fn serialize_maps_its_return_to_the_class_header_line() {
             );
         }
     }
-}
-
-/// Instruction rows for one method, with only constant-pool indices erased. javap comments retain
-/// the exact selected owner/member/descriptor identity.
-pub(super) fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for raw in disassembly.lines() {
-        let line = raw.trim();
-        if line.ends_with(';') && line.contains(marker) {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if [
-            "LineNumberTable",
-            "LocalVariableTable",
-            "StackMapTable",
-            "Exception table",
-        ]
-        .iter()
-        .any(|table| line.starts_with(table))
-            || (line.starts_with("descriptor:") && !out.is_empty())
-        {
-            break;
-        }
-        let Some((pc, rest)) = line.split_once(": ") else {
-            continue;
-        };
-        if pc.parse::<u32>().is_err() {
-            continue;
-        }
-        let code = rest
-            .split_whitespace()
-            .map(|token| if token.starts_with('#') { "#" } else { token })
-            .collect::<Vec<_>>()
-            .join(" ");
-        out.push(format!("{}: {code}", pc.trim()));
-    }
-    out
 }
 
 fn instruction_text(row: &str) -> &str {

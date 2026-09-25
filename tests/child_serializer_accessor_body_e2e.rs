@@ -8,9 +8,8 @@
 //!
 //! Reading the declared static instead gives the return its own type, so nothing coerces.
 
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
-};
+use super::common::compare_with_kotlinc_plugin;
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\

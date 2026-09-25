@@ -104,7 +104,10 @@ impl BodyLowering<'_> {
                 unreachable!("local function declaration changed during FIR lowering")
             };
             let tailrec = *tailrec;
-            let lowered = self.lower_nested_function(body, function, false, false, tailrec)?;
+            // A local function is the scope of what it declares.
+            let enclosure = Some(crate::ir::IrEnclosure::Function(function));
+            let lowered =
+                self.lower_nested_function(body, function, enclosure, false, false, tailrec)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -364,7 +367,10 @@ impl BodyLowering<'_> {
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
         // A lambda carries no `tailrec`: the modifier is a function declaration's.
-        let lowered = self.lower_nested_function(body, function, unit_as_value, true, false)?;
+        // A lambda is not a scope: what it declares belongs to the enclosing one.
+        let enclosure = self.enclosure;
+        let lowered =
+            self.lower_nested_function(body, function, enclosure, unit_as_value, true, false)?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
             .any(|(_, depth)| *depth > 0)
@@ -831,6 +837,12 @@ impl BodyLowering<'_> {
             .fn_source_names
             .insert(function, source_name.to_owned());
         self.ir.private_methods.insert(function);
+        if let Some((sequence, site)) = lifting_sequence(body, self.index).zip(body.lifting_site())
+        {
+            self.ir
+                .lifted_functions
+                .insert(function, (sequence, site.clone()));
+        }
         let owner = if let Some(owner) = body.lexical_class_owner() {
             let class = self
                 .ir
@@ -949,6 +961,7 @@ impl BodyLowering<'_> {
         &mut self,
         body: &FirBody,
         function: crate::ir::FunId,
+        enclosure: Option<crate::ir::IrEnclosure>,
         unit_as_value: bool,
         retain_inline_template: bool,
         tailrec: bool,
@@ -981,6 +994,7 @@ impl BodyLowering<'_> {
             scopes,
             self.published_local_callables.clone(),
         );
+        nested.enclosure = enclosure;
         nested.control_path = self.control_path.clone();
         nested.control_path.push(
             body.local_callable()
@@ -1280,4 +1294,55 @@ fn local_tailrec_frame(
         slots,
         logical_parameters,
     ))
+}
+
+/// The sequence `body`'s own lifting site belongs to, in the source file that declares it.
+fn lifting_sequence(
+    body: &FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+) -> Option<crate::ir::IrLiftingSequence> {
+    let site = body.lifting_site()?;
+    let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    Some(crate::ir::IrLiftingSequence {
+        source: index.declaration_anchor(declaration)?.source,
+        owner: site.owner.clone(),
+        container: site.container.clone(),
+    })
+}
+
+/// Record every lifting site `body` and the callables nested in it declare, so a target can number
+/// each sequence whole: a lambda that is spliced at an inline call site still takes its place.
+pub(super) fn record_lifting_sites(
+    body: &FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+    ir: &mut crate::ir::IrFile,
+) {
+    let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let Some(source) = index
+        .declaration_anchor(declaration)
+        .map(|anchor| anchor.source)
+    else {
+        return;
+    };
+    let mut sites = Vec::new();
+    body.collect_lifting_sites(&mut sites);
+    for site in sites {
+        let Some(step) = site.path.last() else {
+            continue;
+        };
+        ir.lifting_sequences
+            .entry(crate::ir::IrLiftingSequence {
+                source,
+                owner: site.owner.clone(),
+                container: site.container.clone(),
+            })
+            .or_default()
+            .insert(
+                step.position,
+                crate::ir::IrLiftingEntry {
+                    name: step.name.clone(),
+                    lifted: site.lifted,
+                },
+            );
+    }
 }

@@ -8,7 +8,7 @@
 
 use super::{
     default_mask_bit, default_mask_count, load, method_descriptor, slot_words, store, ClassWriter,
-    CodeBuilder, EmitEnv, Emitter, VerifType,
+    CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -122,35 +122,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     slot += 1;
     e.next_slot = slot;
 
-    // The stackmap frame at each mask-branch target: `this` (slot 0) is UNINITIALIZED (the real `<init>`
-    // has not run yet), the params keep their types, then the mask ints + marker. Built manually because
-    // the frame machinery types slot 0 from `e.slots` as an initialized `Object`, which the verifier rejects.
-    let branch_locals: Vec<VerifType> = {
-        let mut raw = vec![VerifType::Top; e.next_slot as usize];
-        raw[0] = VerifType::UninitializedThis;
-        for &(prefix_slot, prefix_ty) in &prefix_slots {
-            raw[prefix_slot as usize] = e.verif_single(prefix_ty);
-        }
-        for &(pslot, pty) in &param_slots {
-            raw[pslot as usize] = e.verif_single(pty);
-        }
-        for &mask_slot in &mask_slots {
-            raw[mask_slot as usize] = VerifType::Integer;
-        }
-        raw[slot as usize - 1] = e.verif_single(marker);
-        // Collapse the two-slot categories (long/double occupy one verif entry) and trim trailing Top.
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
-            out.push(raw[i].clone());
-            i += if wide { 2 } else { 1 };
-        }
-        while out.last() == Some(&VerifType::Top) {
-            out.pop();
-        }
-        out
-    };
     // kotlinc's `$default` ctor LineNumberTable: the CLASS declaration line at entry, each masked
     // fill's value at its PARAMETER's declaration line, the delegation back at the class line, and
     // the `return` at the primary ctor's closing-`)` line — consecutive same-line entries collapse.
@@ -170,7 +141,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
             code.push_int(default_mask_bit(i), e.cw);
             code.iand();
             let skip = code.new_label();
-            code.add_frame_if_new(skip, branch_locals.clone(), vec![]);
             code.ifeq(skip);
             let parameter_line = match secondary_lines {
                 Some((_, parameter_lines, _)) => parameter_lines.get(i).copied().flatten(),

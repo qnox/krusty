@@ -9,9 +9,8 @@
 //!
 //! Every step fails closed: a missing plugin, runtime, reference compiler or a failed krusty
 //! compile is a failure, not a skip.
-use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, method_instructions, plugin_and_runtime,
-};
+use super::common::{compare_with_kotlinc_plugin, method_instructions};
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 /// A class's `<clinit>` instructions, with constant-pool indices erased because their numbering is
 /// an emission-order artifact.

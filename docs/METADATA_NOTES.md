@@ -8,7 +8,7 @@ effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
 > reverse-engineered; the encoding is version-stable so it still holds. The reference toolchain krusty
-> is **validated** against today is pinned by the `kotlin-versions` manifest (currently **2.4.0**) and
+> is **validated** against today is pinned by the `kotlin-versions` manifest (currently **2.4.20**) and
 > self-provisioned by `just kotlinc` — see `harness/run-diff.sh` / `just conformance`.
 
 Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`.
@@ -57,6 +57,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 `Class` fields: `f3 = fq_name` (a string-table class-id), `f6 = supertype` (`Type`),
 `f8 = constructor` (repeated), `f10 = property` (repeated). Class flags (f1) omitted ⇒ default
 (public/final).
+- `fq_name` resolves to the Kotlin class name in metadata spelling: `/` between package segments
+  and `.` between classes (`lib/Outer.Nested`). Dotting the `/`s gives the qualified name
+  (`lib.Outer.Nested`), which a consumer cannot recover from the internal name because `$` is also
+  a legal identifier character. The serialization plugin names a dependency's `@Serializable object`
+  by it (`KotlinMeta::class_qualified_name`).
 - `Type.class_name = f6`.
 - `Constructor`: `f2 = value_parameter` (repeated `{f2=name, f3=Type}`), `f100 = JvmMethodSignature`
   ext (`f2 = desc`; name omitted ⇒ `<init>`).
