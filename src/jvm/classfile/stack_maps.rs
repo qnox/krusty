@@ -30,8 +30,9 @@ use super::bytecode_analysis::{
     entry_frame, ComputedFrame, ComputedFrames, Decline, FrameComputation, Handler, PoolView,
     TypedHandler, VerificationType,
 };
-use super::{u2, ClassWriter, ConstPool, LvtEntry};
-use crate::jvm::inline::{disassemble, insn_offsets_at};
+use super::method_rewrite::var_slot;
+use super::{u2, ClassWriter, CodeBuilder, ConstPool, LvtEntry, VerifType};
+use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
 
 const NOP: u8 = 0x00;
 const ATHROW: u8 = 0xbf;
@@ -49,13 +50,19 @@ pub(super) struct Body<'a> {
     pub labels: Vec<usize>,
 }
 
-/// The computed frames of a body, with the byte offset of each instruction.
+/// The computed frames of a body, with its instructions and the byte offset of each.
 pub(super) struct Computed {
     frames: ComputedFrames,
+    insns: Vec<Insn>,
     offsets: Vec<usize>,
 }
 
 impl Computed {
+    /// The frames to write, in instruction order.
+    pub(super) fn frames(&self) -> &[ComputedFrame] {
+        &self.frames.frames
+    }
+
     /// The byte ranges of the unreachable blocks, each ending before the next block starts.
     fn unreachable_bytes(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         self.frames
@@ -68,6 +75,16 @@ impl Computed {
 impl ClassWriter {
     /// The frames `body` implies, or why none can be computed.
     pub(super) fn compute_frames(&self, body: &Body<'_>) -> Result<Computed, Decline> {
+        self.compute_frames_from(body, None)
+    }
+
+    /// [`Self::compute_frames`], entered with `entry` (one local per slot) instead of the method's
+    /// arguments when it is given.
+    fn compute_frames_from(
+        &self,
+        body: &Body<'_>,
+        entry: Option<Vec<VerificationType>>,
+    ) -> Result<Computed, Decline> {
         let insns = disassemble(body.code).ok_or(Decline::UnsupportedControlFlow)?;
         let offsets = insn_offsets_at(&insns, 0);
         if offsets.last() != Some(&body.code.len()) {
@@ -99,15 +116,71 @@ impl ClassWriter {
                 .map_err(|_| Decline::UnsupportedControlFlow)?;
             labels[at] = true;
         }
-        let frames = FrameComputation {
+        let computation = FrameComputation {
             insns: &insns,
             handlers: &handlers,
             labels: &labels,
             this_class: &self.internal_name,
             pool: self,
+        };
+        let frames = match entry {
+            Some(entry) => computation.compute_from(entry)?,
+            None => computation.compute(body.access, body.name, body.descriptor)?,
+        };
+        Ok(Computed {
+            frames,
+            insns,
+            offsets,
+        })
+    }
+
+    /// The frames of a body still being emitted, entered with `entry` (one local per slot), by
+    /// instruction index with their locals one per slot. `None` when they cannot be computed.
+    pub(crate) fn builder_frames(
+        &self,
+        bytes: &[u8],
+        code: &CodeBuilder,
+        entry: &[VerifType],
+    ) -> Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>> {
+        let body = Body {
+            access: 0,
+            name: "",
+            descriptor: "",
+            code: bytes,
+            exceptions: &code.resolved_exceptions(),
+            labels: builder_labels(code.line_marks(), code.local_entries(), bytes.len()),
+        };
+        let entry = entry
+            .iter()
+            .map(|value| VerificationType::from_verif(value, self))
+            .collect();
+        let computed = self.compute_frames_from(&body, Some(entry)).ok()?;
+        Some(verif_frames(computed.frames()))
+    }
+
+    /// The local slots `body` uses as ASM's `COMPUTE_MAXS` counts them: its arguments, every slot a
+    /// load, store or `iinc` names, and every local-variable entry.
+    fn max_locals(&self, body: &Body<'_>, computed: &Computed, lvt: &[LvtEntry]) -> usize {
+        let entry = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
+            .expect("a successfully computed method must have a valid entry frame");
+        let mut max = entry.iter().map(words).sum::<usize>();
+        for insn in &computed.insns {
+            if let Some((slot, width)) = var_slot(insn) {
+                max = max.max(usize::from(slot) + usize::from(width));
+            }
         }
-        .compute(body.access, body.name, body.descriptor)?;
-        Ok(Computed { frames, offsets })
+        for &(_, descriptor, slot, _, _) in lvt {
+            let width = match self
+                .cp
+                .utf8_at(descriptor)
+                .expect("a local-variable entry must retain its descriptor")
+            {
+                "J" | "D" => 2,
+                _ => 1,
+            };
+            max = max.max(usize::from(slot) + width);
+        }
+        max
     }
 
     /// Encode `computed` as a `StackMapTable` body, interning the classes the written entries name
@@ -213,9 +286,14 @@ impl ClassWriter {
                 labels: Vec::new(),
             };
             let stackmap = self.encode_frames(&body, &computed);
+            let max_locals = self.max_locals(&body, &computed, &self.methods[index].lvt);
             let method = &mut self.methods[index];
+            // kotlinc's writer computes both maxima from the final body (`COMPUTE_MAXS`).
+            method.max_stack = u16::try_from(computed.frames.max_stack)
+                .expect("a JVM method's computed stack depth must fit u16");
+            method.max_locals = u16::try_from(max_locals)
+                .expect("a JVM method's computed local count must fit u16");
             if !dead.is_empty() {
-                method.max_stack = method.max_stack.max(1);
                 method.code = Some(code);
                 method.exceptions = exceptions;
             }
@@ -225,7 +303,7 @@ impl ClassWriter {
 }
 
 /// The byte offsets a method's line numbers and local ranges put a label at.
-fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize) -> Vec<usize> {
+pub(super) fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize) -> Vec<usize> {
     let mut labels: Vec<usize> = lnt.iter().map(|&(pc, _)| usize::from(pc)).collect();
     for &(_, _, _, start, length) in lvt {
         let start = usize::from(start.unwrap_or(0));
@@ -237,6 +315,26 @@ fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize) -> Vec<us
 
 /// The labels of an emitted body that the class file will record: its line marks and the bounds of
 /// its local ranges.
+/// `frames` by instruction index in the emitter's form, their locals one per slot.
+pub(super) fn verif_frames(
+    frames: &[ComputedFrame],
+) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+    frames
+        .iter()
+        .map(|frame| {
+            let mut locals = Vec::with_capacity(frame.locals.len());
+            for local in &frame.locals {
+                locals.push(local.to_verif());
+                if local.is_wide() {
+                    locals.push(VerifType::Top);
+                }
+            }
+            let stack = frame.stack.iter().map(VerificationType::to_verif).collect();
+            (frame.index, locals, stack)
+        })
+        .collect()
+}
+
 pub(super) fn builder_labels(
     lines: &[(u16, u16)],
     locals: &[(u16, Option<u16>, u16, String, String)],
@@ -342,6 +440,14 @@ fn encode(
         previous_locals = locals;
     }
     body
+}
+
+/// The words a value takes in the locals or on the stack.
+fn words(value: &VerificationType) -> usize {
+    match value {
+        VerificationType::Long | VerificationType::Double => 2,
+        _ => 1,
+    }
 }
 
 fn write_type(value: &VerificationType, offsets: &[usize], out: &mut Vec<u8>, cp: &mut ConstPool) {

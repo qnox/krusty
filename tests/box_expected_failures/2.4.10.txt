@@ -84,9 +84,6 @@ contextParameters/sameExtensionContextAndDispatchReceiver.kt
 contextParameters/substitutedContextReceivers.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValue.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueDoWhileContinue.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
@@ -451,8 +448,6 @@ ranges/contains/inComparableRange.kt
 ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inRangeWithCustomContains.kt
-ranges/forInUntil/forInUntilInt.kt
-ranges/forInUntil/forInUntilLong.kt
 ranges/kt37370.kt
 reflection/classes/localClassSimpleName.kt
 reflection/functions/genericOverriddenFunction.kt
@@ -488,7 +483,6 @@ sealed/delegatingConstructor.kt
 sealed/multipleFiles_enabled.kt
 sealed/sealedInSameFile.kt
 secondaryConstructors/callFromLocalSubClass.kt
-secondaryConstructors/dataClasses.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt
 smartCasts/kt44932.kt

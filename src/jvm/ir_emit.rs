@@ -76,9 +76,7 @@ use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
 use inline_body_emission::collect_body_var_types;
-use inline_call::{
-    bind_inline_handlers, parse_descriptor_params, vtype_to_verif, InlineStaticTarget,
-};
+use inline_call::{bind_inline_handlers, parse_descriptor_params, InlineStaticTarget};
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
 };
@@ -4633,12 +4631,6 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         let mut equals = CodeBuilder::new(2);
         let not_same = equals.new_label();
         let adapter = equals.new_label();
-        let locals = vec![
-            VerifType::ObjectName(plan.internal.clone()),
-            VerifType::ObjectName("java/lang/Object".to_string()),
-        ];
-        equals.add_frame_if_new(not_same, locals.clone(), Vec::new());
-        equals.add_frame_if_new(adapter, locals, Vec::new());
         equals.aload(0);
         equals.aload(1);
         equals.if_acmpne(not_same);
@@ -4665,7 +4657,6 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         let object_equals = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
         equals.invokevirtual(object_equals, 1, 1);
         equals.ireturn();
-        equals.set_needs_stackmap();
         equals.link();
         cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &equals);
 
@@ -4898,9 +4889,6 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     })
 }
 
-/// A method's `StackMapTable` frames resolved to byte offsets: `(offset, locals, stack)` each.
-type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
-
 /// The internal class name to `checkcast` a value to when narrowing an erased `Object` to `ty` — or
 /// `None` when no narrowing is needed (`Object`/`Any`, a primitive, `Unit`/`Nothing`).
 fn checkcast_internal(ty: Ty) -> Option<String> {
@@ -4911,51 +4899,6 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
             Some(crate::jvm::names::classfile_internal_name(&n.render()))
         }
         _ => None,
-    }
-}
-
-/// Expand a COLLAPSED frame-locals list (long/double = one entry) to SLOT-indexed (long/double = the
-/// type + a trailing `Top` filler), so per-slot overlays line up.
-fn expand_collapsed_locals(collapsed: &[VerifType]) -> Vec<VerifType> {
-    let mut out = Vec::with_capacity(collapsed.len());
-    for v in collapsed {
-        let wide = matches!(v, VerifType::Long | VerifType::Double);
-        out.push(v.clone());
-        if wide {
-            out.push(VerifType::Top);
-        }
-    }
-    out
-}
-
-/// Collapse a SLOT-indexed locals list back to the JVM `StackMapTable` form (long/double = one entry,
-/// its second slot dropped).
-fn collapse_locals(slots: &[VerifType]) -> Vec<VerifType> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < slots.len() {
-        let wide = matches!(slots[i], VerifType::Long | VerifType::Double);
-        out.push(slots[i].clone());
-        i += if wide { 2 } else { 1 };
-    }
-    out
-}
-
-/// The StackMapTable verification type of a JVM value type — the free-function twin of
-/// `Emitter::verif_single`, for code synthesized outside an `Emitter`.
-fn verif_of(ty: Ty) -> VerifType {
-    match ty {
-        t if is_jvm_int_category(t) => VerifType::Integer,
-        Ty::Long => VerifType::Long,
-        Ty::Double => VerifType::Double,
-        Ty::Float => VerifType::Float,
-        Ty::String => VerifType::ObjectName("java/lang/String".to_string()),
-        t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
-        Ty::Obj(n, _) => {
-            VerifType::ObjectName(crate::jvm::names::classfile_internal_name(&n.render()))
-        }
-        Ty::Null => VerifType::Null,
-        _ => VerifType::Top,
     }
 }
 
@@ -5237,11 +5180,6 @@ fn emit_declared_property_accessor(
             g.invokestatic(m, 1, 0);
             // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
             // field value on the stack.
-            g.add_frame_if_new(
-                lbl,
-                vec![VerifType::ObjectName(fq_name.to_string())],
-                vec![verif_of(field_jt)],
-            );
             g.bind(lbl);
         }
         emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, accessor_jt);
@@ -6302,7 +6240,7 @@ fn emit_class(
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
-            if super_args.iter().any(|&a| e.records_frame(a)) {
+            if super_args.iter().any(|&a| e.emits_control_flow(a)) {
                 let temps = e.spill_to_temps(&super_args, &mut ctor);
                 ctor.aload(0);
                 for &(slot, t, _) in &temps {
@@ -7242,17 +7180,12 @@ fn emit_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    let get_locals = vec![
-        VerifType::ObjectName(fq.clone()),
-        VerifType::ObjectName("java/lang/Object".to_string()),
-    ];
     box_property_reference_value(
         &mut cw,
         &mut get,
         pr,
         realization.boxed_value_class,
         target.getter_ret,
-        get_locals,
     );
     get.areturn();
     finish_code::<0x0001>(
@@ -7318,14 +7251,12 @@ fn emit_bound_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    let get_locals = vec![VerifType::ObjectName(fq.clone())];
     box_property_reference_value(
         &mut cw,
         &mut get,
         pr,
         realization.boxed_value_class,
         target.getter_ret,
-        get_locals,
     );
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
@@ -7411,14 +7342,12 @@ fn emit_toplevel_prop_ref_class(
     let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
     get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
     if carrier {
-        let get_locals = vec![VerifType::ObjectName(fq.clone())];
         box_property_reference_value(
             &mut cw,
             &mut get,
             pr,
             realization.boxed_value_class,
             getter_jvm,
-            get_locals,
         );
     } else if prop_jvm.is_jvm_scalar() {
         box_prim_free(
@@ -7469,12 +7398,6 @@ fn emit_toplevel_prop_ref_class(
                     &mut cw,
                     &mut set,
                     pr.prop_ty.is_nullable(),
-                    vec![
-                        VerifType::ObjectName(fq.clone()),
-                        VerifType::ObjectName("java/lang/Object".to_string()),
-                    ],
-                    VerifType::ObjectName(owner.clone()),
-                    setter_jvm,
                     |_, set| set.invokevirtual(unbox, 0, slot_words(setter_jvm) as i32),
                 );
             }
@@ -7920,24 +7843,12 @@ fn emit_func_ref_class(
             inv.checkcast(cref);
         }
         if let Some(vc) = value_class_unbox {
-            let locals =
-                function_reference_invoke::func_ref_invoke_locals(&mut cw, &fq, arity, high_arity);
-            let stack_prefix = function_reference_invoke::func_ref_call_stack_prefix(
-                &mut cw,
-                &fr.dispatch,
-                &call_owner,
-                &target_param_tys,
-                field_capture_tys,
-                field_capture_count,
-            );
             emit_value_class_unbox_adapter(
                 &mut cw,
                 &mut inv,
                 *vc,
                 target_jt,
                 fr.unbox_param_nullable.get(k).copied().unwrap_or(false),
-                Some(locals),
-                stack_prefix,
             );
         }
         call_arg_words += slot_words(target_jt) as i32;
@@ -8041,8 +7952,6 @@ fn emit_value_class_unbox_adapter(
     value_class: TypeName,
     target: Ty,
     nullable: bool,
-    locals: Option<Vec<VerifType>>,
-    stack_prefix: Vec<VerifType>,
 ) {
     let value_class = value_class.render();
     let value_class_ref = cw.class_ref(&value_class);
@@ -8058,14 +7967,6 @@ fn emit_value_class_unbox_adapter(
     }
     let null = code.new_label();
     let end = code.new_label();
-    if let Some(locals) = locals {
-        let mut null_stack = stack_prefix.clone();
-        null_stack.push(VerifType::Object(cw.class_ref(&value_class)));
-        let mut end_stack = stack_prefix;
-        end_stack.push(verif_for_jvm_free(cw, target));
-        code.add_frame_if_new(null, locals.clone(), null_stack);
-        code.add_frame_if_new(end, locals, end_stack);
-    }
     code.dup();
     code.ifnull(null);
     code.invokevirtual(unbox, 0, slot_words(target) as i32);
@@ -8451,15 +8352,10 @@ fn emit_annotation_equals(
     let mut cb = CodeBuilder::new(2); // this=0, o=1
     cb.ensure_locals(3); // +o-as-iface at local 2
     let icls = cw.class_ref(iface);
-    let self_ty = VerifType::ObjectName(crate::jvm::names::classfile_internal_name(fq));
-    let object_ty = VerifType::ObjectName("java/lang/Object".to_string());
-    let iface_ty = VerifType::ObjectName(crate::jvm::names::classfile_internal_name(iface));
-    let member_locals = vec![self_ty.clone(), object_ty.clone(), iface_ty];
 
     let typed = cb.new_label();
     cb.aload(1);
     cb.instance_of(icls);
-    cb.add_frame_if_new(typed, vec![self_ty, object_ty], Vec::new());
     cb.ifne(typed);
     cb.push_int(0, cw);
     cb.ireturn();
@@ -8475,7 +8371,6 @@ fn emit_annotation_equals(
         cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
         cb.aload(2);
         cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
-        cb.add_frame_if_new(next, member_locals.clone(), Vec::new());
         match *jt {
             Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => cb.if_icmpeq(next),
             Ty::Long => {
@@ -8526,7 +8421,6 @@ fn emit_annotation_equals(
     }
     cb.push_int(1, cw);
     cb.ireturn();
-    cb.set_needs_stackmap();
     cb.link();
     let locals = [
         ("this".to_string(), format!("L{fq};"), 0u16),
@@ -9725,7 +9619,7 @@ fn emit_enum_class(
             let args = &entry.args;
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
-            let spill = args.iter().any(|&a| e.records_frame(a));
+            let spill = args.iter().any(|&a| e.emits_control_flow(a));
             let temps = if spill {
                 e.spill_to_temps(args, &mut clinit)
             } else {
@@ -11037,16 +10931,13 @@ fn emit_method_inner_with_holder(
                 crate::jvm::classfile::CoroutineMarker::Suspension => continue,
             };
             // Bind the label the dispatch's restore block jumps to (the resume point) and the join
-            // the two paths out of the suspension meet at, and record their frames: the entry
-            // locals plus what this state restored — with nothing on the stack at the resume
-            // point, and the resumed value at the join.
-            let (Some(entry), Some(machine)) = (e.machine_entry_locals.clone(), e.machine.clone())
-            else {
+            // the two paths out of the suspension meet at.
+            let Some(machine) = e.machine.clone().filter(|_| e.machine_entered) else {
                 continue;
             };
-            let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
+            if machine.plan.suspensions.get(ordinal as usize).is_none() {
                 continue;
-            };
+            }
             let target = match is_resume {
                 true => e.machine_resumes.get(ordinal as usize),
                 false => e.machine_joins.get(ordinal as usize),
@@ -11054,23 +10945,8 @@ fn emit_method_inner_with_holder(
             let Some(&target) = target else {
                 continue;
             };
-            let mut restored = expand_collapsed_locals(&entry);
-            // Every spill, the constant-`null` ones included: the restore leaves those holding
-            // `null`, and the frame has to say so rather than `Object`.
-            for &(slot, ty) in &suspension.spills {
-                let slot = slot as usize;
-                if restored.len() <= slot {
-                    restored.resize(slot + 1, VerifType::Top);
-                }
-                restored[slot] = verif_of(ir_ty_to_jvm(&ty));
-            }
             // The marker sits AT the position: it is the first instruction there, and becomes `nop`s.
             code.bind_target_at(target, at);
-            let stack = match is_resume {
-                true => Vec::new(),
-                false => vec![VerifType::ObjectName("java/lang/Object".into())],
-            };
-            code.add_frame_if_new(target, collapse_locals(&restored), stack);
         }
         e.emit_machine_states(&resumes, &mut code);
         e.emit_machine_default(default, &mut code);
@@ -12115,14 +11991,12 @@ fn emit_default_super_guard(
     code: &mut CodeBuilder,
     marker_slot: u16,
     method_name: &str,
-    entry_locals: Vec<VerifType>,
 ) {
     code.aload(marker_slot);
     let ok = code.new_label();
     // The fall-through target is a branch target, so it needs a StackMapTable entry: the method-entry
     // locals with an empty stack (kotlinc writes a `same_frame` here). Without it the JVM rejects the
     // method — "Expecting a stackmap frame at branch target".
-    code.add_frame_if_new(ok, entry_locals, Vec::new());
     code.ifnull(ok);
     let cls = cw.class_ref("java/lang/UnsupportedOperationException");
     code.new_obj(cls);
@@ -12229,15 +12103,7 @@ fn emit_default_stub(
     // is a thin forward emitted by `emit_default_stub_forward` and correctly carries no guard: it
     // passes the marker straight through to the body that does check it.)
     if is_interface || owner_is_inheritable(ir, owner) {
-        // The stub's locals at entry: the receiver, every stub parameter, one int per mask word, and
-        // the trailing marker.
-        let mut entry_locals = vec![VerifType::ObjectName(
-            crate::jvm::names::classfile_internal_name(owner),
-        )];
-        entry_locals.extend(stub_param_tys.iter().map(|t| verif_of(*t)));
-        entry_locals.extend(std::iter::repeat_n(VerifType::Integer, mask_slots.len()));
-        entry_locals.push(VerifType::ObjectName("java/lang/Object".to_string()));
-        emit_default_super_guard(e.cw, &mut code, slot - 1, &method_name, entry_locals);
+        emit_default_super_guard(e.cw, &mut code, slot - 1, &method_name);
     }
     // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
     // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
@@ -12394,7 +12260,6 @@ fn emit_default_param_overwrites(
             code.push_int(default_mask_bit(i), e.cw);
             code.iand();
             let skip = code.new_label();
-            e.frame(skip, vec![], code);
             code.ifeq(skip);
             // The value-class realization pass has already adapted the checked default root to this
             // exact physical stub slot. Emission only stores that selected representation.
@@ -12716,7 +12581,7 @@ struct Emitter<'a> {
     machine: Option<coroutine_machine::Machine>,
     /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
     /// anything. A resume's only predecessor is that dispatch.
-    machine_entry_locals: Option<Vec<VerifType>>,
+    machine_entered: bool,
     /// Where each state re-enters the body. The dispatch's restore block jumps here, so these are
     /// the enclosing method's labels; a `Resume` marker says where the splice put each one. The
     /// block there rethrows a failed resumption INSIDE the body, where a `try` around the
@@ -12737,7 +12602,6 @@ struct Emitter<'a> {
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
     /// so the pending operand is typed through the branch (matching kotlinc), avoiding the spill-to-temp
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
-    pending_stack: Vec<VerifType>,
     /// Open source locals: `(block_depth, slot, start_pc, name, descriptor)`.
     open_locals: Vec<(usize, u16, u16, String, String)>,
     /// Current block nesting depth; the function body is depth 1.
@@ -12815,13 +12679,12 @@ impl<'a> Emitter<'a> {
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
             machine_next_ordinal: 0,
-            machine_entry_locals: None,
+            machine_entered: false,
             machine_resumes: Vec::new(),
             machine_joins: Vec::new(),
             machine: None,
             ret,
             loop_stack: Vec::new(),
-            pending_stack: Vec::new(),
             open_locals: Vec::new(),
             block_depth: 0,
             statement_line: None,
@@ -12839,8 +12702,10 @@ impl<'a> Emitter<'a> {
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
     /// BRANCHY host `inline fun` body, replacing each zero-arg lambda-parameter `Function0.invoke` site
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
-    /// where the lambda runs only on a branch. v1: zero-arg (Function0) lambdas with branchless bodies,
-    /// at an empty operand-stack baseline. Returns `false` (caller falls back / skips) on any other shape.
+    /// where the lambda runs only on a branch. Final-body dataflow carries any existing operand prefix
+    /// through ordinary branches; handlers, suspensions, and external transfers require a spill
+    /// boundary.
+    /// Returns `false` (caller falls back / skips) on any unsupported shape.
     #[allow(clippy::too_many_arguments)]
     fn try_inline_unified(
         &mut self,
@@ -12881,7 +12746,7 @@ impl<'a> Emitter<'a> {
             })
             .map(|(i, _)| i)
             .collect();
-        // ONE plan for the caller frame: where the relocated host body ends, and where each
+        // ONE plan for caller locals: where the relocated host body ends, and where each
         // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
         // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
         // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
@@ -12892,10 +12757,9 @@ impl<'a> Emitter<'a> {
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
         self.next_slot = self.next_slot.max(top_local);
-        // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
-        // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
+        // Build each lambda argument's pre-relocated body, leaving its boxed result on the stack, and
+        // record whether its instruction graph branches.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
-        let mut lam_frames: Vec<Vec<ResolvedFrames>> = Vec::new();
         // Capture initializers belong to lambda-creation time, in argument evaluation order. A
         // capture that is already a caller local needs no code; every other checked value is
         // materialized once when its lambda operand is reached, then the spliced body reads that
@@ -12907,7 +12771,7 @@ impl<'a> Emitter<'a> {
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
-            let (bodies, frames, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
+            let (bodies, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13013,7 +12877,6 @@ impl<'a> Emitter<'a> {
                 let slot_base = self.next_slot;
                 let states_before = self.machine_next_ordinal;
                 let mut bodies: Vec<crate::jvm::inline::LambdaBody> = Vec::new();
-                let mut frames: Vec<ResolvedFrames> = Vec::new();
                 let mut lam_max_locals = 0u16;
                 let mut lam_stack = 0u16;
                 loop {
@@ -13107,7 +12970,6 @@ impl<'a> Emitter<'a> {
                         );
                     }
                     scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
-                    let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
                     let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
                         &scratch.bytes,
                         &scratch.external_branches(),
@@ -13116,7 +12978,6 @@ impl<'a> Emitter<'a> {
                     };
                     lam_max_locals = lam_max_locals.max(scratch.max_locals);
                     lam_stack = lam_stack.max(scratch.max_stack);
-                    frames.push(lam_fr);
                     bodies.push(crate::jvm::inline::LambdaBody {
                         body: lam_insns,
                         locals: lam_locals_declared,
@@ -13128,7 +12989,7 @@ impl<'a> Emitter<'a> {
                         break;
                     }
                 }
-                (bodies, frames, lam_max_locals, lam_stack)
+                (bodies, lam_max_locals, lam_stack)
             } else {
                 continue;
             };
@@ -13137,7 +12998,6 @@ impl<'a> Emitter<'a> {
             }
             self.next_slot = self.next_slot.max(lam_max_locals);
             lam_max_stack = lam_max_stack.max(lam_stack);
-            lam_frames.push(frames);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
                 bodies,
@@ -13146,7 +13006,8 @@ impl<'a> Emitter<'a> {
         if lam_splices.is_empty() {
             return false; // no lambda argument — not this path
         }
-        // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
+        // Probe at offset 0. Switch padding and absolute handler/external-transfer offsets require a
+        // second splice at the method's real byte offset; relative branches do not.
         let Some(probe) = crate::jvm::inline::splice_unified(
             body,
             descriptor,
@@ -13159,25 +13020,18 @@ impl<'a> Emitter<'a> {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
-        // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
-        // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
-        // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
-        // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
-        // Per lambda, per BODY, the frames that body records: a lambda argument always has a body, so
-        // the question is whether any body actually produced a frame — not whether one exists.
-        let needs_frames = probe.join_required
-            || !probe.frames.is_empty()
-            || lam_frames
-                .iter()
-                .any(|bodies| bodies.iter().any(|frames| !frames.is_empty()))
-            || !probe.external_branches.is_empty();
-        if needs_frames && code.stack_height() != 0 {
+        let needs_relayout = probe.needs_relayout;
+        // Ordinary branches preserve the caller's operand prefix and final-body dataflow computes it.
+        // A handler clears that prefix, while an external transfer targets code outside the splice;
+        // neither is sound until the surrounding operands have been spilled.
+        let needs_empty_stack = !probe.handlers.is_empty() || !probe.external_branches.is_empty();
+        if needs_empty_stack && code.stack_height() != 0 {
             crate::trace_compiler!(
                 "splice",
-                "unified BAIL: needs_frames but stack_height={}",
+                "unified BAIL: control transfer requires empty stack but stack_height={}",
                 code.stack_height()
             );
-            return false; // frames carry no stack prefix → need an empty baseline
+            return false;
         }
         let ret_words = descriptor_ret_words(descriptor);
         // Emit each NON-lambda argument (the operands the host prologue stores into its parameter slots).
@@ -13199,8 +13053,8 @@ impl<'a> Emitter<'a> {
             self.adapt_physical_call_operand_for(call_expression, i, a, at, params[i], code);
             arg_words += slot_words(params[i]) as i32;
         }
-        if !needs_frames {
-            // Pure branchless host + lambda: append the bytes, no frames; works at any stack height.
+        if !needs_relayout {
+            // Position-independent host + lambda: append the probed bytes at any stack height.
             // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
             // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
             let ret_words = if probe.falls_through { ret_words } else { 0 };
@@ -13218,8 +13072,7 @@ impl<'a> Emitter<'a> {
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
-        // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
-        // bind the relocated HOST frames, the LAMBDA bodies' own frames, the spliced bytes, and the join.
+        // RE-splice at the real method offset so any switch in the host/lambda body pads correctly.
         let splice_start = code.bytes.len();
         let Some(bs) = crate::jvm::inline::splice_unified(
             body,
@@ -13233,55 +13086,9 @@ impl<'a> Emitter<'a> {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
-        let capture_frame_locals = capture_materializations
-            .iter()
-            .map(|(_, _, slot, ty)| (*slot, *ty))
-            .collect::<Vec<_>>();
-        let prefix = self.verif_locals_upto(base);
-        for (abs_off, body_locals, stack) in &bs.frames {
-            let mut locals = prefix.clone();
-            locals.extend(body_locals.iter().map(vtype_to_verif));
-            let locals = self.overlay_frame_locals(locals, &capture_frame_locals);
-            let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
-            let l = code.new_label();
-            code.bind_at(l, *abs_off);
-            code.add_frame_if_new(l, locals, st);
-        }
-        for site in &bs.lambda_sites {
-            let frames = &lam_frames[site.lambda_index][site.body_index];
-            let host_ctx = &site.host_locals;
-            // The lambda body's frames were compiled against an EMPTY operand base; rebase each onto the
-            // host operand-stack prefix sitting below the lambda value (e.g. a `map` destination). Empty
-            // for `forEach`/`fold`/`takeIf`; `splice_unified` only returns `Some` here for a branchy body.
-            let op_prefix: Vec<VerifType> = site
-                .stack_prefix
-                .as_ref()
-                .map(|p| p.iter().map(vtype_to_verif).collect())
-                .unwrap_or_default();
-            // A body's frames are byte offsets into it as built, and it is spliced verbatim: the
-            // splice only ever cancels instructions off a body with NO frames, so there is nothing
-            // here to remap.
-            for (fb, locals, stack) in frames {
-                let off = site.byte_start + fb;
-                let lambda_base = spliced_frame
-                    .as_ref()
-                    .and_then(|frame| frame.lambda_bases.get(site.lambda_index).copied())
-                    .unwrap_or(top_local);
-                let merged = self.merge_lambda_frame_locals(base, lambda_base, host_ctx, locals);
-                let merged = self.overlay_frame_locals(merged, &capture_frame_locals);
-                let mut st = op_prefix.clone();
-                st.extend(stack.iter().cloned());
-                let l = code.new_label();
-                code.bind_at(l, off);
-                code.add_frame_if_new(l, merged, st);
-            }
-        }
         // Register the spliced body's relocated exception handlers (try/catch/finally from `use`/
-        // `synchronized`/`runCatching`). The handler frames are already bound above (each handler is a
-        // StackMapTable target in `bs.frames`); here we add the guarded-range entries to the caller's
-        // exception table via labels bound at the absolute spliced offsets.
+        // `synchronized`/`runCatching`). Final-body analysis derives their handler-entry frames.
         bind_inline_handlers(code, &bs.handlers);
-        code.set_needs_stackmap();
         let ret_words = if bs.falls_through { ret_words } else { 0 };
         // Host stack must cover the host body PLUS the deepest spliced lambda body (safe upper bound).
         code.splice_inline(
@@ -13295,37 +13102,7 @@ impl<'a> Emitter<'a> {
         );
         self.record_spliced_lines(&bs.lines, body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
-        if bs.join_required {
-            let join = code.new_label();
-            self.bind(join, code);
-            let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
-            code.add_frame_if_new(join, prefix, join_stack);
-        }
         true
-    }
-
-    /// Add caller-owned materialized capture slots to a relocated inline frame. These values are
-    /// initialized before entering the spliced host and remain live for every host/lambda branch,
-    /// but they sit above the host's relocated locals and therefore are not present in either the
-    /// caller prefix or the dependency's original StackMapTable.
-    fn overlay_frame_locals(
-        &mut self,
-        locals: Vec<VerifType>,
-        live: &[(u16, Ty)],
-    ) -> Vec<VerifType> {
-        if live.is_empty() {
-            return locals;
-        }
-        let mut slots = expand_collapsed_locals(&locals);
-        for &(slot, ty) in live {
-            let words = slot_words(ty) as usize;
-            slots.resize(slots.len().max(slot as usize + words), VerifType::Top);
-            slots[slot as usize] = self.verif_single(ty);
-            if words == 2 {
-                slots[slot as usize + 1] = VerifType::Top;
-            }
-        }
-        collapse_locals(&slots)
     }
 
     /// Record a spliced body's line marks, mapping the dependency's lines into output lines the
@@ -13437,30 +13214,7 @@ impl<'a> Emitter<'a> {
         code.putfield(label_field, 1);
         code.goto(have);
 
-        // The machine's own locals are not assigned yet on the way in: the entry branch happens
-        // before any of them is stored, and a frame claiming otherwise describes a frame the
-        // incoming edge cannot produce.
-        let entry = self.verif_locals_upto(self.next_slot);
-        let unset = |locals: &[VerifType], slots: &[u16]| -> Vec<VerifType> {
-            let mut expanded = expand_collapsed_locals(locals);
-            for &slot in slots {
-                if let Some(at) = expanded.get_mut(slot as usize) {
-                    *at = VerifType::Top;
-                }
-            }
-            collapse_locals(&expanded)
-        };
-        let before_any = unset(
-            &entry,
-            &[
-                machine.slots.result,
-                machine.slots.continuation,
-                machine.slots.suspended,
-            ],
-        );
-        let after_continuation = unset(&entry, &[machine.slots.result, machine.slots.suspended]);
         code.bind(fresh);
-        code.add_frame_if_new(fresh, before_any.clone(), Vec::new());
         code.new_obj(class);
         code.dup();
         let constructor_descriptor = match &machine.receiver {
@@ -13480,7 +13234,6 @@ impl<'a> Emitter<'a> {
         code.astore(machine.slots.continuation);
 
         code.bind(have);
-        code.add_frame_if_new(have, after_continuation, Vec::new());
         code.aload(machine.slots.continuation);
         code.getfield(result_field, 1);
         code.astore(machine.slots.result);
@@ -13498,7 +13251,7 @@ impl<'a> Emitter<'a> {
         targets.extend(resumes.iter().copied());
         code.tableswitch(0, targets.len() as i32 - 1, default, &targets);
 
-        self.machine_entry_locals = Some(entry.clone());
+        self.machine_entered = true;
         let throw_on_failure =
             self.cw
                 .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
@@ -13516,10 +13269,8 @@ impl<'a> Emitter<'a> {
         self.machine_resumes = resume_points;
 
         code.bind(body);
-        code.add_frame_if_new(body, entry, Vec::new());
         code.aload(machine.slots.result);
         code.invokestatic(throw_on_failure, 1, 0);
-        code.set_needs_stackmap();
         Some((body, resumes, default))
     }
 
@@ -13538,7 +13289,6 @@ impl<'a> Emitter<'a> {
         let Some(machine) = self.machine.clone() else {
             return;
         };
-        let entry = self.machine_entry_locals.clone().unwrap_or_default();
         for (ordinal, suspension) in machine.plan.suspensions.iter().enumerate() {
             let (Some(&state), Some(&resume)) =
                 (states.get(ordinal), self.machine_resumes.get(ordinal))
@@ -13547,7 +13297,6 @@ impl<'a> Emitter<'a> {
             };
             code.bind_external_target(state);
             code.set_stack_height(0);
-            code.add_frame_if_new(state, entry.clone(), Vec::new());
             for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
                 code.aload(machine.slots.continuation);
                 let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
@@ -13575,9 +13324,7 @@ impl<'a> Emitter<'a> {
 
     /// The state a resume cannot legally be in: re-entering a machine that never suspended.
     fn emit_machine_default(&mut self, default: Label, code: &mut CodeBuilder) {
-        let locals = self.verif_locals_upto(self.next_slot);
         code.bind(default);
-        code.add_frame_if_new(default, locals, Vec::new());
         let class = self.cw.class_ref("java/lang/IllegalStateException");
         code.new_obj(class);
         code.dup();
@@ -13681,7 +13428,6 @@ impl<'a> Emitter<'a> {
             }
             code.aload(result);
         }
-        code.set_needs_stackmap();
     }
 
     /// Describe a spliced body's own locals in the caller's debug table.
@@ -13708,42 +13454,10 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Full locals for a frame INSIDE a spliced lambda body: the caller's locals (`0..base`), then the
-    /// HOST's live body locals at the invoke (`host_ctx`, slots `base..` — for a loop host the loop
-    /// iterator/accumulator, not just params), then the lambda's own slots (`top_local..`) from its
-    /// scratch frame. All three are slot-expanded, overlaid, and re-collapsed.
-    fn merge_lambda_frame_locals(
-        &mut self,
-        base: u16,
-        lambda_base: u16,
-        host_ctx: &[crate::jvm::inline::VType],
-        lam_locals: &[VerifType],
-    ) -> Vec<VerifType> {
-        let mut slots = self.verif_slots_upto(base); // 0..base caller locals (slot-indexed)
-                                                     // The host's live locals at `base..`, then pad to where the lambda's own begin.
-        let host_collapsed: Vec<VerifType> = host_ctx.iter().map(vtype_to_verif).collect();
-        slots.extend(expand_collapsed_locals(&host_collapsed));
-        slots.truncate(lambda_base as usize);
-        while slots.len() < lambda_base as usize {
-            slots.push(VerifType::Top);
-        }
-        // The lambda's own slots. They begin where the splice placed them — which is at the first
-        // slot the host no longer needs, NOT above the host's whole frame — so a frame that took
-        // them from the host's extent would leave the lambda's own parameters undescribed.
-        for s in expand_collapsed_locals(lam_locals)
-            .into_iter()
-            .skip(lambda_base as usize)
-        {
-            slots.push(s);
-        }
-        collapse_locals(&slots)
-    }
-
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
     ///
-    /// Every frame in the emitter is laid out here: a frame recorded inside a spliced body, and the
-    /// collapsed form the ordinary frames are built from. Both the semantic locals and the backend
-    /// temporaries belong to the same physical frame, which is why one operation places them.
+    /// Semantic locals and backend temporaries share this physical layout. Coroutine discovery uses
+    /// it as the entry state for final-bytecode dataflow; ordinary method frames are computed later.
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let semantic = self.assigned_semantic_slots();
         let temporaries = self.temporaries.live();
@@ -13921,9 +13635,8 @@ impl<'a> Emitter<'a> {
         let binding = in_place.binding();
         let top_local = in_place.top_local();
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
-        // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
-        // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
-        // any `tableswitch`/`lookupswitch` pads correctly.
+        // paths). Probe at offset 0; switch padding and absolute side-table/fixup offsets require a
+        // second splice at the method's real byte offset, while relative branches do not.
         let Some(probe) = crate::jvm::inline::splice_unified(
             &body,
             splice_desc,
@@ -13943,8 +13656,13 @@ impl<'a> Emitter<'a> {
             .iter()
             .map(|ty| slot_words(*ty) as i32)
             .sum();
-        if !probe.join_required {
-            // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
+        let needs_relayout = probe.needs_relayout;
+        let needs_empty_stack = !probe.handlers.is_empty() || !probe.external_branches.is_empty();
+        if needs_empty_stack && code.stack_height() != 0 {
+            return false;
+        }
+        if !needs_relayout {
+            // Position-independent: append the bytes directly. A DIVERGING body (ends in `athrow`, e.g.
             // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
             // A speculative splice DECLINES on a descriptor mismatch rather than bailing the file:
             // nothing has been pushed, so the ordinary call path still gets its chance to emit this
@@ -13976,11 +13694,6 @@ impl<'a> Emitter<'a> {
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
-        // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
-        // prefix); a sub-expression inline call (non-empty stack) falls back to a normal call.
-        if code.stack_height() != 0 {
-            return false;
-        }
         // See the branchless arm above: decline, do not bail.
         if self
             .emit_call_descriptor_operands(
@@ -14007,17 +13720,7 @@ impl<'a> Emitter<'a> {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
-        let prefix = self.verif_locals_upto(base);
-        for (abs_off, body_locals, stack) in &bs.frames {
-            let mut locals = prefix.clone();
-            locals.extend(body_locals.iter().map(vtype_to_verif));
-            let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
-            let l = code.new_label();
-            code.bind_at(l, *abs_off);
-            code.add_frame_if_new(l, locals, st);
-        }
         bind_inline_handlers(code, &bs.handlers);
-        code.set_needs_stackmap();
         let ret_words = if bs.falls_through { ret_words } else { 0 };
         code.splice_inline(
             &bs.bytes,
@@ -14030,20 +13733,7 @@ impl<'a> Emitter<'a> {
         );
         self.record_spliced_lines(&bs.lines, &body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
-        // Join frame: the redirected returns land at the continuation right after the spliced body.
-        let join = code.new_label();
-        self.bind(join, code);
-        let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
-        code.add_frame_if_new(join, prefix, join_stack);
         true
-    }
-
-    /// Caller-local verification types for slots `0..upto` (collapsing `long`/`double` to one entry),
-    /// NOT trimming trailing `Top` — the prefix a spliced branchy body's frames are concatenated onto
-    /// (the body's own locals occupy slots `upto..`).
-    fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
-        let raw = self.verif_slots_upto(upto);
-        backend_temporaries::collapse(&raw)
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -14272,7 +13962,6 @@ impl<'a> Emitter<'a> {
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
-                self.frame(start, vec![], code);
                 self.bind(start, code);
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
@@ -14280,7 +13969,6 @@ impl<'a> Emitter<'a> {
                     // `while (false)`: the jump-out is unconditional, so the body/update/back-edge
                     // that would follow are unreachable — emitting them leaves frameless dead code
                     // the verifier rejects. kotlinc emits no body for a never-entered loop either.
-                    self.frame(end, vec![], code);
                     self.bind(end, code);
                     return;
                 }
@@ -14325,7 +14013,6 @@ impl<'a> Emitter<'a> {
                 // A pre-test body's block has restored its slot map. A post-test body's block stays
                 // open here because `continue` and the condition are inside that same Kotlin scope.
                 if bottom == cont {
-                    self.frame(cont, vec![], code);
                     self.bind(cont, code);
                 }
                 // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
@@ -14348,10 +14035,8 @@ impl<'a> Emitter<'a> {
                         self.restore_slot_scope(saved);
                     }
                 } else {
-                    self.frame(start, vec![], code);
                     code.goto(start);
                 }
-                self.frame(end, vec![], code);
                 self.bind(end, code);
             }
             IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
@@ -14623,11 +14308,11 @@ impl<'a> Emitter<'a> {
             | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
         let takes_receiver = accessor_takes_receiver(&access);
-        // A branchy assigned value emits merge frames. It cannot do so with an instance receiver already
-        // on the operand stack because those frames describe an empty baseline. Spill BOTH operands in
-        // source evaluation order (receiver, then value), then reload them; spilling only the value would
-        // reverse observable side effects.
-        let spilled = if takes_receiver && self.records_frame(value) {
+        // Keep the reference compiler's evaluation layout for a branchy assigned value: spill BOTH
+        // operands in source order (receiver, then value), then reload them. Spilling only the value
+        // would reverse observable side effects. Final-body analysis could verify a live receiver
+        // prefix, but changing this layout would lose bytecode parity.
+        let spilled = if takes_receiver && self.emits_control_flow(value) {
             Some(
                 self.spill_to_temps(
                     &[
@@ -15171,7 +14856,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
-    /// field carries the inline uninitialized guard, so the read emission and [`Self::records_frame`]
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
     /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
     fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
         self.ir
@@ -15407,9 +15092,6 @@ impl<'a> Emitter<'a> {
                         "(Ljava/lang/String;)V",
                     );
                     code.invokestatic(m, 1, 0);
-                    // At the join the field value (non-null on the taken path) is on the stack.
-                    let st = self.verif_stack(jt);
-                    self.frame(lbl, st, code);
                     self.bind(lbl, code);
                 }
             }
@@ -15544,7 +15226,7 @@ impl<'a> Emitter<'a> {
                 let physical_params =
                     parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                if args.iter().any(|&a| self.records_frame(a)) {
+                if args.iter().any(|&a| self.emits_control_flow(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
                     // would omit them. Evaluate all args into temps first (clean stack), then build.
                     let temps = self.spill_to_temps(&args, code);
@@ -16727,7 +16409,7 @@ impl<'a> Emitter<'a> {
                         .methodref("java/lang/StringBuilder", "<init>", "()V");
                     // A branchy part (`"${when{…}}"`) records merge frames that would omit the
                     // StringBuilder on the stack — spill every part to a temp first, then build.
-                    if parts.iter().any(|&p| self.records_frame(p)) {
+                    if parts.iter().any(|&p| self.emits_control_flow(p)) {
                         let temps = self.spill_to_temps(&parts, code);
                         code.new_obj(sb);
                         code.dup();
@@ -16905,10 +16587,10 @@ impl<'a> Emitter<'a> {
                 for s in stmts {
                     self.mark_statement_line(*s, code);
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
-                    // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
-                    // tracks its internal branches only approximately and can leave `cur_stack` drifted
-                    // above the real (verified-balanced) height, which would make a LATER branchy splice
-                    // in the same block falsely see a non-empty baseline and bail.
+                    // the tracked height to that baseline afterward: raw spliced control flow is opaque
+                    // to the builder's linear counter and can leave `cur_stack` drifted above the real,
+                    // verified-balanced height. Later emission still relies on accurate physical stack
+                    // accounting even though final-body analysis owns verifier frames.
                     let base = code.stack_height();
                     self.emit(*s, code);
                     if self.discarding_diverges(*s) {
@@ -17268,9 +16950,6 @@ impl<'a> Emitter<'a> {
                 code.invokestatic(m, 1, 0);
                 // `value_ty` already yields the JVM type of the operand (a reference here); the surviving
                 // (non-null) value is on the stack at the branch target.
-                let jt = self.value_ty(*operand);
-                let st = self.verif_stack(jt);
-                self.frame(lbl, st, code);
                 self.bind(lbl, code);
             }
             IrExpr::Throw { operand } => {
@@ -17313,7 +16992,7 @@ impl<'a> Emitter<'a> {
                 let (cls, fdesc) = ref_class(elem);
                 let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
                 // A branchy initializer can't run with `[holder, holder]` on the stack — spill it.
-                if self.records_frame(*init) {
+                if self.emits_control_flow(*init) {
                     let temps = self.spill_to_temps(&[*init], code);
                     let ci = self.cw.class_ref(cls);
                     code.new_obj(ci);
@@ -17362,7 +17041,7 @@ impl<'a> Emitter<'a> {
             } => {
                 // A branchy value (`msg = x ?: "?"`) can't run with the holder on the stack — its
                 // branch frames assume a clean stack. Spill it first (mirrors `RefNew`).
-                if self.records_frame(*value) {
+                if self.emits_control_flow(*value) {
                     let temps = self.spill_to_temps(&[*value], code);
                     self.emit_value(*holder, code);
                     for &(slot, t, _) in &temps {
@@ -17387,7 +17066,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let n = args.len();
                 let high_arity = is_high_arity_function(n as u8);
-                if args.iter().any(|&a| self.records_frame(a)) {
+                if args.iter().any(|&a| self.emits_control_flow(a)) {
                     // A branchy argument can't run with the function value on the stack — its merge
                     // frame would omit it. Evaluate the function + args into temps first (in order),
                     // then load and box.
@@ -17492,8 +17171,7 @@ impl<'a> Emitter<'a> {
             self.emit_operands(&[array, index], code);
         } else {
             self.emit_value(array, code);
-            let array_verification = self.verif_single(self.value_ty(array));
-            self.emit_value_over(index, &[array_verification], code);
+            self.emit_value(index, code);
         }
         let (operation, words) = array_load_op(element, reference_array);
         code.array_load(operation, words);
@@ -17516,10 +17194,8 @@ impl<'a> Emitter<'a> {
             self.emit_operands(&[array, index, value], code);
         } else {
             self.emit_value(array, code);
-            let array_verification = self.verif_single(self.value_ty(array));
-            self.emit_value_over(index, std::slice::from_ref(&array_verification), code);
-            let index_verification = self.verif_single(self.value_ty(index));
-            self.emit_value_over(value, &[array_verification, index_verification], code);
+            self.emit_value(index, code);
+            self.emit_value(value, code);
         }
         if let Some(primitive) = reference_array
             .then(|| reference_array_scalar_adapter(element))
@@ -17633,7 +17309,7 @@ impl<'a> Emitter<'a> {
         let sb = self.cw.class_ref("java/lang/StringBuilder");
         // A branchy operand (`when`/`try`) can't be emitted with the `StringBuilder` on the stack — its
         // merge frames would omit it. Spill such operands to temps first.
-        if parts.iter().any(|&part| self.records_frame(part)) {
+        if parts.iter().any(|&part| self.emits_control_flow(part)) {
             let temps = self.spill_to_temps(parts, code);
             code.new_obj(sb);
             code.dup();
@@ -17681,7 +17357,7 @@ impl<'a> Emitter<'a> {
         }
         // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
         // that is the same open problem as elsewhere, so leave those on the StringBuilder path.
-        if parts.iter().any(|&p| self.records_frame(p)) {
+        if parts.iter().any(|&p| self.emits_control_flow(p)) {
             return false;
         }
         if parts.iter().any(|part| {
@@ -17782,17 +17458,36 @@ impl<'a> Emitter<'a> {
     }
 
     /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead
-    /// (`pending_stack` must not be used across it): a `try` in the subtree — the JVM clears the
-    /// operand stack on handler entry, so a held value would be lost (and its handler frame mistyped) —
-    /// or an inlinable call, whose splice expects the stack baseline its frames were recorded at.
+    /// a `try` in the subtree — the JVM clears the operand stack on handler entry, so a held value
+    /// would be lost — a transfer to a loop target outside the subtree, or a suspension whose state
+    /// machine cannot carry an unrecorded JVM operand prefix across resumption. An ordinary inline
+    /// branch is not such a boundary: final-body dataflow carries the live prefix through its edges.
     /// Conservative: the spill path is always correct, only byte-parity with kotlinc is deferred.
     fn must_spill_across(&self, e: u32) -> bool {
+        if self.machine_suspensions.contains(&e) {
+            return true;
+        }
         match self.ir.expr(e) {
-            IrExpr::Try { .. } => true,
+            IrExpr::Try { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
             IrExpr::Call {
-                callee: Callee::Static { inline, .. },
-                ..
-            } if inline.can_inline() => true,
+                callee:
+                    Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline,
+                    },
+                dispatch_receiver,
+                args,
+            } if inline.can_inline() => {
+                self.bodies
+                    .body(&owner.render(), name, descriptor)
+                    .is_some_and(|body| !body.handlers.is_empty())
+                    || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
+                    || args
+                        .iter()
+                        .any(|&argument| self.must_spill_across(argument))
+            }
             _ => {
                 let mut spill = false;
                 crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
@@ -17803,17 +17498,17 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Whether emitting `e` records a StackMapTable frame anywhere in its subtree. An operand
-    /// sequence uses this semantic fact either to spill earlier values to locals or, where the
-    /// instruction shape must keep them live, to describe them through [`Self::emit_value_over`].
-    fn records_frame(&self, e: u32) -> bool {
+    /// Whether emitting `e` introduces non-linear JVM control flow anywhere in its subtree. Operand
+    /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
+    /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.
+    fn emits_control_flow(&self, e: u32) -> bool {
         use IrBinOp::*;
         match self.ir.expr(e) {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             // The multi-part `StringConcat` itself spills branchy parts internally, so as a whole it
             // leaves only its `String` result — but a parent operand sequence still must treat it as
-            // frame-recording if any part does (it builds the StringBuilder mid-stack otherwise).
-            IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.records_frame(p)),
+            // branchy if any part is (it builds the StringBuilder mid-stack otherwise).
+            IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.emits_control_flow(p)),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
                     // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
@@ -17823,20 +17518,17 @@ impl<'a> Emitter<'a> {
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.records_frame(*lhs) || self.records_frame(*rhs)
+                    || self.emits_control_flow(*lhs) || self.emits_control_flow(*rhs)
             }
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 args,
             } => {
-                // An inline call whose SPLICED body records StackMapTable frames — a branchy lambda body,
-                // or a branchy host body (a loop HOF like `map`/`filter`, or an `@InlineOnly` `require`/
-                // `check`) — records frames at THIS position. So a parent operand sequence must spill the
-                // earlier operands to temps (keeping the splice at an empty baseline), exactly as for
-                // `when`/`try`. Without this, an inline HOF used as a non-first operand
-                // (`sb.append(xs.map { … }))`) would splice at a non-empty baseline and bail to a real call.
-                let splice_records = match callee {
+                // Preserve the reference compiler's temp layout when a spliced host or lambda branches.
+                // This is no longer a verifier requirement: final-body dataflow can carry a live prefix,
+                // and `must_spill_across` separately identifies handlers/external transfers that cannot.
+                let splice_branches = match callee {
                     Callee::Static {
                         owner,
                         name,
@@ -17845,7 +17537,7 @@ impl<'a> Emitter<'a> {
                     } if inline.can_inline() => {
                         args.iter().any(|&a| {
                             matches!(self.ir.expr(a),
-                                IrExpr::Lambda { inline_body: Some(b), .. } if self.records_frame(*b))
+                                IrExpr::Lambda { inline_body: Some(b), .. } if self.emits_control_flow(*b))
                         }) || self
                             .bodies
                             .body(&owner.render(), name, descriptor)
@@ -17863,31 +17555,31 @@ impl<'a> Emitter<'a> {
                         operation: crate::ir::IrIntrinsic::Assert { .. },
                         ..
                     }
-                ) || splice_records
-                    || dispatch_receiver.map_or(false, |r| self.records_frame(r))
-                    || args.iter().any(|&a| self.records_frame(a))
+                ) || splice_branches
+                    || dispatch_receiver.map_or(false, |r| self.emits_control_flow(r))
+                    || args.iter().any(|&a| self.emits_control_flow(a))
             }
             IrExpr::MethodCall { receiver, args, .. } => {
-                self.records_frame(*receiver)
+                self.emits_control_flow(*receiver)
                     || args
                         .iter()
-                        .any(|a| a.map_or(false, |x| self.records_frame(x)))
+                        .any(|a| a.map_or(false, |x| self.emits_control_flow(x)))
             }
             IrExpr::InvokeFunction { func, args, .. } => {
-                self.records_frame(*func) || args.iter().any(|&arg| self.records_frame(arg))
+                self.emits_control_flow(*func)
+                    || args.iter().any(|&arg| self.emits_control_flow(arg))
             }
-            IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::New { args, .. } => args.iter().any(|&a| self.emits_control_flow(a)),
             // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
-            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join records a frame
-            // typing only the field value — so an operand already on the stack must be spilled first. A
-            // read through a getter records nothing here: the guard lives inside the accessor body.
-            IrExpr::EnclosingInstance { receiver, .. } => self.records_frame(*receiver),
+            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join requires the
+            // surrounding operand baseline to agree — so an earlier operand is spilled first.
+            IrExpr::EnclosingInstance { receiver, .. } => self.emits_control_flow(*receiver),
             IrExpr::GetField {
                 receiver,
                 class,
                 index,
             } => {
-                self.records_frame(*receiver)
+                self.emits_control_flow(*receiver)
                     || self.ir.classes[*class as usize].fields[*index as usize].is_lateinit()
             }
             IrExpr::PropertyRead {
@@ -17896,50 +17588,49 @@ impl<'a> Emitter<'a> {
                 name,
                 ..
             } => {
-                receiver.is_some_and(|receiver| self.records_frame(receiver))
+                receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
                     || self.lateinit_direct_field_read(&owner.render(), name)
             }
             IrExpr::SetField {
                 receiver, value, ..
-            } => self.records_frame(*receiver) || self.records_frame(*value),
+            } => self.emits_control_flow(*receiver) || self.emits_control_flow(*value),
             IrExpr::PropertyWrite {
                 receiver, value, ..
             } => {
-                receiver.is_some_and(|receiver| self.records_frame(receiver))
-                    || self.records_frame(*value)
+                receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
+                    || self.emits_control_flow(*value)
             }
             IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
-                self.records_frame(*value)
+                self.emits_control_flow(*value)
             }
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
-                self.records_frame(*arg)
+                self.emits_control_flow(*arg)
             }
-            IrExpr::BottomValue { producer, .. } => self.records_frame(*producer),
-            IrExpr::NotNullAssert { operand, .. } => self.records_frame(*operand),
+            IrExpr::BottomValue { producer, .. } => self.emits_control_flow(*producer),
+            IrExpr::NotNullAssert { operand, .. } => self.emits_control_flow(*operand),
             // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
             // first (else the frame at the join would omit them).
             IrExpr::LateinitCheck { .. } => true,
-            IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
+            IrExpr::RefGet { holder, .. } => self.emits_control_flow(*holder),
             IrExpr::RefSet { holder, value, .. } => {
-                self.records_frame(*holder) || self.records_frame(*value)
+                self.emits_control_flow(*holder) || self.emits_control_flow(*value)
             }
-            IrExpr::RefNew { init, .. } => self.records_frame(*init),
-            IrExpr::Throw { operand } => self.records_frame(*operand),
-            IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
-            IrExpr::NewArray { size, .. } => self.records_frame(*size),
-            IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
-            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
+            IrExpr::RefNew { init, .. } => self.emits_control_flow(*init),
+            IrExpr::Throw { operand } => self.emits_control_flow(*operand),
+            IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.emits_control_flow(a)),
+            IrExpr::NewArray { size, .. } => self.emits_control_flow(*size),
+            IrExpr::Return(v) => v.map_or(false, |x| self.emits_control_flow(x)),
+            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.emits_control_flow(i)),
             IrExpr::Block { stmts, value } => {
-                stmts.iter().any(|&s| self.records_frame(s))
-                    || value.map_or(false, |v| self.records_frame(v))
+                stmts.iter().any(|&s| self.emits_control_flow(s))
+                    || value.map_or(false, |v| self.emits_control_flow(v))
             }
-            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — no frames
+            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — straight-line
         }
     }
 
-    /// Push `ops` onto the stack in order. If any op after the first records a frame (so an earlier
-    /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
-    /// them — keeping the stack empty while each frame-recording op runs.
+    /// Push `ops` onto the stack in order. If any later op introduces control flow, evaluate all ops
+    /// into temps first, then load them, keeping the operand baseline empty across nested branches.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         self.emit_operands_adapted(None, ops, code, |_, _, _| {});
     }
@@ -17984,7 +17675,7 @@ impl<'a> Emitter<'a> {
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
         let mut inside_run = false;
-        if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
+        if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
             let temps = self.spill_to_temps(ops, code);
             for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
                 self.mark_synthesized_operand_run(
@@ -18017,14 +17708,6 @@ impl<'a> Emitter<'a> {
     /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
     fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
         box_prim_free(self.cw, code, ty);
-    }
-
-    /// The two `[receiver, receiver]` stack entries a `dup`-then-call sequence holds. The receiver
-    /// must already be INITIALIZED — right after `new C; dup` the verification type is
-    /// `Uninitialized(offset)`, not the class, so this is wrong for that position.
-    fn held_pair(&mut self, owner: &str) -> [VerifType; 2] {
-        let v = self.verif_single(Ty::obj(owner));
-        [v.clone(), v]
     }
 
     /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
@@ -18197,23 +17880,18 @@ impl<'a> Emitter<'a> {
         match op {
             Add | Sub | Mul | Div | Rem => {
                 // A branchy RHS (`result*31 + <nullable-field hashCode ternary>`): keep the numeric LHS on
-                // the operand stack across the RHS's branch — matching kotlinc — by typing it into the
-                // RHS's stack-map frames via `pending_stack`, instead of spilling it to a temp. The LHS of
-                // arithmetic is always a numeric scalar, so the pending verif type interns no `Class`. A
+                // the operand stack across the RHS's branch — matching kotlinc. Final-bytecode analysis
+                // carries that prefix through every edge, so emitter-side frame annotation is unnecessary. A
                 // non-branchy RHS (or a branchy LHS) keeps the ordinary `emit_operands` path (spill only if
                 // needed) — bytecode unchanged for the common case. NOT applicable when the RHS can enter
-                // an exception handler or splice inline bytecode (`must_spill_across`): a handler CLEARS
-                // the operand stack (the held LHS would be lost and its handler frame mistyped), and a
-                // splice expects its recorded baseline.
-                if self.records_frame(rhs)
-                    && !self.records_frame(lhs)
+                // an exception handler, suspend, or transfer to an enclosing loop (`must_spill_across`):
+                // those boundaries cannot carry the held LHS to this operation.
+                if self.emits_control_flow(rhs)
+                    && !self.emits_control_flow(lhs)
                     && !self.must_spill_across(rhs)
                 {
                     self.emit_value(lhs, code);
-                    let lv = self.verif_single(lt);
-                    // Use the same scoped pending-stack path as container fills and array
-                    // subscripts; all held-operand frames now share one restoration invariant.
-                    self.emit_value_over(rhs, &[lv], code);
+                    self.emit_value(rhs, code);
                 } else {
                     self.emit_operands(&[lhs, rhs], code);
                 }
@@ -18272,8 +17950,8 @@ impl<'a> Emitter<'a> {
                 );
             }
             And | Or => {
-                // Evaluate lhs, hold it in a temp while rhs is emitted (rhs may record frames that
-                // must see the temp as live), then combine. The temp is dead afterwards, so remove it
+                // Evaluate lhs, hold it in a temp while a branchy rhs is emitted, then combine. The
+                // temp is dead afterwards, so release it
                 // from the slot map so it doesn't leak into later merge frames (next_slot stays
                 // monotonic — no reuse). Without this, a `false`/`else` path that never assigned the
                 // temp reaches a merge whose frame claims it's defined → VerifyError.
@@ -18292,7 +17970,7 @@ impl<'a> Emitter<'a> {
                 self.release_temporary(lease);
             }
             BitAnd | BitOr | BitXor => {
-                self.emit_binary_operands_over_frames(lhs, rhs, lt, code);
+                self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
                 match lt {
                     Ty::Long => match op {
                         BitAnd => code.land(),
@@ -18364,7 +18042,6 @@ impl<'a> Emitter<'a> {
         let merged = code.stack_height().max(0) as u16;
         let end = code.new_label();
         code.push_int(1, self.cw);
-        self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
         self.bind(f, code);
         code.set_stack(merged);
@@ -18396,7 +18073,6 @@ impl<'a> Emitter<'a> {
 
         let entry_stack = code.stack_height().max(0) as u16;
         let end = code.new_label();
-        self.frame(end, vec![], code);
         if mode == AssertionMode::Runtime {
             code.ldc_class(&self.owner, self.cw);
             let enabled = self
@@ -18456,7 +18132,6 @@ impl<'a> Emitter<'a> {
         // requested polarity determines whether equality means taking or skipping the target.
         debug_assert!(matches!(op, IrBinOp::Eq | IrBinOp::Ne));
         self.emit_structural_equality(lhs, rhs, code);
-        self.frame(target, vec![], code);
         if (op == IrBinOp::Eq) == jt {
             code.ifne(target);
         } else {
@@ -18494,7 +18169,6 @@ impl<'a> Emitter<'a> {
             && !rhs_null
         {
             self.emit_identity_operands(lhs, rhs, code);
-            self.frame(target, vec![], code);
             if (op == RefEq) == jt {
                 code.if_acmpeq(target);
             } else {
@@ -18514,7 +18188,6 @@ impl<'a> Emitter<'a> {
             // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
             // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
             self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
-            self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
             } else {
@@ -18683,7 +18356,6 @@ impl<'a> Emitter<'a> {
                 _ => unreachable!("int_cat is false only for Long/Double/Float"),
             }
         }
-        self.frame(target, vec![], code);
         match cmp0_int {
             Some(o) => cmp0_branch(o, jt, target, code),
             None if !int_cat => cmp0_branch(op, jt, target, code),
@@ -18742,15 +18414,10 @@ impl<'a> Emitter<'a> {
             (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit || discarded;
         let enclosing_terminal_target = self.terminal_statement_target.take();
         let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
-        let result_stack = if is_stmt {
-            vec![]
-        } else {
-            self.verif_stack(result_ty)
-        };
         if self.emit_safe_call_when(
             expression,
             branches,
-            when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end, None),
+            when::Emission::new(is_stmt, result_ty, entry_height, end, None),
             code,
         ) {
             return;
@@ -18761,25 +18428,11 @@ impl<'a> Emitter<'a> {
         if let Some(plan) = self.int_switch_plan(branches) {
             self.emit_int_switch(
                 &plan,
-                when::Emission::new(
-                    is_stmt,
-                    result_ty,
-                    &result_stack,
-                    entry_height,
-                    end,
-                    terminal_target,
-                ),
+                when::Emission::new(is_stmt, result_ty, entry_height, end, terminal_target),
                 code,
             );
             return;
         }
-        // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
-        // no-`else` statement always has the implicit no-match fallthrough.
-        let mut end_reachable = !has_else && exhaustive_result.is_none();
-        // Whether anything BRANCHES to the merge, as opposed to falling into it. Only a branch
-        // target needs a `StackMapTable` frame; a `when` whose one arm was fused into its condition
-        // is reached by fall-through alone, and a frame there is one kotlinc does not write.
-        let mut end_targeted = false;
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
@@ -18806,20 +18459,6 @@ impl<'a> Emitter<'a> {
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,
                     // unframed body. Suspend flattening produces this shape for some do-while loops.
                     if self.emit_cond_branch(*c, next, false, code) {
-                        // Skipping the CODE must not skip the merge-point accounting: `diverges` does
-                        // not fold constant conditions, so a `when` whose only falling-through branch is
-                        // this dead one still reports as falling through, and the caller keeps emitting
-                        // at `end`. Leaving `end` unframed just moves the same VerifyError there —
-                        // `if (FALSE_CONST) "a" else return "b"` failed at the merge instead of at the
-                        // dead body. Mirror what the emitted path does, minus the code.
-                        let body_diverges = if is_stmt {
-                            self.discarding_diverges(*body)
-                        } else {
-                            self.diverges(*body)
-                        };
-                        if !body_diverges {
-                            end_reachable = true;
-                        }
                         self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;
@@ -18854,13 +18493,9 @@ impl<'a> Emitter<'a> {
                             && (has_else || exhaustive_result.is_none());
                         let falls_into_end = is_stmt && nothing_follows;
                         if !falls_into_end {
-                            self.frame(end, result_stack.clone(), code);
                             code.goto(end);
                         }
-                        end_reachable = true;
                     }
-                    // `next` is a branch target at this offset, so the merge shares its frame.
-                    end_targeted = true;
                     self.bind(next, code);
                     // `next` is reached only via the conditional jump above, where the stack is back at the
                     // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
@@ -18879,14 +18514,6 @@ impl<'a> Emitter<'a> {
                             code,
                         );
                     }
-                    let body_diverges = if is_stmt {
-                        self.discarding_diverges(*body)
-                    } else {
-                        self.diverges(*body)
-                    };
-                    if !body_diverges {
-                        end_reachable = true;
-                    }
                     // The else is last — it falls through to `end` (no goto needed).
                 }
             }
@@ -18900,12 +18527,6 @@ impl<'a> Emitter<'a> {
                     .methodref("kotlin/NoWhenBranchMatchedException", "<init>", "()V");
             code.invokespecial(constructor, 0, 0);
             code.athrow();
-        }
-        // Frame `end` only when it's actually reachable AND something branches there; if every
-        // branch diverges, `end` is dead (no jump targets it) and a frame there would be
-        // "Expecting a stack map frame", and if control only falls in, no frame is needed at all.
-        if end_reachable && end_targeted {
-            self.frame(end, result_stack, code);
         }
         self.bind(end, code);
     }
@@ -18955,32 +18576,6 @@ impl<'a> Emitter<'a> {
         code.bind(label);
     }
 
-    fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
-        self.record_label_assignment_state(label, code);
-        let current_unassigned = std::mem::take(&mut self.unassigned_values);
-        self.unassigned_values = self
-            .label_unassigned_values
-            .get(&label)
-            .cloned()
-            .unwrap_or_default();
-        let locals = self.verif_locals();
-        self.unassigned_values = current_unassigned;
-        // Prepend any operand held on the stack below the current expression (an arithmetic LHS across a
-        // branchy RHS), so the frame types the full operand stack the verifier sees.
-        let stack = if self.pending_stack.is_empty() {
-            stack
-        } else {
-            let mut full = self.pending_stack.clone();
-            full.extend(stack);
-            full
-        };
-        code.add_frame_if_new(label, locals, stack);
-    }
-
-    fn verif_locals(&mut self) -> Vec<VerifType> {
-        self.verif_locals_with(&[])
-    }
-
     /// Take a slot the backend owns for as long as it is live; see `backend_temporaries`.
     fn lease_temporary(&mut self, slot: u16, ty: Ty) -> backend_temporaries::TemporaryLease {
         debug_assert!(
@@ -19010,25 +18605,9 @@ impl<'a> Emitter<'a> {
             .collect()
     }
 
-    fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
-        let mut raw = self.verif_slots_upto(self.next_slot);
-        for (slot, ty) in extra.iter().copied() {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
-        let mut out = backend_temporaries::collapse(&raw);
-        while out.last() == Some(&VerifType::Top) {
-            out.pop();
-        }
-        out
-    }
-
     fn verif_single(&mut self, ty: Ty) -> VerifType {
-        // Object types are recorded by NAME (`VerifType::ObjectName`), NOT interned here — the class is
-        // interned only when a WRITTEN StackMapTable frame lists it (`build_stackmap`). A frame that
-        // compresses to `same_frame` drops its locals, so a class appearing only in dropped frames (e.g.
-        // a `copy$default` mask-branch param) never enters the pool — matching kotlinc, no orphan.
+        // Keep object types by name here. The final StackMapTable encoder interns only classes that
+        // survive frame compression, avoiding constant-pool entries for omitted locals.
         match ty {
             t if is_jvm_int_category(t) => VerifType::Integer,
             Ty::Long => VerifType::Long,
@@ -19045,13 +18624,6 @@ impl<'a> Emitter<'a> {
             }
             Ty::Null => VerifType::Null,
             _ => VerifType::Top,
-        }
-    }
-
-    fn verif_stack(&mut self, ty: Ty) -> Vec<VerifType> {
-        match ty {
-            Ty::Unit | Ty::Nothing | Ty::Error => vec![],
-            _ => vec![self.verif_single(ty)],
         }
     }
 

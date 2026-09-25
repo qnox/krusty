@@ -8,6 +8,7 @@ use super::bytecode::instruction_len;
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
 
+mod adapter_trimming;
 mod relocation;
 pub use relocation::{
     bootstrap_members, references_private_member, relocate_const, relocate_insns,
@@ -18,6 +19,7 @@ mod continuation_flow;
 mod debug_lines;
 mod frame_layout;
 mod in_place_arguments;
+mod invoke_receiver;
 mod local_compaction;
 mod reified_operands;
 mod scalar_adapters;
@@ -29,7 +31,7 @@ use local_compaction::LocalCompaction;
 use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
 pub(super) use reified_operands::{ReifiedArgument, ReifiedArguments};
 use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
-pub use splice_result::{BranchySplice, RelocatedLambdaSite};
+pub use splice_result::SpliceResult;
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
@@ -852,32 +854,6 @@ fn shift_targets(insns: &mut [Insn], delta: usize) {
     }
 }
 
-/// The method's return value as a [`VType`] (`None` value ⇒ `void`), relocating a reference return's
-/// class into `cw`. The outer `None` is a parse error.
-fn ret_vtype(descriptor: &str, cw: &mut ClassWriter) -> Option<Option<VType>> {
-    let ret = descriptor.split(')').nth(1)?;
-    Some(match *ret.as_bytes().first()? {
-        b'V' => None,
-        b'I' | b'B' | b'S' | b'C' | b'Z' => Some(VType::Int),
-        b'J' => Some(VType::Long),
-        b'F' => Some(VType::Float),
-        b'D' => Some(VType::Double),
-        b'L' => Some(VType::Object(cw.class_ref(&ret[1..ret.len() - 1]))),
-        b'[' => Some(VType::Object(cw.class_ref(ret))),
-        _ => return None,
-    })
-}
-
-/// Relocate a frame's verification type into `cw` (an `Object`'s `Class` pool ref). `None` for an
-/// `Uninitialized`/`UninitializedThis` type (not modeled).
-fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType> {
-    Some(match v {
-        VType::Object(idx) => VType::Object(relocate_const(src_cp, *idx, cw)?),
-        VType::Uninit(_) | VType::UninitThis => return None,
-        other => *other,
-    })
-}
-
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` sites.
 pub struct LambdaSplice {
     /// The host parameter index of this lambda (its position in the descriptor).
@@ -1005,12 +981,10 @@ fn set_slot(slots: &mut Vec<VType>, idx: usize, v: VType) {
 }
 
 /// The host's live state — `(slot-indexed locals, operand stack)` — just before the lambda value is
-/// loaded at instruction `load_idx`. The operand stack is the prefix a branchy lambda body's frames
-/// must be rebased onto; the locals are the host context (loop iterator/element/accumulator) those
-/// frames need (the nearest StackMapTable frame is stale — locals assigned later in the loop body
-/// aren't in it). Seeds from the nearest host frame ≤ `load_idx` (or method entry: `frame0` locals,
-/// empty stack) and simulates forward over the straight-line region. Returns `None` for any opcode
-/// not modeled, or if an opaque `Top` survives onto the operand stack (caller then falls back).
+/// loaded at instruction `load_idx`. This is needed only to reject an exception-handling lambda when
+/// its handler would clear values already held below the lambda call. Seeds from the nearest input
+/// frame ≤ `load_idx` (or method entry: `frame0` locals, empty stack) and simulates forward over the
+/// straight-line region. Returns `None` when that safety question cannot be answered.
 fn host_state_at(
     insns: &[Insn],
     load_idx: usize,
@@ -1287,24 +1261,6 @@ fn host_state_at(
     Some((slots, stack))
 }
 
-/// Collapse a slot-indexed local table to StackMapTable frame form (a `long`/`double` is one entry;
-/// its second slot — always `Top` in our tables — is dropped). The inverse of `expand_collapsed_locals`.
-fn collapse_slots(slots: &[VType]) -> Vec<VType> {
-    let mut out = Vec::with_capacity(slots.len());
-    let mut skip = false;
-    for v in slots {
-        if skip {
-            skip = false;
-            continue;
-        }
-        out.push(*v);
-        if matches!(v, VType::Long | VType::Double) {
-            skip = true;
-        }
-    }
-    out
-}
-
 fn ldc_vtype(operands: &[u8], op: u8, src_cp: &[C]) -> Option<VType> {
     let idx = if op == 0x12 {
         *operands.first()? as u16
@@ -1439,59 +1395,6 @@ fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
     Some(out)
 }
 
-fn param_vtypes_target(descriptor: &str, cw: &mut ClassWriter) -> Option<Vec<VType>> {
-    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
-    let b = inner.as_bytes();
-    let mut i = 0;
-    let mut out = Vec::new();
-    while i < b.len() {
-        match b[i] {
-            b'I' | b'B' | b'S' | b'C' | b'Z' => {
-                out.push(VType::Int);
-                i += 1;
-            }
-            b'J' => {
-                out.push(VType::Long);
-                i += 1;
-            }
-            b'D' => {
-                out.push(VType::Double);
-                i += 1;
-            }
-            b'F' => {
-                out.push(VType::Float);
-                i += 1;
-            }
-            b'L' => {
-                let start = i;
-                while *b.get(i)? != b';' {
-                    i += 1;
-                }
-                let name = std::str::from_utf8(&b[start + 1..i]).ok()?;
-                out.push(VType::Object(cw.class_ref(name)));
-                i += 1;
-            }
-            b'[' => {
-                let start = i;
-                i += 1;
-                while *b.get(i)? == b'[' {
-                    i += 1;
-                }
-                if *b.get(i)? == b'L' {
-                    while *b.get(i)? != b';' {
-                        i += 1;
-                    }
-                }
-                i += 1;
-                let name = std::str::from_utf8(&b[start..i]).ok()?;
-                out.push(VType::Object(cw.class_ref(name)));
-            }
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
 /// The local slot of each parameter in the original (static) method — `long`/`double` take two. Used to
 /// locate a lambda parameter's `aload <slot>` before relocation/shifting.
 fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
@@ -1600,6 +1503,12 @@ pub fn lambda_invoke_sites(
                 (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
                     .then_some(index)
             })?;
+        // The load must remain below the invocation arguments until the call. Track stack ENTRY
+        // effects above it: stores of an argument temporary are harmless, while a store that reaches
+        // the receiver proves the value was moved through an alias and this byte splicer must decline.
+        if !invoke_receiver::survives_to_invoke(insns, src_cp, load_idx, site, deleted) {
+            return None;
+        }
         found.push((lambda, load_idx, site));
     }
     Some(found)
@@ -1607,14 +1516,9 @@ pub fn lambda_invoke_sites(
 
 /// The first local slot an inlined lambda's own locals may occupy.
 ///
-/// One past the highest slot any of the host's own stack-map frames DESCRIBES, and at least its
-/// parameter area. Using `max_locals` instead would put the lambda above locals the host has
-/// finished with, and the reference compiler reuses those, so a body inlined where a later local is
-/// only ever live in straight-line code lands a slot lower.
-///
-/// Frames, not liveness: a splice keeps the host's frames verbatim rather than recomputing them, so
-/// a slot some frame still describes must keep its type even where nothing reads it. Writing a
-/// lambda local into one is how a frame comes to disagree with the code it guards.
+/// One past the highest slot the host has written before the call or reserves in its input local
+/// layout, and at least its parameter area. This chooses non-overlapping storage for the splice; it
+/// does not copy those input frames into the output, whose frames are computed from the final body.
 fn free_local_slot_at(
     insns: &[Insn],
     site: usize,
@@ -1622,9 +1526,6 @@ fn free_local_slot_at(
     minimum: u16,
     ceiling: u16,
 ) -> u16 {
-    // A slot the host has already written may be read again after the invoke, and a slot some frame
-    // describes must keep its type there. Neither signal implies the other, so both bound the
-    // answer.
     let mut written = 0u16;
     for insn in insns.iter().take(site) {
         if let Some(slot) = stored_local(insn) {
@@ -1695,8 +1596,8 @@ pub(super) enum ParameterBinding<'a> {
 }
 
 /// Relocate one inline body and splice its literal lambda bodies at their checked invoke sites.
-/// Stored and in-place arguments, branch frames, reified operands, and scalar adapter cancellation
-/// all converge here so no narrower fallback can emit a different body shape.
+/// Stored and in-place arguments, branch relocation, reified operands, and scalar adapter
+/// cancellation all converge here so no narrower fallback can emit a different body shape.
 pub(super) fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
@@ -1705,7 +1606,7 @@ pub(super) fn splice_unified(
     start_offset: usize,
     cw: &mut ClassWriter,
     reified: &ReifiedArguments,
-) -> Option<BranchySplice> {
+) -> Option<SpliceResult> {
     let (lambdas, in_place): (&[LambdaSplice], Option<&InPlacePlan>) = match binding {
         ParameterBinding::Stored(lambdas) => (lambdas, None),
         ParameterBinding::InPlace(plan) => (&[], Some(plan)),
@@ -1723,7 +1624,6 @@ pub(super) fn splice_unified(
     if is_reified_inline(body) && reified.is_empty() {
         return None;
     }
-    let ret = ret_vtype(descriptor, cw)?;
     let offsets_of_param = param_offsets(descriptor)?;
     let mut insns = disassemble(&body.code)?;
     let old_off = old_offsets(&body.code)?;
@@ -1764,17 +1664,12 @@ pub(super) fn splice_unified(
     }) {
         return None;
     }
-    // Decode the host frames against the ORIGINAL body, keyed by old instruction index. A reference
-    // parameter is `Top` in frame0 (its real type is unmodeled), so EVERY reference parameter must be a
-    // spliced-away lambda (a dead slot) — otherwise a frame that keeps it live would be wrong; bail.
+    // Decode input frames against the ORIGINAL body, keyed by old instruction index. They are used
+    // only to answer whether an inlined lambda's exception handler would discard an operand already
+    // held below the lambda call. They never become output frames; final-body analysis computes those.
     let host_frames: Vec<(usize, Frame)> = match body.stackmap.as_ref() {
         Some(sm) => {
             let frame0 = param_vtypes_full(descriptor, &body.source_cp)?;
-            for (pi, v) in frame0.iter().enumerate() {
-                if *v == VType::Top && !lambdas.iter().any(|l| l.param_index == pi) {
-                    return None; // an unresolved non-lambda reference parameter — can't model its frame
-                }
-            }
             decode_stackmap(sm, frame0)?
                 .into_iter()
                 .map(|f| old_off.iter().position(|&o| o == f.offset).map(|i| (i, f)))
@@ -1852,14 +1747,11 @@ pub(super) fn splice_unified(
     let mut lambda_sites = Vec::new(); // original invoke index per occurrence
     let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
     let mut site_lambdas = Vec::new(); // input lambda index per occurrence
-    let mut site_bodies: Vec<&LambdaBody> = Vec::new(); // the body spliced at each occurrence
-    let mut site_body_indices = Vec::new(); // its index in the lambda's `bodies`
-                                            // Bytes of the lambda body dropped from its FRONT by argument cancellation. The body's own
-                                            // frames are offsets into the body as it was built, so the base they are bound against has to
-                                            // move back by exactly what no longer precedes them.
+                                       // The body spliced at each occurrence.
+    let mut site_bodies: Vec<&LambdaBody> = Vec::new();
+    // Bytes of the lambda body dropped from its FRONT by argument cancellation. Handler/debug-local
+    // offsets are measured against the original body and move by exactly this amount.
     let mut dropped_prefix = Vec::new();
-    // The same drop counted in INSTRUCTIONS, which is what maps a frame exactly.
-    let mut dropped_prefix_insns = Vec::new();
     // Bytes dropped from its END by result cancellation, which shortens where its locals leave scope.
     let mut dropped_suffix = Vec::new();
     let found_sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
@@ -1897,51 +1789,58 @@ pub(super) fn splice_unified(
         let mut at = site;
         let mut len = 1;
         let mut dropped = 0usize;
-        let mut dropped_insns = 0usize;
+        let mut dropped_instructions = 0usize;
         let mut suffix = 0usize;
-        // The frames inside a cancelled region would describe a stack that no longer exists.
-        let frame_inside = |from: usize, to: usize| {
-            host_frames
-                .iter()
-                .any(|(index, _)| *index > from && *index <= to)
-        };
-        // Only a body with no frames of its own: cancelling instructions off its front moves every
-        // later offset in it, and its frames are recorded against the layout it was built with. A
-        // branchy body would need those rebased, and the mapping is not a constant shift.
-        let body_has_frames = site_body
-            .body
-            .iter()
-            .any(|insn| !matches!(insn, Insn::Plain { .. }));
-        if !body_has_frames
-            && site > load_idx + 1
-            && !deleted.contains(&(site - 1))
-            && !frame_inside(site - 1, site)
-        {
+        let mut suffix_instructions = 0usize;
+        // A non-local transfer leaves this splice instead of reaching the adapter on the opposite
+        // side. Keep both adapters around such a body until cancellation can prove each exit's
+        // physical value shape; this is a control-flow property, not a frame-offset restriction.
+        let has_external_transfer = site_body.body.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Insn::Branch {
+                    target: BranchTarget::External(_),
+                    ..
+                } | Insn::BranchW {
+                    target: BranchTarget::External(_),
+                    ..
+                }
+            )
+        });
+        if !has_external_transfer && site > load_idx + 1 && !deleted.contains(&(site - 1)) {
             if let Some(primitive) = boxing_call_primitive(&body.source_cp, &insns[site - 1]) {
                 let unboxing = leading_unboxing(cw, &replacement, primitive);
                 if unboxing > 0 {
-                    let removed: Vec<Insn> = replacement.drain(..unboxing).collect();
-                    dropped = assemble(&removed).len();
-                    dropped_insns = removed.len();
+                    dropped = assemble(&replacement[..unboxing]).len();
+                    dropped_instructions = unboxing;
                     at = site - 1;
                     len += 1;
                 }
             }
         }
-        if let Some((primitive, spans)) = host_unboxing(&body.source_cp, &insns[site + 1..]) {
-            let boxes_result = replacement
-                .last()
-                .is_some_and(|last| is_target_boxing(cw, last, primitive));
-            if boxes_result
-                && !(site + 1..=site + spans).any(|index| deleted.contains(&index))
-                && !frame_inside(site, site + spans)
-            {
-                let removed = replacement
-                    .pop()
-                    .expect("a trailing boxing was just observed");
-                suffix = assemble(std::slice::from_ref(&removed)).len();
-                len += spans;
+        if !has_external_transfer {
+            if let Some((primitive, spans)) = host_unboxing(&body.source_cp, &insns[site + 1..]) {
+                let boxes_result = replacement
+                    .last()
+                    .is_some_and(|last| is_target_boxing(cw, last, primitive));
+                if boxes_result && !(site + 1..=site + spans).any(|index| deleted.contains(&index))
+                {
+                    suffix = assemble(&replacement[replacement.len() - 1..]).len();
+                    suffix_instructions = 1;
+                    len += spans;
+                }
             }
+        }
+        if adapter_trimming::trim(&mut replacement, dropped_instructions, suffix_instructions)
+            .is_none()
+        {
+            // An internal edge uses an adapter instruction. It remains part of the lambda's real
+            // CFG, so retain both adjacent adapter pairs and splice the body unchanged.
+            replacement = site_body.body.clone();
+            at = site;
+            len = 1;
+            dropped = 0;
+            suffix = 0;
         }
         edits.push(Edit {
             at,
@@ -1952,9 +1851,7 @@ pub(super) fn splice_unified(
         lambda_loads.push(load_idx);
         site_lambdas.push(lambda);
         site_bodies.push(site_body);
-        site_body_indices.push(body_index);
         dropped_prefix.push(dropped);
-        dropped_prefix_insns.push(dropped_insns);
         dropped_suffix.push(suffix);
     }
     if !lambdas.is_empty()
@@ -1963,23 +1860,25 @@ pub(super) fn splice_unified(
     {
         return None;
     }
-    // The host's live state (locals + operand-stack prefix) below each lambda, simulated on the ORIGINAL
-    // source-pool insns/frames (before relocation rewrites indices/pool refs). `None` per lambda whose
-    // state couldn't be modeled.
+    // An exception handler clears the operand stack. For lambdas that own one, prove that no value is
+    // held below the lambda call; otherwise inlining would change the enclosing expression's control
+    // flow. Ordinary branches need no such model: final-body dataflow carries their actual prefix.
     let prefix_frame0 = param_vtypes_full(descriptor, &body.source_cp).unwrap_or_default();
     let host_states: Vec<Option<(Vec<VType>, Vec<VType>)>> = lambda_loads
         .iter()
-        .map(|&li| host_state_at(&insns, li, &host_frames, &prefix_frame0, &body.source_cp))
+        .zip(&site_bodies)
+        .map(|(&li, site_body)| {
+            if site_body.handlers.is_empty() {
+                None
+            } else {
+                host_state_at(&insns, li, &host_frames, &prefix_frame0, &body.source_cp)
+            }
+        })
         .collect();
-    // A BRANCHY lambda body has its own frames, compiled against an empty operand base; they must be
-    // rebased onto the host state. If that state couldn't be modeled, bail (a BRANCHLESS body has no
-    // frames, so its unmodeled state is irrelevant). The caller then falls back to a real call.
     for (site, site_body) in site_bodies.iter().enumerate() {
-        let branchy = site_body
-            .body
-            .iter()
-            .any(|i| !matches!(i, Insn::Plain { .. }));
-        if branchy && host_states[site].is_none() {
+        if !site_body.handlers.is_empty()
+            && !matches!(&host_states[site], Some((_, stack)) if stack.is_empty())
+        {
             return None;
         }
     }
@@ -1997,16 +1896,11 @@ pub(super) fn splice_unified(
         LocalCompaction::parameters(descriptor, &removed_indices)?
     };
     remap_locals(&mut insns, |slot| compaction.compact(slot, base))?;
-    // Return handling: DROP a trailing return (fall through with the result on the stack), and redirect
-    // any earlier return to the join (`goto` past the body). A pure BRANCHLESS body — no branches, a
-    // single trailing return dropped — then needs NO frames/join, so the caller may splice it at ANY
-    // operand-stack height (mid-expression), exactly like the former `splice_branchless`. A branchy body
-    // (`require`'s `ifne`) or a non-trailing return needs the join frame ⇒ an empty baseline.
-    let host_has_branches = insns.iter().any(|i| !matches!(i, Insn::Plain { .. }));
-    let synthesize_empty_branch_frames = host_has_branches && body.stackmap.is_none();
+    // Return handling: drop a trailing return (fall through with the result on the stack), and redirect
+    // any earlier return to the continuation just past the body. These are ordinary CFG edges; output
+    // frames and operand prefixes are derived later from the complete method.
     let last_idx = insns.len().saturating_sub(1);
     let join_pos = insns.len();
-    let mut made_goto = false;
     for (i, insn) in insns.iter_mut().enumerate() {
         if let Insn::Plain { op, .. } = insn {
             if matches!(*op, 0xac..=0xb1) && i != last_idx {
@@ -2014,7 +1908,6 @@ pub(super) fn splice_unified(
                     op: 0xa7,
                     target: BranchTarget::Internal(join_pos),
                 };
-                made_goto = true;
             }
         }
     }
@@ -2025,7 +1918,6 @@ pub(super) fn splice_unified(
             repl: Vec::new(),
         }); // drop the trailing return → fall through
     }
-    let join_required = host_has_branches || made_goto || !host_frames.is_empty();
     edits.extend(
         type_of_edits
             .into_iter()
@@ -2061,8 +1953,8 @@ pub(super) fn splice_unified(
         }
         old2new[insns.len()] = pos;
     }
-    // Pass 2: build the merged list, remapping every host branch target through `old2new`. Replacement
-    // (lambda) instructions are branchless, so they carry no targets to remap.
+    // Pass 2: build the merged list, remapping every host branch target through `old2new` and every
+    // lambda body's own target relative to its insertion point.
     let mut merged: Vec<Insn> = Vec::new();
     {
         let mut i = 0usize;
@@ -2156,147 +2048,11 @@ pub(super) fn splice_unified(
     // `when (size)`) pads correctly; returned frame/lambda offsets are then absolute.
     let offs = insn_offsets_at(&final_insns, start_offset);
 
-    // Relocate the host frames: remap old index → new (+prologue), drop each spliced-away lambda slot
-    // (its local is now dead → `Top`), and relocate the verification types into `cw`.
-    let mut frames = Vec::with_capacity(host_frames.len() + 1);
-    for (old_idx, f) in &host_frames {
-        let new_idx = old2new[*old_idx] + p;
-        // The lambda parameter is spliced away and its slot closed, so the frame must not describe
-        // it at all — a `Top` in its place would still reserve the slot.
-        //
-        // The entry to drop is found by SLOT, not by position: a `long`/`double` local occupies one
-        // verification-type entry and two slots, so past one of them the two stop agreeing. Removing
-        // the wrong entry leaves a frame describing different locals from the code it guards, which
-        // the verifier reports as an inconsistent stack map, not as anything resembling its cause.
-        let mut locals = Vec::with_capacity(f.locals.len());
-        let mut slot = 0u16;
-        for v in &f.locals {
-            let width = if matches!(v, VType::Long | VType::Double) {
-                2
-            } else {
-                1
-            };
-            if !compaction.is_removed(slot) {
-                locals.push(relocate_vtype(v, &body.source_cp, cw)?);
-            }
-            slot += width;
-        }
-        // A substituted lambda's `aload` is deleted, so remove that exact value while it would have
-        // been live between the load and `FunctionN.invoke`. Do not discard FunctionN values by type:
-        // an inline host can legitimately carry an unsubstituted function parameter across a branch
-        // (`mapIndexed` does this), and that value remains part of the verifier stack.
-        let mut source_stack = f.stack.clone();
-        let mut removed_positions = Vec::new();
-        for (k, (&load, &site)) in lambda_loads.iter().zip(&lambda_sites).enumerate() {
-            if load < *old_idx && *old_idx <= site {
-                let prefix_len = host_states.get(k)?.as_ref()?.1.len();
-                removed_positions.push(prefix_len);
-            }
-        }
-        removed_positions.sort_unstable();
-        removed_positions.dedup();
-        for position in removed_positions.into_iter().rev() {
-            let VType::Object(class) = source_stack.get(position)? else {
-                return None;
-            };
-            if !class_name(&body.source_cp, *class)
-                .is_some_and(|name| name.starts_with("kotlin/jvm/functions/Function"))
-            {
-                return None;
-            }
-            source_stack.remove(position);
-        }
-        let stack = source_stack
-            .iter()
-            .map(|v| relocate_vtype(v, &body.source_cp, cw))
-            .collect::<Option<Vec<_>>>()?;
-        frames.push((offs[new_idx], locals, stack));
-    }
-    if synthesize_empty_branch_frames {
-        // Through the same compaction the body's own locals and every other frame take: a
-        // substituted lambda's parameter slot is closed, so a frame must not describe it.
-        let locals = compaction.drop_entries(&param_vtypes_target(descriptor, cw)?);
-        let mut targets = std::collections::BTreeSet::new();
-        for insn in &final_insns {
-            match insn {
-                Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
-                    if let BranchTarget::Internal(target) = target {
-                        targets.insert(*target);
-                    }
-                }
-                Insn::TableSwitch {
-                    default,
-                    targets: ts,
-                    ..
-                } => {
-                    targets.insert(*default);
-                    targets.extend(ts.iter().copied());
-                }
-                Insn::LookupSwitch { default, pairs } => {
-                    targets.insert(*default);
-                    targets.extend(pairs.iter().map(|(_, t)| *t));
-                }
-                Insn::Plain { .. } => {}
-            }
-        }
-        for target in targets {
-            if target < final_insns.len() {
-                let off = offs[target];
-                if !frames.iter().any(|(existing, _, _)| *existing == off) {
-                    frames.push((off, locals.clone(), Vec::new()));
-                }
-            }
-        }
-    }
-    // A DIVERGING spliced lambda body ends in a `*return`/`athrow` (a non-local return — `repeat { return
-    // … }`): the host's post-invoke continuation (e.g. a loop back-edge / exit) is then unreachable, and
-    // the verifier can't fall through the return, so it needs a stack-map frame there. Synthesize one from
-    // the host state at the invoke plus the (dropped) `FunctionN.invoke` result, so the dead continuation
-    // still verifies. (Without this the splice would emit a frameless target → `VerifyError`.)
-    for (k, lam) in site_bodies.iter().enumerate() {
-        let diverges = matches!(
-            lam.body.last(),
-            Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1 | 0xbf)
-        ) || matches!(
-            lam.body.last(),
-            Some(Insn::Branch {
-                op: 0xa7,
-                target: BranchTarget::External(_),
-            })
-        );
-        if !diverges {
-            continue;
-        }
-        let Some((locals, stack)) = host_states[k].clone() else {
-            continue;
-        };
-        let cont_old = lambda_sites[k] + 1;
-        if cont_old >= insns.len() {
-            continue; // the diverging body is the last instruction — no continuation to frame
-        }
-        let cont_off = offs[old2new[cont_old] + p];
-        if frames.iter().any(|(o, _, _)| *o == cont_off) {
-            continue; // already framed (a branch target)
-        }
-        // Through the same compaction every other frame takes; this one is built from the host's
-        // simulated state rather than from its table, which is why it needs saying again here.
-        let collapsed = compaction.drop_entries(&collapse_slots(&locals));
-        let mut rl = Vec::with_capacity(collapsed.len());
-        for v in &collapsed {
-            rl.push(relocate_vtype(v, &body.source_cp, cw)?);
-        }
-        let mut rs = Vec::with_capacity(stack.len() + 1);
-        for v in &stack {
-            rs.push(relocate_vtype(v, &body.source_cp, cw)?);
-        }
-        rs.push(VType::Object(cw.class_ref("java/lang/Object"))); // the dropped invoke result
-        frames.push((cont_off, rl, rs));
-    }
     // Relocate the exception table: each entry's `start`/`end`/`handler` are byte offsets into the
     // ORIGINAL code — map each to its instruction index (`old_off`), through `old2new` (+ prologue `p`)
     // to the spliced instruction, then to its absolute byte offset (`offs`). `catch_type` is re-interned
-    // into `cw` (0 = catch-all/`finally`). The handler's own frame is already in `frames` (it is a
-    // StackMapTable target). `end` may equal the code length — `old_off` includes that boundary.
+    // into `cw` (0 = catch-all/`finally`). `end` may equal the code length — `old_off` includes that
+    // boundary. Final-body analysis derives the handler-entry frames from this relocated table.
     let byte_to_abs = |bp: u16| -> Option<usize> {
         let old_idx = old_off.iter().position(|&o| o == bp as usize)?;
         offs.get(old2new[old_idx] + p).copied()
@@ -2327,16 +2083,11 @@ pub(super) fn splice_unified(
         if lambda.handlers.is_empty() {
             continue;
         }
-        // A handler is entered with only the exception on the stack: whatever the host held under
-        // the lambda's value (`acc + f(x)`) is gone, and the code after the region would find it
-        // missing. The reference compiler spills that prefix into locals around such a body; this
-        // splice does not yet, so it declines and the lambda stays a closure.
-        if host_states[occurrence]
-            .as_ref()
-            .is_some_and(|(_, stack)| !stack.is_empty())
-        {
-            return None;
-        }
+        // The preflight above proved that handler entry cannot discard an enclosing operand prefix.
+        debug_assert!(matches!(
+            &host_states[occurrence],
+            Some((_, stack)) if stack.is_empty()
+        ));
         let body_start = offs[p + old2new[site]];
         let prefix = dropped_prefix[occurrence];
         let suffix = dropped_suffix[occurrence];
@@ -2366,42 +2117,6 @@ pub(super) fn splice_unified(
     }
     handlers.extend(host_handlers);
     let falls_through = caller_continuation_reachable(&final_insns, &offs, &handlers)?;
-    // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
-    // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
-    // (iterator/accumulator live), the context a branchy lambda body's frames need. Empty if no frame
-    // precedes the invoke (the caller then uses the parameters).
-    // Fallback context when no host frame precedes the invoke (`takeIf` — the invoke is before the first
-    // branch): the method's parameters (`base..`, a spliced-away lambda param dropped).
-    let param_ctx: Vec<VType> = compaction
-        .drop_entries(&param_vtypes_full(descriptor, &body.source_cp).unwrap_or_default());
-    // The host's live locals + operand-stack prefix at each lambda's invoke, from the forward simulation
-    // (`host_states`): the loop-body context a branchy lambda body's frames need. The locals are collapsed
-    // to frame form, the spliced-away lambda slot dropped, and both relocated into `cw`. A `None`
-    // state only occurs for a BRANCHLESS lambda (its frames/prefix are unused) → the `param_ctx` filler.
-    let mut relocated_lambda_sites = Vec::with_capacity(host_states.len());
-    for (occurrence, state) in host_states.iter().enumerate() {
-        let (host_locals, stack_prefix) = match state {
-            Some((slots, stack)) => (
-                compaction
-                    .drop_entries(&collapse_slots(slots))
-                    .iter()
-                    .map(|v| relocate_vtype(v, &body.source_cp, cw))
-                    .collect::<Option<Vec<_>>>()?,
-                stack
-                    .iter()
-                    .map(|v| relocate_vtype(v, &body.source_cp, cw))
-                    .collect::<Option<Vec<_>>>(),
-            ),
-            None => (param_ctx.clone(), None),
-        };
-        relocated_lambda_sites.push(RelocatedLambdaSite {
-            lambda_index: site_lambdas[occurrence],
-            body_index: site_body_indices[occurrence],
-            byte_start: offs[p + old2new[lambda_sites[occurrence]]],
-            host_locals,
-            stack_prefix,
-        });
-    }
     // Relocate the dependency's debug locals: its byte offsets become instruction indices, travel
     // through the same `old2new` every branch target does, and come back as absolute offsets; its
     // slots go through the same compaction the instructions did. A local whose declaration lands
@@ -2491,7 +2206,7 @@ pub(super) fn splice_unified(
     })?;
     lambda_locals.extend(relocated_locals);
     let relocated_locals = lambda_locals;
-    let external_branches = final_insns
+    let external_branches: Vec<_> = final_insns
         .iter()
         .enumerate()
         .filter_map(|(index, instruction)| match instruction {
@@ -2502,13 +2217,17 @@ pub(super) fn splice_unified(
             _ => None,
         })
         .collect();
-    Some(BranchySplice {
+    let needs_relayout = final_insns.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Insn::TableSwitch { .. } | Insn::LookupSwitch { .. }
+        )
+    }) || !handlers.is_empty()
+        || !external_branches.is_empty();
+    Some(SpliceResult {
         bytes: assemble_at(&final_insns, start_offset),
-        frames,
-        join_stack: ret.into_iter().collect(),
-        join_required,
+        needs_relayout,
         falls_through,
-        lambda_sites: relocated_lambda_sites,
         handlers,
         external_branches,
         locals: relocated_locals,
@@ -2520,6 +2239,7 @@ pub(super) fn splice_unified(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn finds_function_invoke_sites() {
         // pool: Function1.invoke(Object)Object as an InterfaceMethodref, + an unrelated Methodref.
@@ -2565,6 +2285,89 @@ mod tests {
     }
 
     #[test]
+    fn lambda_invoke_site_rejects_a_receiver_moved_through_another_local() {
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/functions/Function1".into()),
+            C::Class(1),
+            C::Utf8("invoke".into()),
+            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()),
+            C::NameAndType(3, 4),
+            C::InterfaceMethodref(2, 5),
+        ];
+        // aload_2; astore 5; aload 5; aconst_null; invokeinterface Function1.invoke
+        // The first load is consumed by the store, so deleting it as the invoke receiver would
+        // underflow the final bytecode.
+        let insns = vec![
+            Insn::Plain {
+                op: 0x2c,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x3a,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0xb9,
+                operands: vec![0x00, 0x06, 0x02, 0x00],
+            },
+        ];
+        assert!(
+            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &std::collections::HashSet::new(),)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lambda_invoke_site_accepts_an_argument_stored_above_the_receiver() {
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/functions/Function1".into()),
+            C::Class(1),
+            C::Utf8("invoke".into()),
+            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()),
+            C::NameAndType(3, 4),
+            C::InterfaceMethodref(2, 5),
+        ];
+        // aload_2; aconst_null; astore 5; aload 5; invokeinterface Function1.invoke
+        // The store consumes only the argument value above the still-live receiver.
+        let insns = vec![
+            Insn::Plain {
+                op: 0x2c,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x3a,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![5],
+            },
+            Insn::Plain {
+                op: 0xb9,
+                operands: vec![0x00, 0x06, 0x02, 0x00],
+            },
+        ];
+        assert_eq!(
+            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &std::collections::HashSet::new()),
+            Some(vec![(0, 0, 4)]),
+        );
+    }
+
+    #[test]
     fn method_desc_effect_counts_args_and_return() {
         let cp = vec![C::Other];
         // (Object, int) -> boolean : 2 arg entries, Int return.
@@ -2580,23 +2383,6 @@ mod tests {
             Some((2, Some(VType::Long)))
         );
         assert_eq!(method_desc_effect("()V", &cp), Some((0, None)));
-    }
-
-    #[test]
-    fn collapse_slots_is_inverse_of_expand() {
-        // [Object, <long>, Top(2nd half), Int] collapses to [Object, Long, Int]; a standalone `Top`
-        // (a genuinely uninitialized slot, not a cat-2 tail) is preserved.
-        let slots = vec![
-            VType::Object(5),
-            VType::Long,
-            VType::Top,
-            VType::Int,
-            VType::Top,
-        ];
-        assert_eq!(
-            collapse_slots(&slots),
-            vec![VType::Object(5), VType::Long, VType::Int, VType::Top]
-        );
     }
 
     #[test]
@@ -2789,9 +2575,10 @@ mod tests {
     }
 
     #[test]
-    fn splice_unified_synthesizes_branch_frames_without_stackmap() {
+    fn splice_unified_does_not_relayout_relative_branches() {
         // `if (x != 0) 1 else 0` as a tiny inline body without a source `StackMapTable`. The inliner
-        // synthesizes descriptor-based empty-stack frames for branch targets.
+        // can append its relative branches at any method offset; final-body analysis computes its
+        // frames and carries any enclosing operand prefix through the branch.
         let body = MethodCode {
             max_stack: 1,
             max_locals: 1,
@@ -2817,8 +2604,7 @@ mod tests {
             &ReifiedArguments::default(),
         )
         .expect("splice");
-        assert!(out.join_required);
-        assert!(!out.frames.is_empty());
+        assert!(!out.needs_relayout);
     }
 
     #[test]
@@ -2870,11 +2656,10 @@ mod tests {
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
     }
 
-    /// An inlined lambda's locals go above every slot the host has WRITTEN by the invoke and above
-    /// every slot its own frames still DESCRIBE — a slot stored before the invoke may be read after
-    /// it, and a slot a frame mentions must keep its type whether or not anything reads it.
+    /// An inlined lambda's locals go above slots already written and slots reserved by the input
+    /// body's local layout. The latter is allocation evidence, not output verifier authority.
     #[test]
-    fn the_free_slot_clears_both_the_writes_so_far_and_the_frames() {
+    fn the_free_slot_respects_prior_writes_and_the_input_layout() {
         // istore_1; lstore_2 (slots 2 and 3); iload_1; <invoke here>; istore 9
         let insns = vec![
             Insn::Plain {
@@ -2906,7 +2691,6 @@ mod tests {
         // The parameter area is reserved whether or not anything has been stored into it.
         assert_eq!(free_local_slot_at(&insns, 0, &[], 6, ceiling), 6);
 
-        // A frame describing six slots reserves them even where nothing has been written.
         let frame = Frame {
             offset: 0,
             locals: vec![VType::Int; 6],
@@ -2914,7 +2698,6 @@ mod tests {
         };
         assert_eq!(free_local_slot_at(&insns, 1, &[(0, frame)], 1, ceiling), 6);
 
-        // A `long` in a frame occupies two slots, so the next free one is two above it.
         let wide = Frame {
             offset: 0,
             locals: vec![VType::Int, VType::Long],
