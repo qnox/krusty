@@ -31,6 +31,8 @@
 //! - `splice` — inline-function bytecode splicing (`jvm/ir_emit.rs`).
 //! - `cache` — classpath cache hit-rate summary (`jvm/classpath.rs`), emitted once at end of a run.
 //! - `bytecode` — bytecode rewrites of a finished method (`jvm/classfile/method_rewrite.rs`).
+//! - `slots` — local-slot releases that break the frame's stack discipline
+//!   (`jvm/ir_emit/frame_map.rs`).
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
@@ -48,6 +50,7 @@ pub const CATEGORIES: &[&str] = &[
     "splice",
     "cache",
     "bytecode",
+    "slots",
 ];
 
 #[cfg(feature = "trace")]

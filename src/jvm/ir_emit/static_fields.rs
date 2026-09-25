@@ -353,7 +353,7 @@ pub(super) fn emit_statics(
         e.emit_static_initializer_store(facade, s, &mut code);
     }
     code.ret_void();
-    finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.next_slot);
+    finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
     }

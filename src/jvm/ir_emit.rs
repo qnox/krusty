@@ -40,6 +40,7 @@ mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
+mod frame_map;
 mod function_debug;
 mod function_reference_invoke;
 mod implicit_reference_coercion;
@@ -76,6 +77,7 @@ use declaration_types::{field_jvm_tys, jvm_declared_ty};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
+use frame_map::{FrameKey, TempRole};
 use inline_body_emission::collect_body_var_types;
 use inline_call::{bind_inline_handlers, parse_descriptor_params, InlineStaticTarget};
 use member_schedule::{
@@ -3543,7 +3545,7 @@ fn emit_jvm_interface_companion_surface(
             emitter.emit_static_initializer_store(&fq_name, s, &mut clinit);
         }
         clinit.ret_void();
-        clinit.ensure_locals(emitter.next_slot);
+        clinit.ensure_locals(emitter.frame.max());
         clinit.link();
         emitter.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
         if !clinit_lines.is_empty() {
@@ -6160,13 +6162,13 @@ fn emit_class(
                     .chain(c.super_args.iter().copied())
                     .chain(c.init_body),
             );
-            e.next_slot = 1 + params_words;
             e.this_uninitialized = true;
-            e.slots.insert(0, (0, Ty::obj(&fq_name)));
-            let mut s = 1u16;
+            let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq_name));
+            e.slots.insert(0, (receiver, Ty::obj(&fq_name)));
             for (vi, t) in param_tys.iter().enumerate() {
-                e.slots.insert(vi as u32 + 1, (s, *t));
-                s += slot_words(*t);
+                let value = vi as u32 + 1;
+                let s = e.frame.enter(FrameKey::Value(value), *t);
+                e.slots.insert(value, (s, *t));
             }
             // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
             // the very start of `<init>` — before the super() call.
@@ -6325,7 +6327,7 @@ fn emit_class(
                 e.emit_constructor_init_body(c, init_body, &mut ctor, &mut ctor_lines);
                 init_diverges = e.discarding_diverges(init_body);
             }
-            max_slot = e.next_slot;
+            max_slot = e.frame.max();
         }
         // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
         // would be dead code after `athrow` (which the verifier rejects without a frame).
@@ -6697,7 +6699,7 @@ fn emit_class(
                 e.emit_static_initializer_store(&fq_name, s, &mut clinit);
             }
             clinit.ret_void();
-            clinit.ensure_locals(e.next_slot);
+            clinit.ensure_locals(e.frame.max());
             clinit.link();
             e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
             if byte_parity && !clinit_lines.is_empty() {
@@ -7551,11 +7553,11 @@ fn emit_func_ref_class(
         .reflection_target_param_tys
         .as_deref()
         .unwrap_or(&target_param_tys);
-    let reflection_first_arg = fr
-        .reflection_target_param_tys
-        .is_none()
-        .then_some(first_arg.max(usize::from(fr.reflection_receiver_parameter)))
-        .unwrap_or(0);
+    let reflection_first_arg = if fr.reflection_target_param_tys.is_none() {
+        first_arg.max(usize::from(fr.reflection_receiver_parameter))
+    } else {
+        0
+    };
     for pt in reflection_parameters.iter().skip(reflection_first_arg) {
         signature_desc.push_str(&ir_type_desc(pt));
     }
@@ -9365,15 +9367,18 @@ fn emit_enum_class(
     // synthetic name and ordinal. A pure SetField block retains each store's source line.
     if let Some(init_body) = c.init_body {
         let mut e = Emitter::new(ir, &mut cw, env, &fq, facade, Ty::Unit, [init_body]);
-        e.next_slot = 1 + ctor_words;
-        e.slots.insert(0, (0, Ty::obj(&fq)));
-        let mut s = 3u16;
+        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq));
+        e.slots.insert(0, (receiver, Ty::obj(&fq)));
+        // The synthetic name and ordinal come first; no semantic value names them.
+        e.frame.enter(FrameKey::Parameter(0), Ty::String);
+        e.frame.enter(FrameKey::Parameter(1), Ty::Int);
         for (i, t) in all_param_tys.iter().enumerate() {
-            e.slots.insert(i as u32 + 1, (s, *t));
-            s += slot_words(*t);
+            let value = i as u32 + 1;
+            let s = e.frame.enter(FrameKey::Value(value), *t);
+            e.slots.insert(value, (s, *t));
         }
         e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
-        max_locals = max_locals.max(e.next_slot);
+        max_locals = max_locals.max(e.frame.max());
     }
     // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
     let ctor_return_pc = ctor.bytes.len() as u16;
@@ -9744,9 +9749,9 @@ fn emit_enum_class(
             clinit_lines.push((clinit.bytes.len() as u16, c.decl_end_line));
         }
         clinit.ret_void();
-        // `max_locals` is exactly what the body allocated — entry-arg spills bump `next_slot`, and a
+        // `max_locals` is exactly what the body allocated — entry-arg spills enter the frame, and a
         // `<clinit>` that spills nothing has no locals at all (kotlinc writes 0, not a floor of 2).
-        clinit.ensure_locals(e.next_slot);
+        clinit.ensure_locals(e.frame.max());
         clinit.link();
         clinit
     };
@@ -10516,14 +10521,13 @@ fn emit_method_inner_with_holder(
             .is_some_and(|publication| publication.debug.records_locals()))
         && !ir.suspend_funs.contains(&fid);
     if instance {
-        e.slots.insert(0, (0, Ty::obj(owner)));
-        e.next_slot = 1;
+        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
+        e.slots.insert(0, (receiver, Ty::obj(owner)));
     }
     for (i, t) in param_tys.iter().enumerate() {
         let vi = i as u32 + if instance { 1 } else { 0 };
-        let slot = e.next_slot;
+        let slot = e.frame.enter(FrameKey::Value(vi), *t);
         e.slots.insert(vi, (slot, *t));
-        e.next_slot += slot_words(*t);
     }
     // A function whose coroutine machine emission owns reads its continuation from a slot this
     // emitter picks. While the frame is being discovered that is the `$completion` parameter, which
@@ -10534,21 +10538,18 @@ fn emit_method_inner_with_holder(
     // lambda, which are built from the emitter's own slot view. Reserved identically on both passes,
     // so the spill plan the first one reads is expressed in the slots the second one uses.
     let machine_slots = env.emit_time_machines.suspensions(fid).map(|suspensions| {
-        let result = e.next_slot;
-        let continuation = result + 1;
-        let suspended = continuation + 1;
-        e.next_slot = suspended + 1;
         let object = Ty::nullable(Ty::obj("kotlin/Any"));
-        e.lease_temporary(result, object);
         // Typed as the machine's OWN continuation class: every read of this slot goes on to touch
         // its `label`, `result` and spill fields, which the supertype does not declare.
-        e.lease_temporary(
-            continuation,
-            Ty::obj(&coroutine_machine::continuation_internal(
-                ir, fid, owner, &f.name,
-            )),
-        );
-        e.lease_temporary(suspended, object);
+        let continuation_ty = Ty::obj(&coroutine_machine::continuation_internal(
+            ir, fid, owner, &f.name,
+        ));
+        // Held for the whole method: nothing leaves them.
+        let [result, continuation, suspended] = [object, continuation_ty, object].map(|ty| {
+            let slot = e.frame.enter_temp(TempRole::CoroutineMachine, ty).slot();
+            e.lease_temporary(slot, ty);
+            slot
+        });
         e.continuation_slot = Some(continuation);
         e.machine_suspensions = suspensions
             .iter()
@@ -10765,7 +10766,7 @@ fn emit_method_inner_with_holder(
         &declared_annotations,
         &method_parameters,
     );
-    let mut code = CodeBuilder::new(e.next_slot);
+    let mut code = CodeBuilder::new(e.frame.size());
     // kotlinc guards each non-null reference parameter of a visible function with
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
     let param_checks = f.param_checks.clone();
@@ -10808,8 +10809,10 @@ fn emit_method_inner_with_holder(
     // then naturally starts at the post-store pc.
     let inline_marker: Option<(u16, u16)> =
         (!instance && ir.top_level_inline_functions.contains(&fid)).then(|| {
-            let slot = e.next_slot;
-            e.next_slot += 1;
+            let slot = e
+                .frame
+                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
             code.push_int(0, e.cw);
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
@@ -11049,7 +11052,7 @@ fn emit_method_inner_with_holder(
     // is emitted and before the code is linked, with no `return` in between — is what makes that a
     // property of method emission rather than of whichever machine branch happened to run.
     let _ = code.erase_markers();
-    code.ensure_locals(e.next_slot);
+    code.ensure_locals(e.frame.max());
     code.link();
     // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
     // instance method of a *final* class (nothing extends it) is also `final` and can never be
@@ -12074,37 +12077,43 @@ fn emit_default_stub(
         defaults.iter().flatten().copied(),
     );
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
-    e.slots.insert(0, (0, owner_ty));
-    let mut slot = 1u16;
+    let receiver = e.frame.enter(FrameKey::Receiver, owner_ty);
+    e.slots.insert(0, (receiver, owner_ty));
     let mut param_slots: Vec<(u16, Ty)> = Vec::new();
     for (i, t) in stub_param_tys.iter().enumerate() {
-        e.slots.insert((i + 1) as u32, (slot, *t));
+        let value = (i + 1) as u32;
+        let slot = e.frame.enter(FrameKey::Value(value), *t);
+        e.slots.insert(value, (slot, *t));
         param_slots.push((slot, *t));
-        slot += slot_words(*t);
     }
-    let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|_| {
-            let s = slot;
+    let mask_count = default_mask_count(logical_param_count);
+    let mask_slots: Vec<u16> = (0..mask_count)
+        .map(|mask| {
+            let s = e.frame.enter(
+                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
+                Ty::Int,
+            );
             // The mask ints and the trailing marker are BACKEND temporaries: no semantic value
             // names them, they only have to be typed in every frame this stub records.
             // Held for the whole stub: nothing releases a mask word before the method ends.
             let _ = e.lease_temporary(s, Ty::Int);
-            slot += 1;
             s
         })
         .collect();
-    let _ = e.lease_temporary(slot, Ty::obj("java/lang/Object"));
-    slot += 1;
-    e.next_slot = slot;
+    let marker_slot = e.frame.enter(
+        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
+        Ty::obj("java/lang/Object"),
+    );
+    let _ = e.lease_temporary(marker_slot, Ty::obj("java/lang/Object"));
 
-    let mut code = CodeBuilder::new(slot);
+    let mut code = CodeBuilder::new(e.frame.size());
     // An INTERFACE's stub is guarded too: `super<I>.m()` is a real call site, so kotlinc puts the
     // guard on whichever class carries the mask-expanding body — the interface itself under
     // `-jvm-default=enable`, the `$DefaultImpls` holder under `disable`. (The enable-mode holder copy
     // is a thin forward emitted by `emit_default_stub_forward` and correctly carries no guard: it
     // passes the marker straight through to the body that does check it.)
     if is_interface || owner_is_inheritable(ir, owner) {
-        emit_default_super_guard(e.cw, &mut code, slot - 1, &method_name);
+        emit_default_super_guard(e.cw, &mut code, marker_slot, &method_name);
     }
     // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
     // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
@@ -12143,7 +12152,7 @@ fn emit_default_stub(
         code.invokevirtual(m, aw, slot_words(ret) as i32);
     }
     emit_return(ret, &mut code);
-    code.ensure_locals(e.next_slot);
+    code.ensure_locals(e.frame.max());
     code.link();
 
     let stub_params = default_stub_params(ir, fid, owner_ty);
@@ -12434,28 +12443,32 @@ fn emit_facade_default_stub(
     );
     // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
     // with); then mask + marker (not value-indexed).
-    let mut slot = 0u16;
     let mut param_slots: Vec<(u16, Ty)> = Vec::new();
     for (i, t) in stub_param_tys.iter().enumerate() {
+        let slot = e.frame.enter(FrameKey::Value(i as u32), *t);
         e.slots.insert(i as u32, (slot, *t));
         param_slots.push((slot, *t));
-        slot += slot_words(*t);
     }
-    let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|_| {
-            let s = slot;
+    let mask_count = default_mask_count(logical_param_count);
+    let mask_slots: Vec<u16> = (0..mask_count)
+        .map(|mask| {
+            let s = e.frame.enter(
+                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
+                Ty::Int,
+            );
             // Backend temporaries — see the member stub: typed in frames, named by no value.
             // Held for the whole stub: nothing releases a mask word before the method ends.
             let _ = e.lease_temporary(s, Ty::Int);
-            slot += 1;
             s
         })
         .collect();
-    let _ = e.lease_temporary(slot, marker);
-    slot += 1;
-    e.next_slot = slot;
+    let marker_slot = e.frame.enter(
+        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
+        marker,
+    );
+    let _ = e.lease_temporary(marker_slot, marker);
 
-    let mut code = CodeBuilder::new(slot);
+    let mut code = CodeBuilder::new(e.frame.size());
     // A top-level EXTENSION's registered defaults/names carry a leading `$receiver` slot; the mask
     // bits stay LOGICAL (kotlinc's convention), so slice the receiver prefix off and offset slots.
     emit_default_param_overwrites(
@@ -12488,7 +12501,7 @@ fn emit_facade_default_stub(
         code.invokestatic(m, aw, slot_words(ret) as i32);
         emit_return(ret, &mut code);
     }
-    code.ensure_locals(e.next_slot);
+    code.ensure_locals(e.frame.max());
     code.link();
 
     let mut stub_params = stub_param_tys;
@@ -12567,7 +12580,8 @@ struct Emitter<'a> {
     value_stores: non_null_operands::ValueStores,
     /// Parameters whose emitted entry assertion establishes a semantic non-null fact.
     checked_parameters: HashSet<u32>,
-    next_slot: u16,
+    /// Every local slot this method's code uses is entered in, and left from, this frame.
+    frame: frame_map::FrameMap,
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
     continuation_slot: Option<u16>,
@@ -12679,7 +12693,7 @@ impl<'a> Emitter<'a> {
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
             checked_parameters: HashSet::new(),
-            next_slot: 0,
+            frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
             machine_next_ordinal: 0,
@@ -12772,7 +12786,7 @@ impl<'a> Emitter<'a> {
         let top_local = spliced_frame
             .as_ref()
             .map_or(base + body.max_locals, |frame| frame.top_local);
-        self.next_slot = self.next_slot.max(top_local);
+        self.frame.reserve_through(top_local);
         // Build each lambda argument's pre-relocated body, leaving its boxed result on the stack, and
         // record whether its instruction graph branches.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
@@ -12855,8 +12869,11 @@ impl<'a> Emitter<'a> {
                         };
                         slot
                     } else {
-                        let slot = self.next_slot;
-                        self.next_slot += slot_words(cap_tys[k]);
+                        // Left with the rest of the call's frame when the splice finishes.
+                        let slot = self
+                            .frame
+                            .enter_temp(TempRole::LambdaCapture, cap_tys[k])
+                            .slot();
                         capture_materializations.push((i, cap, slot, cap_tys[k]));
                         slot
                     };
@@ -12880,7 +12897,7 @@ impl<'a> Emitter<'a> {
                 let lambda_slot_base = spliced_frame
                     .as_ref()
                     .and_then(|frame| frame.lambda_bases.get(ordinal).copied())
-                    .unwrap_or(self.next_slot)
+                    .unwrap_or(self.frame.size())
                     .max(capture_ceiling);
                 // How many sites the host invokes this lambda from. One body serves them all unless
                 // the body carries a suspension: then each site is a state of this machine, and a
@@ -12893,19 +12910,19 @@ impl<'a> Emitter<'a> {
                     .and_then(|frame| frame.site_counts.get(ordinal).copied())
                     .unwrap_or(1)
                     .max(1);
-                let slot_base = self.next_slot;
+                let copies = self.frame.mark();
                 let states_before = self.machine_next_ordinal;
                 let mut bodies: Vec<crate::jvm::inline::LambdaBody> = Vec::new();
                 let mut lam_max_locals = 0u16;
                 let mut lam_stack = 0u16;
                 loop {
-                    self.next_slot = slot_base;
+                    self.frame.rewind_to(copies);
                     // Build the lambda body into a scratch builder. The host left the lambda's `arity`
                     // arguments on the stack (as `Object`, the erased `FunctionN.invoke` parameters);
                     // unbox a primitive parameter, or `checkcast` a specific reference parameter to its
                     // type, then store it (top = last). Then run the body, then box the result to `Object`
                     // (matching the replaced `invoke`'s `Object` result).
-                    let mut scratch = CodeBuilder::new(self.next_slot);
+                    let mut scratch = CodeBuilder::new(self.frame.size());
                     scratch.set_stack(arity as u16);
                     let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
                     let mut lambda_slot = lambda_slot_base;
@@ -12929,7 +12946,7 @@ impl<'a> Emitter<'a> {
                         }
                         let slot = lambda_slot;
                         lambda_slot += slot_words(jt);
-                        self.next_slot = self.next_slot.max(lambda_slot);
+                        self.frame.reserve_through(lambda_slot);
                         store(jt, slot, &mut scratch);
                         param_slots[n_cap + j] = (slot, jt);
                         // Its scope opens once the store completes, and runs to the end of the body.
@@ -12957,7 +12974,7 @@ impl<'a> Emitter<'a> {
                     // body is emitted from IR rather than relocated.
                     let depth_marker = lambda_slot;
                     lambda_slot += 1;
-                    self.next_slot = self.next_slot.max(lambda_slot);
+                    self.frame.reserve_through(lambda_slot);
                     scratch.push_int(0, self.cw);
                     store(Ty::Int, depth_marker, &mut scratch);
                     if self.record_locals {
@@ -13015,7 +13032,7 @@ impl<'a> Emitter<'a> {
             if code.max_locals < lam_max_locals {
                 code.max_locals = lam_max_locals;
             }
-            self.next_slot = self.next_slot.max(lam_max_locals);
+            self.frame.reserve_through(lam_max_locals);
             lam_max_stack = lam_max_stack.max(lam_stack);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
@@ -13514,7 +13531,6 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         leading_non_argument_operands: usize,
         code: &mut CodeBuilder,
-        allow_owner_bridge: bool,
         reified: &crate::jvm::inline::ReifiedArguments,
     ) -> bool {
         let InlineStaticTarget {
@@ -13523,6 +13539,7 @@ impl<'a> Emitter<'a> {
             descriptor,
             splice_desc,
             inline_only,
+            allow_owner_bridge,
         } = target;
         crate::trace_compiler!(
             "splice",
@@ -13563,7 +13580,7 @@ impl<'a> Emitter<'a> {
         // Splice the body's locals above BOTH the slot allocator's next free slot and the code's
         // high-water mark, so the spliced temporaries can never collide with a caller local (live or
         // reserved-but-unstored).
-        let base = self.next_slot.max(code.max_locals);
+        let base = self.frame.size().max(code.max_locals);
         // Route (b): a literal lambda argument → splice its body at the host's `FunctionN.invoke` site
         // (the unified host+lambda splice handles both the branchy `require(c){m}` and the branchless
         // `let`/`also`/… shapes).
@@ -13676,11 +13693,10 @@ impl<'a> Emitter<'a> {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
                 self.link_safe_call_chain(e, code);
-                // Scope block-locals: restore the slot *map* after the block (keeping next_slot
-                // monotonic) so a local declared here doesn't leak into a later merge-point frame
-                // (its slot must read as `Top` once out of scope — else a sibling branch that never
-                // initialized it fails verification).
-                let saved = self.slots.clone();
+                // Scope block-locals: restore the slot *map* after the block so a local declared
+                // here doesn't leak into a later merge-point frame (its slot must read as `Top` once
+                // out of scope — else a sibling branch that never initialized it fails verification).
+                let saved = self.open_slot_scope();
                 let terminal_target = self.terminal_statement_target.take();
                 self.emit_open_block(stmts, value, terminal_target, code);
                 self.close_scope_locals(code);
@@ -13734,11 +13750,8 @@ impl<'a> Emitter<'a> {
                     // declaration's, before the store (after an inlined call, both are written).
                     debug_lines::mark_expression_start(self.ir, i, code);
                     debug_lines::mark_statement(self.ir, e, code);
-                    let slot = reuse.unwrap_or_else(|| {
-                        let s = self.next_slot;
-                        self.next_slot += slot_words(jt);
-                        s
-                    });
+                    let slot =
+                        reuse.unwrap_or_else(|| self.frame.enter(FrameKey::Value(index), jt));
                     self.slots.insert(index, (slot, jt));
                     self.unassigned_values.remove(&index);
                     store(jt, slot, code);
@@ -13759,11 +13772,8 @@ impl<'a> Emitter<'a> {
                         }
                     }
                 } else {
-                    let slot = reuse.unwrap_or_else(|| {
-                        let s = self.next_slot;
-                        self.next_slot += slot_words(jt);
-                        s
-                    });
+                    let slot =
+                        reuse.unwrap_or_else(|| self.frame.enter(FrameKey::Value(index), jt));
                     self.slots.insert(index, (slot, jt));
                     self.unassigned_values.insert(index);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
@@ -13910,7 +13920,7 @@ impl<'a> Emitter<'a> {
                         // read an undeclared value. `post_test` is the checked common-IR fact that
                         // authorizes this lifetime, so no source-shape lookup is involved.
                         IrExpr::Block { stmts, value } => {
-                            let saved = self.slots.clone();
+                            let saved = self.open_slot_scope();
                             self.emit_open_block(stmts, value, Some(bottom), code);
                             Some(saved)
                         }
@@ -14806,11 +14816,9 @@ impl<'a> Emitter<'a> {
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
                 self.emit_loop_transfer(label, true, code);
-                return;
             }
             IrExpr::Continue { label } => {
                 self.emit_loop_transfer(label, false, code);
-                return;
             }
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
@@ -14974,7 +14982,7 @@ impl<'a> Emitter<'a> {
                 let c = &self.ir.classes[*class as usize];
                 let source_name = c.fields[*index as usize].name.clone();
                 let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
-                let fty = c.fields[*index as usize].ty.clone();
+                let fty = c.fields[*index as usize].ty;
                 let jt = jvm_declared_ty(&fty);
                 let owner = c.fq_name();
                 let is_lateinit = c.fields[*index as usize].is_lateinit();
@@ -15636,10 +15644,11 @@ impl<'a> Emitter<'a> {
                                 // its argument once, into the parameter's slot, before the body
                                 // runs; the body then reads that slot.
                                 self.emit_value(args[0], code);
-                                let name = self.next_slot;
-                                self.next_slot += 1;
+                                let argument =
+                                    self.frame.enter_temp(TempRole::InlineArgument, Ty::String);
+                                let name = argument.slot();
                                 store(Ty::String, name, code);
-                                let lease = self.lease_temporary(name, Ty::String);
+                                let lease = self.lease_frame_temporary(argument, Ty::String);
                                 // Kotlin's public inline template keeps the reified classifier as
                                 // the standard mode-5 marker plus a null Class placeholder. A
                                 // consuming compiler replaces that placeholder at the call site.
@@ -15882,6 +15891,7 @@ impl<'a> Emitter<'a> {
                     // as emitted. Only a metadata-normalized splice-only declaration may bypass it.
                     if inline.can_inline() && (!name.ends_with("$default") || inline.must_inline())
                     {
+                        let call_frame = self.frame.mark();
                         let spliced = if let Some(&recv) = dispatch_receiver.as_ref() {
                             let recv_desc = type_descriptor(self.value_ty(recv));
                             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -15894,8 +15904,9 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
                                 inline_only: inline.must_inline(),
+                                allow_owner_bridge: true,
                             };
-                            self.try_inline_static_as(e, target, &all, 1, code, true, &reified)
+                            self.try_inline_static_as(e, target, &all, 1, code, &reified)
                         } else {
                             let has_lambda_arg = args.iter().any(|&a| {
                                 matches!(self.ir.expr(a), IrExpr::Lambda { .. })
@@ -15908,17 +15919,12 @@ impl<'a> Emitter<'a> {
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
                                 inline_only: inline.must_inline(),
+                                allow_owner_bridge: inline.must_inline() || has_lambda_arg,
                             };
-                            self.try_inline_static_as(
-                                e,
-                                target,
-                                &args,
-                                0,
-                                code,
-                                inline.must_inline() || has_lambda_arg,
-                                &reified,
-                            )
+                            self.try_inline_static_as(e, target, &args, 0, code, &reified)
                         };
+                        // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
+                        self.frame.drop_to(call_frame);
                         if spliced {
                             return;
                         }
@@ -16493,7 +16499,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Block { stmts, value } => {
                 self.link_safe_call_chain(e, code);
                 let enclosing_statement_line = self.statement_line;
-                let saved = self.slots.clone();
+                let saved = self.open_slot_scope();
                 self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
@@ -16895,7 +16901,7 @@ impl<'a> Emitter<'a> {
                 result,
             } => {
                 let catches = catches.clone();
-                let result = result.clone();
+                let result = *result;
                 self.emit_try(e, *body, &catches, *finally, &result, code);
             }
             IrExpr::RefNew { elem, init } => {
@@ -17466,14 +17472,14 @@ impl<'a> Emitter<'a> {
                         ..
                     }
                 ) || splice_branches
-                    || dispatch_receiver.map_or(false, |r| self.emits_control_flow(r))
+                    || dispatch_receiver.is_some_and(|r| self.emits_control_flow(r))
                     || args.iter().any(|&a| self.emits_control_flow(a))
             }
             IrExpr::MethodCall { receiver, args, .. } => {
                 self.emits_control_flow(*receiver)
                     || args
                         .iter()
-                        .any(|a| a.map_or(false, |x| self.emits_control_flow(x)))
+                        .any(|a| a.is_some_and(|x| self.emits_control_flow(x)))
             }
             IrExpr::InvokeFunction { func, args, .. } => {
                 self.emits_control_flow(*func)
@@ -17529,11 +17535,11 @@ impl<'a> Emitter<'a> {
             IrExpr::Throw { operand } => self.emits_control_flow(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.emits_control_flow(a)),
             IrExpr::NewArray { size, .. } => self.emits_control_flow(*size),
-            IrExpr::Return(v) => v.map_or(false, |x| self.emits_control_flow(x)),
-            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.emits_control_flow(i)),
+            IrExpr::Return(v) => v.is_some_and(|x| self.emits_control_flow(x)),
+            IrExpr::Variable { init, .. } => init.is_some_and(|i| self.emits_control_flow(i)),
             IrExpr::Block { stmts, value } => {
                 stmts.iter().any(|&s| self.emits_control_flow(s))
-                    || value.map_or(false, |v| self.emits_control_flow(v))
+                    || value.is_some_and(|v| self.emits_control_flow(v))
             }
             _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — straight-line
         }
@@ -17768,10 +17774,10 @@ impl<'a> Emitter<'a> {
                 "spill inline operand expression={o} node={:?} type={t:?}",
                 self.ir.expr(o)
             );
-            let slot = self.next_slot;
-            self.next_slot += slot_words(t);
+            let temp = self.frame.enter_temp(TempRole::OperandSpill, t);
+            let slot = temp.slot();
             store(t, slot, code);
-            let lease = self.lease_temporary(slot, t);
+            let lease = self.lease_frame_temporary(temp, t);
             temps.push((slot, t, lease));
         }
         temps
@@ -17861,14 +17867,13 @@ impl<'a> Emitter<'a> {
             }
             And | Or => {
                 // Evaluate lhs, hold it in a temp while a branchy rhs is emitted, then combine. The
-                // temp is dead afterwards, so release it
-                // from the slot map so it doesn't leak into later merge frames (next_slot stays
-                // monotonic — no reuse). Without this, a `false`/`else` path that never assigned the
-                // temp reaches a merge whose frame claims it's defined → VerifyError.
+                // temp is dead afterwards, so release it so it doesn't leak into later merge frames.
+                // Without this, a `false`/`else` path that never assigned the temp reaches a merge
+                // whose frame claims it's defined → VerifyError.
                 self.emit_value(lhs, code);
-                let tmp = self.next_slot;
-                self.next_slot += 1;
-                let lease = self.lease_temporary(tmp, Ty::Boolean);
+                let temp = self.frame.enter_temp(TempRole::BooleanOperand, Ty::Boolean);
+                let tmp = temp.slot();
+                let lease = self.lease_frame_temporary(temp, Ty::Boolean);
                 code.istore(tmp);
                 self.emit_value(rhs, code);
                 code.iload(tmp);
@@ -18485,21 +18490,6 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
-    }
-
-    /// Take a slot the backend owns for as long as it is live; see `backend_temporaries`.
-    fn lease_temporary(&mut self, slot: u16, ty: Ty) -> backend_temporaries::TemporaryLease {
-        debug_assert!(
-            !self.slots.values().any(|(held, _)| *held == slot),
-            "backend temporary at slot {slot} aliases a semantic local"
-        );
-        // A temporary released before the plan is read is invisible to it otherwise, and a spill
-        // set cannot skip a slot the frames still describe.
-        self.temporaries.lease(slot, ty)
-    }
-
-    fn release_temporary(&mut self, lease: backend_temporaries::TemporaryLease) {
-        self.temporaries.release(lease);
     }
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.

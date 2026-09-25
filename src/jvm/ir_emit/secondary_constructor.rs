@@ -1,5 +1,6 @@
 //! JVM emission of secondary constructors.
 
+use super::frame_map::FrameKey;
 use super::{
     constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
@@ -103,24 +104,23 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     .copied()
                     .chain(sc.body),
             );
-            e.next_slot = 1 + sc_words;
             e.this_uninitialized = true;
-            e.slots.insert(0, (0, Ty::obj(fq_name)));
+            let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(fq_name));
+            e.slots.insert(0, (receiver, Ty::obj(fq_name)));
             // The enum name/ordinal are backend-owned physical parameters, not common-IR value
             // identities. Keep them live in every stack-map frame recorded while delegation
             // arguments are evaluated; otherwise a branchy argument turns their slots into `Top`
             // and the later forwarding loads fail verification.
-            let mut owner_slot = 1u16;
-            for ty in &owner_prefix_tys {
+            for (index, ty) in owner_prefix_tys.iter().enumerate() {
+                let owner_slot = e.frame.enter(FrameKey::Parameter(index as u16), *ty);
                 let _ = e.lease_temporary(owner_slot, *ty);
-                owner_slot += slot_words(*ty);
             }
             // Value ids count the DECLARED parameters only, so the owner's prefix is skipped in
             // the numbering while still consuming its slots.
-            let mut s = 1u16 + owner_prefix_words;
             for (vi, t) in sc_prefix_tys.iter().chain(&sc_source_tys).enumerate() {
-                e.slots.insert(vi as u32 + 1, (s, *t));
-                s += slot_words(*t);
+                let value = vi as u32 + 1;
+                let s = e.frame.enter(FrameKey::Value(value), *t);
+                e.slots.insert(value, (s, *t));
             }
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
@@ -311,7 +311,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 e.emit(body, &mut sctor);
                 sec_diverges = e.diverges(body);
             }
-            sec_max = e.next_slot;
+            sec_max = e.frame.max();
         }
         if !sec_diverges {
             sctor.ret_void();

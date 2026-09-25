@@ -6,6 +6,7 @@
 //! physical JVM shapes with no Kotlin declaration of their own, so they live here rather than in
 //! the emitter facade.
 
+use super::frame_map::FrameKey;
 use super::{
     default_mask_bit, default_mask_count, load, method_descriptor, slot_words, store, ClassWriter,
     CodeBuilder, EmitEnv, Emitter,
@@ -91,36 +92,45 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     e.this_uninitialized = true;
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
-    e.slots.insert(0, (0, Ty::obj(owner)));
-    let mut slot = 1u16;
+    let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
+    e.slots.insert(0, (receiver, Ty::obj(owner)));
     let mut prefix_slots = Vec::with_capacity(physical_prefix.len());
     for (index, &ty) in physical_prefix.iter().enumerate() {
+        let key = if index < logical_prefix_count {
+            FrameKey::Value(index as u32 + 1)
+        } else {
+            FrameKey::Parameter(index as u16)
+        };
+        let slot = e.frame.enter(key, ty);
         prefix_slots.push((slot, ty));
         if index < logical_prefix_count {
             e.slots.insert(index as u32 + 1, (slot, ty));
         }
-        slot += slot_words(ty);
     }
     let mut param_slots: Vec<(u16, Ty)> = Vec::new();
     for (i, t) in real_params.iter().enumerate() {
-        e.slots
-            .insert((logical_prefix_count + i + 1) as u32, (slot, *t));
+        let value = (logical_prefix_count + i + 1) as u32;
+        let slot = e.frame.enter(FrameKey::Value(value), *t);
+        e.slots.insert(value, (slot, *t));
         param_slots.push((slot, *t));
-        slot += slot_words(*t);
     }
-    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
-        .map(|_| {
-            let s = slot;
+    let trailing = physical_prefix.len() + real_params.len();
+    let mask_count = default_mask_count(real_params.len());
+    let mask_slots: Vec<u16> = (0..mask_count)
+        .map(|mask| {
+            let s = e
+                .frame
+                .enter(FrameKey::Parameter((trailing + mask) as u16), Ty::Int);
             // Backend temporaries — see the member stub: typed in frames, named by no value.
             // Held for the whole stub: nothing releases a mask word before the method ends.
             let _ = e.lease_temporary(s, Ty::Int);
-            slot += 1;
             s
         })
         .collect();
-    let _ = e.lease_temporary(slot, marker);
-    slot += 1;
-    e.next_slot = slot;
+    let marker_slot = e
+        .frame
+        .enter(FrameKey::Parameter((trailing + mask_count) as u16), marker);
+    let _ = e.lease_temporary(marker_slot, marker);
 
     // kotlinc's `$default` ctor LineNumberTable: the CLASS declaration line at entry, each masked
     // fill's value at its PARAMETER's declaration line, the delegation back at the class line, and
@@ -133,7 +143,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .map(|(entry, _, _)| entry)
         .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
     let mut lines: Vec<(u16, u32)> = vec![(0, class_line)];
-    let mut code = CodeBuilder::new(slot);
+    let mut code = CodeBuilder::new(e.frame.size());
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
             let (pslot, pty) = param_slots[i];
@@ -205,7 +215,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         lines.push((code.bytes.len() as u16, close));
     }
     code.ret_void();
-    code.ensure_locals(e.next_slot);
+    code.ensure_locals(e.frame.max());
     code.link();
 
     let mut stub_params = physical_params;

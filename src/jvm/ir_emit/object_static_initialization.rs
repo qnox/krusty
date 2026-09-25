@@ -98,9 +98,12 @@ pub(super) fn emit(
         if init_body_reads_this(ir, init_body) {
             let iref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
             clinit.getstatic(iref, 1);
-            store(Ty::obj(fq_name), 0, &mut clinit);
-            emitter.slots.insert(0, (0, Ty::obj(fq_name)));
-            emitter.next_slot = 1;
+            // The instance local opens a frame of its own: the stores before the source body
+            // are done with every slot they took.
+            emitter.frame = super::frame_map::FrameMap::default();
+            let receiver = emitter.frame.enter(FrameKey::Receiver, Ty::obj(fq_name));
+            store(Ty::obj(fq_name), receiver, &mut clinit);
+            emitter.slots.insert(0, (receiver, Ty::obj(fq_name)));
         }
         let statements: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
             crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
@@ -147,7 +150,7 @@ pub(super) fn emit(
         emitter.emit_static_initializer_store(fq_name, property, &mut clinit);
     }
 
-    let clinit_max = emitter.next_slot;
+    let clinit_max = emitter.frame.max();
     let clinit_return = clinit.bytes.len() as u16;
     clinit.ret_void();
     clinit.ensure_locals(clinit_max);

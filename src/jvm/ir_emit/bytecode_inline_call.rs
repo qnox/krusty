@@ -50,7 +50,7 @@ impl Emitter<'_> {
         if physical.len() != args.len() {
             return None;
         }
-        let base = self.next_slot.max(code.max_locals);
+        let base = self.frame.size().max(code.max_locals);
         let frame = crate::jvm::inline::spliced_frame(body, target.splice_desc, &[], base)?;
         let probe = crate::jvm::inline::splice_unified(
             body,
@@ -105,6 +105,7 @@ impl Emitter<'_> {
             result_words,
             rewritten.falls_through,
         );
+        self.frame.reserve_through(frame.top_local);
         self.record_spliced_lines(
             &rewritten.lines,
             body,
@@ -195,7 +196,7 @@ impl Emitter<'_> {
             .live()
             .into_iter()
             .map(|(slot, ty)| slot + slot_words(ty))
-            .fold(self.next_slot, u16::max);
+            .fold(self.frame.size(), u16::max);
         let inlined = match inliner::inline(&callee, &parameters, target.inline_only, base, reified)
         {
             Ok(inlined) => inlined,
@@ -207,7 +208,8 @@ impl Emitter<'_> {
         let temporaries = parameters.temporaries();
 
         // Arguments, in order: each is stored right after it is evaluated.
-        let saved_next_slot = self.next_slot;
+        let argument_frame = self.frame.mark();
+        self.frame.reserve_through(base);
         let origins = self.default_operand_origins(call_expression, args, false);
         let mut inside_run = false;
         let mut leases = Vec::new();
@@ -221,7 +223,8 @@ impl Emitter<'_> {
                 in_place.insert(slot, index);
                 continue;
             }
-            self.next_slot = slot;
+            self.frame.reserve_through(slot);
+            let operand_frame = self.frame.mark();
             self.mark_synthesized_operand_run(
                 Some((call_expression, &origins)),
                 index,
@@ -236,9 +239,13 @@ impl Emitter<'_> {
                 index,
                 code,
             );
+            self.frame.rewind_to(operand_frame);
+            let entered = self
+                .frame
+                .enter_temp(TempRole::InlineArgument, physical[index]);
+            debug_assert_eq!(entered.slot(), slot);
             store(physical[index], slot, code);
-            leases.push(self.lease_temporary(slot, physical[index]));
-            self.next_slot = slot + slot_words(physical[index]);
+            leases.push(self.lease_frame_temporary(entered, physical[index]));
         }
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
@@ -270,10 +277,10 @@ impl Emitter<'_> {
             _ => code.forget_line(),
         }
 
-        self.next_slot = saved_next_slot;
         for lease in leases {
             self.release_temporary(lease);
         }
+        self.frame.rewind_to(argument_frame);
         Some(())
     }
 
@@ -571,8 +578,8 @@ impl Emitter<'_> {
         // kotlinc evaluated the argument before the body, with the earlier arguments' temporaries
         // already entered into its frame, and moved the code here afterwards.
         let mut inside_run = false;
-        let saved = self.next_slot;
-        self.next_slot = temporary;
+        let saved = self.frame.mark();
+        self.frame.reserve_through(temporary);
         self.mark_synthesized_operand_run(
             Some((placement.call_expression, placement.origins)),
             index,
@@ -587,7 +594,7 @@ impl Emitter<'_> {
             index,
             code,
         );
-        self.next_slot = saved;
+        self.frame.rewind_to(saved);
     }
 }
 

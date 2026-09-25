@@ -6,6 +6,7 @@
 
 use super::bridge_emission::emit_bridges;
 use super::constructor_defaults::emit_ctor_default_stub_with_prefix;
+use super::frame_map::FrameKey;
 use super::*;
 
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
@@ -57,10 +58,13 @@ pub(super) fn emit_enum_entry_subclass(
     let mut ctor_max = 1 + ctor_words;
     if let Some(init_body) = c.init_body {
         let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
-        e.next_slot = 1 + ctor_words;
-        e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
+        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq_name));
+        e.slots.insert(0, (receiver, Ty::obj(&fq_name))); // `this`
+        for (index, &ty) in ctor_params.iter().enumerate() {
+            e.frame.enter(FrameKey::Parameter(index as u16), ty);
+        }
         e.emit(init_body, &mut ctor);
-        ctor_max = e.next_slot;
+        ctor_max = e.frame.max();
     }
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
