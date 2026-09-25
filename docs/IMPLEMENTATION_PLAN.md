@@ -4485,8 +4485,33 @@ shadow with no output change.
 - ☐ 4c. Lowering's scope facts where an IR block is a kotlinc transparent scope: not needed so
   far, the corpus shows no such block (the `try` difference above was the result temporary's
   placement).
-- ☐ 4e–4h. Backend temporaries on the stack (4e), inline-call frames (4f), lowering's temporaries
-  matching kotlinc's (4g) and coroutine locals at `max_locals` (4h).
+- ✅ 4e. Backend temporaries are on the frame's stack: leaving the newest entry, keyed or not, hands
+  its slot back, as kotlinc's `leaveTemp` lowers `currentSize`. The `try`'s result temporary, the
+  catch parameters, the catch-all's parked throwable (entered at the handler) and a `return`'s
+  spill (entered at the `return`, per `generateFinallyBlocksIfNeeded`) follow `ExpressionCodegen`.
+  The reservation at the `try` and its reuse pool (`pending_return_spills`, `free_exception_slots`,
+  `FrameMap::keep_for_method`) and the vararg `give_back` are deleted. A statement `try` whose
+  branches disagree gets the result temporary kotlinc's join type gives it. The krusty-only
+  temporaries (`&&` operand, operand spills, vararg array) release their slots when loaded,
+  newest first. In the 2.4.20 box corpus 229 of 25,236 classes change, no box outcome moves, and
+  no class becomes or stops being byte-identical (files 269). Of the 98 methods whose
+  local-variable slots change, 31 now match kotlinc (`inlinedTryCatchFinally`, `tryFinally`,
+  `kt3549`, the `nestedFinallyAndNonFinallyTry` family, …), 18 more are closer
+  (`tryCatchReifiedType`), 34 are as close as before and 5 are further off. 4 matched and no
+  longer do, and 6 are lambdas kotlinc inlines. Each of the 4 is a krusty-only temporary that
+  kotlinc has no local for and that now sits below the `try` in stack order:
+  - `catch` and `tryInsideCatch` spill the `"O" +` operand before the `try`; kotlinc saves its
+    stack at `maxLocals` after codegen.
+  - `finally2` stores `appendLine`'s receiver in the body; kotlinc remaps it (4f).
+  - `someStuff` `test4` loads and pops a discarded valued `try`'s result; kotlinc's dead stores go,
+    and its gap-closing drops the temporary.
+
+  In 4d these matched only because the reserved parked slot lined up. `break.kt` `qux` still has
+  `j` one slot high, now from the same `appendLine` receiver store (4f).
+- ☐ 4f–4h. Inline-call frames (4f), lowering's temporaries matching kotlinc's (4g) and coroutine
+  locals at `max_locals` (4h). Also open: krusty's checker types a statement `try` whose branches
+  disagree as `Unit` (kotlinc: their join), a discarded valued `try` still stores and reloads its
+  result, and a `try` operand's stack is spilled below the `try` rather than at `maxLocals`.
 - ☐ 5–6. kotlinc's transformer order.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
