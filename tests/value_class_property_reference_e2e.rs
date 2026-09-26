@@ -136,8 +136,8 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
         reference_get(&dump, "ValueClassUnderlyingRefDumpKt$box$3"),
         vec![
             "aload_0".to_string(),
-            "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
-                .to_string(),
+            // kotlinc names the inherited field through the carrier itself.
+            "getfield Field receiver:Ljava/lang/Object;".to_string(),
             "checkcast class Z".to_string(),
             "invokevirtual Method Z.getX:()I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
@@ -542,8 +542,8 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         reference_get(&dump, "Z$bound$1"),
         vec![
             "aload_0".to_string(),
-            "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
-                .to_string(),
+            // kotlinc names the inherited field through the carrier itself.
+            "getfield Field receiver:Ljava/lang/Object;".to_string(),
             "checkcast class Z".to_string(),
             "invokevirtual Method Z.\"unbox-impl\":()I".to_string(),
             "invokestatic Method Z.\"access$getXx-impl\":(I)I".to_string(),
@@ -570,8 +570,8 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         reference_get(&dump, "Ord$bound$1"),
         vec![
             "aload_0".to_string(),
-            "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
-                .to_string(),
+            // kotlinc names the inherited field through the carrier itself.
+            "getfield Field receiver:Ljava/lang/Object;".to_string(),
             "checkcast class Ord".to_string(),
             "invokestatic Method Ord.access$getP$p:(LOrd;)I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),

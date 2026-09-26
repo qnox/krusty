@@ -3999,6 +3999,10 @@ impl JvmLibraries {
                 // scalar member surface comes from builtins; do not manufacture a frontend
                 // property from the carrier's private representation.
                 .filter(|_| Ty::obj_name(cn).scalar_value_repr().is_none())
+                // Likewise a Kotlin builtin realized by a platform class (`kotlin/Enum` by
+                // `java/lang/Enum`) declares only its Kotlin members: `Enum.name` is the builtin
+                // property realized by `name()`, never the platform class's private `name` field.
+                .filter(|_| ci.this_class == cn)
                 .filter(|field| !field.is_private() || overloads.is_empty())
             {
                 let erased_ty = declared_desc_to_ty(&field.descriptor);

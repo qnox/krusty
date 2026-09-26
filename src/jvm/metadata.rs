@@ -3328,6 +3328,7 @@ fn decode_properties(
         let mut legacy_flags = None;
         let mut modern_flags = None;
         let mut sig = (None, None);
+        let mut sig_recorded = false;
         let mut receiver_class = None;
         let mut receiver_body = None;
         let mut receiver_nullable = false;
@@ -3425,6 +3426,7 @@ fn decode_properties(
                         break;
                     };
                     sig = parse_jvm_property_signature(ext);
+                    sig_recorded = true;
                 }
                 (_, w) => {
                     if p.skip(w).is_none() {
@@ -3550,10 +3552,17 @@ fn decode_properties(
             params.push(*ty);
             method_descriptor(&params, Ty::Unit)
         });
+        // kotlinc records a `JvmPropertySignature` accessor entry exactly when that accessor method
+        // exists, so a recorded signature without one (a `@JvmField` or `const` property, a private
+        // property with default accessors) names no method. Deriving the default spelling there
+        // would bind the property to an unrelated same-spelled member (`fun getStamp()`).
         let materialize_accessor =
             |signature: Option<ParsedJvmSignature>,
              default_name: String,
              default_desc: Option<String>| {
+                if sig_recorded && signature.is_none() {
+                    return None;
+                }
                 let name = signature
                     .and_then(|signature| signature.name_id)
                     .and_then(|id| resolve_string(records, d2, id as usize))

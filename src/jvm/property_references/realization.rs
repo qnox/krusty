@@ -73,6 +73,15 @@ pub(crate) struct PropertyReferenceRealization {
     /// The value-class pass updates this in step whenever it realizes the accessor over a carrier,
     /// so a reader always sees the return of the accessor the reference currently names.
     pub physical_getter_ret: Option<Ty>,
+    /// The PHYSICAL value type the selected setter declares, recorded and kept in step exactly as
+    /// [`Self::physical_getter_ret`] is.
+    pub physical_setter_value: Option<Ty>,
+    /// The storage the reference reads and writes directly, when the selected declaration is
+    /// realized as a field (`@JvmField`, a dependency's field-backed property) rather than through
+    /// accessors. Decided where the declaration was selected, from its own realization; nothing
+    /// later looks a field up by owner and spelling.
+    pub getter_field: Option<PropertyFieldAccess>,
+    pub setter_field: Option<PropertyFieldAccess>,
     /// The selected property IS the underlying storage of the value class that declares it.
     ///
     /// Reading it is the unbox itself, so its accessor stays an ordinary instance getter on the
@@ -91,6 +100,16 @@ pub(crate) struct PropertyReferenceRealization {
     /// The reference receiver is this value class's boxed object while the selected static
     /// accessor consumes its erased carrier.
     pub unboxed_receiver_value_class: Option<TypeName>,
+}
+
+/// A field a property reference accesses directly.
+#[derive(Clone, Debug)]
+pub(crate) struct PropertyFieldAccess {
+    pub owner: TypeName,
+    pub name: String,
+    /// The field's physical type.
+    pub ty: Ty,
+    pub is_static: bool,
 }
 
 /// Every property reference this file synthesized, by the reference class's internal name.
