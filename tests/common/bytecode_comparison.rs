@@ -146,6 +146,17 @@ pub struct ClassSets {
 }
 
 impl ClassSets {
+    /// The method declarations of `class` that kotlinc and krusty each write, in class-file order,
+    /// as `javap -p` prints them; `None` when either compiler wrote no such class.
+    pub fn method_declarations(&self, class: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let declarations =
+            |bytes: &Vec<u8>| declared_methods(&disassemble_with(class, bytes, &["-p"]));
+        Some((
+            declarations(self.reference.get(class)?),
+            declarations(self.krusty.get(class)?),
+        ))
+    }
+
     /// Each class that differs between the two, or that only one of them wrote, with both
     /// disassemblies of a class they both wrote.
     pub fn differences(&self) -> Vec<String> {
@@ -227,7 +238,21 @@ fn collect_classes(
     }
 }
 
+/// `javap -p` lines that declare a method or constructor.
+fn declared_methods(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains('(') && line.ends_with(';'))
+        .map(str::to_string)
+        .collect()
+}
+
 fn disassemble(name: &str, bytes: &[u8]) -> String {
+    disassemble_with(name, bytes, &["-p", "-c", "-v"])
+}
+
+fn disassemble_with(name: &str, bytes: &[u8], flags: &[&str]) -> String {
     let Some(dir) = super::common_core::scratch_dir() else {
         return "(no scratch directory)".to_string();
     };
@@ -236,8 +261,10 @@ fn disassemble(name: &str, bytes: &[u8]) -> String {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&path, bytes);
-    let text = super::common_core::javap(&["-p", "-c", "-v", "-cp", &dir.to_string_lossy(), name])
-        .unwrap_or_default();
+    let dir_arg = dir.to_string_lossy().into_owned();
+    let mut args = flags.to_vec();
+    args.extend(["-cp", &dir_arg, name]);
+    let text = super::common_core::javap(&args).unwrap_or_default();
     let _ = std::fs::remove_dir_all(dir);
     text
 }

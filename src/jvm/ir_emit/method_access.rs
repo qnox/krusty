@@ -47,7 +47,11 @@ pub(super) fn declared_method_access(
         // `open_methods`. `box-impl`/`equals-impl0` stay `public static final` (not opened). Visibility
         // derives from the member's own (a private declaration — or a lambda impl, which kotlinc always
         // emits private — is `ACC_PRIVATE`).
-        let vis = if private {
+        // A class member's `$suspendImpl` is package-private, as kotlinc writes it.
+        let class_suspend_impl = !owner_is_iface && ir.jvm_suspend_impl_bodies.contains_key(&fid);
+        let vis = if class_suspend_impl {
+            0
+        } else if private {
             // Under `-Xlambdas=class` the body is called from the lambda's OWN class, so a private
             // impl would be an `IllegalAccessError` at the delegating `invoke`. kotlinc has no such
             // method to place — it moves the body into `invoke` — so package-private here is the
@@ -65,7 +69,7 @@ pub(super) fn declared_method_access(
         } else {
             ACC_PUBLIC
         };
-        if owner_is_iface || ir.open_methods.contains(&fid) {
+        if owner_is_iface || class_suspend_impl || ir.open_methods.contains(&fid) {
             vis | ACC_STATIC
         } else {
             vis | ACC_STATIC | ACC_FINAL

@@ -134,6 +134,19 @@ pub(super) fn append_continuation(
         }
         IrExpr::Call {
             args,
+            callee: Callee::Special { descriptor, .. },
+            ..
+        } => {
+            if planned_index.is_some() {
+                return false;
+            }
+            *descriptor = cps_descriptor(descriptor);
+            let index = args.len();
+            args.push(continuation);
+            index
+        }
+        IrExpr::Call {
+            args,
             callee: Callee::LocalDefault(_) | Callee::ClassStaticDefault { .. },
             ..
         } => {

@@ -1,28 +1,31 @@
-//! A suspend interface member's body moves to `<name>$suspendImpl`.
+//! An overridable suspend member's body moves to `<name>$suspendImpl`.
 //!
-//! kotlinc compiles a `suspend fun` with a DEFAULT BODY in an interface into two methods: the
-//! interface's default method, which is a trampoline, and a public static `<name>$suspendImpl`
-//! taking the receiver as its first parameter and carrying the body.
+//! kotlinc (`AddContinuationLowering.createStaticSuspendImpl`) compiles a `suspend fun` with a body
+//! that a subclass may override into two methods: the member itself, which is a trampoline, and a
+//! static `<name>$suspendImpl` taking the receiver as its first parameter and carrying the body.
 //!
 //! ```text
-//! public default Object onEvent(int, Continuation)          aload_0; iload_1; aload_2;
-//!                                                           invokestatic onEvent$suspendImpl; areturn
-//! public static  Object onEvent$suspendImpl(Listener, int, Continuation)   ← the state machine
+//! public Object work(String, Continuation)                  aload_0; aload_1; aload_2;
+//!                                                           invokestatic work$suspendImpl; areturn
+//! static Object work$suspendImpl(Base, String, Continuation) ← the state machine
 //! ```
 //!
-//! The split exists because an overriding class runs the super body by CALLING that static: an
-//! `invokespecial` on the default method cannot express it once the body is a state machine whose
-//! continuation is bound to a particular method.
+//! The split exists so that re-entering the machine from its continuation does not dispatch
+//! virtually to an override, and so that an override runs the super body by calling the static.
+//! Every member of an interface with a body is split (its static is `public`); a class member is
+//! split when it is overridable (`open`, `abstract` or a non-`final` `override` in a class that can
+//! be subclassed), and its static is package-private.
 //!
 //! This runs as an IR rewrite rather than at emission so the ordinary method emitter produces both
 //! methods, with the debug tables, generic signature and nullability annotations it already derives.
 //! Writing the trampoline at emission would mean hand-copying all of that.
 //!
-//! It runs AFTER `lower_suspend`: the body it moves is the finished state machine.
+//! It runs AFTER `lower_suspend`: the body it moves is the finished state machine, or the body
+//! the coroutine transformer takes once the class is written.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Callee, IrExpr, IrFile, IrFunction};
+use crate::ir::{Callee, IrClass, IrExpr, IrFile, IrFunction};
 use crate::types::Ty;
 
 fn move_fact<T>(facts: &mut HashMap<u32, T>, implementation: u32, declaration: u32) {
@@ -107,7 +110,54 @@ fn split_signature_facts(ir: &mut IrFile, implementation: u32, declaration: u32)
     copy_fact(&mut ir.suspend_declared_sigs, implementation, declaration);
 }
 
-/// Rewrite every suspend interface member that has a body.
+/// Whether member `fid` of `class` keeps only a trampoline, its body moving to `$suspendImpl`.
+fn splits(ir: &IrFile, class: &IrClass, fid: u32) -> bool {
+    let function = &ir.functions[fid as usize];
+    let splits_in_class = || {
+        // kotlinc's `isOverridable`: not private, not final, in a class that is not final.
+        ir.open_methods.contains(&fid)
+            && (class.is_open || class.is_abstract || class.is_sealed)
+            && !class.is_value
+    };
+    !function.is_static
+        && function.body.is_some()
+        && ir.suspend_funs.contains(&fid)
+        && !ir.private_methods.contains(&fid)
+        && (class.is_interface || splits_in_class())
+}
+
+/// Whether suspend member `fid` keeps only a trampoline and its body moves to the static
+/// `<name>$suspendImpl`: its continuation re-enters that static, never the member.
+pub(crate) fn moves_to_suspend_impl(ir: &IrFile, fid: u32) -> bool {
+    ir.functions[fid as usize]
+        .dispatch_receiver
+        .and_then(|owner| ir.classes.iter().find(|class| class.fq_name_id() == owner))
+        .is_some_and(|class| splits(ir, class, fid))
+}
+
+/// Whose `$default` stub follows method `fid` in its class: its own, or, after the `$suspendImpl` a
+/// member's body moved to, that member's, since kotlinc adds the static right after the member and
+/// ahead of the stub. `None` for such a member itself.
+pub(crate) fn default_stub_after(ir: &IrFile, fid: u32) -> Option<u32> {
+    match ir.jvm_suspend_impl_bodies.get(&fid) {
+        Some(&(_, declaration)) => Some(declaration),
+        None if ir
+            .jvm_suspend_impl_bodies
+            .values()
+            .any(|&(_, declaration)| declaration == fid) =>
+        {
+            None
+        }
+        None => Some(fid),
+    }
+}
+
+/// The JVM name of the static a member's body moves to.
+pub(crate) fn suspend_impl_name(member: &str) -> String {
+    format!("{member}$suspendImpl")
+}
+
+/// Rewrite every suspend member whose body moves to `$suspendImpl`.
 ///
 /// The ORIGINAL function keeps its id and its body and becomes the static: every fact the suspend
 /// pass recorded against that id — its continuation class, its spill metadata — stays attached to
@@ -115,23 +165,16 @@ fn split_signature_facts(ir: &mut IrFile, implementation: u32, declaration: u32)
 ///
 /// Prepending the receiver parameter does not move a value index: an instance method's `this` is
 /// already index 0 and its parameters follow, which is exactly the static's layout.
-pub(crate) fn lower_suspend_interface_impls(ir: &mut IrFile) {
+pub(crate) fn lower_suspend_impls(ir: &mut IrFile) {
     for class_index in 0..ir.classes.len() {
-        if !ir.classes[class_index].is_interface {
-            continue;
-        }
         let owner = ir.classes[class_index].fq_name_id();
         let members = ir.classes[class_index].methods.clone();
         let mut rewritten: Vec<(usize, u32, u32)> = Vec::new();
         for (position, &fid) in members.iter().enumerate() {
-            let function = &ir.functions[fid as usize];
-            if function.is_static
-                || function.body.is_none()
-                || !ir.suspend_funs.contains(&fid)
-                || ir.private_methods.contains(&fid)
-            {
+            if !splits(ir, &ir.classes[class_index], fid) {
                 continue;
             }
+            let function = &ir.functions[fid as usize];
             let trampoline_name = function.name.clone();
             let params = function.params.clone();
             let ret = function.ret;
@@ -203,21 +246,21 @@ pub(crate) fn lower_suspend_interface_impls(ir: &mut IrFile) {
             }
             assert!(
                 source_declaration_retargeted,
-                "a suspend interface declaration retains its checked callable identity"
+                "a suspend member declaration retains its checked callable identity"
             );
-            ir.jvm_suspend_interface_bodies
-                .insert(fid, (owner, trampoline));
+            ir.jvm_suspend_impl_bodies.insert(fid, (owner, trampoline));
             // The original becomes the static, named `<name>$suspendImpl`, with the receiver as
             // its first parameter.
             {
                 let function = &mut ir.functions[fid as usize];
-                function.name = format!("{}$suspendImpl", function.name);
+                function.name = suspend_impl_name(&function.name);
                 function.is_static = true;
                 function.dispatch_receiver = None;
                 function.params.insert(0, Ty::obj_name(owner));
                 function.param_checks.insert(0, None);
             }
-            // kotlinc emits it `public static synthetic` (0x1009). The synthetic mark is also what
+            // kotlinc emits it `static synthetic`: public on an interface (0x1009), package-private
+            // on a class (0x1008, from the recorded split below). The synthetic mark is also what
             // keeps it out of `@Metadata`: it is a JVM implementation detail of the declaration,
             // not a second Kotlin function, and the declaration is described by the trampoline.
             ir.synthetic_methods.insert(fid);

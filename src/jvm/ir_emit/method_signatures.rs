@@ -8,7 +8,7 @@ use crate::jvm::classfile::ACC_SYNTHETIC;
 /// (`FunctionCodegen.needsGenericSignature`) keeps it on an `inline` function, whose generics the
 /// inliner reads, and on a suspend function's `$suspendImpl` static.
 pub(super) fn keeps_signature_when_synthetic(ir: &IrFile, fid: u32) -> bool {
-    ir.inline_fns.contains(&fid) || ir.jvm_suspend_interface_bodies.contains_key(&fid)
+    ir.inline_fns.contains(&fid) || ir.jvm_suspend_impl_bodies.contains_key(&fid)
 }
 
 /// The generic `Signature` kotlinc writes for a method. It writes none on a synthetic method

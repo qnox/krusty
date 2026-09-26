@@ -98,7 +98,20 @@ pub(super) fn build_continuation_class(
             let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
             let owner_midx = owner_cid
                 .and_then(|cid| ir.classes[cid].methods.iter().position(|&m| m == outer_fid));
-            if let (true, Some(cid), Some(midx)) = (
+            if crate::jvm::suspend_impls::moves_to_suspend_impl(ir, outer_fid) {
+                // The machine lives in the member's `$suspendImpl`: re-enter the static with the
+                // captured receiver first, never the member, which an override may replace.
+                let mut args = vec![recv];
+                args.extend(reentry_args);
+                ir.add_expr(IrExpr::Call {
+                    callee: Callee::ClassStatic {
+                        owner,
+                        function: outer_fid,
+                    },
+                    dispatch_receiver: None,
+                    args,
+                })
+            } else if let (true, Some(cid), Some(midx)) = (
                 ir.private_methods.contains(&outer_fid),
                 owner_cid,
                 owner_midx,

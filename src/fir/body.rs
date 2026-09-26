@@ -339,6 +339,9 @@ pub enum FirCallTarget {
         enclosing_dispatch: bool,
         kind: FirSuperCallKind,
         name: String,
+        /// The selected declaration's physical parameters, as its provider published them. They
+        /// are parallel to the call's parameters for a source declaration, whose `descriptor` the
+        /// target derives from them; a provider-described declaration keeps its own ABI shape.
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         /// The selected owner is an interface, so the call reaches a default method.
@@ -359,6 +362,9 @@ pub enum FirCallTarget {
         /// owner of retained checked defaults; dependency declarations leave it unset.
         source: Option<CallableId>,
         source_member: Option<crate::libraries::SourceMember>,
+        /// The selected declaration is a `suspend` function: the call is a suspension point, and
+        /// a target passes it a continuation.
+        suspend: bool,
     },
 }
 
