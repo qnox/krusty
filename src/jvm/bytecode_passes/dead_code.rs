@@ -11,7 +11,9 @@
 //! line, the scan reaches the end of the method or a different line having passed only dead
 //! instructions; the first live instruction keeps it, and so does a different line reached with no
 //! instruction in between. `removeEmptyCatchBlocks` then drops every protected range left with no
-//! instruction, and `prepareForEmitting` every local variable whose range the removal empties.
+//! live instruction, and `prepareForEmitting` every local variable whose range holds none. Both
+//! apply whether or not anything was dead now: an earlier pass (the constant-condition pass's own
+//! dead-code step) can leave a range empty.
 //!
 //! The same transformer then renumbers the local slots (see [`super::local_slots`]).
 
@@ -24,8 +26,8 @@ const RET: u8 = 0xa9;
 /// What the removal took with the dead instructions.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Elimination {
-    /// Per local variable, in the order the method had them, whether its range lost its last
-    /// instruction and the entry went with it.
+    /// Per local variable, in the order the method had them, whether its range holds no live
+    /// instruction (it lost its last one, or an earlier pass emptied it) and the entry went.
     pub removed_locals: Vec<bool>,
 }
 
@@ -96,8 +98,9 @@ fn removed_lines(nodes: &[Node], live: &[bool]) -> Vec<bool> {
 }
 
 /// Remove every instruction the method's entry does not reach, with the line numbers, protected
-/// ranges and local variables that go with them; `None` when nothing is dead (or the body is
-/// outside what the analysis models), leaving `method` as it was.
+/// ranges and local variables that go with them, and every protected range and local variable left
+/// with no instruction; `None` when there is nothing to remove (or the body is outside what the
+/// analysis models), leaving `method` as it was.
 pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
     if method.instructions().any(is_subroutine) {
         return None;
@@ -105,20 +108,20 @@ pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
     let at = LabelPositions::of(method);
     let (live, handler_live) = liveness(method, &at);
     let is_dead = |p: usize| matches!(method.nodes[p], Node::Insn(_)) && !live[p];
-    if !(0..method.nodes.len()).any(is_dead) {
-        return None;
-    }
-    let removed_lines = removed_lines(&method.nodes, &live);
+    // A local keeps its entry while a live instruction stands in its range, whether this pass or
+    // an earlier one removed the others (`prepareForEmitting`).
     let removed_locals: Vec<bool> = method
         .local_variables
         .iter()
-        .map(|local| {
-            let range = at.at(local.start)..at.at(local.end);
-            let mut insns = range.filter(|&p| matches!(method.nodes[p], Node::Insn(_)));
-            let mut insns_again = insns.clone();
-            insns.next().is_some() && !insns_again.any(|p| live[p])
-        })
+        .map(|local| !(at.at(local.start)..at.at(local.end)).any(|p| live[p]))
         .collect();
+    if !(0..method.nodes.len()).any(is_dead)
+        && handler_live.iter().all(|&kept| kept)
+        && !removed_locals.contains(&true)
+    {
+        return None;
+    }
+    let removed_lines = removed_lines(&method.nodes, &live);
 
     let mut index = 0;
     method.nodes.retain(|node| {
@@ -336,6 +339,36 @@ mod tests {
         let before = body.method.clone();
         assert_eq!(eliminate(&mut body.method), None);
         assert_eq!(body.method, before);
+    }
+
+    #[test]
+    fn a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead() {
+        // 0 iconst_0; 1 ireturn, with a protected range and a local over the empty span before
+        // instruction 0: kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` drop both.
+        let mut body = Body::new(&[Ok(0x03), Ok(IRETURN)]);
+        let labels = body.labels.clone();
+        let empty = body.method.new_label();
+        body.method.nodes.insert(1, Node::Label(empty));
+        body.method.try_catch_blocks.push(TryCatchBlock {
+            start: labels[0],
+            end: empty,
+            handler: labels[1],
+            catch_type: None,
+        });
+        for (start, end) in [(labels[0], empty), (labels[0], labels[2])] {
+            body.method.local_variables.push(LocalVariable {
+                name: "x".to_string(),
+                desc: "I".to_string(),
+                start,
+                end,
+                slot: 0,
+            });
+        }
+        let elimination = eliminate(&mut body.method).expect("the empty range and local go");
+        assert_eq!(body.instructions(), ops(&[0x03, IRETURN]));
+        assert!(body.method.try_catch_blocks.is_empty());
+        assert_eq!(elimination.removed_locals, vec![true, false]);
+        assert_eq!(body.method.local_variables.len(), 1);
     }
 
     #[test]

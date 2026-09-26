@@ -7175,6 +7175,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Rounds repeat while a jump or `instanceof` folds. Nothing that runs changes: the folded test had
   one outcome. Tests: the unit tests beside the pass, and `tests/redundant_null_jumps_e2e.rs`
   (instructions and frames against kotlinc, and the folded samples at run time).
+- **An `int` jump whose outcome constants decide becomes a `goto` or goes, as kotlinc's
+  `ConstantConditionEliminationMethodTransformer` does.** The pass runs after CapturedVars, before
+  RedundantBoxing (step `ConstantCondition`, `bytecode_passes/constant_conditions/`), and only on a
+  method with both an `int` jump (`ifeq`…`ifle`, `if_icmpeq`…`if_icmple`) and an `int` constant
+  (`iconst_m1`…`iconst_5`, `bipush`, `sipush`, `ldc` of an `Integer`). Its analysis is the basic
+  interpreter with each such constant keeping its value through loads, stores and `dup`s; two equal
+  constants meeting stay known, anything else (arithmetic, `iinc`, different constants meeting) is a
+  plain `int`. An `if<cond>` on a known value gets a `pop` before it and becomes a `goto` when the value
+  satisfies it, or goes; an `if_icmp<cond>` on two known values gets two `pop`s and does the same; an
+  `if_icmp<cond>` whose top operand is a known `0` gets a `pop` and becomes the `if<cond>` of the other
+  (a known `0` below an unknown top is left, as in kotlinc). In the same round every node no path
+  reaches goes, line numbers included, labels kept (so this happens in any method with a jump and a
+  constant, even when nothing folds). Rounds repeat while one changes anything. The popped loads and
+  constants are left to the later passes. Nothing that runs changes: the folded comparison had one
+  outcome. An inline function called with a constant it branches on keeps only the branch taken
+  (`pick(true)` is `iconst_1; ireturn` apart from kotlinc's `$i$f$` marker local), and a comparison of
+  locals holding constants folds. Tests: the unit tests beside the pass, and
+  `tests/constant_conditions_e2e.rs` (instructions and frames against kotlinc, and the samples at run
+  time). Because this step removes code without touching the tables, the final dead-code step drops
+  every protected range and local variable left with no instruction even when nothing is dead at
+  that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
+  (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
 
 ## 8. Success criteria for the PoC
 

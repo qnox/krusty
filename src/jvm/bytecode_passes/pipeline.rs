@@ -24,8 +24,8 @@ use super::redundant_boxing::{self, ValueClasses};
 use super::redundant_checkcasts::{self, StackTops};
 use super::redundant_null_checks::{self, Rewritten};
 use super::{
-    captured_vars, checkcasts_before_aastore, dead_code, local_slots, negated_jumps,
-    redundant_gotos, redundant_nops, stack_peephole, temporaries,
+    captured_vars, checkcasts_before_aastore, constant_conditions, dead_code, local_slots,
+    negated_jumps, redundant_gotos, redundant_nops, stack_peephole, temporaries,
 };
 use crate::jvm::method_node::{LabelId, MethodNode};
 
@@ -38,7 +38,7 @@ pub(crate) enum Pass {
     RedundantCheckCast,
     /// `CapturedVarsOptimizationMethodTransformer` (see `captured_vars`).
     CapturedVars,
-    /// `ConstantConditionEliminationMethodTransformer`: not ported yet.
+    /// `ConstantConditionEliminationMethodTransformer` (see `constant_conditions`).
     ConstantCondition,
     /// `RedundantBoxingMethodTransformer` (see `redundant_boxing`).
     RedundantBoxing,
@@ -172,6 +172,9 @@ impl Run {
                 false
             }
             Pass::CapturedVars => captured_vars::eliminate(method, context.owner).ok()?,
+            Pass::ConstantCondition => {
+                constant_conditions::eliminate(method, context.owner).ok()?
+            }
             Pass::RedundantBoxing => {
                 redundant_boxing::eliminate(method, context.owner, context.value_classes).ok()?
             }
@@ -198,7 +201,7 @@ impl Run {
                 let parameters: BTreeSet<u16> = (0..context.parameter_slots).collect();
                 local_slots::compact(method, &parameters)
             }
-            Pass::ConstantCondition | Pass::PopBackwardPropagation | Pass::DeadCode => false,
+            Pass::PopBackwardPropagation | Pass::DeadCode => false,
         };
         self.changed |= changed;
         Some(())

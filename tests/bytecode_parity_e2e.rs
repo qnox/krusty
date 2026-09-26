@@ -126,10 +126,12 @@ fn counting_loop_uses_iinc_not_load_add_store() {
 
 #[test]
 fn compare_against_zero_is_single_operand_branch() {
-    // `x != 0` → `ifeq`/`ifne` (compare-to-zero), NOT `iconst_0; if_icmp*`.
+    // `x != 0` → `ifeq`/`ifne` (compare-to-zero), NOT `iconst_0; if_icmp*`. `x` is a parameter:
+    // on a local holding a constant the constant-condition pass decides the jump, as kotlinc's does.
     let Some(d) = facade_disasm(
         "cmp0",
-        "fun box(): String {\n  val x = 3\n  if (x != 0) return \"OK\"\n  return \"f\"\n}\n",
+        "fun pick(x: Int): String {\n  if (x != 0) return \"OK\"\n  return \"f\"\n}\n\
+         fun box(): String = pick(3)\n",
     ) else {
         return;
     };
