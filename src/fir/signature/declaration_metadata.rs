@@ -10,6 +10,19 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub(crate) fn take_declaration_annotation_occurrences(
+        &mut self,
+        declaration: DeclarationId,
+    ) -> Box<[Option<TypeName>]> {
+        self.declaration_annotation_occurrences
+            .remove(&declaration)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn has_declaration_annotation_occurrences(&self) -> bool {
+        !self.declaration_annotation_occurrences.is_empty()
+    }
+
     pub fn declaration_applied_annotations(
         &self,
         declaration: DeclarationId,
@@ -78,6 +91,26 @@ impl ResolvedModuleIndex {
                 .insert(declaration, annotations)
                 .is_none(),
             "a stable declaration may publish its annotation identities only once"
+        );
+    }
+
+    pub(crate) fn publish_declaration_annotation_occurrences(
+        &mut self,
+        declaration: DeclarationId,
+        annotations: impl IntoIterator<Item = Option<TypeName>>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if annotations.is_empty() {
+            return;
+        }
+        assert!(
+            self.declaration_annotation_occurrences
+                .insert(declaration, annotations)
+                .is_none(),
+            "a stable declaration may publish its annotation occurrences only once"
         );
     }
 

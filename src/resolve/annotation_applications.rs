@@ -16,17 +16,42 @@ impl Checker<'_> {
         annotation: &AnnotationRef,
         arguments: &[ExprId],
     ) {
+        // Resolve the application in its owning lexical scope. Pass 1's declaration-header
+        // inventory and Pass 2's body checking use the same scope rules.
+        let reference = TypeRef {
+            name: annotation.name.clone(),
+            flags: TrFlags::default(),
+            arg: None,
+            targs: Vec::new(),
+            span: annotation.span,
+            fun_params: Vec::new(),
+            fun_context_count: 0,
+        };
+        let ty = self.type_ref_ty_reported(scope, &reference);
+        let Some(internal) = ty.kotlin_class_internal() else {
+            return;
+        };
+        self.check_bound_annotation_application(scope, annotation, arguments, internal);
+    }
+
+    /// Check an annotation occurrence whose classifier was selected during declaration-header
+    /// resolution. Metadata publication calls this with the stable occurrence binding; it must not
+    /// repeat classifier lookup after actualization has removed target-inapplicable declarations.
+    pub(super) fn check_bound_annotation_application(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+        arguments: &[ExprId],
+        internal: TypeName,
+    ) {
         if arguments
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
         {
-            // Annotation applications were resolved and validated during header collection. A
-            // RESTRICTED pass re-enters a declaration it did not select solely to recreate that
-            // declaration's lexical type and value scopes, and the annotation expressions of the
-            // members it skipped are outside the fragment it retains. Two passes are restricted
-            // this way: Pass-1 default checking, and inline preparation, which selects only the
-            // inline declarations it must expand. An UNRESTRICTED pass has every expression and
-            // must never reach released syntax.
+            // A restricted body pass re-enters declarations solely to recreate lexical scopes;
+            // annotation syntax on skipped neighbors may already be gone. The focused metadata
+            // publisher never calls this method without its explicitly retained argument fragment,
+            // while a complete pass must still fail closed.
             assert!(
                 self.fragment.may_observe_released_annotation_syntax(),
                 "a complete pass reached released annotation syntax; fragment={:?}",
@@ -34,36 +59,6 @@ impl Checker<'_> {
             );
             return;
         }
-        let internal = if self.fragment.is_classifier_annotations() {
-            // Pass 1 already bound this exact occurrence. Metadata publication consumes that
-            // identity directly: resolving its spelling again after actualization could resurrect
-            // a target-excluded optional-expect annotation or select a different scope rung.
-            let Some(internal) = self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            else {
-                return;
-            };
-            internal
-        } else {
-            // Resolve the application in its owning lexical scope. Pass 1's declaration-header
-            // inventory and Pass 2's body checking use the same scope rules.
-            let reference = TypeRef {
-                name: annotation.name.clone(),
-                flags: TrFlags::default(),
-                arg: None,
-                targs: Vec::new(),
-                span: annotation.span,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
-        };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
             && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
