@@ -28,6 +28,11 @@ class Runner {
 class Tag
 inline operator fun Tag.invoke(f: () -> Int): Int = f()
 class Wrapper(val runner: Runner, val tag: Tag)
+class OverloadedRunner {
+    inline operator fun invoke(marker: Int = 0, f: (String) -> Int): Int = f(\"inline\") + marker
+    operator fun invoke(marker: String = \"\", f: (Int) -> Int): Int = f(marker.length)
+}
+class OverloadedHolder(val runner: OverloadedRunner)
 ";
 
 /// The uses, from line 1 of their own file.
@@ -50,6 +55,7 @@ fun throughInlineInvoke(runner: Runner): Int = runner { return 12 }
 fun throughInlineInvokeProperty(wrapper: Wrapper): Int = wrapper.runner { return 13 }
 fun throughExtensionInvokeProperty(wrapper: Wrapper): Int = wrapper.tag { return 14 }
 fun memberSpliced(): Int = Box(1).spliced { return 15 }
+fun throughSelectedOverload(holder: OverloadedHolder): Int = holder.runner { _: Int -> return 16 }
 ";
 
 fn prohibited(file: &str, line: usize, column: usize) -> ObservedError {
@@ -74,10 +80,55 @@ fn expected(file: &str) -> Vec<ObservedError> {
         (11, 47),
         (13, 72),
         (14, 61),
+        (19, 88),
     ]
     .into_iter()
     .map(|(line, column)| prohibited(file, line, column))
     .collect()
+}
+
+#[test]
+fn missing_inline_parameter_metadata_never_grants_return_permission() {
+    let shape = krusty::symbol_resolver::LambdaCallShape {
+        inline: true,
+        boxes_captures: Some(vec![None]),
+        ..krusty::symbol_resolver::LambdaCallShape::default()
+    };
+    assert_eq!(shape.inlines_argument(0), None);
+    assert_eq!(shape.inlines_argument(1), None);
+}
+
+#[test]
+fn a_property_invoke_plan_keeps_one_overload_for_shaping_and_recording() {
+    const SOURCE: &str = "\
+class RoutedCall {
+    inline operator fun invoke(marker: Int = 0, block: (Int) -> String): String = \"integer:\" + block(marker)
+    operator fun invoke(marker: String = \"text\", block: (String) -> String): String = \"string:\" + block(marker)
+}
+class RoutedHolder(val call: RoutedCall)
+class ScopedCall
+class ScopedHolder(val call: ScopedCall)
+class CallScope {
+    inline operator fun ScopedCall.invoke(marker: Int = 0, block: (Int) -> String): String = \"scoped-integer:\" + block(marker)
+    operator fun ScopedCall.invoke(marker: String = \"text\", block: (String) -> String): String = \"scoped-string:\" + block(marker)
+    fun route(holder: ScopedHolder): String {
+        val integer = holder.call { value: Int -> value.toString() }
+        val string = holder.call { value: String -> value }
+        return \"$integer/$string\"
+    }
+}
+fun box(): String {
+    val holder = RoutedHolder(RoutedCall())
+    val integer = holder.call { value: Int -> value.toString() }
+    val string = holder.call { value: String -> value }
+    val scoped = CallScope().route(ScopedHolder(ScopedCall()))
+    return if (integer == \"integer:0\" && string == \"string:text\" && scoped == \"scoped-integer:0/scoped-string:text\") \"OK\" else \"$integer/$string/$scoped\"
+}
+";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "SelectedInvokePlan").as_deref(),
+        Some("OK")
+    );
 }
 
 fn assert_prohibited_returns(result: common::CompilerDiagnosticResult, file: &str) {

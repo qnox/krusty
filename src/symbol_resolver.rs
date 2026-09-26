@@ -91,7 +91,10 @@ pub struct LambdaCallShape {
     pub fixed_expected_types: Option<Vec<Option<Ty>>>,
     pub receivers: Option<Vec<Option<Ty>>>,
     pub context_counts: Option<Vec<usize>>,
-    pub boxes_captures: Option<Vec<bool>>,
+    /// Per source argument, whether the selected parameter requires a materialized capture.
+    /// `None` at either level means the declaration did not publish the parameter modifier; an
+    /// inline permission must never be inferred from that missing fact.
+    pub boxes_captures: Option<Vec<Option<bool>>>,
     /// The selected callable permits its non-materialized lambda arguments to be spliced.
     pub inline: bool,
 }
@@ -100,14 +103,16 @@ impl LambdaCallShape {
     /// Whether the selected parameter of source argument `argument` inlines a lambda into the
     /// caller's frame: the callable is inline and the parameter is neither `crossinline` nor
     /// `noinline`.
-    pub fn inlines_argument(&self, argument: usize) -> bool {
-        self.inline
-            && !self
-                .boxes_captures
-                .as_ref()
-                .and_then(|boxes| boxes.get(argument))
-                .copied()
-                .unwrap_or(false)
+    pub fn inlines_argument(&self, argument: usize) -> Option<bool> {
+        if !self.inline {
+            return Some(false);
+        }
+        self.boxes_captures
+            .as_ref()?
+            .get(argument)
+            .copied()
+            .flatten()
+            .map(|boxes| !boxes)
     }
 }
 

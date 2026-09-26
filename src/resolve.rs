@@ -6060,7 +6060,7 @@ fn shaped_argument_inlining(
 ) -> Option<bool> {
     match module {
         Some(shape) => shape.inlined.get(argument).copied(),
-        None => extension.map(|shape| shape.inlines_argument(argument)),
+        None => extension.and_then(|shape| shape.inlines_argument(argument)),
     }
 }
 
@@ -20329,58 +20329,62 @@ impl<'a> Checker<'a> {
                     extension: ext_lambda_shape,
                     provider: provider_member_lambda_pts,
                 } = shaping;
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = ext_lambda_shape
+                // When call syntax reads a property and invokes its value, select that invoke
+                // declaration now. Its stable plan owns both contextual lambda typing and final
+                // recording; completed lambda types never reopen the overload family.
+                let property_invoke_plan = (module_lambda_shape.is_none()
+                    && ext_lambda_shape.is_none()
+                    && receiver_callables.functions().is_empty())
+                .then(|| {
+                    self.plan_property_invoke(
+                        scope,
+                        call,
+                        rt,
+                        &name,
+                        args,
+                        &generic_member_partial,
+                        CallResultConstraint::direct(expected),
+                    )
+                })
+                .flatten();
+                let argument_lambda_shape = property_invoke_plan
                     .as_ref()
-                    .and_then(|shape| shape.param_types.clone());
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.receivers.clone());
-                let ext_lambda_context_counts: Option<Vec<usize>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.context_counts.clone());
-                let ext_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.expected_types.clone());
-                let ext_literal_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.fixed_expected_types.clone());
+                    .map(|plan| &plan.invoke.lambda_shape)
+                    .or(ext_lambda_shape.as_ref());
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.param_types.clone());
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.receivers.clone());
+                let ext_lambda_context_counts: Option<Vec<usize>> =
+                    argument_lambda_shape.and_then(|shape| shape.context_counts.clone());
+                let ext_callable_types: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.expected_types.clone());
+                let ext_literal_callable_types: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.fixed_expected_types.clone());
                 crate::trace_compiler!(
                     "lambda_shape",
                     "member call={name} receiver={rt:?} params={ext_lambda_pts:?} receivers={ext_lambda_recvs:?} contexts={ext_lambda_context_counts:?} provider={provider_member_lambda_pts:?}",
                 );
                 // Inline extensions splice lambdas, so captured mutable locals stay direct for this call.
-                let allow_lambda_mutation = method_sig
-                    .as_ref()
-                    .is_some_and(|member| self.member_inline_body_available(member))
-                    || (ext_lambda_pts.is_some()
-                        && receiver_callables
-                            .functions()
-                            .iter()
-                            .filter(|function| function.is_extension())
-                            .any(|function| function.flags.inline.can_inline()));
-                // No function takes the call, so `name` is a property whose value is invoked.
-                let property_invoke_inlining = (module_lambda_shape.is_none()
-                    && ext_lambda_shape.is_none()
-                    && receiver_callables.functions().is_empty())
-                .then(|| {
-                    self.property_invoke_argument_inlining(
-                        scope,
-                        call,
-                        rt,
-                        &name,
-                        (args, &generic_member_partial),
-                    )
-                })
-                .flatten();
+                let allow_lambda_mutation = (0..args.len()).any(|argument| {
+                    (match property_invoke_plan.as_ref() {
+                        Some(plan) => plan.invoke.inlines_argument(argument),
+                        None => shaped_argument_inlining(
+                            module_lambda_shape.as_ref(),
+                            argument_lambda_shape,
+                            argument,
+                        ),
+                    }) == Some(true)
+                });
                 let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
                     args.iter()
                         .enumerate()
                         .map(|(i, &a)| {
-                            let inlined = match &property_invoke_inlining {
-                                Some(inlining) => inlining.get(i).copied().flatten(),
+                            let inlined = match property_invoke_plan.as_ref() {
+                                Some(plan) => plan.invoke.inlines_argument(i),
                                 None => shaped_argument_inlining(
                                     module_lambda_shape.as_ref(),
-                                    ext_lambda_shape.as_ref(),
+                                    argument_lambda_shape,
                                     i,
                                 ),
                             };
@@ -20842,6 +20846,34 @@ impl<'a> Checker<'a> {
                     ) {
                         return ret;
                     }
+                }
+                if let Some(plan) = property_invoke_plan {
+                    if let Some((visibility, owner)) = plan.property.access() {
+                        if visibility != Visibility::Public
+                            && self.reject_if_inaccessible(
+                                visibility,
+                                &name,
+                                owner,
+                                self.call_callee_name_span(call),
+                            )
+                        {
+                            return Ty::Error;
+                        }
+                    }
+                    let value_ty = self.record_property_read(scope, Some(callee), plan.property);
+                    return self.record_planned_invoke_or_report(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        callee,
+                        value_ty,
+                        span,
+                        plan.invoke,
+                        CallResultConstraint::direct(expected),
+                    );
                 }
                 // A MEMBER PROPERTY used with call syntax is a value read followed by the ordinary
                 // invoke convention. A callable value (`obj.func(args)`) flows through that shared
@@ -22178,9 +22210,10 @@ impl<'a> Checker<'a> {
                     .and_then(|shape| shape.context_counts.clone());
                 // Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is
                 // `Ref`-boxed (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
-                let toplevel_lambda_boxes_captures: Option<Vec<bool>> = toplevel_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.boxes_captures.clone());
+                let toplevel_lambda_boxes_captures: Option<Vec<Option<bool>>> =
+                    toplevel_lambda_shape
+                        .as_ref()
+                        .and_then(|shape| shape.boxes_captures.clone());
                 // The shape's own callable may be a companion's `operator fun invoke` rather than
                 // a top-level function; its inline flag decides where a lambda's `return` may go.
                 let toplevel_shape_inline = toplevel_lambda_shape
@@ -22662,11 +22695,12 @@ impl<'a> Checker<'a> {
                                 .copied()
                                 .flatten();
                             let inline = this_member_lambda_inline
-                                && !this_member_lambda_boxes_captures
+                                && this_member_lambda_boxes_captures
                                     .as_ref()
                                     .and_then(|boxes| boxes.get(i))
                                     .copied()
-                                    .unwrap_or(false);
+                                    .flatten()
+                                    == Some(false);
                             if let Some(Ty::Fun(signature)) = this_member_lambda_expected
                                 .as_ref()
                                 .and_then(|expected| expected.get(i))
@@ -22802,7 +22836,8 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .and_then(|m| m.get(i))
                                 .copied()
-                                .unwrap_or(false);
+                                .flatten()
+                                .unwrap_or(true);
                             // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
                             // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
                             // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
@@ -22969,7 +23004,8 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .and_then(|boxes| boxes.get(i))
                             .copied()
-                            .unwrap_or(false);
+                            .flatten()
+                            .unwrap_or(true);
                         return self.with_argument_lambda(a, inlined, |c| {
                             c.check_lambda_with_types_labeled(
                                 scope,
@@ -24044,6 +24080,7 @@ impl<'a> Checker<'a> {
                             info,
                             bindings,
                             intersection_bindings: HashMap::new(),
+                            candidate_index: None,
                         }))
                     })
                     .or_else(|| {
@@ -37455,45 +37492,7 @@ pub(crate) fn member_extension_function_with(
             );
             continue;
         };
-        candidates.push(MemberExtensionFunctionCandidate {
-            stable_declaration: shape.function.signature.stable_declaration,
-            external_identity: shape.function.external_identity,
-            external_default_provider: shape.function.external_default_provider,
-            priority: shape.priority,
-            dispatch_receiver: shape.dispatch_receiver,
-            score: instantiated.score,
-            physical_receiver: shape.function.physical_receiver,
-            extension_receiver: instantiated.extension_receiver,
-            params: instantiated.logical_params,
-            visible_params: instantiated.visible_params,
-            physical_params: shape.function.physical_params.clone(),
-            context_args: instantiated.context_sources,
-            context_count: shape.function.signature.context_count,
-            ret: instantiated.ret,
-            physical_ret: shape.function.signature.ret,
-            call_sig: instantiated.call_sig,
-            diagnostic_param_names: shape.function.signature.call_sig().param_names,
-            physical_vararg_index: instantiated.physical_vararg_index,
-            argument_parameters: instantiated.argument_parameters,
-            visibility: shape.function.signature.visibility,
-            is_operator: shape.is_operator,
-            inline: InlineKind::from_flags(
-                shape.function.signature.is_inline(),
-                shape.function.signature.requires_splice(),
-            ),
-            inline_body_plan: shape.function.inline_body_plan.clone(),
-            suspend: shape.function.signature.is_suspend(),
-            declared_params: shape
-                .function
-                .signature
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.clone())
-                .unwrap_or_else(|| shape.function.signature.params.clone()),
-            declared_ret: shape.function.declared_ret,
-            owner: shape.owner,
-            physical_name: shape.function.physical_name.clone(),
-        });
+        candidates.push(member_extension_selection::candidate(&shape, instantiated));
     }
     member_extension_selection::retain_selected(&mut candidates, selection);
     let mut maximal =
@@ -40100,6 +40099,9 @@ struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
     bindings: crate::symbol_resolver::GSigBinds,
     intersection_bindings: HashMap<String, Vec<Ty>>,
+    /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
+    /// therefore finish against the same declaration instead of selecting the overload again.
+    candidate_index: Option<usize>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -45453,6 +45455,7 @@ impl<'a> Checker<'a> {
                 info: candidate,
                 bindings: specialized_bindings,
                 intersection_bindings,
+                candidate_index: Some(index),
             };
             applicable.push((
                 score.rank,
@@ -46673,7 +46676,7 @@ impl<'a> Checker<'a> {
                         .call_sig
                         .inline_modifiers
                         .get(parameter)
-                        .is_some_and(|inlining| inlining.boxes_captures())
+                        .map(|inlining| inlining.boxes_captures())
                 })
                 .collect(),
         );
@@ -46702,7 +46705,7 @@ impl<'a> Checker<'a> {
             || shape
                 .boxes_captures
                 .as_ref()
-                .is_some_and(|items| items.iter().any(|item| *item)))
+                .is_some_and(|items| items.iter().any(Option::is_some)))
         .then_some(shape)
     }
 
@@ -48558,32 +48561,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn member_inline_body_available(&self, member: &crate::libraries::LibraryMember) -> bool {
-        if !member.inline.can_inline() {
-            return false;
-        }
-        let Some(owner) = member.owner else {
-            return true;
-        };
-        let Some(class) = self.resolver().classifier(owner) else {
-            return true;
-        };
-        class.members.iter().any(|candidate| {
-            candidate.name == member.name
-                && candidate.params == member.params
-                && (candidate
-                    .stable_declaration
-                    .and_then(|declaration| {
-                        self.resolved_index
-                            .and_then(|index| index.declaration_anchor(declaration))
-                    })
-                    .is_some_and(|anchor| anchor.source.raw() == self.file_index)
-                    || candidate
-                        .source_member
-                        .is_some_and(|source| source.file() == self.file_index))
-        })
-    }
-
     /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
     /// EXTENSION, or a library member — checking each argument type and returning the selected target.
     /// `None` when no such method of matching arity exists (the caller then declines). Used by the
@@ -49208,21 +49185,21 @@ impl<'a> Checker<'a> {
         let Some(slots) = self.resolved_call_arg_slots.get(&call).cloned() else {
             return;
         };
-        let target = if inline.can_inline() {
-            LambdaCapture::InlineSplice
-        } else {
-            LambdaCapture::Closure
-        };
         for (parameter, argument) in slots.into_iter().enumerate() {
             let Some(argument) = argument else { continue };
-            if call_sig
-                .inline_modifiers
-                .get(parameter)
-                .is_some_and(|inlining| inlining.boxes_captures())
-                || !matches!(self.file.expr(argument), Expr::Lambda { .. })
-            {
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
                 continue;
             }
+            let target = if inline.can_inline()
+                && call_sig
+                    .inline_modifiers
+                    .get(parameter)
+                    .is_some_and(|modifier| modifier.runs_in_caller_frame())
+            {
+                LambdaCapture::InlineSplice
+            } else {
+                LambdaCapture::Closure
+            };
             self.update_lambda_info(argument, |info| info.capture = target);
         }
     }
@@ -49437,6 +49414,7 @@ impl<'a> Checker<'a> {
             info: mut selected,
             bindings: mut selected_bindings,
             intersection_bindings,
+            ..
         } = selected;
         let mut ret = selected.callable.ret;
         let expectations = self.source_generic_argument_expectations(
@@ -77511,6 +77489,21 @@ impl<'a> Checker<'a> {
         shape: &MemberExtensionFunctionShape,
         call: MemberExtensionCall<'_>,
     ) -> Option<InstantiatedMemberExtension> {
+        self.instantiate_member_extension_constrained(
+            scope,
+            shape,
+            call,
+            CallResultConstraint::direct(None),
+        )
+    }
+
+    fn instantiate_member_extension_constrained(
+        &self,
+        scope: &CheckerScope<'_>,
+        shape: &MemberExtensionFunctionShape,
+        call: MemberExtensionCall<'_>,
+        result_constraint: CallResultConstraint,
+    ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
         instantiate_member_extension_with(
             self.file.explicit_context_arguments,
@@ -77520,7 +77513,7 @@ impl<'a> Checker<'a> {
                 self.unit_coerced_lambda_type(args[source], expected, actual)
             },
             &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
-            CallResultConstraint::direct(None),
+            result_constraint,
             shape,
             call,
         )
