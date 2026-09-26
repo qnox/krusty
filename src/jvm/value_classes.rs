@@ -21,6 +21,7 @@ mod call_results;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
+mod equality;
 mod interface_entries;
 mod member_names;
 mod module_members;
@@ -2511,13 +2512,13 @@ pub(crate) fn lower_value_classes(
                 extension_receiver: bool,
                 default_boxed_parameters: Vec<(usize, Ty)>,
             },
-            /// Same-value-class `==`/`!=` → `equals-impl0(U, U)Z` compared against 0 (kotlinc's ABI).
+            /// Same-value-class non-null `==`/`!=` → `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's ABI).
             VcEq {
                 ne: bool,
                 lhs: ExprId,
                 rhs: ExprId,
                 owner: TypeName,
-                descriptor: String,
+                carrier: Ty,
             },
             /// Constructing a value class with its sole (defaulted) param omitted (`Id()`) →
             /// `constructor-impl$default(<underlying>, 1, DefaultConstructorMarker)` — mask `1` because a
@@ -2876,11 +2877,11 @@ pub(crate) fn lower_value_classes(
                     args: vec![*receiver],
                 }))
             }
-            // `a == b` / `a != b` where BOTH operands are the same UNBOXED value class → the class's
-            // static `equals-impl0(U, U)Z` compared against 0 (kotlinc's value-class equality ABI;
+            // `a == b` / `a != b` where BOTH operands are the same non-null UNBOXED value class → the
+            // class's static `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's value-class equality ABI;
             // the underlying-level `areEqual`/`icmp` was semantically right but not kotlinc's shape).
-            // Identity `===`/`!==` (RefEq/RefNe) is untouched, as are boxed/mixed/null operands —
-            // those keep the step-5 boxing decisions.
+            // Identity `===`/`!==` (RefEq/RefNe) is untouched; nullable and mixed operands are
+            // specialized in step 5 (`equality`).
             IrExpr::PrimitiveBinOp {
                 op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
                 lhs,
@@ -2888,15 +2889,15 @@ pub(crate) fn lower_value_classes(
             } => {
                 let (l, r) = (*lhs, *rhs);
                 match (repr_ctx.repr(l), repr_ctx.repr(r)) {
-                    (Repr::Unboxed(x), Repr::Unboxed(y)) if x == y => {
-                        let u = under.get(&x).map(|t| erase(t, &under)).unwrap_or(Ty::Error);
-                        let ud = desc(&u);
+                    (Repr::Unboxed(x), Repr::Unboxed(y))
+                        if x == y && repr_ctx.operand_nonnull(l) && repr_ctx.operand_nonnull(r) =>
+                    {
                         Some(Rw::VcEq {
                             ne: matches!(op, crate::ir::IrBinOp::Ne),
                             lhs: l,
                             rhs: r,
                             owner: x,
-                            descriptor: format!("({ud}{ud})Z"),
+                            carrier: erase(&under[&x], &under),
                         })
                     }
                     _ => None,
@@ -3145,30 +3146,10 @@ pub(crate) fn lower_value_classes(
                 lhs,
                 rhs,
                 owner,
-                descriptor,
+                carrier,
             }) => {
-                let call = ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner,
-                        name: "equals-impl0".to_string(),
-                        descriptor,
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![lhs, rhs],
-                });
-                let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-                // `a == b` ⇒ `equals-impl0(a, b) != 0`; `a != b` ⇒ `== 0`. Both fuse to a single
-                // `ifne`/`ifeq` on the call result in branch position — kotlinc's exact shape.
-                Some(IrExpr::PrimitiveBinOp {
-                    op: if ne {
-                        crate::ir::IrBinOp::Eq
-                    } else {
-                        crate::ir::IrBinOp::Ne
-                    },
-                    lhs: call,
-                    rhs: zero,
-                })
+                let call = equality::compare(ir, owner, &carrier, true, lhs, rhs);
+                Some(equality::negated_if(ir, call, ne))
             }
             None => None,
         };
@@ -3200,6 +3181,7 @@ pub(crate) fn lower_value_classes(
     let mut strip: Vec<(ExprId, ExprId)> = Vec::new();
     // `(comparison expr, is_ne)` — a `non-null-vc == null` folded to a constant `false`/`true`.
     let mut vacuous: Vec<(ExprId, bool)> = Vec::new();
+    let mut equalities = Vec::new();
     // `(type-op expr, underlying)` — casts to NULLABLE reference-underlying value classes and
     // representation-changing implicit coercions are retargeted to the physical carrier. There is
     // no box-class instance at either boundary, so retaining the semantic value-class operand would
@@ -3641,6 +3623,10 @@ pub(crate) fn lower_value_classes(
                         vacuous.push((id, is_ne));
                         continue;
                     }
+                }
+                if let Some(specialized) = equality::specialize(&repr_ctx, l, r) {
+                    equalities.push((id, specialized));
+                    continue;
                 }
                 for (a, other) in [(l, r), (r, l)] {
                     if let Repr::Unboxed(x) = repr_ctx.repr(a) {
@@ -4216,6 +4202,10 @@ pub(crate) fn lower_value_classes(
             BoxOp::Narrow(x) => narrow_wrap(ir, id, x),
             BoxOp::StringOf(x) => to_string_wrap(ir, id, x, &under),
         }
+    }
+
+    for (id, specialized) in equalities {
+        equality::realize(ir, id, specialized, &under, &mut fresh);
     }
 
     // `super_ctor_params` preserves the checker-selected declaration shape long enough to drive
