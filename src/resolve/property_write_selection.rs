@@ -15,7 +15,7 @@ pub(super) struct ImplicitPropertyWriteResolution {
 
 pub(super) enum PropertyWriteSelection {
     None,
-    Implicit(ImplicitPropertyWriteResolution),
+    Implicit(Box<ImplicitPropertyWriteResolution>),
     Receiverless(Box<ResolvedPropertyAccess>),
     MissingContext(MissingContextParameter, Vec<String>),
     Ambiguous,
@@ -45,7 +45,7 @@ impl Checker<'_> {
             match rung {
                 implicit_rungs::ImplicitRung::Receiver(receiver) => {
                     if let Some(property) = self.property_write_on_receiver(scope, receiver, name) {
-                        return PropertyWriteSelection::Implicit(property);
+                        return PropertyWriteSelection::Implicit(Box::new(property));
                     }
                 }
                 implicit_rungs::ImplicitRung::StaticScope(classifier) => {
@@ -67,7 +67,7 @@ impl Checker<'_> {
         if let Some((receiver, declared_name, _)) = self.imported_singleton_member(name) {
             if let Some(property) = self.property_write_on_receiver(scope, receiver, &declared_name)
             {
-                return PropertyWriteSelection::Implicit(property);
+                return PropertyWriteSelection::Implicit(Box::new(property));
             }
         }
         match self.select_declared_top_level_property(scope, name) {

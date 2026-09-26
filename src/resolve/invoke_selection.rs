@@ -33,7 +33,7 @@ pub(super) struct SelectedInvokePlan {
 
 enum SelectedInvokeTarget {
     Callable {
-        declaration: crate::libraries::FunctionInfo,
+        declaration: Box<crate::libraries::FunctionInfo>,
         /// `None` selects a member; `Some` is the semantic receiver of a top-level extension.
         extension_receiver: Option<Ty>,
     },
@@ -388,7 +388,7 @@ impl Checker<'_> {
             .collect();
         Some(SelectedInvokePlan {
             target: SelectedInvokeTarget::Callable {
-                declaration,
+                declaration: Box::new(declaration),
                 extension_receiver,
             },
             argument_parameters,
@@ -423,7 +423,7 @@ impl Checker<'_> {
             SelectedInvokeTarget::Callable {
                 declaration,
                 extension_receiver,
-            } => (declaration, extension_receiver),
+            } => (*declaration, extension_receiver),
             SelectedInvokeTarget::MemberExtension(shape) => {
                 return self.record_planned_member_extension_invoke(
                     scope,

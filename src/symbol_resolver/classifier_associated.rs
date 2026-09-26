@@ -56,10 +56,9 @@ impl SymbolResolver<'_> {
                     || self.lib.internal_accessible(property.owner)
             }
             Visibility::PackagePrivate => self.package_private_member_accessible(property.owner),
-            Visibility::Private if property.associated_access_owner.is_some() => {
-                self.lexically_inside(property.associated_access_owner.expect("checked above"))
-            }
-            Visibility::Private => current_module,
+            Visibility::Private => property
+                .associated_access_owner
+                .map_or(current_module, |owner| self.lexically_inside(owner)),
             Visibility::Protected => self.lexical_classes.iter().copied().any(|enclosing| {
                 is_subtype(
                     &TyCtx::new(),
@@ -150,11 +149,9 @@ impl SymbolResolver<'_> {
     }
 
     pub(crate) fn associated_function_accessible(&self, function: &FunctionInfo) -> bool {
-        if function.visibility == Visibility::Private && function.associated_access_owner.is_some()
-        {
-            self.lexically_inside(function.associated_access_owner.expect("checked above"))
-        } else {
-            self.non_member_callable_accessible(function)
+        match (function.visibility, function.associated_access_owner) {
+            (Visibility::Private, Some(owner)) => self.lexically_inside(owner),
+            _ => self.non_member_callable_accessible(function),
         }
     }
 
