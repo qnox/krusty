@@ -1,5 +1,147 @@
 use crate::libraries::{CallSig, SemanticPlatform};
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
+
+use super::{
+    call_argument_parameter_indices, generic_member_lambda_params, module_member_lambda_params,
+    ContextualCallShape, GenericMemberPlan,
+};
+
+/// Contextual lambda shapes supplied by one selected module member, in source-argument order.
+pub(super) struct MemberLambdaShape {
+    pub(super) param_types: Vec<Option<Vec<Ty>>>,
+    pub(super) expected_types: Vec<Option<Ty>>,
+    pub(super) signatures: Vec<Option<&'static crate::types::FnSig>>,
+    pub(super) receivers: Vec<Option<Ty>>,
+    /// Per argument, whether the selected parameter inlines a lambda into the caller's frame.
+    pub(super) inlined: Vec<bool>,
+}
+
+pub(super) fn module_member_lambda_shape(
+    source: &dyn SymbolSource,
+    member: &crate::libraries::LibraryMember,
+    generic_member: Option<&GenericMemberPlan>,
+    contextual: &ContextualCallShape,
+    args: &[crate::ast::ExprId],
+    names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+) -> Option<MemberLambdaShape> {
+    let visible_indices = call_argument_parameter_indices(
+        args.len(),
+        contextual.params.len(),
+        names,
+        trailing_lambda,
+        &contextual.call_sig,
+    )?;
+    let indices = visible_indices
+        .into_iter()
+        .map(|parameter| contextual.parameter_indices.get(parameter).copied())
+        .collect::<Option<Vec<_>>>()?;
+    Some(MemberLambdaShape {
+        param_types: indices
+            .iter()
+            .map(|&parameter| {
+                generic_member
+                    .and_then(|plan| generic_member_lambda_params(source, plan, parameter))
+                    .or_else(|| module_member_lambda_params(source, member, parameter))
+            })
+            .collect(),
+        expected_types: indices
+            .iter()
+            .map(|&parameter| {
+                generic_member
+                    .and_then(|plan| {
+                        plan.method
+                            .signature
+                            .params
+                            .get(parameter)
+                            .copied()
+                            .map(|shape| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    shape,
+                                    &plan.call_bindings,
+                                )
+                            })
+                    })
+                    .or_else(|| member.params.get(parameter).copied())
+            })
+            .collect(),
+        signatures: indices
+            .iter()
+            .map(|&parameter| {
+                let semantic = generic_member
+                    .and_then(|plan| {
+                        plan.method
+                            .signature
+                            .params
+                            .get(parameter)
+                            .copied()
+                            .map(|shape| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    shape,
+                                    &plan.call_bindings,
+                                )
+                            })
+                    })
+                    .or_else(|| {
+                        member
+                            .generic_sig
+                            .as_ref()
+                            .and_then(|signature| signature.params.get(parameter).copied())
+                    })
+                    .or_else(|| member.params.get(parameter).copied());
+                match semantic {
+                    Some(Ty::Fun(signature)) => Some(signature),
+                    _ => None,
+                }
+            })
+            .collect(),
+        receivers: indices
+            .iter()
+            .map(|&parameter| {
+                member
+                    .call_sig
+                    .lambda_receivers
+                    .get(parameter)
+                    .copied()
+                    .flatten()
+            })
+            .collect(),
+        inlined: indices
+            .iter()
+            .map(|&parameter| {
+                member.inline.can_inline()
+                    && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
+                        &member.call_sig.inline_modifiers,
+                        parameter,
+                    )
+            })
+            .collect(),
+    })
+}
+
+/// Whether the parameter selected for source argument `argument` inlines a lambda into the
+/// caller's frame, from the call's member shape, else its extension shape.
+pub(super) fn shaped_argument_inlining(
+    module: Option<&MemberLambdaShape>,
+    extension: Option<&crate::symbol_resolver::LambdaCallShape>,
+    argument: usize,
+) -> Option<bool> {
+    match module {
+        Some(shape) => shape.inlined.get(argument).copied(),
+        None => extension.and_then(|shape| shape.inlines_argument(argument)),
+    }
+}
+
+/// The `crossinline`/`noinline` modifier a source parameter wrote.
+pub(in crate::resolve) fn written_inline_modifier(
+    parameter: &crate::ast::Param,
+) -> crate::types::InlineParameterModifier {
+    crate::types::InlineParameterModifier::written(
+        parameter.is_materialized_lambda,
+        parameter.is_crossinline,
+    )
+}
 
 /// The functional shape at one argument position of a selected provider candidate. Lambdas consume
 /// the split context/receiver/value inputs; callable references consume `callable_type`. Keeping one

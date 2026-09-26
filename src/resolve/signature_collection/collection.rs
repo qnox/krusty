@@ -2893,22 +2893,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                         );
                     }
-                    // An unresolved supertype is diagnosed at its own source span and is never emitted.
-                    let super_span = |name: &str| {
-                        if let Some(base) = classifier_header
-                            .base
-                            .as_ref()
-                            .filter(|base| base.name == name)
-                        {
-                            return base.span;
-                        }
-                        classifier_header
-                            .supertypes
-                            .iter()
-                            .find(|t| t.name == name)
-                            .map(|t| t.span)
-                            .unwrap_or(c.span)
-                    };
                     let mut resolve_super = |s: &str| -> String {
                         let resolved =
                             declared_supertype_name(c, s, &header_class_names, &lexical_inheritors)
@@ -2921,7 +2905,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 if !compact_local_header {
                                     let segment = class_names.unresolved_segment(s);
                                     diags.error(
-                                        super_span(s),
+                                        // An unresolved supertype is diagnosed at its own source span.
+                                        supertype_reference_span(&classifier_header, c.span, s),
                                         format!("unresolved reference '{segment}'."),
                                     );
                                 }
