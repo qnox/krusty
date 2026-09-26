@@ -145,7 +145,10 @@ impl FrameComputation<'_> {
             locals: entry.clone(),
             stack: Vec::new(),
         });
-        let mut pending: Vec<usize> = vec![0];
+        // The frames merged here do not depend on the order blocks are visited in, only how
+        // often they are revisited. Taking the lowest block first walks a join's successors once
+        // its predecessors have settled, instead of after every predecessor that widens it.
+        let mut pending = std::collections::BinaryHeap::from([std::cmp::Reverse(0usize)]);
         let mut queued = vec![false; blocks.len()];
         queued[0] = true;
         let words = |stack: &[VerificationType]| -> usize {
@@ -155,7 +158,7 @@ impl FrameComputation<'_> {
                 .sum()
         };
         let mut max_stack = 0;
-        while let Some(b) = pending.pop() {
+        while let Some(std::cmp::Reverse(b)) = pending.pop() {
             queued[b] = false;
             let block = &blocks[b];
             let mut state = input[b].clone().expect("a queued block has an input");
@@ -191,7 +194,7 @@ impl FrameComputation<'_> {
                 };
                 if changed && !queued[to] {
                     queued[to] = true;
-                    pending.push(to);
+                    pending.push(std::cmp::Reverse(to));
                 }
                 Ok(())
             };
