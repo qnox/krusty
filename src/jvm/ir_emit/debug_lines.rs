@@ -4,7 +4,8 @@
 //! those locations into `LineNumberTable` marks without teaching expression emission how the maps
 //! are represented.
 
-use crate::ir::{ExprId, IrFile};
+use crate::fir::SyntheticOriginKind;
+use crate::ir::{ExprId, IrFile, IrNodeOrigin};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
@@ -51,6 +52,21 @@ pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder)
         .or_else(|| ir.expr_source_lines.get(&returned).copied())
         .or_else(|| ir.expr_lines.get(&returned).copied())
     {
+        if line != 0 {
+            code.mark_line(line);
+        }
+    }
+}
+
+/// Mark a loop's own line at control lowering generated for it: a `for` loop's update and exit
+/// test, and the bottom condition of its `do…while` shape.
+///
+/// kotlinc's `ForLoopsLowering` builds that control at the loop's offsets, and its codegen marks it
+/// like any other expression, so after the body the loop's line comes back at the first instruction
+/// of the update (`line 7: 74` after the body's `line 8`). `None` — a loop emitted with no statement
+/// line in effect — marks nothing, as a node without offsets does in kotlinc.
+pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) {
+    if let Some(line) = loop_line {
         if line != 0 {
             code.mark_line(line);
         }
@@ -131,6 +147,26 @@ impl Emitter<'_> {
     /// [`Self::mark_inline_call_site_line`]).
     pub(super) fn mark_dispatch_line(&self, expression: ExprId, code: &mut CodeBuilder) {
         mark_dispatch(self.ir, expression, code);
+    }
+
+    /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
+    /// place (`SyntheticOriginKind::InlinedCall`).
+    ///
+    /// Inside a condition the line in effect is written again at once, for the jump that follows;
+    /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
+    /// last line number after an inlined body, which ran under the callee's lines.
+    pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
+        let Some(IrNodeOrigin::Synthetic {
+            kind: SyntheticOriginKind::InlinedCall,
+            ..
+        }) = self.ir.fir_origins.get(&expression)
+        else {
+            return;
+        };
+        match code.current_line() {
+            Some(line) if self.inside_condition => code.inlined_line(line),
+            _ => code.forget_line(),
+        }
     }
 
     /// Mark the site of an INLINE call, at the first instruction its expansion emits.

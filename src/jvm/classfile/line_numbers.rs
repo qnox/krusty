@@ -358,6 +358,42 @@ mod tests {
         assert_eq!(code.line_marks(), [(0, 5)]);
     }
 
+    /// After an inlined call the line in effect is forgotten, so the next mark of the SAME line is
+    /// written again: kotlinc's store of a loop's `last` after the inline `toInt()` of its bound.
+    #[test]
+    fn a_forgotten_line_is_written_again_by_the_next_mark() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(6);
+        advance(&mut code);
+        code.mark_line(6);
+        assert_eq!(
+            code.line_marks(),
+            [(0, 6)],
+            "an ordinary re-mark deduplicates"
+        );
+        code.forget_line();
+        code.mark_line(6);
+        advance(&mut code);
+        code.mark_line(6);
+        assert_eq!(
+            code.line_marks(),
+            [(0, 6), (1, 6)],
+            "only the first mark after the forget is written"
+        );
+    }
+
+    /// Inside a condition the line after an inlined call is written at once, for the jump that
+    /// follows, even though it is the line already in effect.
+    #[test]
+    fn an_inlined_line_is_written_even_when_already_in_effect() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(6);
+        advance(&mut code);
+        code.inlined_line(6);
+        code.inlined_line(6);
+        assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
+    }
+
     /// A retained entry is spent by the mark that appends after it: a third at the same offset
     /// replaces the second rather than appending again.
     #[test]

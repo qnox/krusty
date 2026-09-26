@@ -2683,6 +2683,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **A `for` loop's generated control carries the loop's line.** kotlinc's `ForLoopsLowering` builds
+  a `for` loop's update, exit test and the bottom condition of its `do…while` shape at the loop's
+  offsets, and codegen marks them like any other expression, so after the body the `for` line comes
+  back at the first instruction of that control (`for (i in 0..n) {⏎ sink(i) ⏎}` has `line 6: 11` after
+  the body's `line 7`). The JVM emitter marks the statement line in effect where the loop begins (a
+  `for` is always a statement) before a loop's update, and before the bottom condition of a
+  `do…while` whose condition has no source line of its own; a written `do…while` condition marks its
+  own. `tests/loop_control_lines_e2e.rs` (full-byte against kotlinc).
+- **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
+  `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
+  condition and otherwise forgets it, so the next expression's mark is written even on the same
+  line. Besides user inline functions (the inliner's), this applies to the calls `ForLoopsLowering`
+  inlines into an unsigned `for` header: `toInt()`/`toLong()` on a non-constant `UInt`/`ULong`
+  bound (constants are folded) and `UInt.compareTo`/`ULong.compareTo` in the ordering test;
+  `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
+  records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
+  `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
 - **`LocalVariableTable` for regular function bodies**: block locals end at block exit; method
   locals, `this`, and parameters span to method end. Parsed non-suspend functions record source
   local names through `IrFile::value_names`; synthesized and suspend methods retain their existing

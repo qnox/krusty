@@ -814,7 +814,7 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // A sibling of `tests` rather than a child of it: the root test module is already over the size
 // this repository lets a file reach, so a new responsibility is declared here instead of growing it.
