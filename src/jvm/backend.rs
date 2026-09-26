@@ -67,20 +67,21 @@ pub(crate) struct BackendPassFacts {
 /// 3. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
 ///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
 ///
-/// 4. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
-///    initialization. Common IR retains them for targets without zero-initialized fields.
-///
-/// 5. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
+/// 4. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
 ///    and fold its marked conversion chain; later representation passes may refine the slot.
 ///
-/// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 5. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 7. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 6. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
 ///
-/// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
+///
+/// 8. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
+///    initialization, judged by each field's physical slot now that carriers are realized. Common
+///    IR retains them for targets without zero-initialized fields.
 ///
 /// 9. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
 ///    value-class lowering has fixed their physical carriers.
@@ -145,9 +146,6 @@ fn run_backend_passes_after_plugins(
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir);
-    // The JVM supplies default field values before any constructor runs. Elide only source
-    // declaration stores recorded by exact ExprId; common IR and other targets keep them.
-    crate::jvm::property_storage::elide_default_property_stores(ir);
     // Kotlin parameter nullability is already fixed in common IR. Select the JVM's entry-guard
     // realization before generic/value-class erasure changes the physical parameter types; those
     // later representation passes may then remove a guard whose carrier becomes primitive.
@@ -176,6 +174,10 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::ValueClasses);
     }
+    // The JVM supplies default field values before any constructor runs. Elide only source
+    // declaration stores recorded by exact ExprId; common IR and other targets keep them. Runs
+    // after value-class lowering, so each field's type is the physical slot the JVM zero-fills.
+    crate::jvm::property_storage::elide_default_property_stores(ir);
     if let Some(stems) = stems {
         crate::jvm::module_calls::resolve_foreign_template_facades(ir, stems);
         crate::jvm::module_calls::realize_default_calls(

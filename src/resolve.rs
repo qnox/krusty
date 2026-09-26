@@ -145,7 +145,10 @@ pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
-use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
+use lambda_expectation::{
+    functional_argument_expectation, module_member_lambda_shape, shaped_argument_inlining,
+    written_inline_modifier, FunctionalArgumentExpectation, MemberLambdaShape,
+};
 pub use lambda_returns::ReturnTarget;
 use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::EnclosingTypeParameterDeclaration;
@@ -1154,6 +1157,9 @@ pub struct Signature {
     /// implicit `this` receiver (so a bare member/extension call inside resolves against it). Parallel
     /// to `params`; empty = none are receivers.
     pub lambda_recv: Vec<bool>,
+    /// Per logical parameter, the `crossinline`/`noinline` modifier it wrote. Parallel to `params`;
+    /// empty when the source publishes none.
+    pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
     /// Source visibility.
     pub visibility: Visibility,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
@@ -1250,6 +1256,15 @@ impl Signature {
     pub fn is_inline(&self) -> bool {
         self.flags.has(SigFlags::IS_INLINE)
     }
+    /// Whether a lambda argument for logical parameter `parameter` is inlined into the caller's
+    /// frame: the callable is inline and the parameter wrote neither `crossinline` nor `noinline`.
+    pub fn inlines_lambda_for(&self, parameter: usize) -> bool {
+        self.is_inline()
+            && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
+                &self.inline_modifiers,
+                parameter,
+            )
+    }
     #[inline]
     pub fn is_operator(&self) -> bool {
         self.flags.has(SigFlags::IS_OPERATOR)
@@ -1325,6 +1340,7 @@ impl Signature {
         call_sig.exact_params = self.exact_params.clone();
         call_sig.no_infer_params = self.no_infer_params.clone();
         call_sig.implicit_integer_coercion = self.implicit_integer_coercion.clone();
+        call_sig.inline_modifiers = self.inline_modifiers.clone();
         call_sig
     }
 }
@@ -1360,6 +1376,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
         param_names: function.call_sig.param_names.clone(),
         lambda_param_types: function.call_sig.lambda_param_types.clone(),
         lambda_recv: function.call_sig.lambda_receiver_params.clone(),
+        inline_modifiers: function.call_sig.inline_modifiers.clone(),
         visibility: function.visibility,
         context_count: function.context_count,
         source_decl,
@@ -2160,14 +2177,6 @@ struct GenericMemberQuery<'a> {
     partial_arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
     expected_result: Option<Ty>,
-}
-
-struct MemberLambdaShape {
-    param_types: Vec<Option<Vec<Ty>>>,
-    expected_types: Vec<Option<Ty>>,
-    signatures: Vec<Option<&'static crate::types::FnSig>>,
-    receivers: Vec<Option<Ty>>,
-    is_inline: bool,
 }
 
 #[derive(Clone, Default)]
@@ -5933,101 +5942,6 @@ fn named_whole_array_varargs(
         .collect()
 }
 
-fn module_member_lambda_shape(
-    source: &dyn SymbolSource,
-    member: &crate::libraries::LibraryMember,
-    generic_member: Option<&GenericMemberPlan>,
-    contextual: &ContextualCallShape,
-    args: &[ExprId],
-    names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    is_inline: bool,
-) -> Option<MemberLambdaShape> {
-    let visible_indices = call_argument_parameter_indices(
-        args.len(),
-        contextual.params.len(),
-        names,
-        trailing_lambda,
-        &contextual.call_sig,
-    )?;
-    let indices = visible_indices
-        .into_iter()
-        .map(|parameter| contextual.parameter_indices.get(parameter).copied())
-        .collect::<Option<Vec<_>>>()?;
-    Some(MemberLambdaShape {
-        param_types: indices
-            .iter()
-            .map(|&parameter| {
-                generic_member
-                    .and_then(|plan| generic_member_lambda_params(source, plan, parameter))
-                    .or_else(|| module_member_lambda_params(source, member, parameter))
-            })
-            .collect(),
-        expected_types: indices
-            .iter()
-            .map(|&parameter| {
-                generic_member
-                    .and_then(|plan| {
-                        plan.method
-                            .signature
-                            .params
-                            .get(parameter)
-                            .copied()
-                            .map(|shape| {
-                                crate::symbol_resolver::ty_subst_keep_unbound(
-                                    shape,
-                                    &plan.call_bindings,
-                                )
-                            })
-                    })
-                    .or_else(|| member.params.get(parameter).copied())
-            })
-            .collect(),
-        signatures: indices
-            .iter()
-            .map(|&parameter| {
-                let semantic = generic_member
-                    .and_then(|plan| {
-                        plan.method
-                            .signature
-                            .params
-                            .get(parameter)
-                            .copied()
-                            .map(|shape| {
-                                crate::symbol_resolver::ty_subst_keep_unbound(
-                                    shape,
-                                    &plan.call_bindings,
-                                )
-                            })
-                    })
-                    .or_else(|| {
-                        member
-                            .generic_sig
-                            .as_ref()
-                            .and_then(|signature| signature.params.get(parameter).copied())
-                    })
-                    .or_else(|| member.params.get(parameter).copied());
-                match semantic {
-                    Some(Ty::Fun(signature)) => Some(signature),
-                    _ => None,
-                }
-            })
-            .collect(),
-        receivers: indices
-            .iter()
-            .map(|&parameter| {
-                member
-                    .call_sig
-                    .lambda_receivers
-                    .get(parameter)
-                    .copied()
-                    .flatten()
-            })
-            .collect(),
-        is_inline,
-    })
-}
-
 fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
     fn selected<T: Clone>(values: &[T], parameters: &[usize]) -> Vec<T> {
         parameters
@@ -6051,7 +5965,7 @@ fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
         lambda_receivers: selected(&sig.lambda_receivers, parameters),
         lambda_receiver_params: selected(&sig.lambda_receiver_params, parameters),
         lambda_context_counts: selected(&sig.lambda_context_counts, parameters),
-        lambda_materialized: selected(&sig.lambda_materialized, parameters),
+        inline_modifiers: selected(&sig.inline_modifiers, parameters),
         platform_nullable_params: selected(&sig.platform_nullable_params, parameters),
         required: crate::libraries::required_arity(parameters.len(), &param_defaults),
         param_defaults,
@@ -20283,39 +20197,68 @@ impl<'a> Checker<'a> {
                     extension: ext_lambda_shape,
                     provider: provider_member_lambda_pts,
                 } = shaping;
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = ext_lambda_shape
+                // When call syntax reads a property and invokes its value, select that invoke
+                // declaration now. Its stable plan owns both contextual lambda typing and final
+                // recording; completed lambda types never reopen the overload family.
+                let property_invoke_plan = (module_lambda_shape.is_none()
+                    && ext_lambda_shape.is_none()
+                    && receiver_callables.functions().is_empty())
+                .then(|| {
+                    self.plan_property_invoke(
+                        scope,
+                        call,
+                        rt,
+                        &name,
+                        args,
+                        &generic_member_partial,
+                        CallResultConstraint::direct(expected),
+                    )
+                })
+                .flatten();
+                let argument_lambda_shape = property_invoke_plan
                     .as_ref()
-                    .and_then(|shape| shape.param_types.clone());
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.receivers.clone());
-                let ext_lambda_context_counts: Option<Vec<usize>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.context_counts.clone());
-                let ext_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.expected_types.clone());
-                let ext_literal_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.fixed_expected_types.clone());
+                    .map(|plan| &plan.invoke.lambda_shape)
+                    .or(ext_lambda_shape.as_ref());
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.param_types.clone());
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.receivers.clone());
+                let ext_lambda_context_counts: Option<Vec<usize>> =
+                    argument_lambda_shape.and_then(|shape| shape.context_counts.clone());
+                let ext_callable_types: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.expected_types.clone());
+                let ext_literal_callable_types: Option<Vec<Option<Ty>>> =
+                    argument_lambda_shape.and_then(|shape| shape.fixed_expected_types.clone());
                 crate::trace_compiler!(
                     "lambda_shape",
                     "member call={name} receiver={rt:?} params={ext_lambda_pts:?} receivers={ext_lambda_recvs:?} contexts={ext_lambda_context_counts:?} provider={provider_member_lambda_pts:?}",
                 );
                 // Inline extensions splice lambdas, so captured mutable locals stay direct for this call.
-                let allow_lambda_mutation = method_sig
-                    .as_ref()
-                    .is_some_and(|member| self.member_inline_body_available(member))
-                    || (ext_lambda_pts.is_some()
-                        && receiver_callables
-                            .functions()
-                            .iter()
-                            .filter(|function| function.is_extension())
-                            .any(|function| function.flags.inline.can_inline()));
+                let allow_lambda_mutation = (0..args.len()).any(|argument| {
+                    (match property_invoke_plan.as_ref() {
+                        Some(plan) => plan.invoke.inlines_argument(argument),
+                        None => shaped_argument_inlining(
+                            module_lambda_shape.as_ref(),
+                            argument_lambda_shape,
+                            argument,
+                        ),
+                    }) == Some(true)
+                });
                 let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
                     args.iter()
                         .enumerate()
                         .map(|(i, &a)| {
+                            let inlined = match property_invoke_plan.as_ref() {
+                                Some(plan) => plan.invoke.inlines_argument(i),
+                                None => shaped_argument_inlining(
+                                    module_lambda_shape.as_ref(),
+                                    argument_lambda_shape,
+                                    i,
+                                ),
+                            };
+                            if let Some(inlined) = inlined {
+                                c.argument_lambda_inlining.insert(a, inlined);
+                            }
                             if matches!(c.file.expr(a), Expr::CallableRef { .. }) {
                                 let expected = module_lambda_shape
                                     .as_ref()
@@ -20771,6 +20714,34 @@ impl<'a> Checker<'a> {
                     ) {
                         return ret;
                     }
+                }
+                if let Some(plan) = property_invoke_plan {
+                    if let Some((visibility, owner)) = plan.property.access() {
+                        if visibility != Visibility::Public
+                            && self.reject_if_inaccessible(
+                                visibility,
+                                &name,
+                                owner,
+                                self.call_callee_name_span(call),
+                            )
+                        {
+                            return Ty::Error;
+                        }
+                    }
+                    let value_ty = self.record_property_read(scope, Some(callee), plan.property);
+                    return self.record_planned_invoke_or_report(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        callee,
+                        value_ty,
+                        span,
+                        plan.invoke,
+                        CallResultConstraint::direct(expected),
+                    );
                 }
                 // A MEMBER PROPERTY used with call syntax is a value read followed by the ordinary
                 // invoke convention. A callable value (`obj.func(args)`) flows through that shared
@@ -22105,12 +22076,17 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_context_counts: Option<Vec<usize>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.context_counts.clone());
-                // Per-param `crossinline`/`noinline`: such a lambda argument is MATERIALIZED (a real
-                // closure, e.g. the `Continuation(ctx){…}` factory's `resumeWith`), so a mutable local it
-                // captures must be `Ref`-boxed — DON'T treat it as an inline splice.
-                let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_lambda_shape
+                // Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is
+                // `Ref`-boxed (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
+                let toplevel_lambda_boxes_captures: Option<Vec<Option<bool>>> =
+                    toplevel_lambda_shape
+                        .as_ref()
+                        .and_then(|shape| shape.boxes_captures.clone());
+                // The shape's own callable may be a companion's `operator fun invoke` rather than
+                // a top-level function; its inline flag decides where a lambda's `return` may go.
+                let toplevel_shape_inline = toplevel_lambda_shape
                     .as_ref()
-                    .and_then(|shape| shape.materialized.clone());
+                    .is_some_and(|shape| shape.inline);
                 // Functional-interface adaptation must be selected before a lambda receives its
                 // first expected type. Query the same federated top-level candidate set used for
                 // final resolution; declaration origin never participates in this decision.
@@ -22202,7 +22178,6 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_names.as_deref(),
                                     self.file.call_has_trailing_lambda.contains(&call.0),
-                                    self.member_inline_body_available(&member),
                                 )
                             })
                     } else {
@@ -22317,8 +22292,8 @@ impl<'a> Checker<'a> {
                     .and_then(|shape| shape.expected_types.clone());
                 let this_member_lambda_inline =
                     implicit_library_ext_lambda_shape.is_some_and(|shape| shape.inline);
-                let this_member_lambda_materialized =
-                    implicit_library_ext_lambda_shape.and_then(|shape| shape.materialized.clone());
+                let this_member_lambda_boxes_captures = implicit_library_ext_lambda_shape
+                    .and_then(|shape| shape.boxes_captures.clone());
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
@@ -22526,7 +22501,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                        if let Some((pt, receiver, signature, is_inline)) =
+                        if let Some((pt, receiver, signature, inlined)) =
                             ordinary_this_member_lambda_shape
                                 .as_ref()
                                 .and_then(|shape| {
@@ -22539,13 +22514,13 @@ impl<'a> Checker<'a> {
                                                 types.clone(),
                                                 shape.receivers.get(i).copied().flatten(),
                                                 shape.signatures.get(i).copied().flatten(),
-                                                shape.is_inline,
+                                                shape.inlined.get(i).copied().unwrap_or(false),
                                             )
                                         })
                                 })
                         {
                             if let Some(signature) = signature {
-                                return self.with_lambda_mutation(is_inline, |checker| {
+                                return self.with_argument_lambda(a, inlined, |checker| {
                                     checker.check_lambda_with_function_type_and_params_labeled(
                                         scope,
                                         a,
@@ -22557,7 +22532,7 @@ impl<'a> Checker<'a> {
                                 });
                             }
                             if let Some(receiver) = receiver {
-                                return self.with_lambda_mutation(is_inline, |checker| {
+                                return self.with_argument_lambda(a, inlined, |checker| {
                                     checker.check_lambda_with_receiver_labeled(
                                         scope,
                                         a,
@@ -22567,7 +22542,7 @@ impl<'a> Checker<'a> {
                                     )
                                 });
                             }
-                            return self.with_lambda_mutation(is_inline, |checker| {
+                            return self.with_argument_lambda(a, inlined, |checker| {
                                 checker.check_lambda_with_types_labeled(
                                     scope,
                                     a,
@@ -22588,18 +22563,19 @@ impl<'a> Checker<'a> {
                                 .copied()
                                 .flatten();
                             let inline = this_member_lambda_inline
-                                && !this_member_lambda_materialized
+                                && this_member_lambda_boxes_captures
                                     .as_ref()
-                                    .and_then(|materialized| materialized.get(i))
+                                    .and_then(|boxes| boxes.get(i))
                                     .copied()
-                                    .unwrap_or(false);
+                                    .flatten()
+                                    == Some(false);
                             if let Some(Ty::Fun(signature)) = this_member_lambda_expected
                                 .as_ref()
                                 .and_then(|expected| expected.get(i))
                                 .copied()
                                 .flatten()
                             {
-                                return self.with_lambda_mutation(inline, |checker| {
+                                return self.with_argument_lambda(a, inline, |checker| {
                                     checker.check_lambda_with_function_type_and_params_labeled(
                                         scope,
                                         a,
@@ -22631,7 +22607,7 @@ impl<'a> Checker<'a> {
                                 .min(pt.len());
                             if context_count > 0 {
                                 let value_start = context_count + usize::from(receiver.is_some());
-                                return self.with_lambda_mutation(inline, |checker| {
+                                return self.with_argument_lambda(a, inline, |checker| {
                                     checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
@@ -22650,7 +22626,7 @@ impl<'a> Checker<'a> {
                                 });
                             }
                             if let Some(receiver) = receiver {
-                                return self.with_lambda_mutation(inline, |checker| {
+                                return self.with_argument_lambda(a, inline, |checker| {
                                     checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
@@ -22668,7 +22644,7 @@ impl<'a> Checker<'a> {
                                     )
                                 });
                             }
-                            return self.with_lambda_mutation(inline, |checker| {
+                            return self.with_argument_lambda(a, inline, |checker| {
                                 checker.check_lambda_with_types_labeled(
                                     scope,
                                     a,
@@ -22723,12 +22699,13 @@ impl<'a> Checker<'a> {
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            // crossinline/noinline materializes a closure; other inline lambdas splice.
-                            let materialized = toplevel_lambda_materialized
+                            // A crossinline/noinline lambda Ref-boxes the locals it changes.
+                            let boxes_captures = toplevel_lambda_boxes_captures
                                 .as_ref()
                                 .and_then(|m| m.get(i))
                                 .copied()
-                                .unwrap_or(false);
+                                .flatten()
+                                .unwrap_or(true);
                             // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
                             // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
                             // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
@@ -22774,8 +22751,12 @@ impl<'a> Checker<'a> {
                                 self.postponed_call_constraints
                                     .push(PostponedCallConstraints::for_formals(postponed_formals));
                             }
+                            self.argument_lambda_inlining.insert(
+                                a,
+                                (toplevel_inline || toplevel_shape_inline) && !boxes_captures,
+                            );
                             let checked = self.with_lambda_mutation(
-                                    toplevel_inline && !materialized,
+                                    toplevel_inline && !boxes_captures,
                                     |c| {
                                         if let Some(Ty::Fun(signature)) = expected_type {
                                             if toplevel_lambda_fixed_expected
@@ -22887,7 +22868,13 @@ impl<'a> Checker<'a> {
                             .and_then(|pts| pts.get(i))
                             .cloned()
                             .unwrap_or_default();
-                        return self.with_lambda_mutation(true, |c| {
+                        let inlined = !toplevel_lambda_boxes_captures
+                            .as_ref()
+                            .and_then(|boxes| boxes.get(i))
+                            .copied()
+                            .flatten()
+                            .unwrap_or(true);
+                        return self.with_argument_lambda(a, inlined, |c| {
                             c.check_lambda_with_types_labeled(
                                 scope,
                                 a,
@@ -23081,9 +23068,10 @@ impl<'a> Checker<'a> {
                                     .push(PostponedCallConstraints::for_formals(postponed_formals));
                             }
                             let has_receiver = sig.lambda_recv.get(pi).copied().unwrap_or(false);
-                            let checked = self.with_lambda_mutation(sig.is_inline(), |c| {
-                                if fixed_expected_return {
-                                    return c
+                            let checked =
+                                self.with_argument_lambda(a, sig.inlines_lambda_for(pi), |c| {
+                                    if fixed_expected_return {
+                                        return c
                                         .check_lambda_with_fixed_function_type_and_params_labeled(
                                             scope,
                                             a,
@@ -23092,15 +23080,15 @@ impl<'a> Checker<'a> {
                                             has_receiver,
                                             call_fn_name.as_deref(),
                                         );
-                                }
-                                c.check_lambda_with_function_type_labeled(
-                                    scope,
-                                    a,
-                                    expected_function,
-                                    has_receiver,
-                                    call_fn_name.as_deref(),
-                                )
-                            });
+                                    }
+                                    c.check_lambda_with_function_type_labeled(
+                                        scope,
+                                        a,
+                                        expected_function,
+                                        has_receiver,
+                                        call_fn_name.as_deref(),
+                                    )
+                                });
                             if collect_postponed {
                                 let inferred = self
                                     .postponed_call_constraints
@@ -23433,8 +23421,10 @@ impl<'a> Checker<'a> {
                                     .get(parameter)
                                     .copied()
                                     .unwrap_or(false);
-                                arg_tys[argument_index] =
-                                    self.with_lambda_mutation(signature.is_inline(), |checker| {
+                                arg_tys[argument_index] = self.with_argument_lambda(
+                                    argument,
+                                    signature.inlines_lambda_for(parameter),
+                                    |checker| {
                                         checker.check_argument_expected(
                                             scope,
                                             argument,
@@ -23442,7 +23432,8 @@ impl<'a> Checker<'a> {
                                             has_receiver,
                                             call_fn_name.as_deref(),
                                         )
-                                    });
+                                    },
+                                );
                             }
                         }
                     }
@@ -23957,6 +23948,7 @@ impl<'a> Checker<'a> {
                             info,
                             bindings,
                             intersection_bindings: HashMap::new(),
+                            candidate_index: None,
                         }))
                     })
                     .or_else(|| {
@@ -26468,6 +26460,12 @@ impl<'a> Checker<'a> {
             self.report_unresolved_statement_label(s);
             return;
         };
+        if self.return_allowed && self.lambda_returns.leaves_its_frame(target) {
+            self.diags.error(
+                self.file.stmt_spans[s.0 as usize],
+                "'return' is prohibited here.",
+            );
+        }
         self.stmt_return_targets.insert(s, target);
         if label.is_some() && matches!(target, ReturnTarget::Lambda(_)) {
             let ReturnTarget::Lambda(lambda) = target else {
@@ -26679,9 +26677,7 @@ impl<'a> Checker<'a> {
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
-        let previous_function_return_label = self
-            .lambda_returns
-            .replace_function_label(Some(f.name.clone()));
+        let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         let suppression_depth =
             self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
@@ -27027,6 +27023,7 @@ impl<'a> Checker<'a> {
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
+            inline_modifiers: f.params.iter().map(written_inline_modifier).collect(),
             visibility: f.visibility,
             context_count: f.context_count,
             source_decl: None,
@@ -27205,8 +27202,7 @@ impl<'a> Checker<'a> {
         );
         self.active_statement_suppressions
             .truncate(suppression_depth);
-        self.lambda_returns
-            .restore_function_label(previous_function_return_label);
+        self.lambda_returns.leave_function(enclosing_return_frame);
     }
 }
 
@@ -27701,13 +27697,14 @@ mod tests {
             vec![false],
             vec![Some(Ty::String)],
             vec![true],
-            vec![false],
+            vec![crate::types::InlineParameterModifier::None],
             None,
         );
 
         let expectation = functional_argument_expectation(
             &crate::libraries::EmptySymbolSource,
             &candidate.call_sig,
+            false,
             0,
             erased_callable,
         )
@@ -37363,45 +37360,7 @@ pub(crate) fn member_extension_function_with(
             );
             continue;
         };
-        candidates.push(MemberExtensionFunctionCandidate {
-            stable_declaration: shape.function.signature.stable_declaration,
-            external_identity: shape.function.external_identity,
-            external_default_provider: shape.function.external_default_provider,
-            priority: shape.priority,
-            dispatch_receiver: shape.dispatch_receiver,
-            score: instantiated.score,
-            physical_receiver: shape.function.physical_receiver,
-            extension_receiver: instantiated.extension_receiver,
-            params: instantiated.logical_params,
-            visible_params: instantiated.visible_params,
-            physical_params: shape.function.physical_params.clone(),
-            context_args: instantiated.context_sources,
-            context_count: shape.function.signature.context_count,
-            ret: instantiated.ret,
-            physical_ret: shape.function.signature.ret,
-            call_sig: instantiated.call_sig,
-            diagnostic_param_names: shape.function.signature.call_sig().param_names,
-            physical_vararg_index: instantiated.physical_vararg_index,
-            argument_parameters: instantiated.argument_parameters,
-            visibility: shape.function.signature.visibility,
-            is_operator: shape.is_operator,
-            inline: InlineKind::from_flags(
-                shape.function.signature.is_inline(),
-                shape.function.signature.requires_splice(),
-            ),
-            inline_body_plan: shape.function.inline_body_plan.clone(),
-            suspend: shape.function.signature.is_suspend(),
-            declared_params: shape
-                .function
-                .signature
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.clone())
-                .unwrap_or_else(|| shape.function.signature.params.clone()),
-            declared_ret: shape.function.declared_ret,
-            owner: shape.owner,
-            physical_name: shape.function.physical_name.clone(),
-        });
+        candidates.push(member_extension_selection::candidate(&shape, instantiated));
     }
     member_extension_selection::retain_selected(&mut candidates, selection);
     let mut maximal =
@@ -37757,6 +37716,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
+        argument_lambda_inlining: HashMap::new(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
@@ -40007,6 +39967,9 @@ struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
     bindings: crate::symbol_resolver::GSigBinds,
     intersection_bindings: HashMap<String, Vec<Ty>>,
+    /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
+    /// therefore finish against the same declaration instead of selecting the overload again.
+    candidate_index: Option<usize>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -40732,6 +40695,11 @@ struct Checker<'a> {
     /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
     /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
     allow_lambda_mutation: bool,
+    /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
+    /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
+    /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument
+    /// is checked against its parameter, and read when the lambda's return scope opens.
+    argument_lambda_inlining: HashMap<ExprId, bool>,
     /// Enables symbolic generic substitution while inferring declaration signatures. Ordinary checking
     /// stays erased until the backend can emit every corresponding bridge and value-class shape.
     symbolic_signature_inference: bool,
@@ -41949,6 +41917,23 @@ impl<'a> Checker<'a> {
         self.implicit_receivers(scope)
             .into_iter()
             .find(|receiver| receiver.identity == identity)
+    }
+
+    /// Check the lambda argument `argument` of a call whose selected parameter inlines it into the
+    /// caller's frame (`inlined`) or not. The same fact permits mutating captured locals in place
+    /// and lets a return leave through the lambda.
+    fn with_argument_lambda<R>(
+        &mut self,
+        argument: ExprId,
+        inlined: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        crate::trace_compiler!(
+            "resolve",
+            "argument lambda expression={argument:?} inlined={inlined}"
+        );
+        self.argument_lambda_inlining.insert(argument, inlined);
+        self.with_lambda_mutation(inlined, f)
     }
 
     fn with_lambda_mutation<R>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -45338,6 +45323,7 @@ impl<'a> Checker<'a> {
                 info: candidate,
                 bindings: specialized_bindings,
                 intersection_bindings,
+                candidate_index: Some(index),
             };
             applicable.push((
                 score.rank,
@@ -46550,16 +46536,15 @@ impl<'a> Checker<'a> {
                 })
                 .collect(),
         );
-        shape.materialized = Some(
+        shape.boxes_captures = Some(
             argument_map
                 .iter()
                 .map(|&parameter| {
                     overload
                         .call_sig
-                        .lambda_materialized
+                        .inline_modifiers
                         .get(parameter)
-                        .copied()
-                        .unwrap_or(false)
+                        .map(|inlining| inlining.boxes_captures())
                 })
                 .collect(),
         );
@@ -46586,9 +46571,9 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .is_some_and(|items| items.iter().any(|count| *count > 0))
             || shape
-                .materialized
+                .boxes_captures
                 .as_ref()
-                .is_some_and(|items| items.iter().any(|item| *item)))
+                .is_some_and(|items| items.iter().any(Option::is_some)))
         .then_some(shape)
     }
 
@@ -48444,32 +48429,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn member_inline_body_available(&self, member: &crate::libraries::LibraryMember) -> bool {
-        if !member.inline.can_inline() {
-            return false;
-        }
-        let Some(owner) = member.owner else {
-            return true;
-        };
-        let Some(class) = self.resolver().classifier(owner) else {
-            return true;
-        };
-        class.members.iter().any(|candidate| {
-            candidate.name == member.name
-                && candidate.params == member.params
-                && (candidate
-                    .stable_declaration
-                    .and_then(|declaration| {
-                        self.resolved_index
-                            .and_then(|index| index.declaration_anchor(declaration))
-                    })
-                    .is_some_and(|anchor| anchor.source.raw() == self.file_index)
-                    || candidate
-                        .source_member
-                        .is_some_and(|source| source.file() == self.file_index))
-        })
-    }
-
     /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
     /// EXTENSION, or a library member — checking each argument type and returning the selected target.
     /// `None` when no such method of matching arity exists (the caller then declines). Used by the
@@ -49083,7 +49042,7 @@ impl<'a> Checker<'a> {
     }
     /// Commit inline-lambda capture semantics from one already-selected callable. Candidate probing may
     /// contextually type a lambda, but only selection may decide whether that lambda is spliced or
-    /// materialized (`crossinline`/`noinline`). The checker-owned slot map supplies the exact parameter
+    /// boxes its captures (`crossinline`/`noinline`). The checker-owned slot map supplies the exact parameter
     /// for named/default/trailing-lambda calls, so lowering never reconstructs this decision from syntax.
     fn mark_selected_inline_lambdas(
         &mut self,
@@ -49094,22 +49053,21 @@ impl<'a> Checker<'a> {
         let Some(slots) = self.resolved_call_arg_slots.get(&call).cloned() else {
             return;
         };
-        let target = if inline.can_inline() {
-            LambdaCapture::InlineSplice
-        } else {
-            LambdaCapture::Closure
-        };
         for (parameter, argument) in slots.into_iter().enumerate() {
             let Some(argument) = argument else { continue };
-            if call_sig
-                .lambda_materialized
-                .get(parameter)
-                .copied()
-                .unwrap_or(false)
-                || !matches!(self.file.expr(argument), Expr::Lambda { .. })
-            {
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
                 continue;
             }
+            let target = if inline.can_inline()
+                && call_sig
+                    .inline_modifiers
+                    .get(parameter)
+                    .is_some_and(|modifier| modifier.runs_in_caller_frame())
+            {
+                LambdaCapture::InlineSplice
+            } else {
+                LambdaCapture::Closure
+            };
             self.update_lambda_info(argument, |info| info.capture = target);
         }
     }
@@ -49324,6 +49282,7 @@ impl<'a> Checker<'a> {
             info: mut selected,
             bindings: mut selected_bindings,
             intersection_bindings,
+            ..
         } = selected;
         let mut ret = selected.callable.ret;
         let expectations = self.source_generic_argument_expectations(
@@ -56619,9 +56578,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
-        let previous_function_return_label = self
-            .lambda_returns
-            .replace_function_label(Some(f.name.clone()));
+        let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
         let previous_diagnostic_function = self.diagnostic_function.replace((
@@ -56946,8 +56903,7 @@ impl<'a> Checker<'a> {
         }
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
-        self.lambda_returns
-            .restore_function_label(previous_function_return_label);
+        self.lambda_returns.leave_function(enclosing_return_frame);
         self.diagnostic_function = previous_diagnostic_function;
         self.active_statement_suppressions
             .truncate(suppression_depth);
@@ -60999,9 +60955,7 @@ impl<'a> Checker<'a> {
                     .checked_local_class_declarations
                     .contains(&DeclId(owner)),
             });
-        let previous_function_return_label = self
-            .lambda_returns
-            .replace_function_label(Some(f.name.clone()));
+        let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         self.check_infix_declaration(f, true);
         self.reset_body_mutations(
             (!self.signature_defaults_only || default_owned_method)
@@ -61337,8 +61291,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_extension_receiver = dispatch_extension_receiver;
-        self.lambda_returns
-            .restore_function_label(previous_function_return_label);
+        self.lambda_returns.leave_function(enclosing_return_frame);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }
@@ -65040,6 +64993,7 @@ impl<'a> Checker<'a> {
                     functional_argument_expectation(
                         self.libraries,
                         &candidate.call_sig,
+                        candidate.flags.inline.can_inline(),
                         parameter_index,
                         param,
                     )
@@ -65130,6 +65084,7 @@ impl<'a> Checker<'a> {
                     functional_argument_expectation(
                         self.libraries,
                         &candidate.call_sig,
+                        candidate.inline.can_inline(),
                         parameter_index,
                         param,
                     )
@@ -65305,6 +65260,8 @@ impl<'a> Checker<'a> {
         if !matches!(self.file.expr(arg), Expr::Lambda { .. }) {
             return self.expr(scope, arg);
         }
+        self.argument_lambda_inlining
+            .insert(arg, expectation.inlined);
         // The declared result decides the body's POSITION, not just its type: a `Unit` result puts
         // the last expression in statement position, so a trailing `when` with no `else` is legal
         // there. Dropping it made every builder block reject the `when` a Kotlin DSL is written
@@ -65463,7 +65420,6 @@ impl<'a> Checker<'a> {
                 args,
                 arg_names,
                 trailing_lambda,
-                self.member_inline_body_available(member),
             )
         });
         // A member normally supplies the call's lambda shape. A member that needs lambda-to-SAM
@@ -65542,7 +65498,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|count| *count > 0)
                         .then_some(plan.context_counts),
-                    materialized: None,
+                    boxes_captures: None,
                     inline: false,
                 });
         let extension = extension.or_else(|| {
@@ -65586,7 +65542,7 @@ impl<'a> Checker<'a> {
                 fixed_expected_types: None,
                 receivers: None,
                 context_counts: None,
-                materialized: None,
+                boxes_captures: None,
                 inline: false,
             })
         });
@@ -65669,6 +65625,11 @@ impl<'a> Checker<'a> {
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
+                if let Some(inlined) =
+                    shaped_argument_inlining(module_shape.as_ref(), shape.as_ref(), i)
+                {
+                    self.argument_lambda_inlining.insert(x, inlined);
+                }
                 if matches!(self.file.expr(x), Expr::CallableRef { .. }) {
                     let expected = module_shape
                         .as_ref()
@@ -65757,9 +65718,12 @@ impl<'a> Checker<'a> {
                                 .copied()
                                 .flatten()
                             {
-                                let is_inline =
-                                    module_shape.as_ref().is_some_and(|shape| shape.is_inline);
-                                return self.with_lambda_mutation(is_inline, |checker| {
+                                let inlined = module_shape
+                                    .as_ref()
+                                    .and_then(|shape| shape.inlined.get(i))
+                                    .copied()
+                                    .unwrap_or(false);
+                                return self.with_argument_lambda(x, inlined, |checker| {
                                     checker.check_lambda_with_function_type_and_params_labeled(
                                         scope,
                                         x,
@@ -66173,6 +66137,10 @@ impl<'a> Checker<'a> {
                         return self.set(e, Ty::Error);
                     }
                 };
+                if self.return_allowed && self.lambda_returns.leaves_its_frame(target) {
+                    self.diags
+                        .error(self.span(e), "'return' is prohibited here.");
+                }
                 self.expr_return_targets.insert(e, target);
                 if let Some(v) = value {
                     let returned = if label.is_none() || matches!(target, ReturnTarget::Function) {
@@ -73325,7 +73293,7 @@ impl<'a> Checker<'a> {
                 let size_type = self.expr_expected(scope, *size, Ty::Int);
                 self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
                 let expected = Ty::fun(vec![Ty::Int], elem);
-                let actual = self.with_lambda_mutation(true, |checker| {
+                let actual = self.with_argument_lambda(*initializer, true, |checker| {
                     checker.check_argument_expected(
                         scope,
                         *initializer,
@@ -73345,7 +73313,7 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
             let callable = if let Some(elem) = element_hint {
                 let expected = Ty::fun(vec![Ty::Int], elem);
-                let actual = self.with_lambda_mutation(true, |checker| {
+                let actual = self.with_argument_lambda(*initializer, true, |checker| {
                     checker.check_argument_expected(
                         scope,
                         *initializer,
@@ -73358,7 +73326,7 @@ impl<'a> Checker<'a> {
                 self.expression_function_type(scope, *initializer, actual)
                     .unwrap_or(actual)
             } else if matches!(self.file.expr(*initializer), Expr::Lambda { .. }) {
-                self.with_lambda_mutation(true, |checker| {
+                self.with_argument_lambda(*initializer, true, |checker| {
                     checker.check_lambda_with_types(scope, *initializer, &[Ty::Int])
                 })
             } else {
@@ -74420,9 +74388,13 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .or(implicit_label)
             .map(str::to_string);
-        let frame = self
-            .lambda_returns
-            .enter_lambda(e, label.clone(), expected_return);
+        // Only a lambda whose selected parameter inlines it runs in the caller's frame. Any other
+        // lambda (no call argument, or one no selected inline parameter took) has kotlinc's
+        // `InlineStatus.Unknown`, which does not allow a return to leave through it.
+        let inlined_argument = self.argument_lambda_inlining.get(&e) == Some(&true);
+        let frame =
+            self.lambda_returns
+                .enter_lambda(e, label.clone(), expected_return, inlined_argument);
         crate::trace_compiler!(
             "resolve",
             "lambda return scope enter expression={e:?} label={label:?}"
@@ -77322,6 +77294,11 @@ impl<'a> Checker<'a> {
                     matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
                 })
                 .collect(),
+            inline_modifiers: if call_sig.inline_modifiers.len() == semantic_params.len() {
+                call_sig.inline_modifiers.clone()
+            } else {
+                Vec::new()
+            },
             visibility: member.visibility,
             context_count: member.context_count.min(semantic_params.len()),
             source_decl: None,
@@ -77380,6 +77357,21 @@ impl<'a> Checker<'a> {
         shape: &MemberExtensionFunctionShape,
         call: MemberExtensionCall<'_>,
     ) -> Option<InstantiatedMemberExtension> {
+        self.instantiate_member_extension_constrained(
+            scope,
+            shape,
+            call,
+            CallResultConstraint::direct(None),
+        )
+    }
+
+    fn instantiate_member_extension_constrained(
+        &self,
+        scope: &CheckerScope<'_>,
+        shape: &MemberExtensionFunctionShape,
+        call: MemberExtensionCall<'_>,
+        result_constraint: CallResultConstraint,
+    ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
         instantiate_member_extension_with(
             self.file.explicit_context_arguments,
@@ -77389,7 +77381,7 @@ impl<'a> Checker<'a> {
                 self.unit_coerced_lambda_type(args[source], expected, actual)
             },
             &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
-            CallResultConstraint::direct(None),
+            result_constraint,
             shape,
             call,
         )

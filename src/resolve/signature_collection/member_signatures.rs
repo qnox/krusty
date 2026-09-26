@@ -200,6 +200,11 @@ pub(in crate::resolve) fn member_signature_from_header(
             .iter()
             .map(|parameter| parameter.ty.fun_has_receiver())
             .collect(),
+        inline_modifiers: header
+            .parameters
+            .iter()
+            .map(|parameter| parameter.inline_modifier)
+            .collect(),
         visibility: header.visibility,
         context_count: header.context_count,
         source_decl: None,

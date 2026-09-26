@@ -349,7 +349,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(construction_declared_params);
     copy_map!(construction_targets);
     copy_map!(static_extension_receivers);
-    copy_map!(call_materialized_lambda_params);
+    copy_map!(call_inline_modifiers);
     copy_map!(suspend_calls);
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);
