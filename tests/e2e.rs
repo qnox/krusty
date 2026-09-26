@@ -2011,6 +2011,8 @@ mod file_private_extension_scope_e2e;
 mod frame_computation_e2e;
 #[path = "local_class_naming_e2e.rs"]
 mod local_class_naming_e2e;
+#[path = "platform_primitive_operand_e2e.rs"]
+mod platform_primitive_operand_e2e;
 #[path = "unboxing_coercion_e2e.rs"]
 mod unboxing_coercion_e2e;
 
