@@ -26,9 +26,6 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// A lambda's parameter or result crosses `invoke` through a value-class adapter rather than a
     /// plain box.
     ValueClassAdapter,
-    /// A literal lambda of the call is materialized as an object, which needs kotlinc's
-    /// anonymous-object regeneration.
-    MaterializedLambda,
     /// The callee needs a later stage of the port.
     CalleeShape(UnsupportedShape),
     /// The callee has a try/catch or a backward jump and the call starts with operands on the
@@ -42,13 +39,12 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
 
 impl Emitter<'_> {
     /// The route of `call`, whose callee's body invokes at least one of the literal lambdas among
-    /// its arguments. `inline_modifiers` is the call's published `crossinline`/`noinline` modifier
-    /// for each value parameter. An error is a fact the checked IR or the
-    /// callee's class file should have made impossible.
+    /// its arguments. A literal for a `noinline` parameter is an ordinary stored argument on either
+    /// route. An error is a fact the checked IR or the callee's class file should have made
+    /// impossible.
     pub(in crate::jvm::ir_emit) fn lambda_call_route(
         &mut self,
         call: &ClasspathInlineCall<'_, '_>,
-        inline_modifiers: &[crate::types::InlineParameterModifier],
         code: &CodeBuilder,
     ) -> Result<LambdaCallRoute, &'static str> {
         let ClasspathInlineCall {
@@ -76,26 +72,13 @@ impl Emitter<'_> {
             .ok_or("an inline callee's descriptor does not match the call's operands")?;
         let mut lambda_arguments = Vec::new();
         for (index, &argument) in args.iter().enumerate() {
-            if !matches!(
-                self.ir.expr(argument),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            ) {
+            if !self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            )? {
                 continue;
-            }
-            let inlining = index
-                .checked_sub(leading_non_argument_operands)
-                .and_then(|parameter| inline_modifiers.get(parameter))
-                .ok_or("a lambda argument has no published crossinline/noinline modifier")?;
-            // Until crossinline lambdas are inlined, both modifiers take the splice.
-            if matches!(
-                inlining,
-                crate::types::InlineParameterModifier::Crossinline
-                    | crate::types::InlineParameterModifier::Noinline
-            ) {
-                return splice(SpliceReason::MaterializedLambda);
             }
             if let Some(reason) = self.lambda_splice_reason(argument) {
                 return splice(reason);
@@ -119,7 +102,7 @@ impl Emitter<'_> {
                 &physical,
                 &callee,
             )
-            .ok_or("a function-typed argument has no published materialization role")?;
+            .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         if supplies.contains(&Supply::InPlace) {
             return splice(SpliceReason::InPlaceArguments);
         }

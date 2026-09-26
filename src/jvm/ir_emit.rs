@@ -10006,26 +10006,21 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
-        let Some(inline_modifiers) = self.ir.call_inline_modifiers.get(&call_expression) else {
-            return false;
-        };
-        let lambda_parameters: Vec<usize> = args
-            .iter()
-            .enumerate()
-            .filter(|(index, &argument)| {
-                matches!(
-                    self.ir.expr(argument),
-                    IrExpr::Lambda {
-                        inline_body: Some(_),
-                        ..
-                    }
-                ) && index
-                    .checked_sub(leading_non_argument_operands)
-                    .and_then(|parameter| inline_modifiers.get(parameter))
-                    == Some(&crate::types::InlineParameterModifier::None)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        // The splice substitutes each literal the body's invokes expand, `crossinline` included; a
+        // `noinline` literal stays an ordinary argument.
+        let mut lambda_parameters = Vec::new();
+        for (index, &argument) in args.iter().enumerate() {
+            match self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            ) {
+                Ok(true) => lambda_parameters.push(index),
+                Ok(false) => {}
+                Err(_) => return false,
+            }
+        }
         // ONE plan for caller locals: where the relocated host body ends, and where each
         // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
         // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
@@ -10845,21 +10840,30 @@ impl<'a> Emitter<'a> {
             )
         });
         if has_lambda_arg {
-            let Some(inline_modifiers) = self.ir.call_inline_modifiers.get(&call_expression) else {
+            // kotlinc expands every literal whose parameter is not `noinline`; a `noinline` literal
+            // is an ordinary argument, the function object the body receives. A call with only
+            // such literals is therefore inlined like one without lambdas.
+            if !self.ir.call_inline_modifiers.contains_key(&call_expression) {
                 return false;
-            };
-            let substitutes_literal = args.iter().enumerate().any(|(index, &argument)| {
-                matches!(
-                    self.ir.expr(argument),
-                    IrExpr::Lambda {
-                        inline_body: Some(_),
-                        ..
+            }
+            let mut inlines_literal = false;
+            for (index, &argument) in args.iter().enumerate() {
+                match self.is_inlined_literal(
+                    call_expression,
+                    leading_non_argument_operands,
+                    index,
+                    argument,
+                ) {
+                    Ok(inlined) => inlines_literal |= inlined,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        return true;
                     }
-                ) && index
-                    .checked_sub(leading_non_argument_operands)
-                    .and_then(|parameter| inline_modifiers.get(parameter))
-                    == Some(&crate::types::InlineParameterModifier::None)
-            });
+                }
+            }
+            if !inlines_literal {
+                return self.try_inline_classpath_body(&inline_call, code).is_some();
+            }
             // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
             // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the
             // `Continuation(ctx){…}` fake-constructor's `new …$Continuation$1(ctx, resumeWith)` — there is
@@ -10869,9 +10873,8 @@ impl<'a> Emitter<'a> {
                 crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
                 });
-            if body_invokes_lambda && substitutes_literal {
-                let inline_modifiers = inline_modifiers.clone();
-                let route = self.lambda_call_route(&inline_call, &inline_modifiers, code);
+            if body_invokes_lambda {
+                let route = self.lambda_call_route(&inline_call, code);
                 let reason = match route {
                     Ok(bytecode_inline_call::LambdaCallRoute::MethodInliner(callee)) => {
                         if let Err(reason) =
