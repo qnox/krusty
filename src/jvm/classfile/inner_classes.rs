@@ -118,7 +118,8 @@ impl ClassWriter {
         specs
             .iter()
             .zip(retained)
-            .filter_map(|(spec, keep)| keep.then(|| spec.clone()))
+            .filter(|&(_, keep)| keep)
+            .map(|(spec, _)| spec.clone())
             .collect()
     }
 
