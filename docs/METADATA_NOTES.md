@@ -193,6 +193,8 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- Enum supertypes (kotlinc 2.4.20): the declared interfaces in source order, then the implicit
+  `kotlin.Enum<E>`. Test: `tests/metadata_enum_supertypes_e2e.rs`.
 - Enum entry body (kotlinc 2.4.20): the `Enum$ENTRY` class is `k=1` with an `ENUM_ENTRY` kind and
   LOCAL visibility (flags 202 for a final body) and no constructor record. Its class id keeps the
   `pkg/Enum.ENTRY` spelling and is marked local (`StringTableTypes.local_name`), since kotlinc gives

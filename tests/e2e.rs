@@ -1084,6 +1084,8 @@ mod member_read_on_nullable_call_result_e2e;
 mod metadata_array_signature_e2e;
 #[path = "metadata_enum_entry_classes_e2e.rs"]
 mod metadata_enum_entry_classes_e2e;
+#[path = "metadata_enum_supertypes_e2e.rs"]
+mod metadata_enum_supertypes_e2e;
 #[path = "metadata_field_presence_e2e.rs"]
 mod metadata_field_presence_e2e;
 #[path = "metadata_jvm_field_e2e.rs"]

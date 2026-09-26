@@ -769,12 +769,30 @@ pub fn build_class(
         })
         .collect();
 
-    // Enums use `Enum<E>`; classes without declarations use `Any`.
+    // An enum lists its declared interfaces, then the implicit `Enum<E>`; a class without declared
+    // supertypes lists `Any`.
     let mut supertype_msgs: Vec<Pb> = Vec::new();
     if !enum_entries.is_empty() {
+        for (index, supertype) in tail.supertypes.iter().enumerate() {
+            if matches!(supertype, Ty::Obj(classifier, _) if *classifier == crate::types::wk::kotlin_enum())
+            {
+                continue;
+            }
+            supertype_msgs.push(type_pb_declared(
+                &mut st,
+                *supertype,
+                tail.supertype_spellings
+                    .get(index)
+                    .unwrap_or(crate::spelling::Spelled::NONE),
+                &class_type_parameters,
+            ));
+        }
         supertype_msgs.push(type_pb(
             &mut st,
-            Ty::obj_args("kotlin/Enum", &[Ty::obj_name(class_internal)]),
+            Ty::obj_args_name(
+                crate::types::wk::kotlin_enum(),
+                &[Ty::obj_name(class_internal)],
+            ),
             &class_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
