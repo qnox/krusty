@@ -51,12 +51,12 @@ fn a_deep_nest_interns_each_row_inner_outer_then_name() {
 }
 
 /// A table spanning a NESTING CHAIN — `A$B`, `A$B$Alpha`, `A$B$Companion`, whose rows carry two
-/// different outers. Two things have to hold here that a flat table cannot show: every row's class
-/// entry is interned before ANY simple name (interleaving per row transposes them once the outers
-/// differ), and the retained set has to be a FIXPOINT, because interning one row's outer ref is
-/// what makes the enclosing row referenced and therefore kept.
+/// different outers. Two things have to hold here that a flat table cannot show: each row interns
+/// its inner class, outer class and simple name before the next row, and the retained set has to
+/// be a FIXPOINT, because one row's outer ref is what makes the enclosing row referenced and
+/// therefore kept.
 #[test]
-fn a_nesting_chain_interns_every_class_entry_before_any_name() {
+fn a_nesting_chain_keeps_its_enclosing_row_and_interns_row_by_row() {
     let src = "class Outer {\n\
                \x20   class Middle {\n\
                \x20       class Alpha\n\
@@ -95,4 +95,24 @@ fn a_single_row_table_is_unchanged() {
         return;
     };
     result.expect("Outer$Alpha byte-identical to kotlinc");
+}
+
+/// A file facade that reads `A.B.C.ok` keeps the `A$B` row only because `A$B$C`'s row names it as
+/// its outer, and `A$B` sorts first. The facade interns its rows when the class is written, which
+/// must use the same retained-set fixpoint as the seeding other classes do after their metadata;
+/// a single pass dropped the `A$B` row there and left `A` and `B` for the attribute's own write.
+#[test]
+fn a_facade_interns_an_enclosing_row_its_nested_row_keeps() {
+    let src = "object A {\n\
+               \x20   object B {\n\
+               \x20       object C {\n\
+               \x20           val ok = \"OK\"\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n\
+               \n\
+               fun box() = A.B.C.ok\n";
+    common::byte_diff_against_kotlinc("InnerNameFacadeChain", src, "InnerNameFacadeChainKt")
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|e| panic!("the facade is byte-identical to kotlinc: {e}"));
 }

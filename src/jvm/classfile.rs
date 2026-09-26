@@ -2299,27 +2299,7 @@ impl ClassWriter {
         // after everything else). Use the same retention predicate as early name seeding and final
         // attribute construction: interning a rejected candidate here would falsely make it a
         // referenced class.
-        let inner_specs: Vec<(String, Option<String>, Option<String>)> = self
-            .inner_class_candidates
-            .iter()
-            .filter(|candidate| self.retains_inner_class(candidate))
-            .map(|candidate| {
-                (
-                    candidate.inner.clone(),
-                    candidate.outer.clone(),
-                    candidate.name.clone(),
-                )
-            })
-            .collect();
-        for (inner, outer, name) in inner_specs {
-            self.cp.class(&inner);
-            if let Some(outer) = outer {
-                self.cp.class(&outer);
-            }
-            if let Some(name) = name {
-                self.cp.utf8(&name);
-            }
-        }
+        self.intern_retained_inner_rows();
         // kotlinc interns the `SourceFile` VALUE (the `.kt` name) right after the class annotations and
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
