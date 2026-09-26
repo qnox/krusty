@@ -7,13 +7,14 @@ mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod origins;
+pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod ranges;
 pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
     FirRuntimeFunction,
 };
 
-use crate::diag::Span;
 use crate::kt_string::KtString;
 use crate::types::TypeName;
 
@@ -28,71 +29,6 @@ use super::identities::ExternalCallableId;
 use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
 use super::signature::ResolvedTy;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SyntheticOriginKind {
-    ImplicitReceiver,
-    ImplicitConversion,
-    DefaultArgument,
-    VarargArray,
-    StringTemplateLiteral,
-    MissingElseUnit,
-    GeneratedAccessor,
-    GeneratedControlFlow,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Origin {
-    Source {
-        file: SourceFileId,
-        span: Span,
-    },
-    Synthetic {
-        cause: OriginId,
-        kind: SyntheticOriginKind,
-    },
-}
-
-#[derive(Debug, Default)]
-pub struct OriginStore {
-    origins: Vec<Origin>,
-}
-
-impl OriginStore {
-    pub fn source(&mut self, file: SourceFileId, span: Span) -> OriginId {
-        self.push(Origin::Source { file, span })
-    }
-
-    pub fn synthetic(&mut self, cause: OriginId, kind: SyntheticOriginKind) -> OriginId {
-        assert!(
-            self.get(cause).is_some(),
-            "a synthetic FIR origin must reference an existing cause"
-        );
-        self.push(Origin::Synthetic { cause, kind })
-    }
-
-    fn push(&mut self, origin: Origin) -> OriginId {
-        let id = OriginId::from_raw(next_id(self.origins.len(), "origins"));
-        self.origins.push(origin);
-        id
-    }
-
-    pub fn get(&self, id: OriginId) -> Option<Origin> {
-        self.origins.get(id.raw() as usize).copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.origins.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.origins.is_empty()
-    }
-
-    pub(super) fn storage_payload_bytes(&self) -> usize {
-        self.origins.len() * std::mem::size_of::<Origin>()
-    }
-}
 
 /// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
 /// not decide assignability, boxing, coercion, or smart-cast eligibility again.
@@ -1468,12 +1404,22 @@ pub enum FirExprKind {
         condition: FirExprId,
         then_branch: FirExprId,
         then_conversion: Option<FirConversion>,
+        /// The written `else`, or the checker's empty `Unit` block when the source has none.
         else_branch: FirExprId,
         else_conversion: Option<FirConversion>,
+        /// The checker's verdict on whether fir2ir types this `if` by its checked result
+        /// (`isDeeplyProperlyExhaustive`): the source wrote the `else`, and an `else if` chain
+        /// ending it is deeply exhaustive too. Otherwise the `if` is a `Unit` statement.
+        deeply_exhaustive: bool,
     },
     When {
         subject: Option<FirExprId>,
         branches: Box<[FirWhenBranch]>,
+        /// The checker's verdict on whether fir2ir types this `when` by its checked result
+        /// (`isDeeplyProperlyExhaustive`). With an `else`, an `else if` chain written as the
+        /// `else` result must be deeply exhaustive too; without one, the resolver typed it by its
+        /// branches only when it proved it exhaustive.
+        deeply_exhaustive: bool,
     },
     Block {
         statements: Box<[FirStatementId]>,

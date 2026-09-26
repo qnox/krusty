@@ -2,7 +2,6 @@ use crate::fir::{
     FirLocalClassCapture, FirLocalClassCaptureSource, FirStatementId, FirStatementKind,
 };
 use crate::ir::{ExprId, IrCtorArg, IrExpr, IrField};
-use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
@@ -167,44 +166,6 @@ impl BodyLowering<'_> {
         }
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
-    }
-
-    /// A checked FIR expression statement consumes its value. Preserve that semantic boundary in
-    /// common IR for exhaustive `when` expressions, whose branch result type would otherwise make
-    /// a backend treat the join as value-producing. A non-exhaustive no-else `when` deliberately
-    /// has no marker and keeps its implicit no-match fallthrough.
-    pub(super) fn consumed_statement(
-        &mut self,
-        statement: FirStatementId,
-    ) -> Result<ExprId, FirLoweringFailure> {
-        let consumes_expression = matches!(
-            self.body
-                .statement(statement)
-                .map(|statement| &statement.kind),
-            Some(FirStatementKind::Expression(_))
-        );
-        let lowered = self.statement(statement)?;
-        if consumes_expression {
-            self.coerce_statement_when_to_unit(lowered);
-        }
-        Ok(lowered)
-    }
-
-    fn coerce_statement_when_to_unit(&mut self, mut expression: ExprId) {
-        loop {
-            match self.ir.expr(expression) {
-                IrExpr::Block {
-                    value: Some(value), ..
-                } => expression = *value,
-                IrExpr::When { .. } => {
-                    if self.ir.exhaustive_whens.contains_key(&expression) {
-                        self.ir.exhaustive_whens.insert(expression, Ty::Unit);
-                    }
-                    return;
-                }
-                _ => return,
-            }
-        }
     }
 }
 

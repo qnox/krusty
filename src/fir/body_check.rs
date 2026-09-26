@@ -9,6 +9,8 @@ mod arrays;
 mod assignment_tests;
 mod assignments;
 #[cfg(test)]
+mod branch_exhaustiveness_tests;
+#[cfg(test)]
 mod builder_inference_tests;
 #[cfg(test)]
 mod call_tests;
@@ -2533,59 +2535,9 @@ impl BodyFirChecker<'_> {
                     cond,
                     then_branch,
                     else_branch,
-                } => {
-                    let result_ty = self.expression_type(expression)?;
-                    let then_origin = self.expression_origin(*then_branch)?;
-                    let checked_then = self.expression(*then_branch)?;
-                    let then_conversion = self.selected_value_conversion(
-                        *then_branch,
-                        checked_then,
-                        result_ty,
-                        then_origin,
-                    )?;
-                    let (else_branch, else_conversion) = match else_branch {
-                        Some(else_branch) => {
-                            let else_origin = self.expression_origin(*else_branch)?;
-                            let checked_else = self.expression(*else_branch)?;
-                            (
-                                checked_else,
-                                self.selected_value_conversion(
-                                    *else_branch,
-                                    checked_else,
-                                    result_ty,
-                                    else_origin,
-                                )?,
-                            )
-                        }
-                        None => {
-                            let cause = self.expression_origin(expression)?;
-                            let origin = self
-                                .origins
-                                .synthetic(cause, SyntheticOriginKind::MissingElseUnit);
-                            (
-                                self.body.add_expr(FirExpr {
-                                    origin,
-                                    ty: ResolvedTy::new(Ty::Unit)
-                                        .expect("Unit is a publishable FIR type"),
-                                    kind: FirExprKind::Block {
-                                        statements: Box::new([]),
-                                        result: None,
-                                    },
-                                }),
-                                None,
-                            )
-                        }
-                    };
-                    FirExprKind::Conditional {
-                        condition: self.boolean_condition(*cond)?,
-                        then_branch: checked_then,
-                        then_conversion,
-                        else_branch,
-                        else_conversion,
-                    }
-                }
+                } => self.conditional(expression, *cond, *then_branch, *else_branch)?,
                 Expr::Block { stmts, trailing } => self.block(expression, stmts, *trailing)?,
-                Expr::When { subject, arms } => self.when_expression(*subject, arms)?,
+                Expr::When { subject, arms } => self.when_expression(expression, *subject, arms)?,
                 Expr::Try {
                     body,
                     catches,

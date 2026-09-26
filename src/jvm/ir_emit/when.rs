@@ -1,6 +1,25 @@
 //! Type joins and JVM integer-switch emission for `when` expressions.
 
-use super::{type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Label, Ty};
+use super::{
+    discard, type_descriptor, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Label, Ty,
+};
+
+/// Whether a discarded `when` still joins a value, as kotlinc's `visitWhen` has it: only a `when`
+/// that is not exhaustive, or whose type is `Unit`, discards each branch's value in the branch.
+/// Any other materializes every branch at its type, and the statement discarding the `when` pops
+/// the joined value once; `PopBackwardPropagation` then drops that `pop` where the branches'
+/// pushes are cheap enough to drop with it. Whether a `when` or `if` ending in an `else if` chain
+/// is exhaustive is recorded by common lowering, as fir2ir decides its type.
+pub(super) fn keeps_discarded_value(exhaustive: bool, result_ty: Ty) -> bool {
+    exhaustive && !matches!(result_ty, Ty::Unit | Ty::Nothing)
+}
+
+/// The `pop` of a discarded `when`'s joined value, when it keeps one and a branch reaches the join.
+pub(super) fn discard_joined_value(keeps_value: bool, result_ty: Ty, code: &mut CodeBuilder) {
+    if keeps_value && !code.is_dead() {
+        discard(result_ty, code);
+    }
+}
 
 /// A switch subject, constant cases in source order, and the optional final `else` body.
 pub(super) struct IntSwitchPlan {
@@ -37,6 +56,18 @@ impl Emission {
 }
 
 impl Emitter<'_> {
+    /// The failure an exhaustive `when` without an `else` reaches when no branch matches.
+    pub(super) fn emit_no_when_branch_matched(&mut self, code: &mut CodeBuilder) {
+        let exception = self.cw.class_ref("kotlin/NoWhenBranchMatchedException");
+        code.new_obj(exception);
+        code.dup();
+        let constructor = self
+            .cw
+            .methodref("kotlin/NoWhenBranchMatchedException", "<init>", "()V");
+        code.invokespecial(constructor, 0, 0);
+        code.athrow();
+    }
+
     pub(super) fn value_ty_of_when(&self, branches: &[(Option<u32>, u32)]) -> Ty {
         if !branches.iter().any(|(condition, _)| condition.is_none()) {
             return Ty::Unit;
@@ -244,10 +275,10 @@ impl Emitter<'_> {
         code.set_stack(emission.entry_height);
         match plan.default {
             Some(body) => {
-                if self.emit_switch_body(body, &emission, code) {
-                    if emission.terminal_target.is_some() {
-                        code.goto(merge);
-                    }
+                if self.emit_switch_body(body, &emission, code)
+                    && emission.terminal_target.is_some()
+                {
+                    code.goto(merge);
                 }
             }
             None => {

@@ -4695,8 +4695,23 @@ shadow with no output change.
   `inline/genericFunctionReference` still keeps its `checkcast Z; aastore`: the method is not kept
   as emitted, but the end label of `f$iv`'s range stands between the cast and the `aastore`, which
   kotlinc's transformer also respects; kotlinc inlines `::Z` and has no cast there (inliner).
-- ☐ 5h–5i, 6. The rest of kotlinc's transformer order: the mandatory steps, and the emitter's
-  statement `if` values for PopBackward.
+- ✅ 5i. A discarded `if`/`when` joins its value where kotlinc's does (`ir_emit/when.rs`,
+  `fir_lower/when_expressions.rs`). kotlinc's `visitWhen` discards each branch's value in the branch
+  only for a `when` that is not exhaustive or whose type is `Unit`; any other one, a statement
+  included, materializes every branch at its type and the statement pops the joined value, which
+  `PopBackwardPropagation` keeps where dropping it with the pushes would cost more
+  (`longerWhenFusedWithPop`: `if (c) next(x) else twice(x)` stays `invokestatic; goto; invokestatic;
+  pop`). fir2ir types a `when`/`if` whose `else` is an unbraced `else if` chain without a final
+  `else` as `Unit` (`isDeeplyProperlyExhaustive`), so common lowering records that `Unit` (the
+  checked `if` now carries whether its `else` was written), and no longer re-types every exhaustive
+  statement `when` as `Unit`. krusty discarded per branch in every statement. In the 2.4.20 box
+  corpus 16 methods change: 4 become identical to kotlinc's (`casts/asSafeFail`, `constantsInWhen`,
+  `kt14597_full`, `kt68806`), 10 come closer, one is as close and one moves further
+  (`kt33641_inlineClass`: a `y++` branch of an `Any`-typed `when` is now emitted as a value, as
+  kotlinc emits it, but kotlinc's later steps erase it and krusty's do not yet); box files
+  byte-identical to kotlinc go from 446 to 447 (`casts/asSafeFail`) with none lost, and box
+  pass/fail is unchanged (`tests/discarded_when_value_e2e.rs`).
+- ☐ 5h, 6. The rest of kotlinc's transformer order: the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
