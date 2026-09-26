@@ -1,6 +1,7 @@
 //! Comparisons between different primitive number types, reachable through smart casts and through
 //! mixed-type `compareTo` overloads, compare at the promoted type exactly as kotlinc emits them:
-//! the narrower operand widens at runtime, and a constant operand widens at compile time.
+//! the narrower operand widens at runtime, and a constant operand widens at compile time, while
+//! arithmetic keeps its constant's runtime widening.
 
 use super::common;
 
@@ -12,7 +13,9 @@ const SOURCE: &str =
     fun doubleBelowFloatConstant(d: Double): Boolean = d < 1.0F\n\
     fun intBelowLongConstant(i: Int): Boolean = i < 5L\n\
     fun intConstantBelowFloat(f: Float): Boolean = 2 < f\n\
-    fun doublePlusFloatConstant(d: Double): Double = d + 1.0F\n";
+    fun doublePlusFloatConstant(d: Double): Double = d + 1.0F\n\
+    fun longBelowIntConstant(l: Long): Boolean = l < 5\n\
+    fun floatBelowDoubleConstant(f: Float): Boolean = f < 2.5\n";
 
 #[test]
 fn mixed_numeric_comparisons_compile_like_kotlinc() {
@@ -26,6 +29,8 @@ fn mixed_numeric_comparisons_compile_like_kotlinc() {
         "intBelowLongConstant",
         "intConstantBelowFloat",
         "doublePlusFloatConstant",
+        "longBelowIntConstant",
+        "floatBelowDoubleConstant",
     ] {
         let (kotlinc, krusty) = pair.method_code("MixedKt", method);
         assert_eq!(krusty, kotlinc, "{method}");

@@ -2,7 +2,6 @@
 //! operation compares or computes at, and the conversions that bring each operand there.
 
 use super::*;
-use crate::fir::FirConstant;
 
 /// One operand of a built-in binary operation: its source expression, its checked type, and the
 /// type the operation consumes it at when that differs from the checked type.
@@ -90,19 +89,6 @@ impl BodyFirChecker<'_> {
         lhs: BinaryOperand,
         rhs: BinaryOperand,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        // A comparison converts its operands to the type it compares at, and a constant operand
-        // converts at compile time: `d < 1.0F` compares against the `Double` constant `1.0`. An
-        // arithmetic operator instead selects an overload taking the operand's own type, whose
-        // conversion stays a runtime operation.
-        let folds_constants = matches!(
-            operation,
-            FirBinaryOperation::Equal
-                | FirBinaryOperation::NotEqual
-                | FirBinaryOperation::Less
-                | FirBinaryOperation::LessOrEqual
-                | FirBinaryOperation::Greater
-                | FirBinaryOperation::GreaterOrEqual
-        );
         let operand =
             |checker: &mut Self, operand: BinaryOperand| -> Result<FirExprId, BodyCheckFailure> {
                 let BinaryOperand {
@@ -125,15 +111,6 @@ impl BodyFirChecker<'_> {
                 // required unbox on primitive operators inside a non-null branch.
                 let conversion =
                     checker.selected_value_conversion_from(source, value, actual, target, cause)?;
-                if folds_constants
-                    && conversion.as_ref().is_some_and(|conversion| {
-                        matches!(conversion.kind, FirConversionKind::NumericWidening { .. })
-                    })
-                {
-                    if let Some(folded) = checker.widened_constant(value, target) {
-                        return Ok(folded);
-                    }
-                }
                 Ok(checker.convert_fir_value(value, target, cause, conversion))
             };
         Ok(FirExprKind::Binary {
@@ -141,30 +118,5 @@ impl BodyFirChecker<'_> {
             lhs: operand(self, lhs)?,
             rhs: operand(self, rhs)?,
         })
-    }
-
-    /// `value` as a constant of the wider numeric `target`, when `value` is a numeric constant.
-    fn widened_constant(&mut self, value: FirExprId, target: ResolvedTy) -> Option<FirExprId> {
-        let expression = self.body.expr(value)?;
-        let FirExprKind::Constant(constant) = &expression.kind else {
-            return None;
-        };
-        let widened = match (constant, target.get().canonical_semantic()) {
-            (FirConstant::Int(value), Ty::Long) => FirConstant::Long(*value),
-            (FirConstant::Int(value) | FirConstant::Long(value), Ty::Float) => {
-                FirConstant::Float(*value as f32)
-            }
-            (FirConstant::Int(value) | FirConstant::Long(value), Ty::Double) => {
-                FirConstant::Double(*value as f64)
-            }
-            (FirConstant::Float(value), Ty::Double) => FirConstant::Double(f64::from(*value)),
-            _ => return None,
-        };
-        let origin = expression.origin;
-        Some(self.body.add_expr(FirExpr {
-            origin,
-            ty: target,
-            kind: FirExprKind::Constant(widened),
-        }))
     }
 }

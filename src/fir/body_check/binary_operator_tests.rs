@@ -1,4 +1,4 @@
-use super::test_support::{checked_function_body, root_expression};
+use super::test_support::checked_function_body;
 use super::*;
 use crate::fir::{FirBody, FirConstant};
 
@@ -51,57 +51,57 @@ fn mixed_primitive_equality_compares_at_the_promoted_type() {
     assert_eq!((ty(&body, lhs), ty(&body, rhs)), (Ty::Long, Ty::Long));
 }
 
-/// A comparison widens a constant operand at compile time: `d < 1.0F` compares against the
-/// `Double` constant `1.0`, and `a == 3` on a smart-cast `Long` against the `Long` constant `3`.
+/// A constant operand of a mixed-width operation keeps its checked `NumericWidening` to the promoted
+/// type, for comparisons and arithmetic alike. Whether a backend widens it at compile time or at
+/// runtime is that backend's representation choice.
 #[test]
-fn a_comparison_widens_a_constant_operand_to_a_constant() {
-    for (source, function, operation, expected) in [
+fn a_constant_operand_keeps_its_checked_widening() {
+    for (source, function, operation, constant, target) in [
         (
             "fun less(d: Double): Boolean = d < 1.0F\n",
             "less",
             FirBinaryOperation::Less,
-            FirConstant::Double(1.0),
+            FirConstant::Float(1.0),
+            Ty::Double,
         ),
         (
             "fun equal(a: Any): Boolean = a is Long && a == 3\n",
             "equal",
             FirBinaryOperation::Equal,
-            FirConstant::Long(3),
+            FirConstant::Int(3),
+            Ty::Long,
         ),
         (
             "fun differ(a: Any): Boolean = a is Double && a != 0.5F\n",
             "differ",
             FirBinaryOperation::NotEqual,
-            FirConstant::Double(0.5),
+            FirConstant::Float(0.5),
+            Ty::Double,
+        ),
+        (
+            "fun add(d: Double): Double = d + 1.0F\n",
+            "add",
+            FirBinaryOperation::Add,
+            FirConstant::Float(1.0),
+            Ty::Double,
         ),
     ] {
         let (body, _) = checked_function_body(source, function);
         let (_, rhs) = binary(&body, operation);
+        let FirExprKind::ImplicitConversion { value, conversion } = kind(&body, rhs) else {
+            panic!("the constant must keep its conversion: {source}")
+        };
+        assert!(
+            matches!(
+                conversion.kind,
+                FirConversionKind::NumericWidening { to } if to.get() == target
+            ),
+            "{source}"
+        );
         assert_eq!(
-            kind(&body, rhs),
-            &FirExprKind::Constant(expected),
+            kind(&body, *value),
+            &FirExprKind::Constant(constant),
             "{source}"
         );
     }
-}
-
-/// Arithmetic selects the overload taking the operand's own type, so its widening stays a runtime
-/// conversion: `d + 1.0F` is kotlinc's `fconst_1; f2d; dadd`.
-#[test]
-fn arithmetic_keeps_a_constant_operands_runtime_widening() {
-    let (body, _) = checked_function_body("fun add(d: Double): Double = d + 1.0F\n", "add");
-    let root = body.expr(root_expression(&body)).expect("checked body");
-    assert_eq!(root.ty.get(), Ty::Double);
-    let (_, rhs) = binary(&body, FirBinaryOperation::Add);
-    let FirExprKind::ImplicitConversion { value, conversion } = kind(&body, rhs) else {
-        panic!("the Float operand must keep its conversion")
-    };
-    assert!(matches!(
-        conversion.kind,
-        FirConversionKind::NumericWidening { to } if to.get() == Ty::Double
-    ));
-    assert_eq!(
-        kind(&body, *value),
-        &FirExprKind::Constant(FirConstant::Float(1.0))
-    );
 }
