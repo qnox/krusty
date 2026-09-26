@@ -61,6 +61,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
 mod diagnostic_selection;
 mod finalized_projection;
+mod for_loop_iteration;
 mod generic_call_bindings;
 mod inspection_analysis;
 mod interface_delegation;
@@ -138,6 +139,7 @@ pub(crate) use diagnostic_selection::unresolved_member_message;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
+pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
@@ -10510,6 +10512,8 @@ pub struct TypeInfo {
     /// User-defined syntactic range loops, keyed by the statement that owns the synthetic range
     /// operator call. Ordinary counted primitive progressions have no entry.
     pub for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
+    /// `kotlin.ranges` progression classes a counted loop may read, with their selected members.
+    pub progression_plans: ProgressionPlans,
     /// Bound classpath/library property references selected while checking, keyed by the
     /// `Expr::CallableRef` expression. Lowering emits the recorded getter instead of re-resolving.
     /// Classpath/library constructors selected while checking, keyed by the construction call.
@@ -26622,6 +26626,7 @@ impl<'a> Checker<'a> {
         label: Option<String>,
     ) {
         let it = self.expr(scope, iterable);
+        self.record_progression_plans();
         // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
         // value-consuming operation, so it selects the non-null lower bound exactly as a member call
         // would; source `Set<E>?` remains nullable and is still rejected.
@@ -37706,6 +37711,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_destructure_components: HashMap::new(),
         iterator_protocols: HashMap::new(),
         for_range_iterator_protocols: HashMap::new(),
+        progression_plans: ProgressionPlans::default(),
         resolved_constructors: HashMap::new(),
         resolved_enum_entry_constructors: HashMap::new(),
         resolved_ctor_delegations: HashMap::new(),
@@ -39402,6 +39408,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_destructure_components,
         iterator_protocols,
         for_range_iterator_protocols,
+        progression_plans,
         resolved_constructors,
         resolved_enum_entry_constructors,
         resolved_ctor_delegations,
@@ -39737,6 +39744,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_destructure_components,
         iterator_protocols,
         for_range_iterator_protocols,
+        progression_plans,
         resolved_constructors,
         resolved_enum_entry_constructors,
         resolved_ctor_delegations,
@@ -40659,6 +40667,7 @@ struct Checker<'a> {
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
     iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
+    progression_plans: ProgressionPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
@@ -74356,94 +74365,6 @@ impl<'a> Checker<'a> {
             }
             None => {}
         }
-    }
-
-    fn iterator_protocol_target(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: Option<StmtId>,
-        iterable_ty: Ty,
-        span: Span,
-        diagnose: bool,
-    ) -> Result<Option<IteratorProtocolTarget>, ()> {
-        let Some(iterator) = self.zero_arg_operator_call(
-            scope,
-            statement.map(IncDecSite::Statement),
-            iterable_ty,
-            "iterator",
-            span,
-            diagnose.then_some(span),
-        )?
-        else {
-            return Ok(None);
-        };
-        let iter_ty = iterator.ret();
-        let Some(has_next) = self.zero_arg_operator_call(
-            scope,
-            statement.map(IncDecSite::Statement),
-            iter_ty,
-            "hasNext",
-            span,
-            diagnose.then_some(span),
-        )?
-        else {
-            return Ok(None);
-        };
-        if has_next.ret() != Ty::Boolean {
-            if diagnose {
-                self.diags.error(
-                    span,
-                    format!(
-                        "the 'iterator().hasNext()' function of the loop range must return \
-                         'Boolean', but returns '{}'.",
-                        has_next.ret().source_name()
-                    ),
-                );
-            }
-            return Err(());
-        }
-        let Some(next) = self.zero_arg_operator_call(
-            scope,
-            statement.map(IncDecSite::Statement),
-            iter_ty,
-            "next",
-            span,
-            diagnose.then_some(span),
-        )?
-        else {
-            return Ok(None);
-        };
-        let elem_ty = next.ret();
-        Ok(Some(IteratorProtocolTarget {
-            iterator: Box::new(iterator),
-            has_next: Box::new(has_next),
-            next: Box::new(next),
-            iter_ty,
-            elem_ty,
-        }))
-    }
-
-    fn record_iterator_protocol(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: Option<StmtId>,
-        iterable: ExprId,
-        iterable_ty: Ty,
-    ) -> Result<Option<Ty>, ()> {
-        let diagnose = statement.is_some();
-        let Some(target) = self.iterator_protocol_target(
-            scope,
-            statement,
-            iterable_ty,
-            self.span(iterable),
-            diagnose,
-        )?
-        else {
-            return Ok(None);
-        };
-        let elem = target.elem_ty;
-        self.iterator_protocols.insert(iterable, target);
-        Ok(Some(elem))
     }
 
     fn destructure_component_target(

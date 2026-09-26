@@ -48,7 +48,7 @@ impl SelectedOperatorTarget {
 
 use crate::resolve::ResolvedCall;
 
-fn selected_extension_intrinsic(
+pub(super) fn selected_extension_intrinsic(
     extension: &crate::resolve::ResolvedExtensionCall,
 ) -> Option<crate::libraries::CompilerIntrinsic> {
     extension
@@ -106,7 +106,11 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::IsNotEmpty
         | crate::libraries::CompilerIntrinsic::Count
         | crate::libraries::CompilerIntrinsic::TrimIndent
-        | crate::libraries::CompilerIntrinsic::TrimMargin => return None,
+        | crate::libraries::CompilerIntrinsic::TrimMargin
+        | crate::libraries::CompilerIntrinsic::RangeDownTo
+        | crate::libraries::CompilerIntrinsic::RangeUntil
+        | crate::libraries::CompilerIntrinsic::ProgressionStep
+        | crate::libraries::CompilerIntrinsic::ProgressionReversed => return None,
     })
 }
 

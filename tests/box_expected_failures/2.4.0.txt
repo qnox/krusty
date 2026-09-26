@@ -60,8 +60,6 @@ collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
-compileKotlinAgainstKotlin/privateSuperType.kt
-compileKotlinAgainstKotlin/privateSuperType2.kt
 constants/kt9532.kt
 contextParameters/classMemberAndTopLevelWithContext.kt
 contextParameters/kt51290.kt

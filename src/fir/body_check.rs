@@ -46,6 +46,7 @@ mod local_classes;
 mod local_function_tests;
 mod local_functions;
 mod plugins;
+mod progressions;
 mod properties;
 #[cfg(test)]
 mod property_tests;
@@ -3990,19 +3991,13 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedStatement(StatementForm::For),
                     )
                 })?;
-                let counter = match variable_ty {
-                    Ty::Int => crate::fir::FirRangeCounterKind::Int,
-                    Ty::Long => crate::fir::FirRangeCounterKind::Long,
-                    Ty::Char => crate::fir::FirRangeCounterKind::Char,
-                    Ty::UInt => crate::fir::FirRangeCounterKind::UInt,
-                    Ty::ULong => crate::fir::FirRangeCounterKind::ULong,
-                    _ => {
-                        return Err(self.failure(
+                let counter =
+                    crate::fir::FirRangeCounterKind::of(variable_ty).ok_or_else(|| {
+                        self.failure(
                             self.file.stmt_spans.get(statement.0 as usize).copied(),
                             BodyCheckFailureKind::UnsupportedStatement(StatementForm::For),
-                        ));
-                    }
-                };
+                        )
+                    })?;
                 let variable_ty = self.resolved_type(
                     self.file
                         .stmt_spans
@@ -4104,6 +4099,13 @@ impl BodyFirChecker<'_> {
                         },
                         iterable: iterable_expression,
                     }
+                } else if let Some(header) = self.progression_loop_header(
+                    variable,
+                    element_ty,
+                    *iterable,
+                    iterable_expression,
+                )? {
+                    header
                 } else {
                     self.iterator_loop_header(
                         statement,

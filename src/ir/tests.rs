@@ -151,9 +151,11 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
         variable: 1,
         variable_name: Some("item".into()),
         counter: Ty::Int,
-        operation: crate::fir::FirRangeOperation::Through,
-        start,
-        end,
+        source: crate::ir::IrProgressionSource::Literal {
+            operation: crate::fir::FirRangeOperation::Through,
+            start,
+            end,
+        },
         body: outer,
         label: String::new(),
     }));
@@ -649,4 +651,26 @@ fn the_storage_default_is_every_all_zero_constant() {
         let expression = ir.add_expr(IrExpr::Const(constant.clone()));
         assert!(!ir.is_storage_default(expression), "{constant:?}");
     }
+}
+
+#[test]
+fn a_checked_range_declaration_reserves_its_value_slot() {
+    let mut ir = IrFile::default();
+    let start = ir.add_expr(IrExpr::Const(IrConst::UInt(0)));
+    let end = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
+    let body = ir.add_expr(IrExpr::UnitInstance);
+    ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        variable: 7,
+        variable_name: None,
+        counter: crate::types::Ty::UInt,
+        source: IrProgressionSource::Literal {
+            operation: crate::fir::FirRangeOperation::Through,
+            start,
+            end,
+        },
+        body,
+        label: "loop".to_string(),
+    }));
+
+    assert_eq!(ir.next_value_slot(), 8);
 }

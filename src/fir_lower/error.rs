@@ -30,6 +30,9 @@ pub enum FirLoweringFailure {
         origin: OriginId,
         ty: crate::types::Ty,
     },
+    /// A counted loop's progression member that is not a dependency property; the checker only
+    /// selects `kotlin.ranges` members, which are.
+    UnsupportedProgressionMember,
     MissingCallable(CallableId),
     UnsupportedCallableReference(CallableId),
     UnsupportedExternalCallableReference(crate::fir::ExternalCallableId),

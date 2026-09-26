@@ -297,6 +297,57 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     .then_some(CompilerIntrinsic::TypeOf)
 }
 
+/// The `kotlin.ranges` progression builders: `downTo` and `until` over integral values, and `step`
+/// and `reversed` over a progression.
+fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if facts.kind != FnKind::Extension
+        || facts.context_count != 0
+        || facts.is_suspend
+        || facts.is_operator
+        || facts.type_parameter_count != 0
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    let class = |ty: Ty, class: crate::types::wk::ProgressionClass| {
+        ty.type_args().is_empty()
+            && ty
+                .obj_internal()
+                .and_then(crate::types::wk::progression_class)
+                == Some(class)
+    };
+    use crate::types::wk::ProgressionBuilder;
+    use crate::types::wk::ProgressionClass::{Progression, Range};
+    let integral = |ty: Ty| matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long | Ty::Char);
+    match (
+        crate::types::wk::progression_builder(facts.package, facts.name)?,
+        facts.params,
+    ) {
+        (ProgressionBuilder::DownTo, [to])
+            if facts.is_infix && integral(receiver) && integral(*to) =>
+        {
+            class(facts.ret, Progression).then_some(CompilerIntrinsic::RangeDownTo)
+        }
+        (ProgressionBuilder::Until, [to])
+            if facts.is_infix && integral(receiver) && integral(*to) =>
+        {
+            class(facts.ret, Range).then_some(CompilerIntrinsic::RangeUntil)
+        }
+        (ProgressionBuilder::Step, [Ty::Int | Ty::Long])
+            if facts.is_infix && class(receiver, Progression) && facts.ret == receiver =>
+        {
+            Some(CompilerIntrinsic::ProgressionStep)
+        }
+        (ProgressionBuilder::Reversed, [])
+            if !facts.is_infix && class(receiver, Progression) && facts.ret == receiver =>
+        {
+            Some(CompilerIntrinsic::ProgressionReversed)
+        }
+        _ => None,
+    }
+}
+
 fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.context_count != 0
         || facts.vararg.is_some()
@@ -381,6 +432,8 @@ pub(crate) fn function_realization(
         kotlin_test(&facts)
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
+    } else if facts.package == crate::types::wk::kotlin_ranges_package() {
+        progression_builder(&facts)
     } else {
         None
     }

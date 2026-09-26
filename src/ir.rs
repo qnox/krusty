@@ -41,6 +41,7 @@ mod expression_provenance;
 mod intrinsic;
 mod local_class_names;
 mod overrides;
+mod progression;
 mod references;
 mod type_reflection;
 mod value_class_constructors;
@@ -57,6 +58,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
+pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{FuncRef, PropRef};
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -571,15 +573,16 @@ pub enum IrCheckedOperation {
         negated: bool,
         counter: Ty,
     },
+    /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
+    /// message is `Step must be positive, was: $step.`.
+    IllegalProgressionStep { step: ExprId },
     RangeLoop {
         variable: u32,
         /// Source identity of the loop variable. A representation backend attaches it to the
         /// declaration it creates; it must not recover the name from a slot or generated spelling.
         variable_name: Option<Box<str>>,
         counter: Ty,
-        operation: crate::fir::FirRangeOperation,
-        start: ExprId,
-        end: ExprId,
+        source: IrProgressionSource,
         body: ExprId,
         label: String,
     },

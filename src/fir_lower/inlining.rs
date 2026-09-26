@@ -1246,6 +1246,7 @@ fn specialize_checked_operation(
         }
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
+        IrCheckedOperation::IllegalProgressionStep { .. } => {}
         IrCheckedOperation::CallableReference {
             target,
             function_type,
@@ -1353,9 +1354,11 @@ mod value_rebasing_tests {
             variable: 4,
             variable_name: Some("element".into()),
             counter: Ty::Int,
-            operation: FirRangeOperation::Until,
-            start: 0,
-            end: 1,
+            source: crate::ir::IrProgressionSource::Literal {
+                operation: FirRangeOperation::Until,
+                start: 0,
+                end: 1,
+            },
             body: 2,
             label: "loop".to_string(),
         });

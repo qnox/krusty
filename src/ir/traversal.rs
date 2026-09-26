@@ -90,6 +90,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*start);
                 f(*end);
             }
+            IrCheckedOperation::IllegalProgressionStep { step } => f(*step),
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {
@@ -97,11 +98,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*start);
                 f(*end);
             }
-            IrCheckedOperation::RangeLoop {
-                start, end, body, ..
-            } => {
-                f(*start);
-                f(*end);
+            IrCheckedOperation::RangeLoop { source, body, .. } => {
+                source.operands().into_iter().for_each(&mut *f);
                 f(*body);
             }
             IrCheckedOperation::CallableReference {
