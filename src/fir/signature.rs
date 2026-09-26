@@ -1712,6 +1712,8 @@ pub struct ResolvedClassifierHeader {
     pub declaration: DeclarationId,
     pub classifier: TypeName,
     pub superclass: Option<ResolvedTy>,
+    /// How many of [`Self::interfaces`] the declaration lists before its superclass.
+    pub interfaces_before_superclass: u32,
     pub interfaces: Box<[ResolvedTy]>,
     pub interface_delegations: Box<[ResolvedInterfaceDelegation]>,
     /// Constructor-supplied implicit receivers available to every instance body, in source order.
@@ -2630,7 +2632,7 @@ impl ResolvedModuleIndex {
         &mut self,
         declaration: DeclarationId,
         classifier: TypeName,
-        superclass: Option<Ty>,
+        superclass: Option<super::DeclaredSuperclass>,
         interfaces: impl IntoIterator<Item = Ty>,
         interface_delegations: impl IntoIterator<Item = ResolvedInterfaceDelegation>,
         context_parameters: impl IntoIterator<
@@ -2638,12 +2640,19 @@ impl ResolvedModuleIndex {
         >,
         sealed_subclasses: impl IntoIterator<Item = TypeName>,
     ) -> Result<(), UnpublishableType> {
-        let superclass = superclass.map(ResolvedTy::new).transpose()?;
+        let interfaces_before_superclass = superclass.map_or(0, |parent| parent.interfaces_before);
+        let superclass = superclass
+            .map(|parent| ResolvedTy::new(parent.ty))
+            .transpose()?;
         let interfaces = interfaces
             .into_iter()
             .map(ResolvedTy::new)
             .collect::<Result<Vec<_>, _>>()?
             .into_boxed_slice();
+        assert!(
+            interfaces_before_superclass as usize <= interfaces.len(),
+            "a superclass slot must lie within the declared interfaces"
+        );
         let interface_delegations = interface_delegations
             .into_iter()
             .collect::<Vec<_>>()
@@ -2672,6 +2681,7 @@ impl ResolvedModuleIndex {
                         declaration,
                         classifier,
                         superclass,
+                        interfaces_before_superclass,
                         interfaces,
                         interface_delegations,
                         context_parameters,
