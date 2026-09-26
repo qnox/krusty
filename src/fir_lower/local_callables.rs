@@ -837,6 +837,15 @@ impl BodyLowering<'_> {
             .fn_source_names
             .insert(function, source_name.to_owned());
         self.ir.private_methods.insert(function);
+        if let Some(vararg) = body.vararg_parameter() {
+            self.ir.fn_varargs.insert(
+                function,
+                crate::ir::IrVarargParameter {
+                    index: vararg.index as usize,
+                    is_last: vararg.is_last,
+                },
+            );
+        }
         if let Some((sequence, site)) = lifting_sequence(body, self.index).zip(body.lifting_site())
         {
             self.ir
