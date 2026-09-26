@@ -28,10 +28,7 @@ pub(super) fn realize(
     ir: &mut IrFile,
     classpath: Rc<Classpath>,
 ) -> Result<(), RangeRealizationFailure> {
-    crate::backend::counted_loops::realize(
-        ir,
-        crate::backend::counted_loops::CounterLoopStyle::JavaLike,
-    );
+    crate::backend::counted_loops::realize(ir, COUNTED_LOOPS);
     let runtime = JvmLibraries::new(classpath).map_err(RangeRealizationFailure::Initialization)?;
     let expression_count = ir.exprs.len();
     for expression in 0..expression_count {
@@ -371,3 +368,11 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         ir.expr_end_lines.insert(target, line);
     }
 }
+
+/// The JVM's counted loops: Java-like counter loops HotSpot recognizes, with the calls kotlinc
+/// inlines into an unsigned loop's header realized as inlined, as its line rules need.
+pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+    crate::backend::counted_loops::CountedLoopPolicy {
+        style: crate::backend::counted_loops::CounterLoopStyle::JavaLike,
+        inlining: crate::backend::counted_loops::HeaderInlining::Kotlinc,
+    };

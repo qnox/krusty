@@ -20,10 +20,7 @@ impl Backend for JsBackend {
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
-        crate::backend::counted_loops::realize(
-            &mut file.ir,
-            crate::backend::counted_loops::CounterLoopStyle::PreTested,
-        );
+        crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         if let Err(target) = crate::backend::local_properties::realize(&mut file.ir) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -213,3 +210,11 @@ mod tests {
         );
     }
 }
+
+/// JavaScript keeps a counted loop's entry test at the top, and an unsigned value is its own
+/// representation there: no call in the header is realized as inlined.
+pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+    crate::backend::counted_loops::CountedLoopPolicy {
+        style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
+        inlining: crate::backend::counted_loops::HeaderInlining::None,
+    };

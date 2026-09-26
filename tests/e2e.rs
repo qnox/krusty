@@ -1040,6 +1040,8 @@ mod local_fun_ref_e2e;
 mod local_shadows_receiver_member_e2e;
 #[path = "local_superclass_capture_e2e.rs"]
 mod local_superclass_capture_e2e;
+#[path = "loop_control_lines_e2e.rs"]
+mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
@@ -1905,6 +1907,8 @@ mod unsigned_ext_e2e;
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_literal_width_e2e.rs"]
 mod unsigned_literal_width_e2e;
+#[path = "unsigned_loop_lines_e2e.rs"]
+mod unsigned_loop_lines_e2e;
 #[path = "unsigned_narrow_carrier_e2e.rs"]
 mod unsigned_narrow_carrier_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
