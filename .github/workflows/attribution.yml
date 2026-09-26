@@ -20,9 +20,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # A pull request checks out its merge commit, whose first parent is the base branch as it is
+      # now and whose second is the PR head, so HEAD^1..HEAD^2 is exactly the PR's own commits. The
+      # payload's `base.sha` can be stale after a restack (a force-push onto a newer base), and a
+      # range from it pulls in base-branch commits the PR does not carry.
       - name: commits
         env:
-          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || 'HEAD^1..HEAD^2' }}
         run: scripts/check-attribution.sh "$RANGE"
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
