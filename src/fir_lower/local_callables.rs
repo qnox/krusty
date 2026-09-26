@@ -1114,7 +1114,13 @@ impl BodyLowering<'_> {
             .then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()))
             .transpose()?;
         let callable = if let Some(frame) = frame {
-            finish_tailrec_body(nested.ir, roots, frame, body_origin(body))?
+            finish_tailrec_body(
+                nested.ir,
+                roots,
+                frame,
+                body.has_implicit_return(),
+                body_origin(body),
+            )?
         } else {
             finish_callable_body(
                 nested.ir,

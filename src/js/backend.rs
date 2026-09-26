@@ -149,8 +149,11 @@ mod tests {
     fn js_backend_emits_checked_block_expression() {
         let (outputs, diags) = compile_js_sources(&[(
             "Main",
-            "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
-             fun box(): Int = C().f(3)",
+            "class C {\n\
+                 tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1)\n\
+                 fun g(a: Int, b: Int): Int = a - b\n\
+             }\n\
+             fun box(): Int = C().g(b = C().f(3), a = 1)",
         )]);
 
         assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
@@ -158,14 +161,15 @@ mod tests {
         let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
         // What this test is about: a call whose receiver and arguments are spilled into
         // temporaries is a checked BLOCK expression, and emitting one as a VALUE needs the
-        // block-expression path rather than the statement one. `box()`'s `C().f(3)` is that shape.
-        assert!(source.contains("return v0.f(v1);"), "{source}");
+        // block-expression path rather than the statement one. `box()`'s named arguments, written
+        // out of order, are that shape.
+        assert!(source.contains("return v0.g(v2, v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
-        // `f`'s own body used to be the marker above, as a `return v2.f(v3);` — it is a loop now,
-        // because a member `tailrec` whose self-call dispatches on `this` is the same frame and
-        // steps (docs/SPEC.md, "What `tailrec` loops is a FRAME"). Asserted rather than dropped:
-        // this backend renders the rewrite's output directly, so it is the cheapest place to see
-        // that the member rewrite reaches every backend and not only the JVM one.
+        // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps
+        // (docs/SPEC.md, "What `tailrec` loops is a FRAME"). The step sits in a branch of the
+        // returned `if`, so the `return` moves into the branches and the `continue` stays a
+        // statement of the loop. Asserted here because this backend renders the rewrite's output
+        // directly, so it is the cheapest place to see that the rewrite reaches every backend.
         assert!(source.contains("continue $tailrec;"), "{source}");
     }
 

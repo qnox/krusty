@@ -643,3 +643,81 @@ fun box(): String {\n\
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+/// Tail calls that leave parameters to their defaults, named out of order, and called on a
+/// singleton. kotlinc's `TailrecLowering` evaluates the supplied arguments in the order they are
+/// written, then each omitted parameter's default in declaration order, seeing the NEW values of
+/// the parameters before it; only then are the parameters written. A default with a side effect
+/// therefore runs once per turn, after the supplied arguments.
+const DEFAULTS: &str = "package tr\n\
+\n\
+tailrec fun sum(n: Int, acc: Int = 0, step: Int = 1): Int =\n\
+    if (n == 0) acc else sum(n - step, acc + n)\n\
+\n\
+tailrec fun follow(n: Int, last: Int = n * 2): Int =\n\
+    if (n == 0) last else follow(n - 1)\n\
+\n\
+tailrec fun named(a: Int, b: Int, c: Int = a + b): Int =\n\
+    if (a == 0) c else named(b = b + 1, a = a - 1)\n\
+\n\
+tailrec fun counted(n: Int, mark: Int = Log.next()): Int =\n\
+    if (n == 0) mark else counted(n - 1)\n\
+\n\
+object Walker {\n\
+    tailrec fun down(n: Int, acc: Int = 0): Int = if (n == 0) acc else Walker.down(n - 1, acc + 1)\n\
+}\n\
+\n\
+class Host {\n\
+    companion object {\n\
+        tailrec fun down(n: Int, acc: Int = 0): Int = if (n == 0) acc else Host.down(n - 1, acc + 2)\n\
+    }\n\
+}\n";
+
+const DEFAULTS_LOG: &str = "package tr\n\
+\n\
+object Log {\n\
+    var calls = 0\n\
+    fun next(): Int {\n\
+        calls = calls + 1\n\
+        return calls\n\
+    }\n\
+}\n";
+
+const DEFAULTS_BOX: &str = "package tr\n\
+\n\
+fun box(): String {\n\
+    if (sum(1000000) != 1784293664) return \"fail sum \" + sum(1000000)\n\
+    if (follow(1000000) != 0) return \"fail follow \" + follow(1000000)\n\
+    if (named(1000000, 0) != 1000000) return \"fail named \" + named(1000000, 0)\n\
+    val mark = counted(1000000)\n\
+    if (mark != 1000001 || Log.calls != 1000001) return \"fail counted \" + mark + \" \" + Log.calls\n\
+    if (Walker.down(1000000) != 1000000) return \"fail object\"\n\
+    if (Host.down(1000000) != 2000000) return \"fail companion\"\n\
+    return \"OK\"\n\
+}\n";
+
+#[test]
+fn tailrec_defaults_and_singleton_receivers_run_flat_like_kotlinc() {
+    let sources = [
+        ("Defaults.kt", DEFAULTS),
+        ("Log.kt", DEFAULTS_LOG),
+        ("Box.kt", DEFAULTS_BOX),
+    ];
+    let reference = common::kotlinc_box_files_result(&sources, "tr.BoxKt");
+    assert_eq!(reference, "OK", "kotlinc's run");
+    common::expect_box_ok_files_with_stdlib(&sources, "TailrecDefaults");
+}
+
+/// The top-level loops are kotlinc's instruction for instruction: the temporaries, the order the
+/// defaults are computed and the parameters written, and the `do … while (true)` shape. A member's
+/// loop is not compared: kotlinc also keeps a `$this` variable and a receiver temporary there,
+/// which krusty does not reproduce yet.
+#[test]
+fn tailrec_default_loops_match_kotlinc() {
+    let sources = [("Defaults.kt", DEFAULTS), ("Log.kt", DEFAULTS_LOG)];
+    let pair = common::ModuleClassPair::compile(&sources, "tr/DefaultsKt");
+    for method in ["sum", "follow", "named", "counted"] {
+        let (kotlinc, krusty) = pair.method_code("tr/DefaultsKt", method);
+        assert_eq!(krusty, kotlinc, "{method} differs from kotlinc's");
+    }
+}

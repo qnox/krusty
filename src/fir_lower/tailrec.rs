@@ -12,25 +12,70 @@ use super::FirLoweringFailure;
 
 const LOOP_LABEL: &str = "$tailrec";
 
+/// kotlinc's `TailrecLowering`: the body runs inside `do { <body>; break } while (true)`, and each
+/// self-call in tail position becomes a loop step — the next turn's parameters written, then
+/// `continue`. The body keeps its own returns: an expression body returns its value, and a `Unit`
+/// body leaves the loop through the `break` and returns after it. A body with no tail call is left
+/// as an ordinary body, as kotlinc leaves it.
+///
+/// The step's own statements carry no source line of their own, as kotlinc's are built at the
+/// call.
 pub(super) fn finish_tailrec_body(
     ir: &mut IrFile,
     mut roots: Vec<ExprId>,
     mut frame: Frame,
+    implicit_return: bool,
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let result = ir.functions[frame.function as usize].ret;
+    let unit = result == Ty::Unit;
     collect_this_slots(ir, &roots, &mut frame);
+    frame.next_slot.set(first_free_slot(ir, &roots, &frame));
+    frame.fixed_temporaries = fixed_temporaries(ir, &roots);
     let frame = &frame;
-    let tail = roots
-        .pop()
-        .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
-    let tail = tail_value(ir, tail, frame, result, origin)?;
-    roots.push(tail);
-    // The body's tail is one tail position; a `return` is another, wherever it stands, because
-    // nothing of this function runs after one. `tail_value` reads the first off the body's shape,
-    // and this sweeps the rest out of the whole body — after the rebuild above, so a tail the
-    // rebuild already turned into a loop step is not visited a second time.
-    rewrite_returned_tail_calls(ir, &roots, frame, result, origin)?;
+    if implicit_return {
+        if unit {
+            super::consume_trailing_unit_result(ir, &mut roots);
+        } else {
+            let value = roots
+                .pop()
+                .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
+            let returned = generated(ir, IrExpr::Return(Some(value)), origin);
+            if let Some(&end) = ir.expr_end_lines.get(&value) {
+                ir.implicit_return_end_lines.insert(returned, end);
+            }
+            roots.push(returned);
+        }
+    }
+    let tail_calls = tail_calls(ir, &roots, frame, unit);
+    if tail_calls.is_empty() {
+        return super::finish_callable_body(
+            ir,
+            roots,
+            result,
+            unit && implicit_return,
+            false,
+            origin,
+        );
+    }
+    for TailCall { edge, call, line } in tail_calls {
+        let step = loop_step(ir, call, line, frame, origin);
+        let step = generated(ir, step, origin);
+        edge.replace(ir, &mut roots, step);
+    }
+    // kotlinc builds the `break` at the body's own position, so it carries the line the body
+    // starts on.
+    let exit = generated(
+        ir,
+        IrExpr::Break {
+            label: Some(LOOP_LABEL.to_owned()),
+        },
+        origin,
+    );
+    if let Some(&line) = ir.fn_decl_lines.get(&frame.function) {
+        ir.expr_lines.insert(exit, line);
+    }
+    roots.push(exit);
     let loop_body = generated(
         ir,
         IrExpr::Block {
@@ -46,11 +91,14 @@ pub(super) fn finish_tailrec_body(
             cond: condition,
             body: loop_body,
             update: None,
-            post_test: false,
+            // kotlinc's `do … while (true)`: a step's `continue` goes to the condition, which
+            // jumps back to the top.
+            post_test: true,
             label: Some(LOOP_LABEL.to_owned()),
         },
         origin,
     );
+    // A `Unit` function returns after the loop through the method's own implicit `return`.
     Ok(generated(
         ir,
         IrExpr::Block {
@@ -59,6 +107,223 @@ pub(super) fn finish_tailrec_body(
         },
         origin,
     ))
+}
+
+/// A self-call in tail position: the slot holding it, and the source line it is on (its own, or
+/// the nearest enclosing node's when the lowering gave it none).
+struct TailCall {
+    edge: Edge,
+    call: ExprId,
+    line: Option<u32>,
+}
+
+/// Where a tail position sits: the one child slot a loop step replaces.
+#[derive(Clone, Copy, Debug)]
+enum Edge {
+    Root(usize),
+    Statement(ExprId, usize),
+    BlockValue(ExprId),
+    Branch(ExprId, usize),
+    /// A `return` no replaceable slot holds — one nested in an operand. The step takes the
+    /// `return`'s own node: it leaves the turn exactly where the `return` left the function.
+    Return(ExprId),
+}
+
+impl Edge {
+    fn replace(self, ir: &mut IrFile, roots: &mut [ExprId], step: ExprId) {
+        match self {
+            Edge::Root(index) => roots[index] = step,
+            Edge::Statement(block, index) => {
+                let IrExpr::Block { stmts, .. } = &mut ir.exprs[block as usize] else {
+                    unreachable!("a statement edge names a block")
+                };
+                stmts[index] = step;
+            }
+            Edge::BlockValue(block) => {
+                let IrExpr::Block { value, .. } = &mut ir.exprs[block as usize] else {
+                    unreachable!("a block-value edge names a block")
+                };
+                *value = Some(step);
+            }
+            Edge::Branch(when, index) => {
+                let IrExpr::When { branches } = &mut ir.exprs[when as usize] else {
+                    unreachable!("a branch edge names a when")
+                };
+                branches[index].1 = step;
+            }
+            Edge::Return(returned) => {
+                ir.exprs[returned as usize] = ir.exprs[step as usize].clone();
+                if let Some(origin) = ir.fir_origins.get(&step).cloned() {
+                    ir.fir_origins.insert(returned, origin);
+                }
+                ir.checked_return_depths.remove(&returned);
+            }
+        }
+    }
+}
+
+/// kotlinc's `collectTailRecursionCalls`: the self-calls in tail position, each with the edge that
+/// holds it.
+///
+/// A position is a tail when nothing of this function runs after it: the value of a `return` of
+/// this function, the last statement of a tail block, a branch result of a tail `when`, the operand
+/// of a tail coercion, and in a `Unit` function any statement a `return` follows. A `try` is never
+/// entered — its `finally` runs after the value — and neither is a lambda's body, whose returns are
+/// the lambda's. A `return` or coercion that holds the call directly is replaced along with it: the
+/// step leaves the loop turn and produces no value for either.
+///
+/// Only a node reached by exactly ONE path is rewritten. A call below a shared ancestor is seen by
+/// another path too, which may cross a boundary this walk does not enter, so it stays a call.
+fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<TailCall> {
+    struct Walk<'a> {
+        ir: &'a IrFile,
+        frame: &'a Frame,
+        unit: bool,
+        paths: std::collections::HashMap<ExprId, u8>,
+        found: Vec<TailCall>,
+        seen: std::collections::HashSet<ExprId>,
+        /// The source line of the innermost node visited that has one.
+        line: Option<u32>,
+    }
+
+    impl Walk<'_> {
+        /// Visit `expression`, a tail position when `tail`, held by `edge` when the slot holding it
+        /// can be replaced.
+        fn visit(&mut self, expression: ExprId, tail: bool, edge: Option<Edge>) {
+            if !self.seen.insert(expression) {
+                return;
+            }
+            let outer = self.line;
+            if let Some(&line) = self
+                .ir
+                .expr_source_lines
+                .get(&expression)
+                .or_else(|| self.ir.expr_lines.get(&expression))
+            {
+                self.line = Some(line);
+            }
+            self.visit_node(expression, tail, edge);
+            self.line = outer;
+        }
+
+        fn visit_node(&mut self, expression: ExprId, tail: bool, edge: Option<Edge>) {
+            match self.ir.expr(expression) {
+                IrExpr::Try { .. } => {}
+                IrExpr::Lambda { captures, .. } => {
+                    for capture in captures.clone() {
+                        self.visit(capture, false, None);
+                    }
+                }
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
+                    self.children(expression);
+                    if let Some(edge) = edge.filter(|_| tail && self.is_self_call(expression)) {
+                        self.found.push(TailCall {
+                            edge,
+                            call: expression,
+                            line: self.line,
+                        });
+                    }
+                }
+                IrExpr::Return(Some(value)) => {
+                    let value = *value;
+                    let holder = edge.or(Some(Edge::Return(expression)));
+                    self.visit_held(value, returns_from_here(self.ir, expression), holder);
+                }
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => {
+                    let arg = *arg;
+                    self.visit_held(arg, tail, edge);
+                }
+                IrExpr::Block { stmts, value } => {
+                    let (stmts, value) = (stmts.clone(), *value);
+                    let coerced_to_unit = self.unit
+                        && value.is_some_and(|value| {
+                            matches!(self.ir.expr(value), IrExpr::UnitInstance)
+                        });
+                    for (index, &statement) in stmts.iter().enumerate() {
+                        let statement_tail = match stmts.get(index + 1) {
+                            Some(&next) => self.unit && self.returns_unit(next),
+                            None => tail && (value.is_none() || coerced_to_unit),
+                        };
+                        self.visit(
+                            statement,
+                            statement_tail,
+                            Some(Edge::Statement(expression, index)),
+                        );
+                    }
+                    if let Some(value) = value {
+                        self.visit(value, tail, Some(Edge::BlockValue(expression)));
+                    }
+                }
+                IrExpr::When { branches } => {
+                    for (index, (condition, result)) in branches.clone().into_iter().enumerate() {
+                        if let Some(condition) = condition {
+                            self.visit(condition, false, None);
+                        }
+                        self.visit(result, tail, Some(Edge::Branch(expression, index)));
+                    }
+                }
+                _ => self.children(expression),
+            }
+        }
+
+        /// The operand of a `return` or a coercion. When it is the self-call itself, the step
+        /// takes the holder's place: it leaves the turn and yields nothing to return or convert.
+        fn visit_held(&mut self, held: ExprId, tail: bool, holder: Option<Edge>) {
+            let direct = matches!(
+                self.ir.expr(held),
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+            );
+            self.visit(held, tail, if direct { holder } else { None });
+        }
+
+        fn is_self_call(&self, call: ExprId) -> bool {
+            self.paths.get(&call) == Some(&1) && is_self_call(self.ir, call, self.frame)
+        }
+
+        fn children(&mut self, expression: ExprId) {
+            let mut children = Vec::new();
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+                children.push(child)
+            });
+            for child in children {
+                self.visit(child, false, None);
+            }
+        }
+
+        /// A `return` of this function, bare or of `Unit`.
+        fn returns_unit(&self, statement: ExprId) -> bool {
+            returns_from_here(self.ir, statement)
+                && match self.ir.expr(statement) {
+                    IrExpr::Return(None) => true,
+                    IrExpr::Return(Some(value)) => {
+                        matches!(self.ir.expr(*value), IrExpr::UnitInstance)
+                    }
+                    _ => false,
+                }
+        }
+    }
+
+    let mut walk = Walk {
+        ir,
+        frame,
+        unit,
+        paths: root_path_counts(ir, roots),
+        found: Vec::new(),
+        seen: std::collections::HashSet::new(),
+        line: None,
+    };
+    for (index, &root) in roots.iter().enumerate() {
+        let tail = match roots.get(index + 1) {
+            Some(&next) => unit && walk.returns_unit(next),
+            None => true,
+        };
+        walk.visit(root, tail, Some(Edge::Root(index)));
+    }
+    walk.found
 }
 
 /// Find every value slot that holds THIS frame's instance.
@@ -120,6 +385,64 @@ fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
         }
     }
     frame.this_slots.retain(|slot| !assigned.contains(slot));
+}
+
+/// The compiler temporaries the body never reassigns — an argument the call lowering held to keep
+/// source evaluation order among them. A read of one is already its own snapshot.
+fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashSet<u32> {
+    let mut declared = std::collections::HashSet::new();
+    let mut assigned = std::collections::HashSet::new();
+    let mut pending: Vec<ExprId> = roots.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::Variable {
+                index,
+                named: false,
+                ..
+            } => {
+                declared.insert(*index);
+            }
+            IrExpr::SetValue { var, .. } => {
+                assigned.insert(*var);
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    declared.retain(|slot| !assigned.contains(slot));
+    declared
+}
+
+/// The first value slot nothing in the body uses, where a loop step's temporaries start.
+fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
+    let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
+    let mut free = parameters_end;
+    let mut pending: Vec<ExprId> = roots.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        let used = match ir.expr(expression) {
+            IrExpr::GetValue(index)
+            | IrExpr::SetValue { var: index, .. }
+            | IrExpr::Variable { index, .. } => Some(*index),
+            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
+                Some(*variable)
+            }
+            IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).max(),
+            _ => None,
+        };
+        if let Some(used) = used {
+            free = free.max(used + 1);
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    free
 }
 
 /// Whether one or several root-to-node paths reach each node in the body.
@@ -185,112 +508,6 @@ fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
         .is_none_or(|&depth| depth == 0)
 }
 
-/// Rewrite every self-call that a `return` puts in tail position, wherever in the body it stands.
-///
-/// What makes a `return` a tail position is not the shape it sits in: nothing of this function runs
-/// after one, so the call it returns is a tail call in a block, in a `when` branch, and inside a
-/// LOOP — Kotlin reads `while (…) { if (…) return f(x) }` as a tail call, and the `continue` this
-/// writes carries the synthetic loop's own label, so leaving the inner loop is the rewrite working
-/// rather than a reason to skip it.
-///
-/// What does stop the walk is OWNERSHIP of the `return`, and of what runs after it:
-///
-/// * An inlined lambda's body. Its `return`s answer to the lambda, and a depth-ZERO one there is
-///   the lambda's own — the one shape the checked depth below cannot tell apart from this
-///   function's, which is why the boundary and not the depth is what keeps the walk out. The
-///   lambda's CAPTURES are ordinary expressions of this function and stay in the walk.
-/// * A `try`. Its `finally` still has to run, so a `return` inside it does not leave directly.
-///
-/// The rewrite happens IN PLACE, at the `return`'s own id, and two facts make that sound rather
-/// than convenient:
-///
-/// * The node is reached by exactly ONE root-to-node path. A `return` below a shared ancestor is
-///   shared too even when it has one direct parent node. A multiply reached return is left alone —
-///   the program keeps recursing, which is the answer this pass started from and is never a wrong
-///   one. Rewriting it would change what another path sees, and that path may cross the `try` or
-///   inline-body boundary this walk deliberately did not enter.
-/// * The `return` is this function's, by its checked depth rather than by where it was found.
-///
-/// A slot that stops being a `Return` gives up its `checked_return_depths` entry with it: that fact
-/// describes a return node, and the side table's contract is that only a return carries one.
-fn rewrite_returned_tail_calls(
-    ir: &mut IrFile,
-    roots: &[ExprId],
-    frame: &Frame,
-    result: Ty,
-    origin: OriginId,
-) -> Result<(), FirLoweringFailure> {
-    let paths = root_path_counts(ir, roots);
-    let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        match ir.expr(expression) {
-            // A `try` keeps whatever it holds: its `finally` runs after the `return`.
-            IrExpr::Try { .. } => continue,
-            // An inlined lambda's body is the lambda's; its captures are this function's.
-            IrExpr::Lambda { captures, .. } => {
-                pending.extend(captures.clone());
-                continue;
-            }
-            IrExpr::Return(Some(_))
-                if returns_from_here(ir, expression) && paths.get(&expression) == Some(&1) =>
-            {
-                // The same rewriter the body's own tail goes through, asked about this `return`
-                // instead: it is a tail position too, so whatever it makes of the body's last
-                // expression it makes of this one. The answer replaces the `return` where it
-                // stands, and a `return` it left a `return` is walked into like anything else.
-                let rebuilt = tail_value(ir, expression, frame, result, origin)?;
-                let node = ir.expr(rebuilt).clone();
-                let stepped = !matches!(node, IrExpr::Return(_));
-                if stepped {
-                    ir.checked_return_depths.remove(&expression);
-                }
-                ir.exprs[expression as usize] = node;
-                if stepped {
-                    continue;
-                }
-            }
-            // A `Unit` function's `f(x); return` is a tail call in ANY block, not only in the one
-            // that ends the body: nothing of this function runs after that `return` either. The
-            // body's own last block went through `tail_value` already; this is the same rewrite
-            // for a block the sweep finds inside an `if`, a `when` arm or a loop. The statement
-            // before the `return` is rebuilt as a tail and the block's exact child edge is updated;
-            // the selected call keeps its identity and side-table facts, while the generated step
-            // keeps its own synthetic provenance. The `return` stays behind it, unreached once the
-            // statement ends in a step.
-            IrExpr::Block { stmts, value: None }
-                if result == Ty::Unit && stmts.len() > 1 && paths.get(&expression) == Some(&1) =>
-            {
-                let (tail, returned) = (stmts[stmts.len() - 2], stmts[stmts.len() - 1]);
-                if matches!(ir.expr(returned), IrExpr::Return(None))
-                    && returns_from_here(ir, returned)
-                    && !matches!(ir.expr(tail), IrExpr::Return(_))
-                    && paths.get(&tail) == Some(&1)
-                    && reaches_self_call(ir, tail, frame)
-                {
-                    let rebuilt = tail_value(ir, tail, frame, result, origin)?;
-                    let IrExpr::Block { stmts, value: None } = &mut ir.exprs[expression as usize]
-                    else {
-                        unreachable!("the matched expression remains a statement block")
-                    };
-                    let tail_slot = stmts
-                        .len()
-                        .checked_sub(2)
-                        .expect("the matched block has a call and return");
-                    debug_assert_eq!(stmts[tail_slot], tail);
-                    stmts[tail_slot] = rebuilt;
-                }
-            }
-            _ => {}
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-    Ok(())
-}
-
 /// The frame a `tailrec` loop steps: which function a self-call must name, and which value slots
 /// hold the parameters it reassigns.
 ///
@@ -315,6 +532,11 @@ pub(super) struct Frame {
     /// parameters, so the values are already what the next turn needs — and reassign only what
     /// follows. 0 for any frame that has no such prefix.
     capture_prefix: usize,
+    /// The next value slot a loop step may take for a temporary. Set by [`finish_tailrec_body`]
+    /// above every slot the body already uses.
+    next_slot: std::cell::Cell<u32>,
+    /// See [`fixed_temporaries`]. Filled by [`finish_tailrec_body`].
+    fixed_temporaries: std::collections::HashSet<u32>,
 }
 
 impl Frame {
@@ -332,6 +554,8 @@ impl Frame {
             receiver: slots.dispatch_receiver,
             this_slots: slots.dispatch_receiver.into_iter().collect(),
             capture_prefix: 0,
+            next_slot: std::cell::Cell::new(0),
+            fixed_temporaries: std::collections::HashSet::new(),
         }
     }
 
@@ -344,16 +568,61 @@ impl Frame {
             ..Self::of_body(function, slots, count)
         }
     }
+
+    /// The value slot of the parameter at `position` in a self-call's argument list, which counts
+    /// the capture prefix: captures take the slots below `first_parameter`.
+    fn parameter_slot(&self, position: usize) -> u32 {
+        let logical = u32::try_from(position - self.capture_prefix)
+            .expect("tailrec parameter count exceeds packed value ids");
+        self.first_parameter + logical
+    }
+
+    fn is_parameter_slot(&self, slot: u32) -> bool {
+        (self.first_parameter..self.parameter_slot(self.capture_prefix + self.count))
+            .contains(&slot)
+    }
+
+    fn temporary(&self) -> u32 {
+        let slot = self.next_slot.get();
+        self.next_slot.set(slot + 1);
+        slot
+    }
 }
 
-/// Whether `call` is this function calling itself with its whole parameter list — the only shape
-/// the loop can step. A partial list is somebody else's overload, or a call that leaves a defaulted
-/// argument for the callee to fill, and neither reassigns everything the next turn reads.
+/// Whether `call` is this function calling itself — the only shape the loop can step. Every
+/// parameter the call leaves out must have a default the step can evaluate in its place (see
+/// [`fillable_defaults`]).
 ///
 /// For a MEMBER the frame is the instance too: `count(n - 1)` on `this` is the same frame and steps,
-/// while `Other().count(n - 1)` is a different one and has to stay a call.
+/// while `Other().count(n - 1)` is a different one and has to stay a call. A member of an `object`
+/// or a companion has only one instance, so `O.rec(n - 1)` is the same frame whatever its receiver
+/// expression says (kotlinc's `hasSameDispatchReceiver` for a singleton).
 fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
     match ir.expr(call) {
+        IrExpr::Call {
+            callee:
+                Callee::LocalWithDefaults {
+                    function: target,
+                    defaults,
+                }
+                | Callee::ClassStaticWithDefaults {
+                    function: target,
+                    defaults,
+                    ..
+                },
+            dispatch_receiver: None,
+            args,
+        } => {
+            frame.receiver.is_none()
+                && *target == frame.function
+                && args.len() + defaults.len() == frame.capture_prefix + frame.count
+                && passes_its_own_captures(ir, args, frame)
+                && fillable_defaults(
+                    ir,
+                    frame,
+                    defaults.iter().map(|&position| position as usize),
+                )
+        }
         // A local function declared inside a class member is lifted onto that class as a private
         // STATIC, so its self-call is a `ClassStatic` rather than a `Local`. It is the same
         // declaration and the same frame — the callee identity says so, not the owner's spelling —
@@ -381,16 +650,65 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
             if frame.receiver.is_none() {
                 return false;
             }
-            ir.classes
-                .get(*class as usize)
-                .and_then(|class| class.methods.get(*index as usize))
-                == Some(&frame.function)
-                && matches!(ir.expr(*receiver), IrExpr::GetValue(slot) if frame.this_slots.contains(slot))
+            let Some(owner) = ir.classes.get(*class as usize) else {
+                return false;
+            };
+            let same_instance = match ir.expr(*receiver) {
+                IrExpr::GetValue(slot) => owner.is_singleton() || frame.this_slots.contains(slot),
+                IrExpr::StaticInstance { .. } | IrExpr::SingletonValue { .. } => {
+                    owner.is_singleton()
+                }
+                _ => false,
+            };
+            owner.methods.get(*index as usize) == Some(&frame.function)
+                && same_instance
                 && args.len() == frame.capture_prefix + frame.count
-                && args.iter().all(Option::is_some)
+                && fillable_defaults(
+                    ir,
+                    frame,
+                    args.iter()
+                        .enumerate()
+                        .filter(|(_, argument)| argument.is_none())
+                        .map(|(position, _)| position),
+                )
         }
         _ => false,
     }
+}
+
+/// Whether each omitted parameter at `positions` has a default the loop step can evaluate itself.
+///
+/// The step evaluates a default where the call would have, reading the NEW values of the
+/// parameters before it (kotlinc's `TailrecLowering.genTailCall`). A default that reads its own or a
+/// later parameter would read kotlinc's null-initialized placeholder, a shape the step does not
+/// build, so such a call stays a call.
+fn fillable_defaults(ir: &IrFile, frame: &Frame, positions: impl Iterator<Item = usize>) -> bool {
+    let defaults = ir.param_defaults(frame.function);
+    positions.into_iter().all(|position| {
+        let Some(default) = defaults.and_then(|defaults| defaults.get(position).copied().flatten())
+        else {
+            return false;
+        };
+        let own = frame.parameter_slot(position);
+        !reads_value(ir, default, &|slot| {
+            frame.is_parameter_slot(slot) && slot >= own
+        })
+    })
+}
+
+fn reads_value(ir: &IrFile, root: ExprId, matches: &dyn Fn(u32) -> bool) -> bool {
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if matches!(ir.expr(expression), IrExpr::GetValue(slot) if matches(*slot)) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
 }
 
 /// Whether a self-call's capture prefix re-reads this frame's OWN capture parameters.
@@ -405,15 +723,30 @@ fn passes_its_own_captures(ir: &IrFile, args: &[ExprId], frame: &Frame) -> bool 
     )
 }
 
-/// The arguments a self-call passes, in parameter order. `call` must satisfy [`is_self_call`],
-/// which is what makes the `MethodCall` unwrap total.
-fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
+/// The arguments a self-call passes, in parameter order, with `None` for each one it leaves to
+/// its default. `call` must satisfy [`is_self_call`].
+fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<Option<ExprId>> {
     match ir.expr(call) {
-        IrExpr::Call { args, .. } => args.clone(),
-        IrExpr::MethodCall { args, .. } => args
-            .iter()
-            .map(|argument| argument.expect("a self call passes every parameter"))
-            .collect(),
+        IrExpr::Call {
+            callee:
+                Callee::LocalWithDefaults { defaults, .. }
+                | Callee::ClassStaticWithDefaults { defaults, .. },
+            args,
+            ..
+        } => {
+            let mut supplied = args.iter().copied();
+            (0..args.len() + defaults.len())
+                .map(|position| {
+                    if defaults.contains(&(position as u32)) {
+                        None
+                    } else {
+                        supplied.next()
+                    }
+                })
+                .collect()
+        }
+        IrExpr::Call { args, .. } => args.iter().copied().map(Some).collect(),
+        IrExpr::MethodCall { args, .. } => args.clone(),
         _ => unreachable!("a self call is a call"),
     }
 }
@@ -424,163 +757,36 @@ fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
 /// The receiver is deliberately NOT reassigned. A static frame has none, and a member self-call is
 /// the same frame only when it already dispatches on `this` — so the slot holding it is already
 /// correct, and writing it would be a store with nothing to store.
-/// Whether `expression` is a self call reached through nothing but value-carrying structure.
-///
-/// A representation coercion can stand between a tail position and the call that fills it: an
-/// elvis lowers to `{ tmp = lhs; when { tmp == null -> rhs; else -> tmp } }`, and each arm is
-/// coerced to the elvis's own type, so `return a ?: f(x)` puts the tail call under a
-/// `TypeOp(ImplicitCoercion)`. The rewrite has to see through that wrapper to reach the call, and
-/// then drop it: what replaces the call is a loop STEP, which ends in `continue` and yields no
-/// value for a coercion to convert.
-///
-/// Dropping it is only sound where the whole expression becomes that step, which is what this
-/// establishes — the call is the value of every block on the way down, so rewriting the tail
-/// rewrites the lot. It deliberately does not look inside a `when` or a `try`: there the rewrite
-/// turns SOME arms into steps and leaves others producing a value, and that value still needs its
-/// coercion.
-fn coerced_self_call(ir: &IrFile, expression: ExprId, frame: &Frame) -> bool {
-    match ir.expr(expression) {
-        IrExpr::Call { .. } | IrExpr::MethodCall { .. } => is_self_call(ir, expression, frame),
-        IrExpr::Block {
-            stmts,
-            value: Some(value),
-        } => {
-            let value = *value;
-            let _ = stmts;
-            coerced_self_call(ir, value, frame)
-        }
-        IrExpr::Block { stmts, value: None } => stmts
-            .last()
-            .is_some_and(|tail| coerced_self_call(ir, *tail, frame)),
-        _ => false,
-    }
-}
-
-/// Whether a self call sits anywhere in the tail STRUCTURE of `expression`.
-///
-/// Broader than [`coerced_self_call`]: this looks through a `when`'s arms as well, because a
-/// coercion over a `when` can be distributed into them. It deliberately stops at a `try` for the
-/// reason the sweep does — a `finally` runs after the value is produced — and at a lambda, whose
-/// body is not this function's tail.
-fn reaches_self_call(ir: &IrFile, expression: ExprId, frame: &Frame) -> bool {
-    match ir.expr(expression) {
-        IrExpr::Call { .. } | IrExpr::MethodCall { .. } => is_self_call(ir, expression, frame),
-        IrExpr::Block {
-            stmts,
-            value: Some(value),
-        } => {
-            let value = *value;
-            let _ = stmts;
-            reaches_self_call(ir, value, frame)
-        }
-        IrExpr::Block { stmts, value: None } => stmts
-            .last()
-            .is_some_and(|tail| reaches_self_call(ir, *tail, frame)),
-        IrExpr::When { branches } => branches
-            .clone()
-            .iter()
-            .any(|(_, branch)| reaches_self_call(ir, *branch, frame)),
-        IrExpr::Return(Some(value)) => reaches_self_call(ir, *value, frame),
-        // Only a coercion to the SAME type is looked through, because that is the one
-        // `distribute_coercion` collapses. Looking through one it keeps would let this arm fire on
-        // a node distribution rebuilds unchanged, which does not terminate.
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
-        } if *type_operand == ir.functions[frame.function as usize].ret => {
-            reaches_self_call(ir, *arg, frame)
-        }
-        _ => false,
-    }
-}
-
-/// Push a representation coercion down to the values it actually converts.
-///
-/// `coerce(when { a -> x; else -> y })` and `when { a -> coerce(x); else -> coerce(y) }` answer the
-/// same thing, because the coercion is a pure function of the value and neither arm's effects move.
-/// The same holds for a block: its statements run either way, and only its value is converted.
-///
-/// Doing this is what lets a tail call under a CHAIN of coercions be found — `a ?: b ?: c` coerces
-/// the inner elvis and then coerces that again, so the call filling the tail sits under two
-/// wrappers and a `when` in between. Distributing leaves each wrapper on the leaf it converts,
-/// where a leaf that is the tail call is recognised and the wrapper dropped with it, and every
-/// other leaf keeps the conversion it needs.
-fn distribute_coercion(
+fn loop_step(
     ir: &mut IrFile,
-    expression: ExprId,
-    target: &Ty,
+    call: ExprId,
+    line: Option<u32>,
+    frame: &Frame,
     origin: OriginId,
-) -> ExprId {
-    match ir.expr(expression).clone() {
-        IrExpr::Block {
-            stmts,
-            value: Some(value),
-        } => {
-            let value = distribute_coercion(ir, value, target, origin);
-            generated(
-                ir,
-                IrExpr::Block {
-                    stmts,
-                    value: Some(value),
-                },
-                origin,
-            )
-        }
-        IrExpr::Block {
-            mut stmts,
-            value: None,
-        } if !stmts.is_empty() => {
-            let tail = stmts.pop().expect("checked non-empty just above");
-            let tail = distribute_coercion(ir, tail, target, origin);
-            stmts.push(tail);
-            generated(ir, IrExpr::Block { stmts, value: None }, origin)
-        }
-        IrExpr::When { branches } => {
-            let branches = branches
-                .into_iter()
-                .map(|(condition, branch)| {
-                    (condition, distribute_coercion(ir, branch, target, origin))
-                })
-                .collect();
-            generated(ir, IrExpr::When { branches }, origin)
-        }
-        IrExpr::Return(Some(value)) => {
-            let value = distribute_coercion(ir, value, target, origin);
-            generated(ir, IrExpr::Return(Some(value)), origin)
-        }
-        // The same conversion twice is the conversion once, so the outer one is dropped and the
-        // walk continues past the inner. A chained elvis produces exactly this: each link coerces
-        // its own result to the type they all share.
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
-        } if type_operand == *target => distribute_coercion(ir, arg, target, origin),
-        _ => generated(
-            ir,
-            IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: expression,
-                type_operand: *target,
-            },
-            origin,
-        ),
-    }
-}
-
-fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> IrExpr {
+) -> IrExpr {
     let args = self_call_arguments(ir, call);
     let mut updates = Vec::with_capacity(frame.count + 1);
     // The capture prefix is skipped, not written: those slots already hold what the next turn
     // reads, and `is_self_call` established that the dropped arguments are re-reads of them.
-    for (parameter, value) in args.into_iter().skip(frame.capture_prefix).enumerate() {
-        let parameter =
-            u32::try_from(parameter).expect("tailrec parameter count exceeds packed value ids");
+    // kotlinc builds the step's temporaries at the call, so each store is on the call's line.
+    let held = Held {
+        frame,
+        line,
+        origin,
+    };
+    if let IrExpr::MethodCall {
+        receiver, class, ..
+    } = *ir.expr(call)
+    {
+        let ty = Ty::obj_name(ir.classes[class as usize].fq_name);
+        hold_receiver(ir, receiver, ty, &held, &mut updates);
+    }
+    let assignments = step_assignments(ir, &args, &held, &mut updates);
+    for (position, value) in assignments {
         updates.push(generated(
             ir,
             IrExpr::SetValue {
-                var: frame.first_parameter + parameter,
+                var: frame.parameter_slot(position),
                 value,
             },
             origin,
@@ -599,125 +805,205 @@ fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> 
     }
 }
 
-fn tail_value(
+/// A member self-call's receiver is evaluated and held like any argument, and then never written
+/// back: the frame's instance does not change. kotlinc holds a receiver other than `this` (an
+/// `object`'s own instance read) in a temporary nothing reads.
+fn hold_receiver(
     ir: &mut IrFile,
-    expression: ExprId,
-    frame: &Frame,
-    result: Ty,
+    receiver: ExprId,
+    ty: Ty,
+    held: &Held<'_>,
+    statements: &mut Vec<ExprId>,
+) {
+    if matches!(ir.expr(receiver), IrExpr::GetValue(slot) if held.frame.this_slots.contains(slot)) {
+        return;
+    }
+    held.declare(ir, ty, receiver, statements);
+}
+
+/// Where a loop step declares its temporaries.
+struct Held<'a> {
+    frame: &'a Frame,
+    /// The self-call's source line.
+    line: Option<u32>,
     origin: OriginId,
-) -> Result<ExprId, FirLoweringFailure> {
-    match ir.expr(expression).clone() {
-        IrExpr::Call { .. } | IrExpr::MethodCall { .. } if is_self_call(ir, expression, frame) => {
-            let step = loop_step(ir, expression, frame, origin);
-            Ok(generated(ir, step, origin))
+}
+
+impl Held<'_> {
+    /// A temporary holding `init`, declared onto `statements`; its slot.
+    fn declare(&self, ir: &mut IrFile, ty: Ty, init: ExprId, statements: &mut Vec<ExprId>) -> u32 {
+        let slot = self.frame.temporary();
+        let declaration = generated(
+            ir,
+            IrExpr::Variable {
+                index: slot,
+                ty,
+                init: Some(init),
+                named: false,
+            },
+            self.origin,
+        );
+        if let Some(line) = self.line {
+            ir.expr_lines.insert(declaration, line);
         }
-        IrExpr::Block {
-            mut stmts,
-            value: Some(value),
-        } if result == Ty::Unit && matches!(ir.expr(value), IrExpr::UnitInstance) => {
-            // A checked `CoerceToUnit` boundary is represented as `{ effect; Unit }`. The singleton
-            // is not an effect after the recursive call, so the final statement remains the real
-            // tail position. This is the shape produced by a Unit-returning `if`/`when` whose
-            // recursive call occupies one arm.
-            if let Some(tail) = stmts.pop() {
-                stmts.push(tail_value(ir, tail, frame, result, origin)?);
-            } else {
-                stmts.push(generated(ir, IrExpr::Return(None), origin));
+        ir.call_operand_bindings.insert(declaration);
+        statements.push(declaration);
+        slot
+    }
+}
+
+/// kotlinc's `genTailCall`: every supplied argument is held in a temporary, each omitted
+/// parameter's default is then evaluated in order over the NEW values of the parameters before it,
+/// and only after that are the parameters written — supplied ones first, then defaulted ones, each
+/// in parameter order. The temporaries declared along the way are pushed onto `statements`; the
+/// assignments are returned.
+///
+/// A temporary kotlinc's `JvmOptimizationLowering` would remove is not made: a constant is used
+/// where it is read, and so is a read of a binding that never changes. A parameter changes — the
+/// loop writes it — so a read of one is held like any other value.
+fn step_assignments(
+    ir: &mut IrFile,
+    args: &[Option<ExprId>],
+    held: &Held<'_>,
+    statements: &mut Vec<ExprId>,
+) -> Vec<(usize, ExprId)> {
+    let (frame, origin) = (held.frame, held.origin);
+    /// Where the next turn's value of a parameter is: a temporary's slot, or a constant
+    /// expression that is repeated wherever it is read.
+    #[derive(Clone, Copy)]
+    enum NewValue {
+        Slot(u32),
+        Constant(ExprId),
+    }
+    let parameter_types = ir.functions[frame.function as usize].params.clone();
+    let mut declare = |ir: &mut IrFile, position: usize, init: ExprId| {
+        NewValue::Slot(held.declare(ir, parameter_types[position], init, statements))
+    };
+    let mut new_values: Vec<(usize, NewValue)> = Vec::new();
+    for (position, argument) in args.iter().enumerate().skip(frame.capture_prefix) {
+        let Some(argument) = *argument else {
+            continue;
+        };
+        let value = match ir.expr(argument) {
+            _ if is_constant(ir, argument) => NewValue::Constant(argument),
+            IrExpr::GetValue(slot)
+                if !frame.is_parameter_slot(*slot)
+                    && (frame.fixed_temporaries.contains(slot)
+                        || ir.binding_read_stability.get(&argument)
+                            == Some(&crate::ir::IrBindingStability::Stable)) =>
+            {
+                NewValue::Slot(*slot)
             }
-            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
-        }
-        // A `Unit` function's block can end in a bare `return`. Everything that runs before it and
-        // after nothing else is still in TAIL position — `f(x); return` is a tail call in Kotlin,
-        // and the source wrote `tailrec` because that call recurses to a depth no stack survives.
-        // Only the statement immediately before the `return` qualifies: anything earlier has code
-        // after it.
-        IrExpr::Block {
-            mut stmts,
-            value: None,
-        } if result == Ty::Unit
-            && matches!(
-                stmts.last().map(|last| ir.expr(*last)),
-                Some(IrExpr::Return(None))
-            )
-            && stmts.len() > 1 =>
-        {
-            let returned = stmts.pop().expect("checked non-empty just above");
-            let tail = stmts
-                .pop()
-                .expect("checked for a second statement just above");
-            stmts.push(tail_value(ir, tail, frame, result, origin)?);
-            stmts.push(returned);
-            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
-        }
-        IrExpr::Block { mut stmts, value } => {
-            if let Some(value) = value {
-                stmts.push(tail_value(ir, value, frame, result, origin)?);
-            } else if let Some(tail) = stmts.pop() {
-                // A block-bodied function carries its explicit `return` (or Unit tail statement)
-                // as the final statement rather than as the block value. It is still the sole tail
-                // position of this block. The statements before it are tail positions only
-                // where they `return`.
-                stmts.push(tail_value(ir, tail, frame, result, origin)?);
-            } else if result == Ty::Unit {
-                stmts.push(generated(ir, IrExpr::Return(None), origin));
-            } else {
-                return Err(FirLoweringFailure::MissingBodyResult { origin });
+            _ => declare(ir, position, argument),
+        };
+        new_values.push((position, value));
+    }
+    let defaults = ir
+        .param_defaults(frame.function)
+        .cloned()
+        .unwrap_or_default();
+    let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
+    for (position, _) in args
+        .iter()
+        .enumerate()
+        .skip(frame.capture_prefix)
+        .filter(|(_, argument)| argument.is_none())
+    {
+        let default = defaults[position].expect("checked: the omitted parameter has a default");
+        let (copy, _) = crate::ir::clone_expression_dag(ir, default);
+        // The default's own locals move above everything the body uses; its parameter reads stay
+        // put for the substitution below.
+        let identity = (0..parameters_end).collect::<Vec<_>>();
+        let locals = super::source_calls::rehome_inline_body_values(
+            ir,
+            copy,
+            &identity,
+            frame.next_slot.get(),
+        )
+        .expect("value slots stay within packed ids");
+        frame.next_slot.set(frame.next_slot.get() + locals);
+        substitute_parameter_reads(ir, copy, frame, &new_values);
+        let value = if is_constant(ir, copy) {
+            // kotlinc reads the constant where its temporary was read, at the call's position.
+            forget_lines(ir, copy);
+            NewValue::Constant(copy)
+        } else {
+            declare(ir, position, copy)
+        };
+        new_values.push((position, value));
+    }
+
+    fn substitute_parameter_reads(
+        ir: &mut IrFile,
+        root: ExprId,
+        frame: &Frame,
+        new_values: &[(usize, NewValue)],
+    ) {
+        let mut pending = vec![root];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression) {
+                continue;
             }
-            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
+            if let IrExpr::GetValue(slot) = *ir.expr(expression) {
+                let replacement = new_values
+                    .iter()
+                    .find(|(position, _)| frame.parameter_slot(*position) == slot);
+                match replacement {
+                    Some((_, NewValue::Slot(new))) => {
+                        ir.exprs[expression as usize] = IrExpr::GetValue(*new);
+                    }
+                    Some((_, NewValue::Constant(constant))) => {
+                        let (copy, _) = crate::ir::clone_expression_dag(ir, *constant);
+                        ir.exprs[expression as usize] = ir.expr(copy).clone();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
         }
-        IrExpr::Return(Some(value)) => tail_value(ir, value, frame, result, origin),
-        // A LOOP is not a value and has no tail position of its own: what leaves the function from
-        // inside one is a `return`, which the sweep reaches wherever it stands. Wrapping the loop
-        // in a `return` instead would return the loop — which is what a body ending in
-        // `while (true) { … return f(x) }` used to compile to, and the verifier said so.
-        IrExpr::While { .. } => Ok(expression),
-        IrExpr::Return(None) => Ok(expression),
-        // The coercion a tail position puts on the value that fills it. Its argument is the tail
-        // call itself (see `coerced_self_call`), so what this returns is the loop step, and the
-        // coercion goes with the call it was converting. Restricted to a coercion to THIS
-        // function's return type: that is the one a tail position inserts, and it is the one whose
-        // disappearance cannot change what the function answers.
+    }
+
+    new_values
+        .into_iter()
+        .map(|(position, value)| {
+            let read = match value {
+                NewValue::Slot(slot) => generated(ir, IrExpr::GetValue(slot), origin),
+                NewValue::Constant(constant) => constant,
+            };
+            (position, read)
+        })
+        .collect()
+}
+
+fn forget_lines(ir: &mut IrFile, root: ExprId) {
+    let mut pending = vec![root];
+    while let Some(expression) = pending.pop() {
+        ir.expr_lines.remove(&expression);
+        ir.expr_source_lines.remove(&expression);
+        ir.expr_end_lines.remove(&expression);
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+}
+
+/// A constant, possibly widened to a reference type without changing its representation: the
+/// initializer kotlinc's `JvmOptimizationLowering` inlines into a temporary's reads.
+fn is_constant(ir: &IrFile, expression: ExprId) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Const(_) => true,
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
-            ref type_operand,
-        } if *type_operand == result && coerced_self_call(ir, arg, frame) => {
-            tail_value(ir, arg, frame, result, origin)
+            type_operand,
+        } => {
+            type_operand.is_reference()
+                && matches!(
+                    ir.expr(*arg),
+                    IrExpr::Const(IrConst::String(_) | IrConst::Null)
+                )
         }
-        // The same coercion over STRUCTURE rather than directly over the call: `a ?: b ?: c`
-        // wraps the inner elvis, so the tail call sits under two coercions with a `when` between
-        // them. Distributing puts each coercion on the leaf it converts, and the arm above then
-        // recognises the leaf that is the call.
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            ref type_operand,
-        } if *type_operand == result && reaches_self_call(ir, arg, frame) => {
-            let target = *type_operand;
-            let distributed = distribute_coercion(ir, arg, &target, origin);
-            tail_value(ir, distributed, frame, result, origin)
-        }
-        IrExpr::When { branches } => {
-            let branches = branches
-                .into_iter()
-                .map(|(condition, branch)| {
-                    Ok((condition, tail_value(ir, branch, frame, result, origin)?))
-                })
-                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
-            Ok(generated(ir, IrExpr::When { branches }, origin))
-        }
-        _ if result == Ty::Unit => {
-            let returned = generated(ir, IrExpr::Return(None), origin);
-            Ok(generated(
-                ir,
-                IrExpr::Block {
-                    stmts: vec![expression, returned],
-                    value: None,
-                },
-                origin,
-            ))
-        }
-        _ => Ok(generated(ir, IrExpr::Return(Some(expression)), origin)),
+        _ => false,
     }
 }
 
@@ -779,6 +1065,7 @@ mod tests {
                 },
                 1,
             ),
+            false,
             OriginId::from_raw(0),
         )
         .expect("the body has a tail");
@@ -831,6 +1118,7 @@ mod tests {
                 },
                 1,
             ),
+            false,
             OriginId::from_raw(0),
         )
         .expect("the body has a tail");
@@ -838,10 +1126,8 @@ mod tests {
 
     /// Whether the rewrite produced a LOOP STEP anywhere in the body.
     ///
-    /// The node a `return` leaves behind is not the signal: `rewrite_returned_tail_calls` replaces a
-    /// block-shaped `return` with the rebuilt block whether or not anything stepped, so "still a
-    /// `Return`" answers a question about shape rather than about the rewrite. A `continue` carrying
-    /// the synthetic loop's label is written by `loop_step` and by nothing else.
+    /// A `continue` carrying the synthetic loop's label is written by `loop_step` and by nothing
+    /// else.
     fn steps(ir: &IrFile) -> bool {
         ir.exprs.iter().any(|expression| {
             matches!(expression, IrExpr::Continue { label: Some(label) } if label == LOOP_LABEL)
@@ -941,6 +1227,7 @@ mod tests {
                 },
                 1,
             ),
+            false,
             OriginId::from_raw(0),
         )
         .expect("the body has a tail");
@@ -1037,11 +1324,9 @@ mod tests {
         finish(&mut ir, vec![returned, tail]);
 
         assert!(
-            matches!(ir.expr(returned), IrExpr::Block { .. }),
+            steps(&ir),
             "a uniquely owned `return` of a self call is the loop step"
         );
-        // The slot stopped being a `Return`, so the fact that described it went with it.
-        assert_eq!(ir.checked_return_depths.get(&returned), None);
         assert!(depths_describe_returns(&ir));
     }
 
@@ -1111,11 +1396,14 @@ mod tests {
         let tail = ir.add_expr(IrExpr::Return(None));
         finish(&mut ir, vec![owned, tail]);
 
-        assert!(
-            matches!(ir.expr(returned), IrExpr::Block { .. }),
-            "one path to the `return` is the licence to rewrite it where it stands"
+        let IrExpr::Block { stmts, .. } = ir.expr(owned) else {
+            panic!("the owning block remains")
+        };
+        assert_ne!(
+            stmts[0], returned,
+            "one path to the `return` is the licence to replace it where it stands"
         );
-        assert_eq!(ir.checked_return_depths.get(&returned), None);
+        assert!(steps(&ir));
         assert!(depths_describe_returns(&ir));
     }
 
