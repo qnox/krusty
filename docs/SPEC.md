@@ -2446,11 +2446,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Long`). This is what compiles the large `kotlin.test`-based slice of the box corpus.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
-- **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm to
-  `Unit`. The checked discarded-expression mark selects effect-then-`Unit` lowering; value-position
-  mixes remain unsupported. Statement position does not rewrite the final arm to `else`, because a
-  non-exhaustive `when` may match no arm.
+- **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm of
+  a non-exhaustive one to `Unit`. The checked discarded-expression mark selects effect-then-`Unit`
+  lowering; value-position mixes remain unsupported. Statement position does not rewrite the final
+  arm to `else`, because a non-exhaustive `when` may match no arm.
   `tests/when_statement_value_arm_e2e.rs`.
+- **A discarded `if`/`when` keeps its type; only a non-exhaustive one is `Unit`.** fir2ir types a
+  `when` or `if` by its checked result when it is exhaustive and, if its `else` is an unbraced
+  `else if`, that one is too, down the chain (`isDeeplyProperlyExhaustive`); otherwise it is `Unit`.
+  Being a statement does not make it `Unit`: kotlinc's `visitWhen` materializes every branch of a
+  non-`Unit` exhaustive `when` and the statement pops the joined value once, which
+  `PopBackwardPropagation` removes only where dropping the pushes with it costs no more;
+  a `Unit` or non-exhaustive one discards each branch's value in the branch. The checker decides it,
+  from the resolver's exhaustiveness verdict for a `when` (a `Unit`-valued one included), and
+  publishes it on the FIR `if`/`when` (`deeply_exhaustive`); common lowering copies it
+  into the IR's `Unit` type (`exhaustive_whens`); the JVM emitter chooses the pop.
+  `tests/discarded_when_value_e2e.rs`, `src/fir/body_check/branch_exhaustiveness_tests.rs`,
+  `src/fir_lower/when_result_type_tests.rs`.
 - **A subjectless `when` threads false-branch narrowings into later arms**: a later condition or body
   runs only after every earlier arm fell through. Null, compound, and type-test conditions use the
   same narrowing rules as `if` branches.

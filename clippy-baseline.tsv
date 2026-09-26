@@ -63,7 +63,6 @@
 1	src/jvm/inline/reified_operands.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
 1	src/jvm/ir_emit/type_operation_emission.rs	this function has too many arguments (8/7)
-1	src/jvm/ir_emit/when.rs	this `if` statement can be collapsed
 1	src/jvm/jvm_libraries.rs	unnecessarily eager cloning of iterator items
 1	src/jvm/jvm_libraries.rs	using `Option.and_then(|x| Some(y))`, which is more succinctly expressed as `map(|x| y)`
 1	src/jvm/metadata.rs	this function has too many arguments (8/7)

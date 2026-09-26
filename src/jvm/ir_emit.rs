@@ -15503,7 +15503,6 @@ impl<'a> Emitter<'a> {
         let is_stmt =
             (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit || discarded;
         let enclosing_terminal_target = self.terminal_statement_target.take();
-        let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         if self.emit_safe_call_when(
             expression,
             branches,
@@ -15512,6 +15511,10 @@ impl<'a> Emitter<'a> {
         ) {
             return;
         }
+        let exhaustive = has_else || exhaustive_result.is_some();
+        let keeps_value = discarded && when::keeps_discarded_value(exhaustive, result_ty);
+        let is_stmt = is_stmt && !keeps_value;
+        let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
         // of comparisons. Everything above (the result type, the statement/value decision, the entry
         // height) applies unchanged; only the dispatch differs.
@@ -15521,6 +15524,7 @@ impl<'a> Emitter<'a> {
                 when::Emission::new(is_stmt, result_ty, entry_height, end, terminal_target),
                 code,
             );
+            when::discard_joined_value(keeps_value, result_ty, code);
             return;
         }
         for (index, (cond, body)) in branches.iter().enumerate() {
@@ -15610,16 +15614,10 @@ impl<'a> Emitter<'a> {
             }
         }
         if !has_else && exhaustive_result.is_some() {
-            let exception = self.cw.class_ref("kotlin/NoWhenBranchMatchedException");
-            code.new_obj(exception);
-            code.dup();
-            let constructor =
-                self.cw
-                    .methodref("kotlin/NoWhenBranchMatchedException", "<init>", "()V");
-            code.invokespecial(constructor, 0, 0);
-            code.athrow();
+            self.emit_no_when_branch_matched(code);
         }
         self.bind(end, code);
+        when::discard_joined_value(keeps_value, result_ty, code);
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
