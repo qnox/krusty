@@ -47,6 +47,12 @@ pub(crate) fn is_boxing(insn: &Insn, value_classes: &dyn ValueClasses) -> bool {
         || is_coroutine_primitive_boxing(owner, name, desc)
 }
 
+/// `isPrimitiveBoxing`: a wrapper class's `valueOf` of its own primitive, and no other boxing.
+pub(crate) fn is_primitive_boxing_insn(insn: &Insn) -> bool {
+    method(insn, INVOKESTATIC)
+        .is_some_and(|(owner, name, desc)| is_primitive_boxing(owner, name, desc))
+}
+
 fn is_primitive_boxing(owner: &str, name: &str, desc: &str) -> bool {
     let Some(primitive) = unboxed_primitive(&descriptors::of_internal_name(owner)) else {
         return false;
