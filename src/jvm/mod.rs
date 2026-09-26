@@ -41,6 +41,8 @@ mod local_class_names;
 mod local_properties;
 mod mapped_builtin_declarations;
 pub mod metadata;
+mod metadata_flags;
+mod metadata_method_signatures;
 pub mod method_node;
 mod method_parameters;
 mod module_calls;

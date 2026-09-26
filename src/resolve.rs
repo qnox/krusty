@@ -62,6 +62,7 @@ mod dependency_platform;
 mod diagnostic_selection;
 mod finalized_projection;
 mod for_loop_iteration;
+pub(crate) mod function_type_parameters;
 mod generic_call_bindings;
 mod inspection_analysis;
 mod interface_delegation;

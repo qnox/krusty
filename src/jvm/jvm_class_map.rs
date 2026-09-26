@@ -20,7 +20,12 @@ use crate::types::TypeName;
 /// of every primitive owner plus `String` and `Enum`; derive the primitive portion from the shared
 /// Kotlin/JVM mapping instead of maintaining another classifier-name list.
 pub fn intrinsic_companion_to_jvm(internal: &str) -> Option<String> {
-    let companion = crate::types::existing_type_name(internal)?;
+    intrinsic_companion_owner(crate::types::existing_type_name(internal)?)
+        .map(companion_object_internal)
+}
+
+/// The owner of an intrinsic companion (`kotlin/Int.Companion` → `kotlin/Int`).
+fn intrinsic_companion_owner(companion: TypeName) -> Option<TypeName> {
     if companion.nested_segment_ref() != "Companion" {
         return None;
     }
@@ -33,11 +38,73 @@ pub fn intrinsic_companion_to_jvm(internal: &str) -> Option<String> {
     if !primitive && !owner.matches("kotlin/String") && !owner.matches("kotlin/Enum") {
         return None;
     }
-    Some(format!(
-        "kotlin/jvm/internal/{}CompanionObject",
-        owner.segment_ref()
-    ))
+    Some(owner)
 }
+
+fn companion_object_internal(owner: TypeName) -> String {
+    format!("kotlin/jvm/internal/{}CompanionObject", owner.segment_ref())
+}
+
+/// kotlinc's `ClassMapperLite.mapClass`: the descriptor a metadata reader assigns a classifier's
+/// class id. It is this module's mapping, and differs from the emitter's erasure only where
+/// kotlinc's table does: no `Boolean.Companion`, numbered `Function`/`KFunction` interfaces only
+/// through 22, no `KSuspendFunction` erasure, and an unmapped classifier (a value class or unsigned
+/// type included) keeps its class id, nested segments joined by `$`.
+pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
+    let signed_primitive = |ty: Ty| ty.scalar_value_repr() == Some(ty);
+    let primitive = Ty::obj_name(classifier);
+    if signed_primitive(primitive) {
+        return super::names::type_descriptor(primitive);
+    }
+    if let Some(element) =
+        crate::types::prim_array_element(classifier).filter(|e| signed_primitive(*e))
+    {
+        return format!("[{}", super::names::type_descriptor(element));
+    }
+    let function = super::function_classifiers::classifier(classifier).filter(|function| {
+        function.identity() == classifier
+            && !function.is_suspend()
+            && function.arity() <= super::names::MAX_NUMBERED_FUNCTION_ARITY
+    });
+    let internal = if let Some(jvm) = type_name_to_jvm_builtin_internal(classifier) {
+        jvm.to_owned()
+    } else if let Some(function) = function {
+        match function.is_reflective() {
+            true => crate::types::KFUNCTION_INTERNAL.to_owned(),
+            false => super::names::function_interface_internal_name(function.arity()),
+        }
+    } else if let Some(owner) =
+        intrinsic_companion_owner(classifier).filter(|owner| Ty::obj_name(*owner) != Ty::Boolean)
+    {
+        companion_object_internal(owner)
+    } else {
+        super::names::binary_class_name(classifier)
+    };
+    format!("L{internal};")
+}
+
+/// [`class_mapper_lite_descriptor`] of `kotlin.Nothing`, which is a type rather than a classifier.
+pub(super) fn class_mapper_lite_nothing_descriptor() -> String {
+    format!("L{NOTHING_JVM};")
+}
+
+/// [`class_mapper_lite_descriptor`] of a function type's class id, `kotlin.FunctionN` or
+/// `kotlin.coroutines.SuspendFunctionN` for its arity.
+pub(super) fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool) -> String {
+    if suspend {
+        format!("Lkotlin/coroutines/SuspendFunction{arity};")
+    } else if arity <= super::names::MAX_NUMBERED_FUNCTION_ARITY {
+        format!(
+            "L{};",
+            super::names::function_interface_internal_name(arity)
+        )
+    } else {
+        format!("Lkotlin/Function{arity};")
+    }
+}
+
+/// The JVM class `kotlin.Nothing` erases to.
+const NOTHING_JVM: &str = "java/lang/Void";
 
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
 pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
@@ -83,7 +150,7 @@ pub fn kotlin_builtin_to_jvm(internal: &str) -> Option<&'static str> {
         "kotlin/Comparable" => "java/lang/Comparable",
         "kotlin/Enum" => "java/lang/Enum",
         "kotlin/Annotation" => "java/lang/annotation/Annotation",
-        "kotlin/Nothing" => "java/lang/Void",
+        "kotlin/Nothing" => NOTHING_JVM,
         // `kotlin.collections` — read-only AND mutable erase to the one JVM interface.
         "kotlin/collections/Iterable" | "kotlin/collections/MutableIterable" => {
             "java/lang/Iterable"
@@ -426,7 +493,7 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
     ),
     ErasureGroup::erasure_only(
         &["kotlin/Nothing"],
-        "java/lang/Void",
+        NOTHING_JVM,
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
     ErasureGroup::mapped(
@@ -940,5 +1007,49 @@ mod tests {
         assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
             "example/UserType"
         )));
+    }
+
+    #[test]
+    fn the_class_mapper_matches_kotlinc_table() {
+        let mapped = |name| super::class_mapper_lite_descriptor(type_name(name));
+        assert_eq!(mapped("kotlin/Int"), "I");
+        assert_eq!(mapped("kotlin/IntArray"), "[I");
+        assert_eq!(mapped("kotlin/UInt"), "Lkotlin/UInt;");
+        assert_eq!(mapped("kotlin/UIntArray"), "Lkotlin/UIntArray;");
+        assert_eq!(mapped("kotlin/collections/MutableList"), "Ljava/util/List;");
+        assert_eq!(
+            mapped("kotlin/collections/MutableMap.MutableEntry"),
+            "Ljava/util/Map$Entry;"
+        );
+        assert_eq!(
+            mapped("kotlin/Function22"),
+            "Lkotlin/jvm/functions/Function22;"
+        );
+        assert_eq!(mapped("kotlin/Function23"), "Lkotlin/Function23;");
+        assert_eq!(
+            mapped("kotlin/reflect/KFunction1"),
+            "Lkotlin/reflect/KFunction;"
+        );
+        assert_eq!(
+            mapped("kotlin/reflect/KSuspendFunction0"),
+            "Lkotlin/reflect/KSuspendFunction0;"
+        );
+        assert_eq!(
+            mapped("kotlin/Boolean.Companion"),
+            "Lkotlin/Boolean$Companion;"
+        );
+        assert_eq!(
+            mapped("kotlin/Int.Companion"),
+            "Lkotlin/jvm/internal/IntCompanionObject;"
+        );
+        assert_eq!(mapped("app/Outer.Inner"), "Lapp/Outer$Inner;");
+        assert_eq!(
+            super::class_mapper_lite_nothing_descriptor(),
+            "Ljava/lang/Void;"
+        );
+        assert_eq!(
+            super::class_mapper_lite_function_descriptor(1, true),
+            "Lkotlin/coroutines/SuspendFunction1;"
+        );
     }
 }

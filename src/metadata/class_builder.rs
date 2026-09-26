@@ -16,6 +16,10 @@ use crate::metadata::type_encoder::{
     semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
     TypeParameters,
 };
+use crate::metadata::version_requirements::{
+    needs_inline_parameter_null_check, VersionRequirement, VersionRequirementTable,
+    INLINE_PARAMETER_NULL_CHECK,
+};
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, TypeName, Visibility};
 
@@ -113,6 +117,9 @@ pub struct FnMeta {
     pub type_param_bounds: Vec<Vec<Ty>>,
     /// `Function.flags` (f9): e.g. operator (`componentN`) or the data-class `copy`. 0 ⇒ omitted.
     pub flags: u64,
+    /// The checker's fact that a value parameter (context parameters excluded) or the extension
+    /// receiver has a function type. `false` for a synthesized member.
+    pub has_function_typed_parameter: bool,
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
@@ -162,6 +169,7 @@ impl FnMeta {
             semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             flags: DEFAULT_FUNCTION_FLAGS,
+            has_function_typed_parameter: false,
             params_have_defaults: false,
             receiver: None,
             param_defaults: Vec::new(),
@@ -578,8 +586,11 @@ pub struct ClassTail<'a> {
     pub jvm_class_flags: Option<u64>,
     /// A compiler-version requirement attached to the class. `-jvm-default=no-compatibility`
     /// requires compiler 1.4.0 so older consumers do not interpret the interface under the legacy
-    /// `$DefaultImpls` rules. The tuple is `(major, minor, patch)`.
-    pub compiler_version_requirement: Option<(u8, u8, u8)>,
+    /// `$DefaultImpls` rules.
+    pub compiler_version_requirement: Option<VersionRequirement>,
+    /// Whether parameter null checks are generated (`-Xno-param-assertions` clears it). An inline
+    /// member with a functional parameter then requires compiler 1.3.50.
+    pub param_assertions: bool,
     /// Index of a `vararg` PRIMARY-ctor parameter (into `ctor_params`), for its
     /// `vararg_element_type` record. `None` ⇒ no vararg parameter.
     pub ctor_vararg_index: Option<usize>,
@@ -635,6 +646,7 @@ impl Default for ClassTail<'_> {
             ctor_sig_name: None,
             jvm_class_flags: None,
             compiler_version_requirement: None,
+            param_assertions: true,
             ctor_vararg_index: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
@@ -1054,7 +1066,9 @@ pub fn build_class(
     };
 
     // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
-    let build_func = |st: &mut StringTable, m: &FnMeta| {
+    let build_func = |st: &mut StringTable,
+                      requirements: &mut VersionRequirementTable,
+                      m: &FnMeta| {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
         let mut function_type_parameters = class_type_parameters.clone();
@@ -1249,11 +1263,21 @@ pub fn build_class(
         for annotation in &annotations {
             func.repeated_message(12, annotation);
         }
+        // Function.version_requirement = 31: an index into this class's requirement table.
+        if needs_inline_parameter_null_check(
+            flags,
+            m.has_function_typed_parameter,
+            tail.param_assertions,
+        ) {
+            func.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
+        }
         if let Some(sig) = &sig {
             func.field_message(100, sig);
         }
         func
     };
+    // Members add their requirements in serialization order; the class's own follow them.
+    let mut requirements = VersionRequirementTable::default();
 
     let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
     let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
@@ -1268,7 +1292,7 @@ pub fn build_class(
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
-                func_msgs[index] = Some(build_func(&mut st, &methods[index]));
+                func_msgs[index] = Some(build_func(&mut st, &mut requirements, &methods[index]));
             }
             ClassMemberOrder::TypeAlias(index)
                 if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
@@ -1290,7 +1314,7 @@ pub fn build_class(
     }
     for (index, function) in methods.iter().enumerate() {
         if func_msgs[index].is_none() {
-            func_msgs[index] = Some(build_func(&mut st, function));
+            func_msgs[index] = Some(build_func(&mut st, &mut requirements, function));
         }
     }
     for (index, alias) in tail.type_aliases.iter().enumerate() {
@@ -1417,27 +1441,12 @@ pub fn build_class(
     for annotation in &annotation_msgs {
         class.repeated_message(25, annotation); // Class.annotation = 25
     }
-    if let Some((major, minor, patch)) = tail.compiler_version_requirement {
-        // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32). The compact
-        // version word is `major:3 | minor:4 | patch:7`; larger components use versionFull instead.
-        // VersionKind.COMPILER_VERSION is enum value 1 (LANGUAGE_VERSION is the omitted default).
-        let mut requirement = Pb::new();
-        if major <= 7 && minor <= 15 && patch <= 127 {
-            requirement.field_varint(
-                1,
-                u64::from(major) | (u64::from(minor) << 3) | (u64::from(patch) << 7),
-            );
-        } else {
-            requirement.field_varint(
-                2,
-                u64::from(major) | (u64::from(minor) << 8) | (u64::from(patch) << 16),
-            );
-        }
-        requirement.field_varint(6, 1);
-        let mut table = Pb::new();
-        table.repeated_message(1, &requirement);
-        class.field_varint(31, 0);
-        class.field_message(32, &table);
+    if let Some(requirement) = tail.compiler_version_requirement {
+        // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32).
+        class.field_varint(31, requirements.index(requirement));
+    }
+    if let Some(table) = requirements.encode() {
+        class.field_message(32, &table); // Class.versionRequirementTable = 32
     }
     // Extensions are written in ASCENDING field number, like every other field: 101 before 104.
     if let Some(mi) = module_idx {
@@ -1690,6 +1699,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1711,6 +1721,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1732,6 +1743,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1753,6 +1765,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1774,6 +1787,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1795,6 +1809,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2038,7 +2053,7 @@ mod tests {
                 flags: 102,
                 emit_primary_ctor: false,
                 jvm_class_flags: Some(1),
-                compiler_version_requirement: Some((1, 4, 0)),
+                compiler_version_requirement: Some(VersionRequirement::compiler(1, 4, 0)),
                 ..Default::default()
             },
         );

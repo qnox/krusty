@@ -2212,6 +2212,12 @@ fn publish_checked_local_signatures_selected(
             source.raw(),
             &local_classifiers,
         );
+        crate::resolve::function_type_parameters::publish_local_function_type_parameters(
+            index,
+            platform,
+            source.raw(),
+            &local_classifiers,
+        );
         Ok(())
     } else {
         failed.sort_by_key(|declaration| declaration.raw());

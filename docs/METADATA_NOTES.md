@@ -148,6 +148,26 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the return and receiver
   types but writes `type_parameter` in `setter_value_parameter`). krusty builds the record in any
   order and `Pb::canonical` sorts it. Test: `tests/metadata_type_reference_e2e.rs`.
+- Version requirements (kotlinc 2.4.20, `FirJvmSerializerExtension`): a named, non-private,
+  non-suspend inline function with a value parameter (context parameters excluded) or extension
+  receiver of a function type (`Function*`, `SuspendFunction*`, `KFunction*`, `KSuspendFunction*`,
+  nullable or not) records `version_requirement` (f31) = compiler 1.3.50, unless parameter
+  assertions are disabled. The checker decides "function type" from the classifier declaration
+  (`LibraryType::represents_some_function_type`) and publishes it per callable; the serializer only
+  reads that fact. Property accessors never qualify. The owning `Package` or `Class` keeps
+  one `version_requirement_table` (f32); equal requirements share one entry in order of first use,
+  members before the class's own (the interface `-jvm-default` 1.4.0 requirement). The entry is
+  `{ version (f1) = major | minor << 3 | patch << 7, version_kind (f6) = COMPILER_VERSION (1) }`.
+  Test: `tests/metadata_version_requirement_e2e.rs`.
+- `JvmMethodSignature` presence (kotlinc 2.4.20, `FirJvmSignatureSerializer.requiresFunctionSignature`):
+  a function records its descriptor exactly when the one rebuilt from the declared extension
+  receiver, value parameters (context parameters excluded; a vararg as its array type) and return
+  type differs from the physical one, or when one of them has no class id (a type parameter). Each
+  type maps by its class id, nullability ignored, through `ClassMapperLite` (`kotlin/Int` -> `I`,
+  `kotlin/reflect/KFunctionN` -> `Lkotlin/reflect/KFunction;`, anything unlisted -> `L<id with $>;`).
+  So `vararg x: Int` records nothing, while a nullable primitive, a `Unit` parameter, a suspend
+  function type, `KSuspendFunctionN` or any context parameter does. Test:
+  `tests/metadata_version_requirement_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

@@ -2,6 +2,9 @@
 //! top-level functions. Schema/field numbers per `core/metadata/src/metadata.proto`; builtin type
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
+use super::version_requirements::{
+    needs_inline_parameter_null_check, VersionRequirementTable, INLINE_PARAMETER_NULL_CHECK,
+};
 use crate::metadata::type_encoder::{
     encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
     semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
@@ -43,6 +46,9 @@ pub struct FnMeta {
     /// `inline fun` — sets `Function.flags` `IS_INLINE` (bit 10) so a reader resolves the function
     /// as inline (splice candidate), not a plain callable.
     pub inline: bool,
+    /// The checker's fact that a value parameter (context parameters excluded) or the extension
+    /// receiver has a function type.
+    pub has_function_typed_parameter: bool,
     /// `operator fun` — sets `Function.flags` `IS_OPERATOR` (bit 8). The declaration flag exists only
     /// in metadata; omitting it makes a consuming Kotlin module reject indexed/call conventions even
     /// though the facade's JVM method is present.
@@ -108,6 +114,7 @@ impl FnMeta {
             jvm_desc: None,
             jvm_name: None,
             inline: false,
+            has_function_typed_parameter: false,
             operator: false,
             infix: false,
             type_params: Vec::new(),
@@ -385,7 +392,12 @@ pub(crate) fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::Applie
     out
 }
 
-fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
+fn function_pb(
+    st: &mut StringTable,
+    f: &FnMeta,
+    requirements: &mut VersionRequirementTable,
+    param_assertions: bool,
+) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
     // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE, bit 9 = IS_INFIX, bit 8 = IS_OPERATOR; the
@@ -543,6 +555,10 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     // `@LowPriorityInOverloadResolution`.
     for annotation in &f.annotations {
         p.repeated_message(12, &annotation_pb(st, annotation));
+    }
+    // Function.version_requirement = 31: an index into the package's requirement table.
+    if needs_inline_parameter_null_check(flags, f.has_function_typed_parameter, param_assertions) {
+        p.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
     }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
@@ -831,8 +847,10 @@ pub fn build_package(
     props: &[PropMeta],
     aliases: &[TypeAliasMeta],
     module_name: Option<&str>,
+    param_assertions: bool,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
+    let mut requirements = VersionRequirementTable::default();
     let mut package = Pb::new();
     // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
     // interns first), while the proto still writes functions (f3) before properties (f4) — so the
@@ -869,7 +887,14 @@ pub fn build_package(
     let mut alias_pbs: Vec<Option<Pb>> = (0..aliases.len()).map(|_| None).collect();
     for (_, kind, index) in build_order {
         match kind {
-            Kind::Function => fn_pbs[index] = Some(function_pb(&mut st, &funcs[index])),
+            Kind::Function => {
+                fn_pbs[index] = Some(function_pb(
+                    &mut st,
+                    &funcs[index],
+                    &mut requirements,
+                    param_assertions,
+                ))
+            }
             Kind::Property => prop_pbs[index] = Some(property_pb(&mut st, &props[index])),
             Kind::Alias => alias_pbs[index] = Some(type_alias_pb(&mut st, &aliases[index])),
         }
@@ -882,6 +907,9 @@ pub fn build_package(
     }
     for ap in alias_pbs.iter().flatten() {
         package.repeated_message(5, ap); // Package.type_alias = 5
+    }
+    if let Some(table) = requirements.encode() {
+        package.field_message(32, &table); // Package.version_requirement_table = 32
     }
     // The `-module-name` value → `JvmProtoBuf.packageModuleName` (f101). kotlinc interns it LAST
     // (the end of d2) and omits the field for the default module `main` (callers pass `None` then).
@@ -923,6 +951,7 @@ mod tests {
             &[],
             &[],
             None,
+            true,
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
@@ -943,6 +972,7 @@ mod tests {
             &[],
             &[],
             Some("mymod"),
+            true,
         );
         assert_eq!(
             d2,
@@ -1035,6 +1065,7 @@ mod tests {
             }],
             &[],
             None,
+            true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -1086,6 +1117,7 @@ mod tests {
             }],
             &[],
             None,
+            true,
         );
         let d1 = String::from_iter(d1.into_iter().map(char::from));
         let metadata = crate::jvm::metadata::decode_metadata(
@@ -1139,6 +1171,7 @@ mod tests {
             }],
             &[],
             None,
+            true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -1180,6 +1213,7 @@ mod tests {
             }],
             &[],
             None,
+            true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -1248,6 +1282,7 @@ mod tests {
             &[],
             &[],
             None,
+            true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -1272,6 +1307,7 @@ mod tests {
             &[],
             &[],
             None,
+            true,
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }

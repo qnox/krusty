@@ -87,6 +87,7 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
+use super::metadata_flags::{class_metadata_flags, function_flags};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -712,93 +713,6 @@ fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: &str
         }
     }
     Ty::obj(owner)
-}
-
-fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
-    // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
-    // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
-    // recorded visibility stay public.
-    let visibility: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
-        Some(crate::types::Visibility::Internal) => 0,
-        Some(crate::types::Visibility::Private) => 1,
-        Some(crate::types::Visibility::Protected) => 2,
-        _ => 3,
-    };
-    let modality: u64 = if c.is_sealed {
-        3
-    } else if c.is_abstract || c.is_interface {
-        2
-    } else if c.is_open {
-        1
-    } else {
-        0
-    };
-    let kind: u64 = if c.is_annotation {
-        4
-    } else if c.is_interface {
-        1
-    } else if !c.enum_entries.is_empty() {
-        2
-    } else if c.enum_entry_of.is_some() {
-        3
-    } else if c.is_companion {
-        6
-    } else if c.is_object {
-        5
-    } else {
-        0
-    };
-    // A value class carries `@JvmInline`, which sets `hasAnnotations`.
-    let has_annotations = u64::from(c.is_value || !c.applied_annotations.is_empty());
-    has_annotations
-        | (visibility << 1)
-        | (modality << 4)
-        | (kind << 6)
-        // `IS_INNER` (bit 9): an `inner class` — the record is how a consumer knows construction
-        // takes the enclosing instance (kotlinc: `inner class Item` flags 518).
-        | (u64::from(c.is_inner_class) << 9)
-        | (u64::from(c.is_data) << 10)
-        | (u64::from(c.is_value) << 13)
-        | (u64::from(c.is_fun_interface) << 14)
-        | (u64::from(!c.enum_entries.is_empty()) << 15)
-}
-
-/// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape
-/// constant. Decoded from kotlinc 2.4.0 (copy 198, componentN 454, hashCode/toString 65750, equals
-/// 66006): bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3, PRIVATE=1) | bits4-5 modality
-/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, SYNTHESIZED=3) | bit8
-/// isOperator | bit9 isInfix.
-/// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
-/// (already kotlinc-verified) constants.
-fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
-    let visibility: u64 = if ir.private_methods.contains(&fid) {
-        1
-    } else if ir.internal_methods.contains(&fid) {
-        0 // INTERNAL — only metadata carries the module boundary
-    } else {
-        3
-    };
-    let modality: u64 = if f.body.is_none() {
-        2 // abstract (an interface method or an `abstract fun`)
-    } else if ir.open_methods.contains(&fid) {
-        1
-    } else {
-        0
-    };
-    // `isOperator` (bit 8) — only `@Metadata` carries it; without it a consumer rejects the
-    // conventional call form (`recv(args)`, `a[i]`) with "expression is not callable", and
-    // convention resolution (`getValue`/`provideDelegate`/`invoke`) cannot filter on it.
-    let operator = u64::from(ir.operator_fns.contains(&fid)) << 8;
-    // `isInfix` (bit 9) — same metadata-only channel as `isOperator`: without it a consumer
-    // rejects the `a f b` call form.
-    let infix = u64::from(ir.infix_fns.contains(&fid)) << 9;
-    // `isInline` (bit 10) is a Kotlin declaration capability, not a bytecode access flag. It must
-    // survive class metadata so downstream frontends can select and splice member inline bodies.
-    let inline = u64::from(ir.inline_fns.contains(&fid)) << 10;
-    let return_value_status = ir.fn_return_value_statuses.get(&fid).map_or(0, |status| {
-        status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
-    });
-    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
@@ -1777,6 +1691,25 @@ fn build_class_metadata(
                             .collect()
                     })
                     .unwrap_or_default();
+                // Recorded exactly when a reader cannot rebuild the physical descriptor from the
+                // declared types (kotlinc's `requiresFunctionSignature`).
+                let physical = crate::jvm::names::method_descriptor(&f.params, f.ret);
+                let vararg_index = ir.fn_vararg_index.get(&fid).copied();
+                let jvm_sig = super::metadata_method_signatures::requires_function_signature(
+                    receiver,
+                    logical_params
+                        .iter()
+                        .enumerate()
+                        .skip(member_context_count)
+                        .map(|(index, (_, ty))| match vararg_index == Some(index) {
+                            true => crate::metadata::vararg_recorded_type(*ty),
+                            false => *ty,
+                        }),
+                    metadata_ret,
+                    &physical,
+                    &Default::default(),
+                )
+                .then_some(physical);
                 Some(FnMeta {
                     // How SOURCE spelled this member's declared types — carried on the IR because
                     // class metadata is built without the AST (see `IrFile::fn_declared_spellings`).
@@ -1793,37 +1726,13 @@ fn build_class_metadata(
                     semantic_type_params: semantic_function_type_params,
                     type_param_bounds: function_type_param_bounds,
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
+                    has_function_typed_parameter: ir.function_typed_parameter_fns.contains(&fid),
                     params_have_defaults: false,
                     param_defaults,
-                    vararg_index: ir.fn_vararg_index.get(&fid).copied(),
+                    vararg_index,
                     context_count: member_context_count,
                     context_parameter_kinds,
-                    // The physical descriptor rides along whenever a reader could not derive it from
-                    // the proto types: a VC/suspend-rewritten member (`declared`), a signature
-                    // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
-                    // — nothing in the record names that), a vararg (kotlinc records it there too),
-                    // or a `kotlin/Array` anywhere in the signature, which a name-keyed table cannot
-                    // map because the descriptor depends on the type ARGUMENT. That last one is the
-                    // same rule the facade path applies, and the same predicate states it.
-                    // Derivable signatures omit it, kotlinc's usual shape. A value-class rewrite
-                    // that only MANGLED the name still has a derivable descriptor when no erasure
-                    // happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so kotlinc
-                    // records just the name there; an erased shape (`h(): V` → `()I`) is not
-                    // derivable and keeps the descriptor.
-                    jvm_sig: ((declared.is_some()
-                        && (is_suspend
-                            || !vc.is_some_and(|(_, p, r)| {
-                                crate::jvm::names::method_descriptor(p, *r)
-                                    == crate::jvm::names::method_descriptor(&f.params, f.ret)
-                            })))
-                        || ir.fn_vararg_index.contains_key(&fid)
-                        || matches!(metadata_ret, crate::types::Ty::TyParam(..))
-                        || crate::metadata::descriptor_needs_recording(metadata_ret)
-                        || metadata_params.iter().any(|parameter| {
-                            matches!(parameter, crate::types::Ty::TyParam(..))
-                                || crate::metadata::descriptor_needs_recording(*parameter)
-                        }))
-                    .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
+                    jvm_sig,
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                     // The declaration's own annotations, mirrored into `@Metadata`. Retention split
                     // the two class-file attributes apart (`RuntimeVisible`/`RuntimeInvisible`); the
@@ -1890,6 +1799,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1928,6 +1838,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: data_copy_fn_flags(ir, c),
+                has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1953,6 +1864,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -1979,6 +1891,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2005,6 +1918,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2034,6 +1948,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2055,6 +1970,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2076,6 +1992,7 @@ fn build_class_metadata(
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
+                has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2370,7 +2287,10 @@ fn build_class_metadata(
             // realization, so kotlinc attaches a compiler-version requirement to every interface.
             compiler_version_requirement: (c.is_interface
                 && opts.jvm_default == JvmDefaultMode::NoCompatibility)
-                .then_some((1, 4, 0)),
+                .then_some(
+                    crate::metadata::version_requirements::VersionRequirement::compiler(1, 4, 0),
+                ),
+            param_assertions: opts.param_assertions,
             // A class with a companion records its simple name (`Class.companionObjectName`, f4) —
             // the consumer resolves `C.member` through it.
             companion: c

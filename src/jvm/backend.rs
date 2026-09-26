@@ -774,7 +774,7 @@ impl JvmBackend {
             diags.error(crate::diag::Span::new(0, 0), message);
             return Vec::new();
         }
-        let metadata = facade_package_metadata_from_ir(&ir, module_name);
+        let metadata = facade_package_metadata_from_ir(&ir, module_name, self.param_assertions);
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
             checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
@@ -1039,62 +1039,45 @@ impl Backend for JvmBackend {
 pub fn facade_package_metadata_from_ir(
     ir: &crate::ir::IrFile,
     module_name: &str,
+    param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
         .package_functions
         .iter()
         .map(|declaration| {
-            let mentions_type_parameter = matches!(declaration.ret, Ty::TyParam(..))
-                || declaration
-                    .params
-                    .iter()
-                    .any(|(_, parameter)| matches!(parameter, Ty::TyParam(..)));
-            let records_an_array = declaration
-                .receiver
-                .into_iter()
-                .chain(declaration.params.iter().map(|(_, parameter)| *parameter))
-                .chain(std::iter::once(declaration.ret))
-                .any(crate::metadata::descriptor_needs_recording);
-            let jvm_desc = (declaration.suspend
-                || mentions_type_parameter
-                || records_an_array
-                || declaration.context_count > 0)
-                .then(|| {
-                    let mut physical = declaration
-                        .params
-                        .iter()
-                        .map(|(_, parameter)| *parameter)
-                        .collect::<Vec<_>>();
-                    if let Some(receiver) = declaration.receiver {
-                        physical.insert(declaration.context_count.min(physical.len()), receiver);
-                    }
-                    let mut descriptor = physical
-                        .iter()
-                        .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
-                        .collect::<String>();
-                    if declaration.suspend {
-                        descriptor.push_str("Lkotlin/coroutines/Continuation;");
-                    }
-                    format!(
-                        "({descriptor}){}",
-                        if declaration.suspend {
-                            "Ljava/lang/Object;".to_owned()
-                        } else {
-                            crate::jvm::names::type_descriptor(declaration.ret)
-                        }
-                    )
-                });
             let physical = ir.functions.get(declaration.function as usize);
             let jvm_name = physical
                 .filter(|function| function.name != declaration.name)
                 .map(|function| function.name.clone());
-            let jvm_desc = if ir.vc_declared_sigs.contains_key(&declaration.function) {
-                physical.map(|function| {
-                    crate::jvm::names::method_descriptor(&function.params, function.ret)
-                })
+            let physical_descriptor = if ir.vc_declared_sigs.contains_key(&declaration.function) {
+                physical
+                    .map(|function| {
+                        crate::jvm::names::method_descriptor(&function.params, function.ret)
+                    })
+                    .expect("a value-class-rewritten package function has its IR realization")
             } else {
-                jvm_desc
+                declared_method_descriptor(declaration)
             };
+            // Recorded exactly when a reader cannot rebuild the physical descriptor from the
+            // declared types (kotlinc's `requiresFunctionSignature`).
+            let jvm_desc = super::metadata_method_signatures::requires_function_signature(
+                declaration.receiver,
+                declaration
+                    .params
+                    .iter()
+                    .enumerate()
+                    .skip(declaration.context_count)
+                    .map(
+                        |(index, (_, ty))| match declaration.vararg_index == Some(index) {
+                            true => crate::metadata::vararg_recorded_type(*ty),
+                            false => *ty,
+                        },
+                    ),
+                declaration.ret,
+                &physical_descriptor,
+                &Default::default(),
+            )
+            .then_some(physical_descriptor);
             let mut param_annotations = ir
                 .fn_param_annotations
                 .get(&declaration.function)
@@ -1135,6 +1118,7 @@ pub fn facade_package_metadata_from_ir(
                 jvm_desc,
                 jvm_name,
                 inline: declaration.inline,
+                has_function_typed_parameter: declaration.has_function_typed_parameter,
                 operator: declaration.operator,
                 infix: declaration.infix,
                 contract: declaration
@@ -1265,7 +1249,41 @@ pub fn facade_package_metadata_from_ir(
             decl_order: alias.source_order as usize,
         })
         .collect::<Vec<_>>();
-    build_facade_metadata(functions, properties, aliases, module_name)
+    build_facade_metadata(
+        functions,
+        properties,
+        aliases,
+        module_name,
+        param_assertions,
+    )
+}
+
+/// The JVM descriptor of a package function realized from its declaration: context parameters,
+/// the extension receiver, the value parameters, and a suspend function's continuation.
+fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> String {
+    let mut physical = declaration
+        .params
+        .iter()
+        .map(|(_, parameter)| *parameter)
+        .collect::<Vec<_>>();
+    if let Some(receiver) = declaration.receiver {
+        physical.insert(declaration.context_count.min(physical.len()), receiver);
+    }
+    let mut descriptor = physical
+        .iter()
+        .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+        .collect::<String>();
+    if declaration.suspend {
+        descriptor.push_str("Lkotlin/coroutines/Continuation;");
+    }
+    format!(
+        "({descriptor}){}",
+        if declaration.suspend {
+            "Ljava/lang/Object;".to_owned()
+        } else {
+            crate::jvm::names::type_descriptor(declaration.ret)
+        }
+    )
 }
 
 fn build_facade_metadata(
@@ -1273,6 +1291,7 @@ fn build_facade_metadata(
     properties: Vec<crate::metadata::builder::PropMeta>,
     aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
     module_name: &str,
+    param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
         let (d1_bytes, d2) = crate::metadata::builder::build_package(
@@ -1280,6 +1299,7 @@ fn build_facade_metadata(
             &properties,
             &aliases,
             (module_name != "main").then_some(module_name),
+            param_assertions,
         );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
@@ -1449,7 +1469,7 @@ mod tests {
             source_order: 0,
         });
 
-        let metadata = facade_package_metadata_from_ir(&ir, "main")
+        let metadata = facade_package_metadata_from_ir(&ir, "main", true)
             .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,

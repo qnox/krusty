@@ -1633,6 +1633,8 @@ pub struct ResolvedModuleIndex {
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
+    /// Callables with a function-typed value parameter or extension receiver (checker-classified).
+    pub(super) function_typed_parameter_callables: std::collections::HashSet<CallableId>,
     type_aliases: HashMap<DeclarationId, ResolvedTypeAliasHeader>,
     signatures: HashMap<DeclarationId, ResolvedSignature>,
     /// Pass-1-resolved contract effects keyed by their stable callable declaration. The wrapper
@@ -2923,11 +2925,17 @@ impl ResolvedModuleIndex {
             && self.callable_equality_bounds.is_empty()
             && self.callable_inherited_statuses.is_empty()
             && self.property_return_value_statuses.is_empty()
+            && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
     }
 
     pub fn callable(&self, callable: CallableId) -> Option<ResolvedCallableHeader> {
         self.callables.get(&callable).copied()
+    }
+
+    /// Every published callable, in no particular order.
+    pub(crate) fn callable_headers(&self) -> impl Iterator<Item = ResolvedCallableHeader> + '_ {
+        self.callables.values().copied()
     }
 
     pub fn callable_for_declaration(
