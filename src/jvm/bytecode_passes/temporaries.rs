@@ -15,8 +15,8 @@
 //! Patterns match raw adjacency, as kotlinc's do: a kept label between the instructions defeats
 //! them (see [`adjacency`]). Safe-call-chain reshaping and unused-LVT cleanup are separate kotlinc
 //! optimizations and are deliberately not approximated here: a body with a null check kotlinc could
-//! fold but this pass cannot is left as it was, and a rewrite that would create an empty debug-local
-//! range is rejected by the class-file boundary.
+//! fold but this pass cannot is left as it was, and a local whose range a rewrite empties goes with
+//! the final dead-code step (`prepareForEmitting`).
 
 mod adjacency;
 mod null_check_folds;

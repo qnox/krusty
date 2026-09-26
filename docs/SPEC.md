@@ -7272,6 +7272,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `classfile::pool_layout::tests`, `classfile::constant_pool_queries::tests`, and
   `tests/constant_pool_order_e2e.rs` (whole class files against kotlinc: a removed cast, casts of
   constants to their boxed types, and an unboxed generic read).
+- **A local whose range holds no instruction stays in the method through every pass and goes when
+  the method is written, as in kotlinc.** A `val` that is the last statement of its block
+  (`if (x) { val unused = 5 }`) has a range that opens after its store and closes at the block's
+  end. kotlinc keeps that entry in its method until `prepareForEmitting`, so the store in front of
+  it is a named local's: `TemporaryVariablesEliminationTransformer` leaves it, and the class keeps
+  `iconst_5; istore_1` with no `LocalVariableTable` entry for `unused`. krusty keeps such an entry
+  when the method is added (only one starting past the last instruction, or running past the end,
+  goes then); the final dead-code step drops it with every other local left with no instruction, so
+  the class-file boundary never meets an empty range and no longer keeps the method as emitted
+  because of one. A method the rewrite does keep as emitted (a pass declined the body, its frames
+  could not be computed, or a coroutine transform's method no pass changed) still loses its empty
+  locals when the class is written, as kotlinc's `prepareForEmitting` drops them from every method.
+  The reasons a rewrite keeps a method as emitted are traced (`KRUSTY_TRACE=bytecode`). Tests:
+  `pipeline::tests::a_named_local_with_an_empty_range_keeps_its_store_and_goes_at_the_end`,
+  `classfile::method_rewrite::tests` (a rewritten method and one written as emitted), and
+  `tests/empty_locals_e2e.rs` (whole class files against kotlinc, and the sample at run time).
 
 - **Mutable collections and function types in `is`/`as`/`as?` (kotlinc's `TypeIntrinsics`).** A
   mutable Kotlin collection shares its JVM interface with its read-only face, and a function type
