@@ -364,6 +364,13 @@ fn emit_return(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) 
         IrExpr::Block { value: None, .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => {
             emit_stmt(ir, e, depth, inst, out)
         }
+        // A cast is the value itself here (see the `TypeOp` expression), so the `return` moves
+        // through it like through a block's value: an elvis arm's coercion can hold the jump.
+        IrExpr::TypeOp { op, arg, .. }
+            if !matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) =>
+        {
+            emit_return(ir, *arg, depth, inst, out)
+        }
         _ => {
             indent(depth, out);
             out.push_str(&format!("return {};\n", emit_expr(ir, e, inst)));

@@ -364,7 +364,7 @@ fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
             }
             _ => {}
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
     }
     loop {
         let mut grew = false;
@@ -409,7 +409,7 @@ fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashSet
             }
             _ => {}
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
     }
     declared.retain(|slot| !assigned.contains(slot));
     declared
@@ -438,7 +438,7 @@ fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
         if let Some(used) = used {
             free = free.max(used + 1);
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
     }
     free
 }
@@ -1526,5 +1526,58 @@ mod tests {
             ir.fir_origins.get(&generated),
             Some(IrNodeOrigin::Synthetic { .. })
         ));
+    }
+
+    /// A lambda's inline body numbers its slots from its own frame, so its slot 1 is not this
+    /// function's slot 1. The outer frame holds an unreassigned temporary in slot 1; the lambda
+    /// declares its own temporary in slot 2 and reassigns its own slot 1, and uses slot 9.
+    #[test]
+    fn slot_inventories_stay_in_this_frame() {
+        let mut ir = file();
+        let seed = ir.add_expr(IrExpr::GetValue(0));
+        let outer = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(seed),
+            named: false,
+        });
+        let inner_seed = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        let inner = ir.add_expr(IrExpr::Variable {
+            index: 2,
+            ty: Ty::Int,
+            init: Some(inner_seed),
+            named: false,
+        });
+        let inner_value = ir.add_expr(IrExpr::GetValue(9));
+        let overwrite = ir.add_expr(IrExpr::SetValue {
+            var: 1,
+            value: inner_value,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![inner, overwrite],
+            value: None,
+        });
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: FUNCTION,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(body),
+        });
+        let roots = vec![outer, lambda];
+        let frame = Frame::of_body(
+            FUNCTION,
+            crate::fir_lower::BodySlots {
+                dispatch_receiver: None,
+                first_parameter: 0,
+            },
+            1,
+        );
+
+        assert_eq!(
+            fixed_temporaries(&ir, &roots),
+            std::collections::HashSet::from([1])
+        );
+        assert_eq!(first_free_slot(&ir, &roots, &frame), 2);
     }
 }

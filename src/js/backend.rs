@@ -173,6 +173,28 @@ mod tests {
         assert!(source.contains("continue $tailrec;"), "{source}");
     }
 
+    /// `a ?: b ?: f(x - 1)` coerces the inner elvis and coerces that again, so the loop step sits
+    /// under a coercion around a `when`. The `return` moves through the coercion into the arms, so
+    /// the `continue` is a statement of the loop and never an expression.
+    #[test]
+    fn js_backend_moves_a_return_through_an_elvis_coercion() {
+        let (outputs, diags) = compile_js_sources(&[(
+            "Main",
+            "tailrec fun chained(x: Int): Int? {\n\
+                 if (x < 0) return null\n\
+                 if (x == 0) return 7\n\
+                 return chained(-1) ?: chained(-2) ?: chained(x - 1)\n\
+             }",
+        )]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
+        assert_eq!(
+            source,
+            "function chained(v0) {\n  $tailrec:\n  do {\n    if ((v0 < 0)) {\n      return null;\n    }\n    else {\n    }\n    if ((v0 === 0)) {\n      return 7;\n    }\n    else {\n    }\n    let v1 = chained(-1);\n    if ((v1 === null)) {\n      let v2 = chained(-2);\n      if ((v2 === null)) {\n        let v3 = (v0 - 1);\n        v0 = v3;\n        continue $tailrec;\n      }\n      else {\n        return v2;\n      }\n    }\n    else {\n      return v1;\n    }\n    break $tailrec;\n  } while (true);\n}\n"
+        );
+    }
+
     #[test]
     fn js_backend_realizes_checked_range_loop_with_its_own_shape() {
         let (outputs, diags) = compile_js_sources(&[(
