@@ -22,8 +22,8 @@ use std::collections::BTreeSet;
 use super::redundant_boxing::{self, ValueClasses};
 use super::redundant_checkcasts::{self, StackTops};
 use super::{
-    captured_vars, dead_code, local_slots, negated_jumps, redundant_gotos, redundant_nops,
-    redundant_null_checks, stack_peephole, temporaries,
+    captured_vars, checkcasts_before_aastore, dead_code, local_slots, negated_jumps,
+    redundant_gotos, redundant_nops, redundant_null_checks, stack_peephole, temporaries,
 };
 use crate::jvm::method_node::{LabelId, MethodNode};
 
@@ -55,7 +55,7 @@ pub(crate) enum Pass {
     RedundantNops,
     /// `NegatedJumpsMethodTransformer` (see `negated_jumps`).
     NegatedJumps,
-    /// `RedundantCheckcastsBeforeAastoreMethodTransformer`: not ported yet.
+    /// `RedundantCheckcastsBeforeAastoreMethodTransformer` (see `checkcasts_before_aastore`).
     RedundantCheckcastsBeforeAastore,
     /// The `DeadCodeEliminationMethodTransformer` every method ends with (see `dead_code`).
     FinalDeadCode,
@@ -174,6 +174,7 @@ impl Run {
             Pass::RedundantGoto => redundant_gotos::remove(method, &self.pinned),
             Pass::RedundantNops => redundant_nops::remove(method),
             Pass::NegatedJumps => negated_jumps::negate(method, &self.pinned),
+            Pass::RedundantCheckcastsBeforeAastore => checkcasts_before_aastore::remove(method),
             Pass::FinalDeadCode => match dead_code::eliminate(method) {
                 Some(dead) => {
                     self.removed_locals = dead.removed_locals;
@@ -185,10 +186,7 @@ impl Run {
                 let parameters: BTreeSet<u16> = (0..context.parameter_slots).collect();
                 local_slots::compact(method, &parameters)
             }
-            Pass::ConstantCondition
-            | Pass::PopBackwardPropagation
-            | Pass::DeadCode
-            | Pass::RedundantCheckcastsBeforeAastore => false,
+            Pass::ConstantCondition | Pass::PopBackwardPropagation | Pass::DeadCode => false,
         };
         self.changed |= changed;
         Some(())
