@@ -1346,6 +1346,7 @@ impl<'a> CommonIrBodySink<'a> {
                 function,
                 lowered.defaults.into_vec(),
                 companion_associated,
+                index.callable_default_provider(callable.id).is_some(),
             );
         }
         let roots = lowered.roots.into_vec();
@@ -1436,6 +1437,7 @@ impl<'a> CommonIrBodySink<'a> {
             function,
             lowered.defaults.into_vec(),
             companion_associated,
+            index.callable_default_provider(callable.id).is_some(),
         )?;
         Ok(())
     }
@@ -1446,6 +1448,7 @@ impl<'a> CommonIrBodySink<'a> {
         function: u32,
         lowered: Vec<(u32, crate::ir::ExprId)>,
         companion_associated: bool,
+        defaults_inherited: bool,
     ) -> Result<(), FirFileLoweringFailure> {
         if lowered.is_empty() {
             return Ok(());
@@ -1484,6 +1487,7 @@ impl<'a> CommonIrBodySink<'a> {
         self.ir.fn_params.insert(function, {
             let mut info = FnParamInfo::identities(identities);
             info.defaults = Some(defaults);
+            info.defaults_inherited = defaults_inherited;
             info
         });
         Ok(())

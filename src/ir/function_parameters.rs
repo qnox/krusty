@@ -151,6 +151,9 @@ pub struct FnParamInfo {
     /// The registered `defaults` serve only the `$default` stub. A call site must not reuse them to
     /// fill an omitted argument. This is set for extensions whose defaults are not all constant.
     pub stub_only: bool,
+    /// The `defaults` were inherited through an override edge, so the declaration itself declares
+    /// none: Kotlin forbids an override to write a default value.
+    pub defaults_inherited: bool,
 }
 
 impl FnParamInfo {
@@ -159,6 +162,7 @@ impl FnParamInfo {
             identities: names.into_iter().map(IrParameterIdentity::source).collect(),
             defaults: None,
             stub_only: false,
+            defaults_inherited: false,
         }
     }
 
@@ -167,6 +171,7 @@ impl FnParamInfo {
             identities,
             defaults: None,
             stub_only: false,
+            defaults_inherited: false,
         }
     }
 
@@ -194,6 +199,15 @@ impl FnParamInfo {
 }
 
 impl IrFile {
+    /// The defaults `fid` declares itself: none when they were inherited through an override.
+    pub fn declared_param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
+        self.fn_params
+            .get(&fid)
+            .filter(|info| !info.defaults_inherited)?
+            .defaults
+            .as_ref()
+    }
+
     /// The single common-IR contract for a function's complete source parameter identities.
     ///
     /// Source lowering and a generated-member producer publish through different owning records,

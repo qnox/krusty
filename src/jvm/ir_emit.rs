@@ -1652,10 +1652,10 @@ fn build_class_metadata(
                     .take(member_context_count)
                     .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
-                // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
-                // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
+                // Per-parameter DECLARES_DEFAULT_VALUE, for the defaults the declaration writes
+                // itself; an override's inherited defaults stay with the declaration it overrides.
                 let param_defaults: Vec<bool> = ir
-                    .param_defaults(fid)
+                    .declared_param_defaults(fid)
                     .map(|ds| {
                         ds.iter()
                             .enumerate()

@@ -1096,6 +1096,8 @@ mod metadata_kept_params;
 mod metadata_local_classes_e2e;
 #[path = "metadata_member_order_e2e.rs"]
 mod metadata_member_order_e2e;
+#[path = "metadata_parameter_defaults_e2e.rs"]
+mod metadata_parameter_defaults_e2e;
 #[path = "metadata_property_flags_e2e.rs"]
 mod metadata_property_flags_e2e;
 #[path = "metadata_reader_e2e.rs"]
