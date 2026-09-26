@@ -2948,7 +2948,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             })
                             .map(|supertype| supertype.name.clone())
                     };
-                    let mut interfaces: Vec<String> = classifier_header
+                    let written_interfaces = classifier_header
                         .supertypes
                         .iter()
                         // A function supertype through the numbered semantic classifier contributes
@@ -2957,6 +2957,19 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         // nominal classifier and must stay out of hierarchy traversal.
                         .filter(|t| t.name != "<fun>")
                         .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
+                        .collect::<Vec<_>>();
+                    let superclass_start = classifier_header.base.as_ref().or_else(|| {
+                        let base = parenless_base.as_deref()?;
+                        classifier_header.supertypes.iter().find(|t| t.name == base)
+                    });
+                    let interfaces_before_superclass = superclass_start.map_or(0, |base| {
+                        written_interfaces
+                            .iter()
+                            .filter(|t| t.span.lo < base.span.lo)
+                            .count()
+                    });
+                    let mut interfaces: Vec<String> = written_interfaces
+                        .into_iter()
                         .map(|t| resolve_super(&t.name))
                         .collect();
                     interfaces.extend(implicit_source_supertypes(c).map(TypeName::render));
@@ -3494,6 +3507,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 })
                                 .collect(),
                             super_internal: super_internal_ref,
+                            interfaces_before_superclass: u32::try_from(
+                                interfaces_before_superclass,
+                            )
+                            .expect("a classifier's interface count fits u32"),
                             // An `enum class E`'s implicit superclass is the PARAMETERIZED
                             // `kotlin.Enum<E>`; the declaration writes no argument list, so the
                             // self argument is recorded here rather than read off the source.
@@ -3607,6 +3624,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     callable_signature: None,
                                     callable_signatures: Vec::new(),
                                     super_internal: None,
+                                    interfaces_before_superclass: 0,
                                     super_type_args: Vec::new(),
                                     super_ctor_params: Vec::new(),
                                     ctor_param_names: Vec::new(),

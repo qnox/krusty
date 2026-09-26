@@ -250,9 +250,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
         let mut supertype_templates = classifier_header
-            .superclass
-            .iter()
-            .chain(classifier_header.interfaces.iter())
+            .declared_supertypes()
             .map(|supertype| supertype.get())
             .collect::<Vec<_>>();
         if classifier_header.superclass.is_none() && internal != crate::types::wk::any() {
