@@ -295,18 +295,17 @@ impl Emitter<'_> {
                 &physical,
                 callee,
             )
-            .ok_or("a function-typed argument has no published materialization role")?;
+            .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
         let mut lambda_bindings = HashMap::new();
         for (index, &argument) in args.iter().enumerate() {
-            if !matches!(
-                self.ir.expr(argument),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            ) {
+            if !self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            )? {
                 continue;
             }
             let argument = self.inline_lambda_node(argument, target.name)?;
@@ -495,14 +494,68 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes
+    /// expand: one passed to a parameter without `noinline` (kotlinc's `isInlineParameter`). A
+    /// literal for a `noinline` parameter is an ordinary argument, the function object the body
+    /// receives. An error is a literal the call published no modifier for.
+    pub(super) fn is_inlined_literal(
+        &self,
+        call_expression: u32,
+        leading_non_argument_operands: usize,
+        index: usize,
+        argument: u32,
+    ) -> Result<bool, &'static str> {
+        if !matches!(
+            self.ir.expr(argument),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        ) {
+            return Ok(false);
+        }
+        let modifier = index
+            .checked_sub(leading_non_argument_operands)
+            .and_then(|parameter| {
+                self.ir
+                    .call_inline_modifiers
+                    .get(&call_expression)?
+                    .get(parameter)
+            })
+            .ok_or("a lambda argument has no published crossinline/noinline modifier")?;
+        Ok(*modifier != crate::types::InlineParameterModifier::Noinline)
+    }
+
+    /// The positions of `args` holding a literal the inline body's invokes expand, by
+    /// [`Self::is_inlined_literal`].
+    pub(super) fn inlined_literal_positions(
+        &self,
+        call_expression: u32,
+        leading_non_argument_operands: usize,
+        args: &[u32],
+    ) -> Result<Vec<usize>, &'static str> {
+        let mut positions = Vec::new();
+        for (index, &argument) in args.iter().enumerate() {
+            if self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            )? {
+                positions.push(index);
+            }
+        }
+        Ok(positions)
+    }
+
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
     /// argument that is already a local from that local (`genOrGetLocal`); its extension receiver
     /// is always stored. When the body loads its parameters first, the stored arguments are instead
     /// evaluated in place.
     ///
-    /// `None` only when a function-typed local has no provider-published materialization role. An
-    /// inline parameter reads that local where it already lives; a `noinline` parameter is stored
-    /// like an ordinary value.
+    /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
+    /// modifier. An inline parameter, `crossinline` included, reads that local where it already
+    /// lives; a `noinline` parameter is stored like an ordinary value.
     fn parameter_supplies(
         &self,
         call_expression: u32,
@@ -563,11 +616,13 @@ impl Emitter<'_> {
                     .get(&call_expression)?
                     .get(parameter)
                     .copied()?;
-                supplies.push(if inlining != crate::types::InlineParameterModifier::None {
-                    evaluated
-                } else {
-                    Supply::CallerLocal
-                });
+                supplies.push(
+                    if inlining == crate::types::InlineParameterModifier::Noinline {
+                        evaluated
+                    } else {
+                        Supply::CallerLocal
+                    },
+                );
                 continue;
             }
             supplies.push(Supply::CallerLocal);

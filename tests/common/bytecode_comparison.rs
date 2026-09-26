@@ -178,6 +178,38 @@ impl ClassSets {
             )
             .collect()
     }
+
+    /// krusty's `javap -c -p -l` of `class`, with pool indices erased (see [`Self::code_differences`]).
+    pub fn krusty_code(&self, class: &str) -> String {
+        let bytes = self
+            .krusty
+            .get(class)
+            .unwrap_or_else(|| panic!("krusty wrote no {class}"));
+        code_listing(class, bytes)
+    }
+
+    /// Each class whose methods differ in their code, line numbers or local variables, with
+    /// constant-pool indices erased: the two classes may lay out their pools differently.
+    pub fn code_differences(&self) -> Vec<String> {
+        let names: std::collections::BTreeSet<&String> =
+            self.reference.keys().chain(self.krusty.keys()).collect();
+        names
+            .into_iter()
+            .filter_map(
+                |name| match (self.reference.get(name), self.krusty.get(name)) {
+                    (Some(reference), Some(krusty)) => {
+                        let reference = code_listing(name, reference);
+                        let krusty = code_listing(name, krusty);
+                        (reference != krusty).then(|| {
+                            format!("{name} differs\n--- kotlinc ---\n{reference}\n--- krusty ---\n{krusty}")
+                        })
+                    }
+                    (Some(_), None) => Some(format!("{name}: only kotlinc writes it")),
+                    (None, _) => Some(format!("{name}: only krusty writes it")),
+                },
+            )
+            .collect()
+    }
 }
 
 /// Compile `src` (file `<name>.kt`) with kotlinc and krusty over the library kotlinc compiles from
@@ -246,6 +278,23 @@ fn declared_methods(listing: &str) -> Vec<String> {
         .filter(|line| line.contains('(') && line.ends_with(';'))
         .map(str::to_string)
         .collect()
+}
+
+/// `javap -c -p -l` of a class with every `#N` pool index erased.
+fn code_listing(name: &str, bytes: &[u8]) -> String {
+    disassemble_with(name, bytes, &["-p", "-c", "-l"])
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| match token.strip_prefix('#') {
+                    Some(rest) if rest.trim_end_matches(',').parse::<u32>().is_ok() => "#",
+                    _ => token,
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn disassemble(name: &str, bytes: &[u8]) -> String {
