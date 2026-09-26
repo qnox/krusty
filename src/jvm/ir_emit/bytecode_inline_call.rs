@@ -865,7 +865,7 @@ pub(super) struct ClasspathInlineCall<'a, 't> {
     pub args: &'a [u32],
     pub leading_non_argument_operands: usize,
     pub body: &'a crate::jvm::classreader::MethodCode,
-    pub reified: &'a crate::jvm::inline::ReifiedArguments,
+    pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
 }
 
 /// A call on its way through the port, with what the call site decided per parameter.

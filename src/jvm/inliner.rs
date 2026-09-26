@@ -93,7 +93,7 @@ pub(in crate::jvm) fn inline(
     lambdas: &[Lambda],
     inline_only: bool,
     frame_base: u16,
-    reified_arguments: &crate::jvm::inline::ReifiedArguments,
+    reified_arguments: &crate::jvm::reified_arguments::ReifiedArguments,
     call: InliningContext<'_>,
 ) -> Result<MethodNode, InlineError> {
     let mut node = callee.clone();

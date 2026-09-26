@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::inline::ReifiedArgument;
+use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
@@ -77,7 +77,10 @@ pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String
             let argument = forwarded(*ty).or_else(|| {
                 let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
                 let internal = super::jvm_class_map::to_jvm_internal(&internal);
-                Some(ReifiedArgument::Class(internal.to_owned()))
+                Some(ReifiedArgument::Class {
+                    internal: internal.to_owned(),
+                    nullable: ty.is_nullable(),
+                })
             })?;
             Some((name.clone(), argument))
         })
@@ -91,7 +94,7 @@ pub(super) fn splice_arguments(
     ir: &IrFile,
     expression: ExprId,
     facade: &str,
-) -> super::inline::ReifiedArguments {
+) -> super::reified_arguments::ReifiedArguments {
     let classes = splice_type_map(ir, expression);
     let mut type_of = HashMap::new();
     if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
@@ -105,7 +108,7 @@ pub(super) fn splice_arguments(
             }
         }
     }
-    super::inline::ReifiedArguments { classes, type_of }
+    super::reified_arguments::ReifiedArguments { classes, type_of }
 }
 
 fn realize_expression_dag(
@@ -224,11 +227,17 @@ mod tests {
             HashMap::from([
                 (
                     "T".to_owned(),
-                    ReifiedArgument::Class("kotlin/Unit".to_owned())
+                    ReifiedArgument::Class {
+                        internal: "kotlin/Unit".to_owned(),
+                        nullable: false,
+                    }
                 ),
                 (
                     "R".to_owned(),
-                    ReifiedArgument::Class("java/lang/String".to_owned())
+                    ReifiedArgument::Class {
+                        internal: "java/lang/String".to_owned(),
+                        nullable: false,
+                    }
                 ),
             ])
         );

@@ -1773,6 +1773,10 @@ mod toplevel_property_inference_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
 
+#[path = "erased_parameter_boxing_e2e.rs"]
+mod erased_parameter_boxing_e2e;
+#[path = "super_argument_outer_receiver_e2e.rs"]
+mod super_argument_outer_receiver_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
 #[path = "tparam_bounded_by_tparam_e2e.rs"]
@@ -1965,3 +1969,6 @@ mod serializer_metadata_test_support;
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]
 mod unsigned_arrays_e2e;
+
+#[path = "reified_nullable_instance_check_e2e.rs"]
+mod reified_nullable_instance_check_e2e;

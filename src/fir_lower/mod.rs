@@ -21,6 +21,7 @@ mod constant_folding;
 mod constructors;
 mod data_classes;
 mod delegated_properties;
+mod erased_parameters;
 mod error;
 mod expression;
 mod external_references;

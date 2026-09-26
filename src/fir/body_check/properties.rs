@@ -312,16 +312,20 @@ impl BodyFirChecker<'_> {
             .or_else(|| self.index.enclosing_classifier(owner))
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let current_storage_owner = self.current_storage_owner();
+        // An inherited member is read through the current instance, which a superclass
+        // constructor's arguments cannot use: there a supertype names an enclosing instance
+        // (`object : A(b)` inside `A`, an inner class's outer `A` whose inner chain extends `A`).
         let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
             current == owner
-                || self
-                    .index
-                    .classifier_hierarchy(current)
-                    .is_some_and(|hierarchy| {
-                        hierarchy
-                            .iter()
-                            .any(|entry| entry.classifier == classifier.classifier)
-                    })
+                || !self.constructor_prefix_capture_access
+                    && self
+                        .index
+                        .classifier_hierarchy(current)
+                        .is_some_and(|hierarchy| {
+                            hierarchy
+                                .iter()
+                                .any(|entry| entry.classifier == classifier.classifier)
+                        })
         });
         if current_storage_is_owner && self.body.local_callable().is_none() {
             let depth = self
@@ -1193,11 +1197,12 @@ impl BodyFirChecker<'_> {
                 Some(crate::types::stored_value_ty(target)),
             )?;
         }
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(expression, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(expression),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let target = self.property_target(expression, declaration, external)?;
         Ok(Some(FirExprKind::PropertyRead {
             target,
@@ -1461,11 +1466,8 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(super::StatementForm::IncDec),
                 )
             })?;
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument_at(span, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments =
+            self.property_context_arguments(span, cause, declaration, context_args)?;
         let origin = cause;
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
@@ -1764,11 +1766,12 @@ impl BodyFirChecker<'_> {
         };
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(expression, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(expression),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let read_target = self.property_target_at(Some(span), declaration, external_getter)?;
         let write_target = self.property_target_at(Some(span), declaration, external_setter)?;
         let resolution = self
@@ -2220,11 +2223,12 @@ impl BodyFirChecker<'_> {
                 Some(crate::types::stored_value_ty(target)),
             )?;
         }
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(value, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(value),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let value_target = declaration
             .and_then(|declaration| self.index.signature(declaration))
             .map(|signature| signature.result)

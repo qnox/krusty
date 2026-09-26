@@ -23,11 +23,11 @@ mod local_compaction;
 mod reified_operands;
 mod scalar_adapters;
 mod splice_result;
+use super::reified_arguments::ReifiedArguments;
 use continuation_flow::caller_continuation_reachable;
 pub(super) use frame_layout::spliced_frame;
 use local_compaction::LocalCompaction;
 use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
-pub(super) use reified_operands::{ReifiedArgument, ReifiedArguments};
 use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
 pub use splice_result::SpliceResult;
 

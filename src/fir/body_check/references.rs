@@ -800,15 +800,22 @@ impl BodyFirChecker<'_> {
                     self.property_reference_to_declaration(
                         expression,
                         declaration,
-                        binding,
-                        dispatch_receiver,
-                        extension_receiver,
-                        property.setter.is_some(),
-                        receiver_type,
-                        target_is_extension,
-                        property.prop_ty,
-                        &property.getter.name,
-                        property.setter.as_ref().map(|setter| setter.name.as_str()),
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver,
+                            extension_receiver,
+                        },
+                        SelectedPropertyView {
+                            mutable: property.setter.is_some(),
+                            receiver_type,
+                            extension_receiver: target_is_extension,
+                            property_type: property.prop_ty,
+                            getter_name: &property.getter.name,
+                            setter_name: property
+                                .setter
+                                .as_ref()
+                                .map(|setter| setter.name.as_str()),
+                        },
                         adaptation,
                     )
                 } else {
@@ -831,15 +838,22 @@ impl BodyFirChecker<'_> {
                     self.property_reference_to_declaration(
                         expression,
                         declaration,
-                        FirCallableReferenceBinding::Static,
-                        None,
-                        None,
-                        property.setter.is_some(),
-                        None,
-                        false,
-                        property.ty,
-                        &property.getter.name,
-                        property.setter.as_ref().map(|setter| setter.name.as_str()),
+                        ReferenceReceivers {
+                            binding: FirCallableReferenceBinding::Static,
+                            dispatch_receiver: None,
+                            extension_receiver: None,
+                        },
+                        SelectedPropertyView {
+                            mutable: property.setter.is_some(),
+                            receiver_type: None,
+                            extension_receiver: false,
+                            property_type: property.ty,
+                            getter_name: &property.getter.name,
+                            setter_name: property
+                                .setter
+                                .as_ref()
+                                .map(|setter| setter.name.as_str()),
+                        },
                         adaptation,
                     )
                 } else {
@@ -1097,22 +1111,27 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn property_reference_to_declaration(
         &self,
         expression: ExprId,
         declaration: DeclarationId,
-        binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        mutable: bool,
-        receiver_type: Option<Ty>,
-        extension_receiver_target: bool,
-        property_type: Ty,
-        getter_name: &str,
-        setter_name: Option<&str>,
+        receivers: ReferenceReceivers,
+        view: SelectedPropertyView<'_>,
         adaptation: Option<FirReferenceAdaptation>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ReferenceReceivers {
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+        } = receivers;
+        let SelectedPropertyView {
+            mutable,
+            receiver_type,
+            extension_receiver: extension_receiver_target,
+            property_type,
+            getter_name,
+            setter_name,
+        } = view;
         let span = self.file.expr_span(expression);
         if self
             .index
@@ -1141,6 +1160,23 @@ impl BodyFirChecker<'_> {
             ResolvedTy::new(ty)
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
         };
+        let property = self
+            .index
+            .property(target)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let declared_receiver =
+            if extension_receiver_target {
+                Some(property.extension_receiver.ok_or_else(|| {
+                    self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                })?)
+            } else {
+                None
+            };
+        let declared_property_type = self
+            .index
+            .signature(declaration)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?
+            .result;
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::SpecializedModule {
                 property: target,
@@ -1149,6 +1185,8 @@ impl BodyFirChecker<'_> {
                 receiver: receiver_type.map(resolved).transpose()?,
                 extension_receiver: extension_receiver_target,
                 property_type: resolved(property_type)?,
+                declared_receiver,
+                declared_property_type,
             },
             function_type: self.reference_function_type(expression)?,
             reflective: self.reference_is_reflective(expression),
@@ -1376,4 +1414,23 @@ impl BodyFirChecker<'_> {
             suspend_conversion,
         })
     }
+}
+
+/// How a property reference to a source declaration is bound: its binding kind and the receivers
+/// the reference captured.
+struct ReferenceReceivers {
+    binding: FirCallableReferenceBinding,
+    dispatch_receiver: Option<FirReceiver>,
+    extension_receiver: Option<FirReceiver>,
+}
+
+/// The selected property as the reference sees it: specialized receiver and property types, and
+/// the accessors the provider-selected candidate declares.
+struct SelectedPropertyView<'a> {
+    mutable: bool,
+    receiver_type: Option<Ty>,
+    extension_receiver: bool,
+    property_type: Ty,
+    getter_name: &'a str,
+    setter_name: Option<&'a str>,
 }
