@@ -321,3 +321,20 @@ fn popup_body_order(
     // One path is a prefix of the other: the longer (nested) one finishes first.
     right.len().cmp(&left.len())
 }
+
+/// The `$annotations` marker methods emitted with their property's accessors, by fid. kotlinc emits a
+/// marker directly after the accessors of the property it describes, not after every property's — so
+/// the class's method loop must skip a marker it already wrote here.
+pub(super) fn property_annotation_marker_fids(
+    ir: &IrFile,
+    c: &IrClass,
+) -> std::collections::HashSet<u32> {
+    c.properties
+        .iter()
+        .filter_map(|property| {
+            ir.property_annotation_markers
+                .get(&(c.fq_name_id(), property.name.clone()))
+                .copied()
+        })
+        .collect()
+}
