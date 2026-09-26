@@ -591,18 +591,41 @@ impl ModuleClassPair {
     /// Compile `sources` as ONE module with kotlinc and with krusty, and take `class` from each.
     /// Either compiler rejecting the fixture, or not emitting the class, fails the test.
     pub fn compile(sources: &[(&str, &str)], class: &str) -> Self {
+        Self::compile_with_classpath(sources, &[], class)
+    }
+
+    /// [`Self::compile`] with both compilers reading the same extra `classpath` entries (such as a
+    /// javac-compiled fixture library).
+    pub fn compile_with_classpath(
+        sources: &[(&str, &str)],
+        classpath: &[PathBuf],
+        class: &str,
+    ) -> Self {
         let work = common::scratch_dir().expect("cannot allocate module comparison fixture");
         let source_paths = write_fixture_sources(&work, sources);
         let output = work.join("out");
-        let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+        let reference_args = if classpath.is_empty() {
+            Vec::new()
+        } else {
+            vec![
+                "-cp".to_string(),
+                std::env::join_paths(classpath)
+                    .expect("classpath entries join")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        };
+        let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &reference_args);
         assert_eq!(code, 0, "kotlinc rejected module fixture: {diagnostics}");
         let kotlinc = std::fs::read(output.join(format!("{class}.class")))
             .unwrap_or_else(|_| panic!("kotlinc did not emit {class}"));
         let _ = std::fs::remove_dir_all(work);
-        let stdlib = common::stdlib_jar();
+        let mut krusty_classpath = vec![common::stdlib_jar()];
+        krusty_classpath.extend_from_slice(classpath);
         let jdk = common::jdk_modules();
-        let classes = common::compile_in_process_files(sources, &[stdlib], Some(jdk.as_path()))
-            .expect("krusty rejected module fixture");
+        let classes =
+            common::compile_in_process_files(sources, &krusty_classpath, Some(jdk.as_path()))
+                .expect("krusty rejected module fixture");
         let krusty = classes
             .into_iter()
             .find_map(|(name, bytes)| (name == class).then_some(bytes))
