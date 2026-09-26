@@ -10,7 +10,8 @@ use krusty::jvm::metadata::{
     class_constructors, class_functions, decode_metadata, package_functions,
 };
 use krusty::metadata::class_builder::{
-    build_class, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
+    build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS,
+    EQUALS_FN_FLAGS,
 };
 use krusty::types::{type_name, Ty, TypeVariance};
 
@@ -272,7 +273,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         &ClassTail {
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
-            captured_type_params: &captured,
+            captured_type_params: CapturedTypeParameters::Reserved(&captured),
             ..Default::default()
         },
     );
@@ -338,7 +339,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         &ClassTail {
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
-            captured_type_params: &captured,
+            captured_type_params: CapturedTypeParameters::Reserved(&captured),
             ..Default::default()
         },
     );

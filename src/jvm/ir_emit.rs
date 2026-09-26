@@ -2166,7 +2166,7 @@ fn build_class_metadata(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: &c.captured_type_params,
+            captured_type_params: super::local_classifiers::captured_type_parameters(c),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),

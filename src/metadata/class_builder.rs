@@ -544,6 +544,23 @@ pub enum ClassMemberOrder {
     EnumEntry(usize),
 }
 
+/// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
+#[derive(Clone, Copy, Debug)]
+pub enum CapturedTypeParameters<'a> {
+    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
+    /// first.
+    Reserved(&'a [String]),
+    /// A local or anonymous class's: its own parameters come first, and each captured one takes
+    /// the next id on first use (see `TypeParameters`).
+    NumberedOnUse(&'a [String]),
+}
+
+impl Default for CapturedTypeParameters<'_> {
+    fn default() -> Self {
+        Self::Reserved(&[])
+    }
+}
+
 pub struct ClassTail<'a> {
     /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
     /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
@@ -613,8 +630,8 @@ pub struct ClassTail<'a> {
     pub type_params: &'a [String],
     pub type_param_bounds: &'a [crate::ir::IrTypeParameter],
     /// Enclosing declaration parameters referenced by this class's members. Kotlin metadata does
-    /// not repeat their declarations, but reserves their IDs before this class's own parameters.
-    pub captured_type_params: &'a [String],
+    /// not repeat their declarations.
+    pub captured_type_params: CapturedTypeParameters<'a>,
     /// Resolved identities of direct sealed subtypes.
     pub sealed_subclasses: &'a [TypeName],
     /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
@@ -663,7 +680,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: &[],
+            captured_type_params: CapturedTypeParameters::Reserved(&[]),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &[],
@@ -728,9 +745,16 @@ pub fn build_class(
         tail.type_params.len(),
         "metadata class type parameters require semantic identities"
     );
-    let captured_count = tail.captured_type_params.len();
-    let mut class_type_parameters = TypeParameters::new();
-    for (index, semantic) in tail.captured_type_params.iter().enumerate() {
+    let (reserved, numbered_on_use) = match tail.captured_type_params {
+        CapturedTypeParameters::Reserved(parameters) => (parameters, &[][..]),
+        CapturedTypeParameters::NumberedOnUse(parameters) => (&[][..], parameters),
+    };
+    let captured_count = reserved.len();
+    let mut class_type_parameters = TypeParameters::classifier(
+        captured_count + tail.type_params.len(),
+        numbered_on_use.iter().cloned(),
+    );
+    for (index, semantic) in reserved.iter().enumerate() {
         class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
     }
     for (index, (source, parameter)) in tail
@@ -838,7 +862,7 @@ pub fn build_class(
                 vararg_index: tail.ctor_vararg_index,
                 annotations: tail.primary_ctor_annotations,
             },
-            &class_type_parameters,
+            &class_type_parameters.member(0).0,
         )]
     } else {
         Vec::new()
@@ -859,7 +883,7 @@ pub fn build_class(
                 vararg_index: sc.vararg_index,
                 annotations: sc.annotations,
             },
-            &class_type_parameters,
+            &class_type_parameters.member(0).0,
         ));
     }
 
@@ -867,7 +891,8 @@ pub fn build_class(
         let mut prop = Pb::new();
         // kotlinc's serializer names a type parameter the declaration being written owns
         // (`Type.type_parameter_name`) and addresses an enclosing class's by table id.
-        let mut property_type_parameters = class_type_parameters.clone();
+        let (mut property_type_parameters, first_own) =
+            class_type_parameters.member(p.type_params.len());
         property_type_parameters.extend(semantic_named_type_parameters(
             p.type_params
                 .iter()
@@ -887,9 +912,9 @@ pub fn build_class(
         };
         // The setter is a declaration of its own: the property's type parameters are not its own,
         // so its value parameter addresses them by table id.
-        let mut setter_type_parameters = class_type_parameters.clone();
+        let (mut setter_type_parameters, _) = property_type_parameters.member(0);
         for (index, parameter) in p.type_params.iter().enumerate() {
-            let id = TypeParameterRef::Id((captured_count + tail.type_params.len() + index) as u64);
+            let id = TypeParameterRef::Id(first_own + index as u64);
             setter_type_parameters.insert(parameter.name.clone(), id.clone());
             setter_type_parameters.insert(parameter.semantic_name.clone(), id);
         }
@@ -913,7 +938,7 @@ pub fn build_class(
         });
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
         for (index, parameter) in p.type_params.iter().enumerate() {
-            let id = captured_count + tail.type_params.len() + index;
+            let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
@@ -1116,7 +1141,8 @@ pub fn build_class(
                       m: &FnMeta| {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
-        let mut function_type_parameters = class_type_parameters.clone();
+        let (mut function_type_parameters, first_own) =
+            class_type_parameters.member(m.type_params.len());
         assert_eq!(
             m.semantic_type_params.len(),
             m.type_params.len(),
@@ -1128,7 +1154,7 @@ pub fn build_class(
             m.semantic_type_params.iter().map(String::as_str),
         ));
         for (index, name) in m.type_params.iter().enumerate() {
-            let id = captured_count + tail.type_params.len() + index;
+            let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
