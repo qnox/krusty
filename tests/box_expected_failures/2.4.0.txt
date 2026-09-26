@@ -157,8 +157,6 @@ functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
 ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
-ieee754/smartCastToDifferentTypes_properIeeeComparisons.kt
-ieee754/smartCastToDoubleAndComparableToDouble.kt
 increment/argumentWithSideEffects.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedTypeAsLambdaInputType.kt

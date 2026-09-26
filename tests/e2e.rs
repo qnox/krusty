@@ -1138,6 +1138,8 @@ mod method_generic_signature_e2e;
 mod method_pool_order_e2e;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
+#[path = "mixed_numeric_comparison_e2e.rs"]
+mod mixed_numeric_comparison_e2e;
 #[path = "module_extension_signature_result_e2e.rs"]
 mod module_extension_signature_result_e2e;
 #[path = "mpp_expect_actual_e2e.rs"]

@@ -9,6 +9,9 @@ mod arrays;
 mod assignment_tests;
 mod assignments;
 #[cfg(test)]
+mod binary_operator_tests;
+mod binary_operators;
+#[cfg(test)]
 mod branch_exhaustiveness_tests;
 #[cfg(test)]
 mod builder_inference_tests;
@@ -1261,123 +1264,6 @@ impl BodyFirChecker<'_> {
         BodyCheckFailure { span, kind }
     }
 
-    fn builtin_binary_expression(
-        &mut self,
-        expression: ExprId,
-        operation: BinOp,
-        lhs: ExprId,
-        rhs: ExprId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let lhs_type = self.expression_type(lhs)?;
-        let rhs_type = self.expression_type(rhs)?;
-        let promotes_operands = matches!(
-            operation,
-            BinOp::Add
-                | BinOp::Sub
-                | BinOp::Mul
-                | BinOp::Div
-                | BinOp::Rem
-                | BinOp::Lt
-                | BinOp::Le
-                | BinOp::Gt
-                | BinOp::Ge
-        );
-        let operation = match operation {
-            BinOp::Add => FirBinaryOperation::Add,
-            BinOp::Sub => FirBinaryOperation::Subtract,
-            BinOp::Mul => FirBinaryOperation::Multiply,
-            BinOp::Div => FirBinaryOperation::Divide,
-            BinOp::Rem => FirBinaryOperation::Remainder,
-            BinOp::Eq => FirBinaryOperation::Equal,
-            BinOp::Ne => FirBinaryOperation::NotEqual,
-            BinOp::Lt => FirBinaryOperation::Less,
-            BinOp::Le => FirBinaryOperation::LessOrEqual,
-            BinOp::Gt => FirBinaryOperation::Greater,
-            BinOp::Ge => FirBinaryOperation::GreaterOrEqual,
-            BinOp::And => FirBinaryOperation::BooleanAnd,
-            BinOp::Or => FirBinaryOperation::BooleanOr,
-            BinOp::RefEq => FirBinaryOperation::ReferentialEqual,
-            BinOp::RefNe => FirBinaryOperation::ReferentialNotEqual,
-        };
-        self.checked_binary_expression(
-            expression,
-            operation,
-            promotes_operands,
-            lhs,
-            rhs,
-            lhs_type,
-            rhs_type,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn checked_binary_expression(
-        &mut self,
-        expression: ExprId,
-        operation: FirBinaryOperation,
-        promotes_operands: bool,
-        lhs: ExprId,
-        rhs: ExprId,
-        lhs_type: ResolvedTy,
-        rhs_type: ResolvedTy,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let promoted = promotes_operands
-            .then(|| Ty::promote(lhs_type.get(), rhs_type.get()))
-            .flatten()
-            .map(|ty| {
-                self.resolved_type(
-                    self.file
-                        .expr_span(expression)
-                        .expect("a checked binary expression has a source span"),
-                    ty,
-                )
-            })
-            .transpose()?;
-        self.checked_binary_expression_at_targets(
-            operation, lhs, rhs, lhs_type, rhs_type, promoted, promoted,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn checked_binary_expression_at_targets(
-        &mut self,
-        operation: FirBinaryOperation,
-        lhs: ExprId,
-        rhs: ExprId,
-        lhs_type: ResolvedTy,
-        rhs_type: ResolvedTy,
-        lhs_target: Option<ResolvedTy>,
-        rhs_target: Option<ResolvedTy>,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let operand = |checker: &mut Self,
-                       source: ExprId,
-                       actual: ResolvedTy,
-                       target: Option<ResolvedTy>|
-         -> Result<FirExprId, BodyCheckFailure> {
-            let value = checker.expression(source)?;
-            let cause = checker.expression_origin(source)?;
-            // Binary operands are value positions. A Unit-returning call is effect-only at its
-            // callable boundary, so publish the language-level Unit materialization explicitly;
-            // common lowering must not infer that requirement from the eventual operation.
-            let unit_value = actual.get().canonical_semantic() == Ty::Unit;
-            let Some(target) = target.or(unit_value.then_some(actual)) else {
-                return Ok(value);
-            };
-            // The expression's semantic type may already be the smart-cast target while its source
-            // value still occupies a nullable/platform reference slot. Consume the resolver's exact
-            // selected boundary as call arguments do; comparing only `actual == target` loses the
-            // required unbox on primitive operators inside a non-null branch.
-            let conversion =
-                checker.selected_value_conversion_from(source, value, actual, target, cause)?;
-            Ok(checker.convert_fir_value(value, target, cause, conversion))
-        };
-        Ok(FirExprKind::Binary {
-            operation,
-            lhs: operand(self, lhs, lhs_type, lhs_target)?,
-            rhs: operand(self, rhs, rhs_type, rhs_target)?,
-        })
-    }
-
     /// Attach an already-selected semantic conversion to a checked value. Call and operator paths
     /// converge here so neither common lowering nor a backend has to reconstruct a boundary from
     /// the operation that eventually consumes the value.
@@ -2255,15 +2141,17 @@ impl BodyFirChecker<'_> {
                         let span = self.file.expr_span(expression).ok_or_else(|| {
                             self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
                         })?;
-                        self.checked_binary_expression_at_targets(
-                            operation,
-                            *lhs,
-                            *rhs,
-                            self.expression_type(*lhs)?,
-                            self.expression_type(*rhs)?,
-                            Some(self.resolved_type(span, lhs_target)?),
-                            Some(self.resolved_type(span, rhs_target)?),
-                        )?
+                        let lhs = binary_operators::BinaryOperand {
+                            source: *lhs,
+                            ty: self.expression_type(*lhs)?,
+                            target: Some(self.resolved_type(span, lhs_target)?),
+                        };
+                        let rhs = binary_operators::BinaryOperand {
+                            source: *rhs,
+                            ty: self.expression_type(*rhs)?,
+                            target: Some(self.resolved_type(span, rhs_target)?),
+                        };
+                        self.checked_binary_expression_at_targets(operation, lhs, rhs)?
                     } else if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                         && self.selected_ieee_relational_operation(expression)
                     {
