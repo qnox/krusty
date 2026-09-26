@@ -1241,10 +1241,18 @@ where
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // Classifier annotation arguments can reference source constants. Publish their compact
+        // payloads before the indexed annotation pass so that pass never needs a sibling source AST
+        // or the legacy module-symbol view.
+        crate::resolve::publish_checked_compile_time_constants(
+            &files[..inferred_end],
+            &mut symbols,
+        );
+        crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
         crate::resolve::publish_checked_classifier_annotations(
             &files[..inferred_end],
-            &index,
-            &mut symbols,
+            &mut index,
+            &symbols,
             diags,
         );
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
@@ -1271,14 +1279,6 @@ where
                 diags,
             );
         }
-        // A `const val` initializer is a stable declaration dependency. Check each such bounded
-        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
-        // consumed; retain only the folded payload before the signature graph and arenas die.
-        crate::resolve::publish_checked_compile_time_constants(
-            &files[..inferred_end],
-            &mut symbols,
-        );
-        crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
         crate::resolve::publish_override_plans(&mut index, &symbols);
         crate::resolve::function_type_parameters::publish_function_type_parameters(
             &mut index, &symbols,

@@ -91,6 +91,27 @@ mod tests {
             resolver.contains("production body checking requires ResolvedModuleIndex"),
             "the private implementation must fail closed when production body checking has no index"
         );
+        assert!(
+            !resolver.contains("fragment.is_classifier_annotations()"),
+            "classifier annotation publication must not reopen the whole-file checker"
+        );
+        let fragments = fs::read_to_string(source_path("src/resolve/source_fragment.rs"))
+            .expect("read source fragment modes");
+        assert!(
+            !fragments.contains("ClassifierAnnotations"),
+            "classifier annotations have a focused indexed pass, not a whole-file fragment mode"
+        );
+        let classifier_annotations =
+            fs::read_to_string(source_path("src/resolve/checked_annotation_publication.rs"))
+                .expect("read classifier annotation publication");
+        assert!(
+            classifier_annotations.contains("take_declaration_annotation_occurrences"),
+            "classifier annotation publication must consume stable declaration occurrences"
+        );
+        assert!(
+            !classifier_annotations.contains("resolved_annotation("),
+            "classifier annotation publication must not return to parser-coordinate bindings"
+        );
 
         let inspection = fs::read_to_string(source_path("src/resolve/inspection_analysis.rs"))
             .expect("read inspection checker entry");
@@ -111,8 +132,8 @@ mod tests {
             "the inspection checker entry must pass its ResolvedModuleIndex to the checker"
         );
 
-        // Signature collection still owns bounded pre-finalization capture and annotation checks.
-        // Nothing outside the resolver may acquire an index-free body-check entry point again.
+        // Signature collection still owns bounded pre-finalization capture discovery. Nothing
+        // outside the resolver may acquire an index-free body-check entry point again.
         for root in ["src", "tests", "crates"] {
             for path in rust_files_under(root) {
                 if path.ends_with("src/resolve.rs")

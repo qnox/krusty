@@ -5320,48 +5320,7 @@ pub(crate) fn finalized_streamed_signature_index(
             _ => None,
         };
         if let Some(annotations) = annotations {
-            index.publish_declaration_annotations(stub.id, annotations.iter().copied());
-            // The class arguments of those annotations, resolved with them. Grouped by annotation
-            // ordinal so the index key matches the string arguments beside it.
-            if stub.kind == DeclarationKind::Classifier {
-                let class = table
-                    .classes
-                    .values()
-                    .find(|class| class.stable_declaration == Some(stub.id));
-                let class_arguments = class
-                    .map(|class| class.annotation_class_arguments.clone())
-                    .unwrap_or_default();
-                for ordinal in class_arguments
-                    .iter()
-                    .map(|(ordinal, _)| *ordinal)
-                    .collect::<std::collections::BTreeSet<_>>()
-                {
-                    index.publish_declaration_annotation_class_arguments(
-                        stub.id,
-                        ordinal,
-                        class_arguments
-                            .iter()
-                            .filter(|(at, _)| *at == ordinal)
-                            .map(|(_, classifier)| *classifier),
-                    );
-                }
-                if let Some(class) = class {
-                    index.publish_generated_classifiers(
-                        stub.id,
-                        class.generated_nested_classifiers.iter().cloned(),
-                    );
-                }
-            }
-            for (ordinal, _) in annotations.iter().enumerate() {
-                index.publish_declaration_annotation_string_arguments(
-                    stub.id,
-                    ordinal as u32,
-                    headers
-                        .annotation_string_arguments(stub.id, ordinal)
-                        .iter()
-                        .cloned(),
-                );
-            }
+            publish_streamed_declaration_annotations(&mut index, headers, table, stub, annotations);
         }
     }
     for declaration in suppressed_generated_callables.iter().copied() {

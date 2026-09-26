@@ -1897,9 +1897,6 @@ pub struct ClassSig {
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
     pub annotations: Vec<TypeName>,
-    /// Fully checked applications of those annotations. This is populated while the Pass-1
-    /// declaration expression arena is live, then projected by stable declaration identity.
-    pub applied_annotations: Vec<crate::types::ResolvedAnnotation>,
     /// Resolved CLASS arguments of those annotations, by annotation ordinal — the identity behind
     /// `@Serializable(with = X::class)`. Resolved here, with the annotation's own name and through
     /// the same classifier rules, because no later phase may recover it from a spelling.
@@ -2092,7 +2089,6 @@ impl ClassSig {
             source_decl: Some(source_decl),
             visibility,
             annotations: Vec::new(),
-            applied_annotations: Vec::new(),
             annotation_class_arguments: Vec::new(),
             generated_nested_classifiers: Vec::new(),
             props: Vec::new(),
@@ -39016,8 +39012,8 @@ enum CaptureDiscovery<'a> {
 }
 
 /// Shared checker implementation. Production body-check entry points require a stable index. The
-/// only index-free production callers are bounded signature work before stable publication:
-/// anonymous-capture discovery and classifier-annotation folding.
+/// only index-free production caller is bounded anonymous-capture discovery before stable
+/// publication.
 #[allow(clippy::too_many_arguments)]
 fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
     file: &File,
@@ -39037,10 +39033,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
 ) -> TypeInfo {
     let capture_discovery = matches!(captures, CaptureDiscovery::Scratch);
     assert!(
-        resolved_index.is_some()
-            || capture_discovery
-            || fragment.is_classifier_annotations()
-            || cfg!(test),
+        resolved_index.is_some() || capture_discovery || cfg!(test),
         "production body checking requires ResolvedModuleIndex",
     );
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
@@ -39111,10 +39104,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
     // IR. Capture discovery and Pass-1 default preparation are scratch traversals whose results are
     // discarded; neither may become a second owner of the application.
-    if !capture_discovery
-        && !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
-    {
+    if !capture_discovery && !fragment.is_signature_defaults() {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -39124,17 +39114,14 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
     // The streaming path already published contracts as stable, semantically resolved Pass-1
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
-        && resolved_index.is_none()
-    {
+    if !fragment.is_signature_defaults() && resolved_index.is_none() {
         c.collect_source_contracts(scope, selected_body_declarations);
     }
 
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery {
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
@@ -39216,7 +39203,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery {
         if let (Some(index), Some(selected_bodies)) = (resolved_index, selected_stable_bodies) {
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
@@ -39303,8 +39290,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         }
     }
     if let Some(body) = file.script_body.filter(|_| {
-        !fragment.is_classifier_annotations()
-            && !c.signature_defaults_only
+        !c.signature_defaults_only
             && (!capture_discovery
                 || c.capture_scope
                     .as_ref()
@@ -39317,7 +39303,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         });
         c.in_script_body = false;
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery {
         c.check_import_paths();
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
@@ -39434,7 +39420,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         source_contracts,
         ..
     } = c;
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery {
         if let Some(syms) = syms.pass_one_symbols_mut() {
             publish_checked_primary_constructor_types(
                 file,
@@ -39763,7 +39749,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery {
         plugin_expression_planning::plan_plugin_expressions(
             file,
             &mut info,
@@ -57712,21 +57698,6 @@ impl<'a> Checker<'a> {
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
             self.push_declaration_suppressions(scope, &cl.annotations, &cl.annotation_args);
-        if self.fragment.is_classifier_annotations() {
-            for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-                if self
-                    .module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-                    .is_some()
-                {
-                    self.check_annotation_application(scope, annotation, arguments);
-                }
-            }
-            self.active_statement_suppressions
-                .truncate(class_suppression_depth);
-            return;
-        }
         let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
         if cl.is_singleton() && self.file.is_local_declaration(d) && !is_anonymous_object {
             self.diags.error(
@@ -76924,12 +76895,6 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
     ) -> Option<TypeName> {
-        if self.fragment.is_classifier_annotations() {
-            return self
-                .module
-                .legacy_symbols()?
-                .resolved_annotation(self.file_index, annotation);
-        }
         self.applied_annotations
             .get(&(annotation.span.lo, annotation.span.hi))
             .map(|applied| applied.internal)
