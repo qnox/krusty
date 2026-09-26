@@ -7224,6 +7224,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the same, and a discarded `if (c) a else ext()` keeps only the call and its `pop` behind a negated
   jump. Tests: the unit tests beside the pass and in `dead_code` and `pipeline`, and
   `tests/pop_backward_e2e.rs` (instructions against kotlinc, and the samples at run time).
+- **CapturedVars, RedundantNullCheck and RedundantCheckCast run first, in kotlinc's order, and a
+  `checkcast` goes when kotlinc's `RedundantCheckCastEliminationMethodTransformer` removes it.** Each
+  of the three steps runs over the method the previous one left (`pipeline::ORDER`), so a cast of a
+  `Ref` element is judged once CapturedVars has made the `Ref` a plain local. The checkcast step
+  (`bytecode_passes/redundant_checkcasts/`) analyses the method with pruned exception edges and the
+  basic interpreter, which keeps a reference's exact class and `null` as a value of its own; two
+  different classes merge to `Object`, a class and `null` to the class. A cast goes when its operand
+  is `null` or has exactly the cast's type (no hierarchy is consulted), unless the type is a
+  multi-dimensional array or the method has a reified-operation marker. As in kotlinc, an `aload` of
+  a local inside that local's range, at an instruction the method's entry reaches only through a
+  handler, loads the type the local-variable table declares. Because a protected range whose first
+  instruction follows a line number and holds no store never reaches its handler with pruned edges,
+  a cast in such a handler is judged on the unreached frame: krusty keeps the `checkcast Object` it
+  emits in the catch code of `inlineTryCatch`'s `tryOrElse` and `kt3297`'s `or`, which kotlinc does
+  not emit. Nothing that runs changes: a removed cast could not fail. Tests: the unit tests beside
+  the pass and in `pipeline` (a cast of a `Ref` element goes once the `Ref` is a local), and
+  `tests/redundant_checkcast_e2e.rs`.
+- **A rewritten method's constants are in the pool as kotlinc's writer interns the optimized
+  method.** krusty interns constants while it emits a body; kotlinc interns them when it writes the
+  body its passes optimized. A constant a rewrite names that the pool lacks (an unboxed local's
+  descriptor, a call a boxing pass introduces) is interned and the method laid out again, instead of
+  the method being written as emitted (`classfile/method_rewrite.rs`,
+  `constant_pool_queries::Wanted`). Once the class is serialized its pool is laid out again
+  (`classfile/pool_layout/`): an entry nothing in the class names is dropped, and an entry that only
+  rewritten code names and that the method's emission or rewrite interned is placed where that
+  method's constants began, in ASM's `MethodWriter` order (catch types, instruction operands in
+  order, the local-variable tables, then the frames' classes, each entry after the entries it names).
+  Every other entry keeps its relative place, including one another member or attribute also names.
+  A class holding an attribute the reader does not know keeps its pool; so does one whose `ldc`
+  operand would move past index 255, and an `ldc_w` whose entry moves below 256 stays `ldc_w`.
+  Tests: `classfile::pool_layout::tests`, `classfile::constant_pool_queries::tests`, and
+  `tests/constant_pool_order_e2e.rs` (whole class files against kotlinc: a removed cast, casts of
+  constants to their boxed types, and an unboxed generic read).
 
 - **Mutable collections and function types in `is`/`as`/`as?` (kotlinc's `TypeIntrinsics`).** A
   mutable Kotlin collection shares its JVM interface with its read-only face, and a function type

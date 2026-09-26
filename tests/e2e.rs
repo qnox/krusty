@@ -424,6 +424,8 @@ mod const_read_inline_e2e;
 mod const_val_e2e;
 #[path = "constant_conditions_e2e.rs"]
 mod constant_conditions_e2e;
+#[path = "constant_pool_order_e2e.rs"]
+mod constant_pool_order_e2e;
 #[path = "construction_argument_labels_e2e.rs"]
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
