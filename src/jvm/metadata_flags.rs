@@ -8,8 +8,10 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
     // recorded visibility stay public.
     // A classifier declared in executable code, or nested in one, is LOCAL (5) whatever it says.
+    // So is an enum entry's body: kotlinc models it as an anonymous object, although its class id
+    // stays the entry's `Enum.ENTRY` name.
     let visibility: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
-        _ if super::local_classifiers::is_local(ir, c) => 5,
+        _ if super::local_classifiers::is_local(ir, c) || c.enum_entry_of.is_some() => 5,
         Some(crate::types::Visibility::Internal) => 0,
         Some(crate::types::Visibility::Private) => 1,
         Some(crate::types::Visibility::Protected) => 2,

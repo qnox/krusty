@@ -2205,14 +2205,14 @@ fn build_class_metadata(
             ctor_param_defaults: &ctor_param_defaults,
             inline_underlying,
             ctor_sig_name: c.is_value.then_some("constructor-impl"),
-            // An interface has no constructor at all, whatever the IR records.
             // An interface has no constructor; a class with ONLY secondary constructors emits no
             // primary record either (its `Class.constructor` entries are the secondaries below).
             // Every other class keeps its (possibly implicit) primary record — an `enum class`
             // without a declared constructor still records the implicit private `(String, I)` one.
-            // An anonymous object's constructor is not a declaration a reader can call.
+            // An anonymous object's constructor (an enum entry body's too) is not callable.
             emit_primary_ctor: !c.is_interface
                 && !c.is_anonymous_object
+                && c.enum_entry_of.is_none()
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
             // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the
@@ -2246,6 +2246,7 @@ fn build_class_metadata(
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
             local_classifiers: &local_classifiers,
+            enum_entry_bodies: &super::local_classifiers::enum_entry_bodies(ir),
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -2294,8 +2295,7 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// value class but the transitive check independently admits it, a mentioning class publishes a type
 /// a downstream compiler reads as an ordinary box.
 fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    !(c.enum_entry_of.is_some()
-        || c.prop_ref.is_some()
+    !(c.prop_ref.is_some()
         || c.func_ref.is_some()
         // A published secondary constructor is described from its recorded semantic parameter
         // identities. A malformed publication contract would advertise the wrong parameter list,

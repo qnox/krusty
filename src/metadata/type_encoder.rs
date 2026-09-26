@@ -73,14 +73,19 @@ pub(crate) struct StringTable {
     /// Classifiers declared in executable code (or nested in one): named by their raw internal
     /// name, marked local, wherever a class id is interned.
     local_classifiers: std::collections::HashSet<TypeName>,
+    /// The local classifiers kotlinc gives no raw-name replacement: enum entry bodies, whose ids
+    /// keep their `pkg/Enum.ENTRY` spelling.
+    enum_entry_bodies: std::collections::HashSet<TypeName>,
 }
 
 impl StringTable {
     pub(crate) fn with_local_classifiers(
         local_classifiers: &std::collections::HashSet<TypeName>,
+        enum_entry_bodies: &std::collections::HashSet<TypeName>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
+            enum_entry_bodies: enum_entry_bodies.clone(),
             ..StringTable::default()
         }
     }
@@ -126,6 +131,7 @@ impl StringTable {
 
     /// A local classifier's id: the raw internal name of the classifier declared in executable
     /// code, then `.`-separated segments for the classes nested in it (`app/AKt$make$Local.In`).
+    /// An enum entry body keeps its ordinary class id instead (`app/Coded.A.In`).
     fn local_class_literal(&self, classifier: TypeName) -> String {
         let mut nested = Vec::new();
         let mut outer = classifier;
@@ -140,7 +146,11 @@ impl StringTable {
             );
             outer = owner;
         }
-        let mut literal = outer.render();
+        let mut literal = if self.enum_entry_bodies.contains(&outer) {
+            class_id_of(outer).literal
+        } else {
+            outer.render()
+        };
         for segment in nested.into_iter().rev() {
             literal.push('.');
             literal.push_str(segment);

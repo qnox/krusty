@@ -629,6 +629,9 @@ pub struct ClassTail<'a> {
     /// The file's local classifiers (declared in executable code or nested in one). The string
     /// table names each by its raw internal name, marked local, wherever it appears.
     pub local_classifiers: &'a std::collections::HashSet<TypeName>,
+    /// The local classifiers whose ids keep their `pkg/Outer.Inner` spelling (enum entry bodies),
+    /// together with the classes nested in them.
+    pub enum_entry_bodies: &'a std::collections::HashSet<TypeName>,
 }
 
 static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeName>> =
@@ -666,6 +669,7 @@ impl Default for ClassTail<'_> {
             annotations: &[],
             primary_ctor_annotations: &[],
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
+            enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
         }
     }
 }
@@ -706,7 +710,8 @@ pub fn build_class(
     let class_flags = tail.flags;
     let companion_name = tail.companion;
     let nested_class_names = tail.nested;
-    let mut st = StringTable::with_local_classifiers(tail.local_classifiers);
+    let mut st =
+        StringTable::with_local_classifiers(tail.local_classifiers, tail.enum_entry_bodies);
 
     // STRINGS ARE INTERNED IN kotlinc's ORDER (fq_name, supertype, constructors, properties'
     // JVM signatures, functions, enum entries, then the companion + nested names LAST) even though the

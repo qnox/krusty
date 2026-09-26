@@ -193,6 +193,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- Enum entry body (kotlinc 2.4.20): the `Enum$ENTRY` class is `k=1` with an `ENUM_ENTRY` kind and
+  LOCAL visibility (flags 202 for a final body) and no constructor record. Its class id keeps the
+  `pkg/Enum.ENTRY` spelling and is marked local (`StringTableTypes.local_name`), since kotlinc gives
+  an entry's anonymous object no raw-name replacement. A class nested in the body is a local class
+  (LOCAL visibility, no nullability annotations) whose id is `pkg/Enum.ENTRY.Nested`, and a
+  signature naming it records its JVM descriptor. The body keeps its members' nullability
+  annotations. Test: `tests/metadata_enum_entry_classes_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one
