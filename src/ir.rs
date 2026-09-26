@@ -44,7 +44,6 @@ mod overrides;
 mod progression;
 pub(crate) mod referenced_classifiers;
 mod references;
-mod storage_default;
 mod type_check_role;
 mod type_reflection;
 mod value_class_constructors;

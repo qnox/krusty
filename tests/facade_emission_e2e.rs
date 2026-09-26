@@ -87,3 +87,26 @@ fn a_boxed_zero_initializer_is_stored_like_kotlinc() {
     let (kotlinc, krusty) = pair.method_code("Holder", "Holder");
     assert_eq!(krusty, kotlinc);
 }
+
+/// Value-class storage is judged by the carrier slot the JVM zero-fills. kotlinc stores a
+/// non-null `Z(0)` into its `int` carrier through `constructor-impl`, boxes a `Z?` field's value,
+/// passes a nullable carrier through `constructor-impl`, and elides only the `null` store into a
+/// boxed `S?` slot.
+#[test]
+fn value_class_initializers_are_stored_by_their_carrier_slot() {
+    let src = "@JvmInline value class Z(val x: Int)\n\
+        @JvmInline value class S(val s: String?)\n\
+        val carrierZero: Z = Z(0)\n\
+        val boxedZero: Z? = Z(0)\n\
+        val nullCarrier: S = S(null)\n\
+        val boxedNull: S? = null\n\
+        class Holder {\n    val carrierZero: Z = Z(0)\n    val boxedZero: Z? = Z(0)\n    \
+        val nullCarrier: S = S(null)\n    val boxedNull: S? = null\n    val boxedInt: Int? = 0\n}\n";
+    let sources = [("ValueDefaults.kt", src)];
+    let pair = common::ModuleClassPair::compile(&sources, "ValueDefaultsKt");
+    let (kotlinc, krusty) = pair.method_code("ValueDefaultsKt", "<clinit>");
+    assert_eq!(krusty, kotlinc);
+    let pair = common::ModuleClassPair::compile(&sources, "Holder");
+    let (kotlinc, krusty) = pair.method_code("Holder", "Holder");
+    assert_eq!(krusty, kotlinc);
+}
