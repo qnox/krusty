@@ -798,7 +798,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the JVM descriptor; its facade record carries the receiver type, the companion bit and an
   explicit JVM signature. When a companion-object property hoisted onto `C` has the same field
   name and descriptor as a block property, the hoisted field takes `name$1` (its `access$…$cp`
-  bridges keep the source name). Tests: `tests/companion_block_members_e2e.rs`.
+  bridges keep the source name). Read from a compiled class, a class `@Metadata` function or
+  property carrying the companion bit and no receiver is the same classifier member: the provider
+  offers its public static method, or its public static accessors (the field stays private), as a
+  classifier callable/property and keeps it out of the class's instance scope. Tests:
+  `tests/companion_block_members_e2e.rs`.
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and

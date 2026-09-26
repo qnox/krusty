@@ -1,6 +1,7 @@
 //! Provider normalization for JVM-backed top-level Kotlin properties.
 //!
-//! A Kotlin `const val` is declared in package metadata but may have no emitted getter. Its field is
+//! A Kotlin `const val` is declared in package metadata (or in class metadata, for a
+//! `companion { … }` block constant) but may have no emitted getter. Its field is
 //! the physical realization and carries the compile-time payload. This module joins those two
 //! provider facts into the same [`PropertyInfo`] shape used by source and accessor-backed properties.
 
@@ -10,7 +11,7 @@ use super::metadata::MetaProp;
 use crate::libraries::{LibraryCallable, PropertyInfo};
 use crate::types::Ty;
 
-pub(super) fn merge_top_level_const(
+pub(super) fn merge_metadata_const(
     source_name: &str,
     metadata: &MetaProp,
     field: &JvmStaticField,
@@ -61,6 +62,7 @@ pub(super) fn merge_top_level_const(
         name: source_name.to_string(),
         kind: crate::libraries::PropKind::TopLevel,
         receiver: None,
+        associated_classifier: None,
         formals: metadata
             .generic_sig
             .as_ref()

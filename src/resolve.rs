@@ -15076,10 +15076,7 @@ impl<'a> Checker<'a> {
             Ok(None) => {}
         }
         if let Some(internal) = rt.non_null().obj_internal() {
-            if let Some(property) = self
-                .libraries
-                .classifier_associated_property(internal, name)
-            {
+            if let Some(property) = self.resolver().associated_property(internal, name) {
                 return self.record_associated_property(mexpr, property, report_diagnostics);
             }
         }
@@ -16434,7 +16431,7 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             }
-            [] => self.libraries.classifier_associated_property(owner, name)?,
+            [] => return None,
         };
         Some(self.record_associated_property(Some(expression), property, true))
     }
@@ -16663,9 +16660,9 @@ impl<'a> Checker<'a> {
             crate::symbol_source::SymbolNamespace::Package(package) => self
                 .libraries
                 .top_level_associated_property(package, &declared_name),
-            crate::symbol_source::SymbolNamespace::Classifier(owner) => self
-                .libraries
-                .classifier_associated_property(owner, &declared_name),
+            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
+                self.resolver().associated_property(owner, &declared_name)
+            }
         }
     }
 
@@ -25850,7 +25847,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
             }
-            if let Some(property) = self.libraries.classifier_associated_property(owner, &name) {
+            if let Some(property) = self.resolver().associated_property(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
                 if !self.member_accessible(property.visibility, property.owner) {
                     self.reject_property_if_inaccessible(
@@ -30789,6 +30786,7 @@ fun box(): String {
                             name: "prop".to_string(),
                             kind: crate::libraries::PropKind::MemberExtension,
                             receiver: Some(parameter),
+                            associated_classifier: None,
                             formals: Vec::new(),
                             ty: Ty::String,
                             context_count: 0,
@@ -53357,7 +53355,7 @@ impl<'a> Checker<'a> {
     fn lexical_associated_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
         self.lexical_classifier_callable_owners()
             .into_iter()
-            .filter_map(|owner| self.libraries.classifier_associated_property(owner, name))
+            .filter_map(|owner| self.resolver().associated_property(owner, name))
             .find(|property| self.member_accessible(property.visibility, property.owner))
     }
 
@@ -68731,7 +68729,7 @@ impl<'a> Checker<'a> {
                     );
                     return Some(ty);
                 }
-                if let Some(property) = self.libraries.classifier_associated_property(owner, name) {
+                if let Some(property) = self.resolver().associated_property(owner, name) {
                     let ty = property.ty;
                     if !self.receiver_is_assignable(ty, expected) {
                         return None;
@@ -68850,8 +68848,8 @@ impl<'a> Checker<'a> {
             return true;
         }
         if self
-            .libraries
-            .classifier_associated_property(owner, name)
+            .resolver()
+            .associated_property(owner, name)
             .is_some_and(|property| self.receiver_is_assignable(property.ty, expected))
         {
             return true;
@@ -69836,8 +69834,7 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, ty);
                 }
-                if let Some(property) = self.libraries.classifier_associated_property(owner, &name)
-                {
+                if let Some(property) = self.resolver().associated_property(owner, &name) {
                     if self.reject_inaccessible_classifier_expression(receiver, owner) {
                         return self.set(e, Ty::Error);
                     }
@@ -71441,10 +71438,7 @@ impl<'a> Checker<'a> {
                         .record_classifier_property_ref(expression, internal, name, property);
                 }
             }
-            if let Some(property) = self
-                .libraries
-                .classifier_associated_property(internal, name)
-            {
+            if let Some(property) = self.resolver().associated_property(internal, name) {
                 let applicable = expected_function.is_none_or(|expected| {
                     self.callable_ref_is_compatible(&[], property.ty, false, expected, true)
                 });

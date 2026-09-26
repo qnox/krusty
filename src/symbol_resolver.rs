@@ -17,6 +17,7 @@ use crate::types::{Ty, TypeName, Visibility};
 mod call_argument;
 mod callable_shapes;
 mod candidate_access;
+mod classifier_associated;
 mod classifier_scope;
 mod declaration_specificity;
 mod generic_inference;
@@ -2754,48 +2755,6 @@ impl<'a> SymbolResolver<'a> {
         internal: TypeName,
     ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         self.src.classifier(internal)
-    }
-
-    pub fn classifier_associated_property(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<crate::libraries::PropertyInfo> {
-        self.lib.classifier_associated_property(internal, name)
-    }
-
-    /// Provider-normalized classifier property visible from this resolver's lexical access site.
-    /// The declaration may be realized however the platform chooses; this operation deals only in
-    /// Kotlin property shape and source visibility.
-    pub(crate) fn accessible_classifier_associated_property(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<crate::libraries::PropertyInfo> {
-        let property = self.lib.classifier_associated_property(internal, name)?;
-        let accessible = match property.visibility {
-            Visibility::Public => true,
-            Visibility::Internal => {
-                self.module
-                    .is_some_and(|module| module.classifier(property.owner).is_some())
-                    || self.lib.internal_accessible(property.owner)
-            }
-            Visibility::PackagePrivate => self.package_private_member_accessible(property.owner),
-            Visibility::Private => self.lexical_classes.iter().copied().any(|enclosing| {
-                enclosing == property.owner
-                    || std::iter::successors(enclosing.nested_owner(), |owner| owner.nested_owner())
-                        .any(|owner| owner == property.owner)
-            }),
-            Visibility::Protected => self.lexical_classes.iter().copied().any(|enclosing| {
-                crate::assignable::is_subtype(
-                    &crate::assignable::TyCtx::new(),
-                    &SourceOracle(&self.src),
-                    Ty::obj_name(enclosing),
-                    Ty::obj_name(property.owner),
-                )
-            }),
-        };
-        accessible.then_some(property)
     }
 
     /// The declared type of the member property `name` on `recv` — the property itself, with no accessor

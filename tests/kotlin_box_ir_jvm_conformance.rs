@@ -1772,15 +1772,6 @@ fn compare_class_sets(
     Ok(())
 }
 
-/// `// LANGUAGE: +X -Y` directives → the `-XXLanguage:` flags the reference test runner passes.
-fn language_directive_args(src: &str) -> Vec<String> {
-    src.lines()
-        .filter_map(|l| l.trim().strip_prefix("// LANGUAGE:"))
-        .flat_map(|rest| rest.split_whitespace())
-        .map(|tok| format!("-XXLanguage:{tok}"))
-        .collect()
-}
-
 /// Bump when the cache layout / comparison semantics change — invalidates every cached entry.
 const REF_CACHE_SALT: &str = "ref-classes-v1";
 
@@ -1901,7 +1892,7 @@ fn reference_compile_in(
         args.push("-cp".into());
         args.push(joined);
     }
-    args.extend(language_directive_args(src));
+    args.extend(common::language_directives::kotlinc_args(src));
     for (i, (name, content)) in blocks.iter().enumerate() {
         // The FILE NAME decides kotlinc's file-facade class name (`arrayElement.kt` →
         // `ArrayElementKt`), so it must be exactly the block's declared LEAF name
@@ -2160,7 +2151,7 @@ fun callableNamedClass(): Any {
 fn language_directive_args_parse() {
     let src = "// LANGUAGE: +ContextParameters -SomethingElse\nfun box() = \"OK\"\n";
     assert_eq!(
-        language_directive_args(src),
+        common::language_directives::kotlinc_args(src),
         vec![
             "-XXLanguage:+ContextParameters",
             "-XXLanguage:-SomethingElse"

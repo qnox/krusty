@@ -1884,11 +1884,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // accessor rather than an instance accessor (`@JvmField` on JVM). Explicit import
                 // still denotes the Kotlin property declaration; consume the provider-normalized
                 // property exactly as the ordinary Pass-2 checker does.
-                if let Some(property) = self
-                    .table
-                    .libraries
-                    .classifier_associated_property(owner, &declared_name)
-                {
+                if let Ok(property) = self.with_resolver(scope, |resolver| {
+                    resolver.associated_property(owner, &declared_name)
+                }) {
                     return crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure());
                 }
             }
@@ -4026,10 +4024,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
         }
         if unbound {
-            if let Some(property) = receiver.get().non_null().obj_internal().and_then(|owner| {
-                self.table
-                    .libraries
-                    .classifier_associated_property(owner, spelling)
+            let owner = receiver.get().non_null().obj_internal();
+            if let Some(property) = owner.and_then(|owner| {
+                self.with_resolver(scope, |resolver| {
+                    resolver.associated_property(owner, spelling)
+                })
+                .ok()
             }) {
                 if expected.is_some_and(|expected| matches!(expected.get().non_null(), Ty::Fun(_)))
                 {

@@ -5,10 +5,14 @@
 pub(crate) mod anonymous_origin;
 pub(super) mod builtin_bridge;
 mod class_identity;
+mod property_declarations;
 mod property_identity;
 mod string_table;
 
-use property_identity::{inline_underlying_property_name_id, parse_jvm_property_signature};
+use property_declarations::decode_properties;
+use property_identity::{
+    inline_underlying_property_name_id, parse_jvm_property_signature, ParsedJvmPropertySignature,
+};
 #[cfg(test)]
 pub(crate) use string_table::PREDEFINED_STRINGS;
 use string_table::{
@@ -306,6 +310,9 @@ struct ParsedFunction {
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
     /// them.
     return_value_status: crate::types::ReturnValueStatus,
+    /// `Function.flags` companion bit: a `companion { … }` block member, or a written
+    /// `companion fun C.f()` when a receiver is present.
+    is_companion: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<ParsedJvmSignature>,
@@ -501,6 +508,9 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
+        // The companion bit exists only in the modern flag layout.
+        is_companion: modern_flags
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_COMPANION != 0),
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1460,6 +1470,7 @@ impl MfnFlags {
     const DEPRECATED_HIDDEN: u16 = 1 << 7;
     const IS_ABSTRACT: u16 = 1 << 8;
     const IS_FINAL: u16 = 1 << 9;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1514,6 +1525,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_final(self, on: bool) -> Self {
         self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
     }
 }
 
@@ -1609,6 +1624,12 @@ impl MetaFn {
     #[inline]
     pub fn has_reified_type_params(&self) -> bool {
         self.flags.has(MfnFlags::HAS_REIFIED_TYPE_PARAMS)
+    }
+    /// A `companion { … }` block member: a static member of the class that declares the block, called
+    /// through the classifier with no receiver.
+    #[inline]
+    pub fn is_companion_block_member(&self) -> bool {
+        self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -1714,6 +1735,13 @@ pub struct MetaJvmMethodSig {
     pub desc: String,
 }
 
+/// A property's JVM backing-field signature carried by Kotlin metadata: field name + descriptor.
+#[derive(Clone, Debug)]
+pub struct MetaJvmFieldSig {
+    pub name: String,
+    pub desc: String,
+}
+
 /// One constructor declaration from Kotlin class metadata. `params` is the complete source shape;
 /// `jvm_name` + `jvm_desc` are only the exact key of its platform realization. Ordinary classes use
 /// `<init>` while value classes use the static `constructor-impl`; consumers must not recover that
@@ -1752,6 +1780,9 @@ pub struct MetaProp {
     pub getter: Option<MetaJvmMethodSig>,
     /// The JVM setter (present iff the property is a `var` with an emitted setter).
     pub setter: Option<MetaJvmMethodSig>,
+    /// The backing field's JVM name + descriptor, from the `JvmPropertySignature` or Kotlin's default
+    /// mapping. The classfile decides whether such a field exists.
+    pub field: Option<MetaJvmFieldSig>,
     /// Explicit custom setter value-parameter name. An absent protobuf field denotes the implicit
     /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
     pub setter_parameter_name: Option<String>,
@@ -1766,6 +1797,9 @@ pub struct MetaProp {
     pub is_var: bool,
     /// This exact property is the value class's underlying storage declaration, joined by wire id.
     pub is_inline_underlying: bool,
+    /// A `companion { … }` block property: a static member of the class that declares the block,
+    /// read and written through its static accessors with no receiver.
+    pub is_companion_block_member: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
@@ -2676,6 +2710,7 @@ fn decode_functions(
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)
                             .with_is_infix(pf.is_infix)
+                            .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),
@@ -3258,351 +3293,6 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
         }
     }
     out
-}
-
-/// Decode every `Property` (`prop_field`: 10 in a `Class`, 4 in a `Package`) of this metadata message
-/// into [`MetaProp`]s — the property analogue of [`decode_functions`]. Carries the REAL getter/setter
-/// JVM names from the `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
-fn decode_properties(
-    ctx: &MetaCtx,
-    prop_field: u64,
-    class_tparams: &[(u64, String)],
-    class_tparam_bounds: &[Vec<Ty>],
-) -> MetadataResult<Vec<MetaProp>> {
-    let inline_underlying_property_name_id = inline_underlying_property_name_id(ctx.msg);
-    let declared_classifier = |ty: Ty| match ty.non_null() {
-        Ty::Obj(internal, _) => Some(internal),
-        _ => None,
-    };
-    let mut out = Vec::new();
-    let records = ctx.records;
-    let d2 = ctx.d2;
-    let mut type_table = None;
-    let mut props: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (f, 2) if f == prop_field => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                props.push(b);
-            }
-            (30, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                type_table = Some(b);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    let type_body_of_id = |tid: u64| type_table_entry(type_table?, tid as usize);
-    let type_of_id = |tid: u64| -> Option<TypeName> {
-        let (tb, _) = type_body_of_id(tid)?;
-        let cn = parse_type_class_name(tb)?;
-        resolve_class_name(records, d2, cn as usize).map(|name| type_name(&name))
-    };
-    let type_id_nullable = |tid: u64| -> bool {
-        type_table
-            .and_then(|table| type_table_entry(table, tid as usize))
-            .is_some_and(|(body, table_nullable)| table_nullable || parse_type_nullable(body))
-    };
-    // Current `Property.flags` is field 11. Its shared declaration prefix is HAS_ANNOTATIONS(0) ·
-    // VISIBILITY(1..3) · MODALITY(4..5) · MEMBER_KIND(6..7), so property-specific IS_VAR and IS_CONST
-    // live at bits 8 and 11. Older metadata may instead carry `old_flags` in field 1, whose shorter
-    // layout puts those facts at bits 6 and 9. Decode the two words independently and prefer field 11
-    // regardless of wire order; collapsing them into one mutable word would let a reordered legacy
-    // field override the authoritative modern value. The shared modern constants also drive both writers.
-    const LEGACY_IS_VAR: u64 = 1 << 6;
-    const LEGACY_IS_CONST: u64 = 1 << 9;
-    for prop in props {
-        let mut p = Pb::new(prop);
-        let mut name_id = None;
-        let mut ret = None;
-        let mut ret_nullable = false;
-        let mut ret_body = None;
-        let mut legacy_flags = None;
-        let mut modern_flags = None;
-        let mut sig = (None, None);
-        let mut receiver_class = None;
-        let mut receiver_body = None;
-        let mut receiver_nullable = false;
-        let mut type_params = Vec::new();
-        let mut context_params = Vec::new();
-        let mut setter_value_parameter = None;
-        let mut context_receiver_bodies = Vec::new();
-        let mut context_receiver_type_ids = Vec::new();
-        while !p.at_end() {
-            let Some(tag) = p.varint() else { break };
-            match (tag >> 3, tag & 7) {
-                (1, 0) => legacy_flags = p.varint(),
-                (11, 0) => modern_flags = p.varint(),
-                (2, 0) => name_id = p.varint(),
-                (3, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(tb) = p.bytes(n as usize) else { break };
-                    ret_nullable = parse_type_nullable(tb);
-                    ret_body = Some(tb);
-                    ret = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(records, d2, cn as usize))
-                        .map(|name| type_name(&name));
-                }
-                (4, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(body) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    type_params.push(parse_type_param(body)?);
-                }
-                (17, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(body) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    context_params.push(parse_value_parameter(body)?);
-                }
-                (12, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(body) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    context_receiver_bodies.push(body.to_vec());
-                }
-                (13, 0) => {
-                    if let Some(type_id) = p.varint() {
-                        context_receiver_type_ids.push(type_id);
-                    }
-                }
-                (13, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(ids) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    context_receiver_type_ids
-                        .extend(packed_varints(ids).ok_or(MetadataDecodeError::MalformedWire)?);
-                }
-                (9, 0) => {
-                    if let Some(tid) = p.varint() {
-                        ret = type_of_id(tid);
-                        ret_nullable = type_id_nullable(tid);
-                        ret_body = type_body_of_id(tid).map(|(body, _)| body);
-                    }
-                }
-                // `Property.receiver_type` (field 5, inline `Type`) / `receiver_type_id` (field 10) —
-                // PRESENCE marks an EXTENSION property; recover the receiver's class name.
-                (5, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(tb) = p.bytes(n as usize) else { break };
-                    receiver_body = Some(tb);
-                    receiver_nullable = parse_type_nullable(tb);
-                    receiver_class = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(records, d2, cn as usize))
-                        .map(|name| type_name(&name));
-                }
-                (6, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(body) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    setter_value_parameter = Some(parse_value_parameter(body)?);
-                }
-                (10, 0) => {
-                    if let Some(tid) = p.varint() {
-                        receiver_class = type_of_id(tid);
-                        if let Some((body, table_nullable)) = type_body_of_id(tid) {
-                            receiver_body = Some(body);
-                            receiver_nullable = table_nullable || parse_type_nullable(body);
-                        }
-                    }
-                }
-                (100, 2) => {
-                    let Some(n) = p.varint() else { break };
-                    let Some(ext) = p.bytes(n as usize) else {
-                        break;
-                    };
-                    sig = parse_jvm_property_signature(ext);
-                }
-                (_, w) => {
-                    if p.skip(w).is_none() {
-                        break;
-                    }
-                }
-            }
-        }
-        let Some(name_id) = name_id else { continue };
-        let Some(name) = resolve_string(records, d2, name_id as usize) else {
-            continue;
-        };
-        let (getter_signature, setter_signature) = sig;
-        let setter_parameter_name = setter_value_parameter
-            .and_then(|parameter| resolve_string(records, d2, parameter.name_id as usize));
-        let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
-            || {
-                legacy_flags.map_or(
-                    (
-                        crate::metadata::property_flags::DEFAULT,
-                        crate::metadata::property_flags::IS_VAR,
-                        crate::metadata::property_flags::IS_CONST,
-                    ),
-                    |flags| (flags, LEGACY_IS_VAR, LEGACY_IS_CONST),
-                )
-            },
-            |flags| {
-                (
-                    flags,
-                    crate::metadata::property_flags::IS_VAR,
-                    crate::metadata::property_flags::IS_CONST,
-                )
-            },
-        );
-        let is_var = setter_signature.is_some() || flags & is_var_bit != 0;
-        let generic_sig = build_property_generic_sig(
-            ParsedPropertySignature {
-                inherited: class_tparams,
-                inherited_bounds: class_tparam_bounds,
-                type_params: &type_params,
-                context_params: &context_params,
-                context_receiver_bodies: &context_receiver_bodies,
-                context_receiver_type_ids: &context_receiver_type_ids,
-                return_body: ret_body,
-                return_nullable: ret_nullable,
-                receiver_body,
-                receiver_nullable,
-            },
-            records,
-            d2,
-            type_table,
-        );
-        if let Some(signature) = &generic_sig {
-            ret = signature.ret.non_null().obj_internal();
-            ret_nullable = signature.ret.is_nullable();
-            if receiver_body.is_some() {
-                receiver_class = signature
-                    .receiver
-                    .and_then(|ty| ty.non_null().obj_internal());
-            }
-        }
-        let context_names = if context_params.is_empty() {
-            vec![String::new(); context_receiver_bodies.len() + context_receiver_type_ids.len()]
-        } else {
-            context_params
-                .iter()
-                .map(|parameter| {
-                    match resolve_string(records, d2, parameter.name_id as usize).as_deref() {
-                        Some("<unused var>") => "_".to_owned(),
-                        Some(name) => name.to_owned(),
-                        None => String::new(),
-                    }
-                })
-                .collect()
-        };
-        let context_parameter_kinds = if context_params.is_empty() {
-            vec![crate::types::ContextParameterKind::LegacyReceiver; context_names.len()]
-        } else {
-            context_names
-                .iter()
-                .map(|name| {
-                    if name == "_" {
-                        crate::types::ContextParameterKind::Anonymous
-                    } else {
-                        crate::types::ContextParameterKind::Named
-                    }
-                })
-                .collect()
-        };
-        let decoded_context_params = context_names
-            .into_iter()
-            .zip(
-                generic_sig
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|signature| signature.params.iter().copied()),
-            )
-            .map(|(name, ty)| MetaValueParam {
-                ty: declared_classifier(ty),
-                name,
-                flags: MvpFlags::default()
-                    .with_nullable(ty.is_nullable())
-                    .with_has_type_facts(true),
-                recv_fun_receiver: None,
-            })
-            .collect::<Vec<_>>();
-        // `JvmPropertySignature` and each nested `JvmMethodSignature` field are optional when the
-        // physical accessor follows Kotlin's default mapping. Complete that metadata declaration
-        // here, while its receiver/return types and flags are still together. Downstream symbol
-        // sources may verify the resulting handle against bytecode, but must not guess it by name.
-        let accessor_types = generic_sig.as_ref().map(|signature| {
-            let mut getter_params = signature.params.clone();
-            if let Some(receiver) = signature.receiver {
-                getter_params.push(receiver);
-            }
-            (getter_params, signature.ret)
-        });
-        let default_getter_desc = accessor_types
-            .as_ref()
-            .map(|(params, ty)| method_descriptor(params, *ty));
-        let default_setter_desc = accessor_types.as_ref().map(|(params, ty)| {
-            let mut params = params.clone();
-            params.push(*ty);
-            method_descriptor(&params, Ty::Unit)
-        });
-        let materialize_accessor =
-            |signature: Option<ParsedJvmSignature>,
-             default_name: String,
-             default_desc: Option<String>| {
-                let name = signature
-                    .and_then(|signature| signature.name_id)
-                    .and_then(|id| resolve_string(records, d2, id as usize))
-                    .unwrap_or(default_name);
-                let desc = signature
-                    .and_then(|signature| signature.desc_id)
-                    .and_then(|id| resolve_string(records, d2, id as usize))
-                    .or(default_desc)?;
-                Some(MetaJvmMethodSig { name, desc })
-            };
-        let getter = materialize_accessor(
-            getter_signature,
-            crate::names::property_getter_name(&name),
-            default_getter_desc,
-        );
-        let setter = is_var
-            .then(|| {
-                materialize_accessor(
-                    setter_signature,
-                    crate::names::property_setter_name(&name),
-                    default_setter_desc,
-                )
-            })
-            .flatten();
-        out.push(MetaProp {
-            name,
-            ret_class: ret,
-            ret_nullable,
-            generic_sig,
-            context_params: decoded_context_params,
-            context_parameter_kinds,
-            getter,
-            setter,
-            setter_parameter_name,
-            visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-            return_value_status: modern_flags.map_or_else(Default::default, |flags| {
-                crate::types::ReturnValueStatus::from_metadata(
-                    (flags >> crate::metadata::property_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
-                )
-            }),
-            is_const: flags & is_const_bit != 0,
-            is_abstract: (flags >> 4) & 0x3 == 2,
-            is_var,
-            is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
-            receiver_class,
-            is_extension: receiver_body.is_some(),
-        });
-    }
-    Ok(out)
 }
 
 /// A classpath value class's underlying property and Kotlin type decoded from `@Metadata`.

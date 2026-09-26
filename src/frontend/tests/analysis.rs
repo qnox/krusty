@@ -76,6 +76,7 @@ impl ExistingLibrary {
                             name: "marker".to_string(),
                             kind: PropKind::Member,
                             receiver: Some(receiver),
+                            associated_classifier: None,
                             formals: Vec::new(),
                             ty: Ty::Int,
                             context_count: 0,
@@ -218,6 +219,16 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         let classifier_name =
             Self::classifier_internal(namespace, name).map(crate::types::type_name);
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
+        if let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace {
+            if let Some(property) = Self::associated_property(owner, name) {
+                return std::rc::Rc::new(ResolvedSymbols {
+                    callables: Callables::Properties(PropertySet {
+                        overloads: vec![property],
+                    }),
+                    ..ResolvedSymbols::default()
+                });
+            }
+        }
         if namespace == crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(""))
             && name == "shadowedProperty"
         {
@@ -237,6 +248,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
                         name: name.to_string(),
                         kind: PropKind::TopLevel,
                         receiver: None,
+                        associated_classifier: None,
                         formals: Vec::new(),
                         ty: Ty::Int,
                         context_count: 0,
@@ -334,9 +346,11 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
     }
 }
 
-impl SemanticPlatform for ExistingLibrary {
-    fn classifier_associated_property(
-        &self,
+impl SemanticPlatform for ExistingLibrary {}
+
+impl ExistingLibrary {
+    /// The fixture's receiver-less `CollisionEnum.ANY`, published in its classifier namespace.
+    fn associated_property(
         internal: crate::types::TypeName,
         name: &str,
     ) -> Option<crate::libraries::PropertyInfo> {
@@ -347,6 +361,7 @@ impl SemanticPlatform for ExistingLibrary {
                 name: name.to_string(),
                 kind: crate::libraries::PropKind::TopLevel,
                 receiver: None,
+                associated_classifier: Some(internal),
                 formals: Vec::new(),
                 ty,
                 context_count: 0,
@@ -1620,8 +1635,13 @@ fn declaration_only_internal_class_shadows_platform_associated_property() {
     assert!(analysis
         .symbols
         .libraries
-        .classifier_associated_property(collision, "ANY")
-        .is_none());
+        .symbols(
+            crate::symbol_source::SymbolNamespace::Classifier(collision),
+            "ANY"
+        )
+        .callables
+        .properties()
+        .is_empty());
 }
 
 #[test]
