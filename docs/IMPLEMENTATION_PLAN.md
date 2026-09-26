@@ -4634,8 +4634,42 @@ shadow with no output change.
   field (`primitiveEqBoxed*`, `boxedEqPrimitive*`), or pops a value kotlinc stores to a temporary
   (`kt238`) or duplicates (`kt45991`). kotlinc's `canBeOptimizedUsingSourceInterpreter` size gate is
   not ported (5h).
-- ☐ 5f–5i, 6. The rest of kotlinc's transformer order: the first three passes in kotlinc's order, no
-  all-or-nothing rewrite, and the mandatory steps.
+- ✅ 5f. CapturedVars, RedundantNullCheck and RedundantCheckCast in kotlinc's order, each over the
+  previous one's output (`pipeline::ORDER`); the checkcast step is kotlinc's
+  `RedundantCheckCastEliminationMethodTransformer` (`bytecode_passes/redundant_checkcasts/`: basic
+  interpreter, pruned exception edges, the local-variable table's type for an `aload` the entry
+  reaches only through a handler), so the verifier stack tops and the 5c node-origin bridge are gone
+  from `method_rewrite`. The class-file boundary now takes constants from the optimized method: a
+  constant a rewrite names that the pool lacks is interned and the method laid out again
+  (`constant_pool_queries::Wanted`), and the serialized class's pool is laid out again
+  (`classfile/pool_layout/`): unreferenced entries go, and the entries only rewritten code names
+  move to where the method's constants began, in ASM's `MethodWriter` order. In the 2.4.20 box
+  corpus, over the 23,037 classes of the diffed box files (without `JvmInlineKt`), 3,991 classes
+  change against 5e: 91 in code (109 methods) and 3,900 only in the pool. 12 methods become
+  identical to kotlinc's instructions and 2 stop being so; classes identical to kotlinc go from
+  6,478 to 6,545 with none lost, and box files byte-identical to kotlinc from 366 to 416
+  (`wasmStringSwitch/typeOperatorCast`, `kt248`, `substituteIntForGeneric`, the `forInUntil*`
+  bounds, `kt49092*`, …) with none lost. The methods written as emitted because a constant was
+  missing go from 67 to 0 (`kt248`'s and `substituteIntForGeneric`'s `box`, `nested`'s
+  `testMultipleReturnsRequireDeeperAnalysisLongRange` among them; another 50 were the bodies of
+  suspend functions, which the coroutine transformer replaces). Box pass/fail is unchanged, and
+  `dataClassWithManyFields` compiles in 3.4 s. The order change alone accounts for 24 classes
+  (casts of `Ref` elements after CapturedVars, `localLateinit`'s check of a known local); the two
+  methods no longer identical (`inlineTryCatch`'s `tryOrElse`, `kt3297`'s `or`) keep a
+  `checkcast Object` in catch code their handler-unreached frame does not decide, which kotlinc does
+  not emit, and `weirdMutableCasts`/`reifiedAsWithMutable` keep `checkcast Map$Entry` where kotlinc
+  calls `TypeIntrinsics.asMutableMapEntry`. Left of the pool order: entries of methods no rewrite
+  changed keep the emitter's order; an entry another member or attribute also names keeps its
+  emitted place (the `@Metadata` `d2` name `T` of a reified function); a coroutine-transformed
+  method's entries are dropped when unreferenced but not moved; an `invokedynamic` interns its call
+  site before its bootstrap arguments (`kt45444_privateFunInterface`'s `Foo`); an `ldc_w` whose entry
+  moves below 256 stays `ldc_w`. kotlinc's `canBeOptimized` gate runs before the first pass
+  (`optimization_limits::fits_optimization`): a method whose analysis would weigh 50 MiB or more,
+  counting a frame per node as krusty's analyzer keeps them, gets only the final dead-code step and
+  slot compaction. No box file changes with it (447 byte-identical before and after); a function of
+  3,700 unused `Long` locals keeps the jump kotlinc keeps (`tests/optimization_gate_e2e.rs`).
+- ☐ 5g–5i, 6. The rest of kotlinc's transformer order: no all-or-nothing rewrite, and the
+  mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

@@ -1,6 +1,6 @@
 //! kotlinc's applicability gates for its optimization passes (`OptimizationMethodVisitor`'s
-//! companion): a pass declines a method whose analysis frames would weigh too much, and leaves it
-//! as it is.
+//! companion): the optimizer, or a pass, declines a method whose analysis frames would weigh too
+//! much, and leaves it as it is.
 //!
 //! The gates keep kotlinc's formulas: a frame weighs `max_locals + max_stack` values, and a
 //! method's weight is in MiB (`getTotalFramesWeight`). They count frames as krusty's analyzer
@@ -24,6 +24,39 @@ const MEMORY_LIMIT_MB: u64 = 50;
 const TRY_CATCH_BLOCKS_SOFT_LIMIT: usize = 16;
 
 const MIB: u64 = 1024 * 1024;
+
+/// `canBeOptimized`: whether kotlinc's optimization passes may run over `method` at all. A method
+/// they may not run over gets only the final dead-code step (see `pipeline`). An analysis frame
+/// holds one value per local and stack slot, so the weight counts the frames once.
+pub(crate) fn fits_optimization(method: &MethodNode) -> bool {
+    optimization_fits(
+        retained_frames(method),
+        method.try_catch_blocks.len(),
+        handler_range_frames(method),
+        usize::from(method.max_locals),
+        usize::from(method.max_stack),
+    )
+}
+
+/// `canBeOptimized` over its counts: `frames` in the method, `handlers` try/catch blocks whose
+/// ranges hold `handler_frames` frames together (`None` when that sum does not fit), and a frame's
+/// width. Unlike the source-interpreter gate, the handler ranges' frames are not multiplied by the
+/// method's.
+fn optimization_fits(
+    frames: usize,
+    handlers: usize,
+    handler_frames: Option<usize>,
+    max_locals: usize,
+    max_stack: usize,
+) -> bool {
+    if handlers > TRY_CATCH_BLOCKS_SOFT_LIMIT
+        && weight(handler_frames, max_locals, max_stack)
+            .is_none_or(|weight| weight > MEMORY_LIMIT_MB)
+    {
+        return false;
+    }
+    weight(Some(frames), max_locals, max_stack).is_some_and(|weight| weight < MEMORY_LIMIT_MB)
+}
 
 /// `canBeOptimizedUsingSourceInterpreter`: whether a pass analyzing `method` with a source
 /// interpreter may run. Such an analysis holds, per frame and value, a set of the instructions
@@ -85,20 +118,28 @@ fn source_interpreter_fits(
     max_locals: usize,
     max_stack: usize,
 ) -> bool {
-    let weight = |size: Option<usize>| -> Option<u64> {
-        let width = u64::try_from(max_locals.checked_add(max_stack)?).ok()?;
-        u64::try_from(size?)
-            .ok()?
-            .checked_mul(width)
-            .map(|cells| cells / MIB)
-    };
     if handlers > TRY_CATCH_BLOCKS_SOFT_LIMIT {
-        let handler_weight = weight(handler_frames.and_then(|size| size.checked_mul(frames)));
+        let handler_weight = weight(
+            handler_frames.and_then(|size| size.checked_mul(frames)),
+            max_locals,
+            max_stack,
+        );
         if handler_weight.is_none_or(|weight| weight > MEMORY_LIMIT_MB) {
             return false;
         }
     }
-    weight(frames.checked_mul(frames)).is_some_and(|weight| weight < MEMORY_LIMIT_MB)
+    weight(frames.checked_mul(frames), max_locals, max_stack)
+        .is_some_and(|weight| weight < MEMORY_LIMIT_MB)
+}
+
+/// `getTotalFramesWeight`: `size` frames of `max_locals + max_stack` values, in whole MiB; `None`
+/// when `size` is `None` or the product does not fit.
+fn weight(size: Option<usize>, max_locals: usize, max_stack: usize) -> Option<u64> {
+    let width = u64::try_from(max_locals.checked_add(max_stack)?).ok()?;
+    u64::try_from(size?)
+        .ok()?
+        .checked_mul(width)
+        .map(|cells| cells / MIB)
 }
 
 #[cfg(test)]
@@ -175,6 +216,39 @@ mod tests {
         // 26,738 * 1,000 * 2 is 50.99 MiB, 26,739 * 1,000 * 2 is 51.00.
         assert!(source_interpreter_fits(1_000, 17, Some(26_738), 1, 1));
         assert!(!source_interpreter_fits(1_000, 17, Some(26_739), 1, 1));
+    }
+
+    #[test]
+    fn the_optimizer_weighs_the_frames_once() {
+        // 52,428,800 cells are 50 MiB: kotlinc optimizes only below that.
+        assert!(optimization_fits(52_428_799, 0, Some(0), 1, 0));
+        assert!(!optimization_fits(52_428_800, 0, Some(0), 1, 0));
+        // 400 frames of 131,071 values are 49.99 MiB, 401 frames 50.12.
+        assert!(optimization_fits(400, 0, Some(0), 65_535, 65_536));
+        assert!(!optimization_fits(401, 0, Some(0), 65_535, 65_536));
+        // The operand stack counts as much as the locals.
+        assert!(!optimization_fits(401, 0, Some(0), 65_536, 65_535));
+    }
+
+    #[test]
+    fn many_handlers_weigh_their_ranges_for_the_optimizer() {
+        // Past 16 handlers, the handlers' frames must weigh at most 50 MiB (51 is too much),
+        // without being multiplied by the method's frames.
+        let at_most = 51 * 1_048_576 - 1;
+        assert!(optimization_fits(1_000, 17, Some(at_most), 1, 0));
+        assert!(!optimization_fits(1_000, 17, Some(at_most + 1), 1, 0));
+        // At 16 handlers their ranges do not count.
+        assert!(optimization_fits(1_000, 16, None, 1, 0));
+        assert!(optimization_fits(1_000, 16, Some(usize::MAX), 1, 0));
+    }
+
+    #[test]
+    fn a_weight_the_optimizer_cannot_fit_declines() {
+        assert!(!optimization_fits(usize::MAX, 0, Some(0), 2, 0));
+        assert!(!optimization_fits(3, 0, Some(0), usize::MAX, 1));
+        assert!(!optimization_fits(3, 0, Some(0), 1, usize::MAX));
+        assert!(!optimization_fits(2, 17, None, 1, 1));
+        assert!(!optimization_fits(2, 17, Some(usize::MAX), 2, 0));
     }
 
     #[test]

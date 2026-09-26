@@ -105,8 +105,12 @@ fn resolve(insn: I, labels: &[LabelId]) -> Insn {
     }
 }
 
-fn run_method(method: &MethodNode) -> Option<Rewritten> {
-    eliminate(method, "T", &ValueClassDescriptors::default()).expect("the analysis completes")
+/// The nodes the pass leaves of `method`; `None` when it changes nothing.
+fn run_method(method: &MethodNode) -> Option<Vec<Node>> {
+    let mut method = method.clone();
+    eliminate(&mut method, "T", &ValueClassDescriptors::default())
+        .expect("the analysis completes")
+        .then_some(method.nodes)
 }
 
 fn instructions(nodes: &[Node]) -> Vec<Insn> {
@@ -130,7 +134,7 @@ fn assert_rewrites(insns: Vec<I>, desc: &str, max_locals: u16, expected: Option<
             .collect::<Vec<_>>()
     });
     assert_eq!(
-        run_method(&method).map(|rewritten| instructions(&rewritten.nodes)),
+        run_method(&method).map(|nodes| instructions(&nodes)),
         expected
     );
 }
@@ -624,36 +628,6 @@ fn a_label_nothing_names_does_not_separate_a_check_from_its_load() {
 }
 
 #[test]
-fn the_result_says_where_each_node_came_from() {
-    let (method, _) = method_of(
-        vec![
-            type_insn(NEW, "Foo"),
-            op(DUP),
-            call(INVOKESPECIAL, "Foo", "<init>", "()V"),
-            type_insn(INSTANCEOF, "Foo"),
-            op(IRETURN),
-        ],
-        "()Z",
-        0,
-    );
-    let rewritten = run_method(&method).expect("the instanceof folds");
-    assert_eq!(rewritten.nodes.len(), rewritten.origins.len());
-    // Node 2k + 1 is instruction k; the `pop` is new and the `instanceof`'s node now holds
-    // `iconst_1`.
-    let origins: Vec<Option<usize>> = rewritten
-        .nodes
-        .iter()
-        .zip(&rewritten.origins)
-        .filter(|(node, _)| matches!(node, Node::Insn(_)))
-        .map(|(_, origin)| *origin)
-        .collect();
-    assert_eq!(
-        origins,
-        vec![Some(1), Some(3), Some(5), None, Some(7), Some(9)]
-    );
-}
-
-#[test]
 fn the_intrinsics_calls_are_known_by_owner_name_and_descriptor() {
     let method = |owner: &str, name: &str, desc: &str| Insn::Method {
         op: INVOKESTATIC,
@@ -804,7 +778,7 @@ fn many_foldable_checks_rewrite_in_linear_time() {
     let rewritten = run_method(&method).expect("every check folds");
     let elapsed = started.elapsed();
     assert_eq!(
-        instructions(&rewritten.nodes),
+        instructions(&rewritten),
         [
             type_insn(NEW, "Foo"),
             op(DUP),

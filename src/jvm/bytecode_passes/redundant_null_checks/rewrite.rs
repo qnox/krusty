@@ -64,23 +64,16 @@ impl<'a> Rewrite<'a> {
         }
     }
 
-    /// The node list the round made, and for each node the entry of `origins` (the position in the
-    /// method the pass received) of the node it was; `None` for a `pop` the pass added.
-    pub(super) fn finish(self, origins: &[Option<usize>]) -> (Vec<Node>, Vec<Option<usize>>) {
+    /// The node list the round made.
+    pub(super) fn finish(self) -> Vec<Node> {
         let mut nodes = Vec::with_capacity(self.nodes.len());
-        let mut from = Vec::with_capacity(self.nodes.len());
-        for (at, (node, edit)) in self.nodes.iter().zip(self.edits).enumerate() {
-            for _ in 0..edit.pops_before {
-                nodes.push(Node::Insn(Insn::Op(POP)));
-                from.push(None);
+        for (node, edit) in self.nodes.iter().zip(self.edits) {
+            nodes.extend((0..edit.pops_before).map(|_| Node::Insn(Insn::Op(POP))));
+            if !edit.removed {
+                nodes.push(edit.replacement.map_or_else(|| node.clone(), Node::Insn));
             }
-            if edit.removed {
-                continue;
-            }
-            nodes.push(edit.replacement.map_or_else(|| node.clone(), Node::Insn));
-            from.push(origins[at]);
         }
-        (nodes, from)
+        nodes
     }
 
     /// The instruction at `at` as the round has left it; `None` for a node that is not one.

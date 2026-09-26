@@ -6,9 +6,6 @@
 //! and rewrites the checks of the method whose operand the analysis knows (`rewrite`). The rounds
 //! repeat while a round folds a jump or an `instanceof`, since a folded branch can make another
 //! operand known. A method with no null jump, `instanceof` or `checkNotNull*` call is left as it is.
-//!
-//! The pass runs on the method as emitted, where the redundant-cast pass also selects its casts, so
-//! it reports where each node of its result came from.
 
 mod assumptions;
 mod nullability;
@@ -128,34 +125,26 @@ fn analysis_within_limit(nodes: usize, max_locals: usize, max_stack: usize) -> b
         .is_some_and(|cells| cells <= ANALYSIS_CELL_LIMIT)
 }
 
-/// The method the pass made: its nodes, and for each the position of the node it was in the method
-/// the pass received (`None` for a `pop` the pass added).
-#[derive(Debug, PartialEq)]
-pub(crate) struct Rewritten {
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) origins: Vec<Option<usize>>,
-}
-
-/// Run the pass over `method`, a member of `owner`; `None` when it changes nothing.
+/// Run the pass over `method`, a member of `owner`; `false` when it changes nothing. A round that
+/// fails leaves `method` as it was.
 pub(crate) fn eliminate(
-    method: &MethodNode,
+    method: &mut MethodNode,
     owner: &str,
     value_classes: &dyn ValueClasses,
-) -> Result<Option<Rewritten>, AnalyzerError> {
+) -> Result<bool, AnalyzerError> {
     let mut working = method.clone();
-    let mut origins: Vec<Option<usize>> = (0..method.nodes.len()).map(Some).collect();
     let mut edited = false;
     loop {
-        let round = run_round(&mut working, &mut origins, owner, value_classes)?;
+        let round = run_round(&mut working, owner, value_classes)?;
         edited |= round.edited;
         if !round.changes {
             break;
         }
     }
-    Ok(edited.then_some(Rewritten {
-        nodes: working.nodes,
-        origins,
-    }))
+    if edited {
+        method.nodes = working.nodes;
+    }
+    Ok(edited)
 }
 
 struct Round {
@@ -166,7 +155,6 @@ struct Round {
 /// `TransformerPass.run`.
 fn run_round(
     method: &mut MethodNode,
-    origins: &mut Vec<Option<usize>>,
     owner: &str,
     value_classes: &dyn ValueClasses,
 ) -> Result<Round, AnalyzerError> {
@@ -185,9 +173,7 @@ fn run_round(
         edited: rewrite.edited,
     };
     if round.edited {
-        let (nodes, from) = rewrite.finish(origins);
-        method.nodes = nodes;
-        *origins = from;
+        method.nodes = rewrite.finish();
     }
     Ok(round)
 }
