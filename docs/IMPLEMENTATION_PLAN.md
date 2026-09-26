@@ -4691,8 +4691,21 @@ shadow with no output change.
   `inline/genericFunctionReference` still keeps its `checkcast Z; aastore`: the method is not kept
   as emitted, but the end label of `f$iv`'s range stands between the cast and the `aastore`, which
   kotlinc's transformer also respects; kotlinc inlines `::Z` and has no cast there (inliner).
-- ☐ 5h–5i, 6. The rest of kotlinc's transformer order: the mandatory steps, and the emitter's
-  statement `if` values for PopBackward.
+- ✅ 5h. The mandatory steps. kotlinc's `canBeOptimized` gate is part of 5f. kotlinc runs
+  `UninitializedStoresProcessor` over every method after its normalization; krusty keeps it inside
+  the coroutine transform (`coroutines/uninitialized_stores.rs`), where a suspension point among a
+  constructor's arguments needs it. Outside a suspend function krusty's emitter never stores or pops
+  an object whose constructor has not run: it evaluates a constructor call's arguments first, into
+  locals around a `try`, and emits `new; dup` only before the call. Run over every method (wired
+  into the pipeline for the measurement only), the processor changes no class of the 2.4.20 box
+  corpus and no method of the `try`/`finally`/inline-`try`-in-argument samples. kotlinc's shape
+  differs: for `A(1, try { g() } catch (e: Exception) { 0 })` its `FixStack` saves the arguments
+  and the `new` to locals before the `try`, and the processor then moves `new; dup` to the call,
+  storing the arguments once more (`istore_3; istore 4; new; dup; iload 4; iload_3`), where krusty
+  loads them straight from its locals. Matching that is an emitter change, which would then need
+  the processor over every method.
+- ☐ 5i, 6. The rest of kotlinc's transformer order: the emitter's statement `if` values for
+  PopBackward.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
