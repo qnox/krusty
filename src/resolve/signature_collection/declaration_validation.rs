@@ -6,6 +6,21 @@
 
 use super::*;
 
+/// Source span of a written supertype, preserving the base/interface partition from the header.
+pub(in crate::resolve) fn supertype_reference_span(
+    header: &StreamedClassifierHeader,
+    fallback: Span,
+    name: &str,
+) -> Span {
+    header
+        .base
+        .as_ref()
+        .filter(|base| base.name == name)
+        .or_else(|| header.supertypes.iter().find(|ty| ty.name == name))
+        .map(|ty| ty.span)
+        .unwrap_or(fallback)
+}
+
 pub(in crate::resolve) fn validate_context_property(
     property: &PropDecl,
     abstract_allowed: bool,

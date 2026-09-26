@@ -2335,10 +2335,8 @@ impl Classpath {
         if stored.callable.declared_params.is_none() {
             stored.callable.declared_params = callable.declared_params.clone();
         }
-        if stored.callable.lambda_materialized.is_empty()
-            && !callable.lambda_materialized.is_empty()
-        {
-            stored.callable.lambda_materialized = callable.lambda_materialized.clone();
+        if stored.callable.inline_modifiers.is_empty() && !callable.inline_modifiers.is_empty() {
+            stored.callable.inline_modifiers = callable.inline_modifiers.clone();
         }
     }
 

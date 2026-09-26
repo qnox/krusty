@@ -36,6 +36,10 @@ pub(super) struct LambdaReturnScopes {
     expected_types: HashMap<ExprId, Ty>,
     bare_target: ReturnTarget,
     active_chain: Vec<ExprId>,
+    /// Parallel to `active_chain`: whether each active lambda is inlined into the frame around it,
+    /// which is kotlinc's `InlineStatus.returnAllowed`. A return may leave only through lambdas
+    /// passed to a plain (neither `crossinline` nor `noinline`) parameter of an inline callee.
+    active_inlined: Vec<bool>,
 }
 
 impl Default for LambdaReturnScopes {
@@ -47,8 +51,17 @@ impl Default for LambdaReturnScopes {
             expected_types: HashMap::new(),
             bare_target: ReturnTarget::Function,
             active_chain: Vec::new(),
+            active_inlined: Vec::new(),
         }
     }
+}
+
+/// The return state of the body around a named function, restored when the function's body ends.
+pub(super) struct FunctionReturnFrame {
+    label: Option<String>,
+    bare_target: ReturnTarget,
+    chain: Vec<ExprId>,
+    inlined: Vec<bool>,
 }
 
 pub(super) struct LambdaReturnFrame {
@@ -79,12 +92,23 @@ impl LambdaReturnScopes {
         &self.labels
     }
 
-    pub(super) fn replace_function_label(&mut self, label: Option<String>) -> Option<String> {
-        std::mem::replace(&mut self.function_label, label)
+    /// Open the body of a named function (`label`) nested in the current body. Its returns target
+    /// the function itself, and no lambda around it is on their way: a return that names one of
+    /// those lambdas crosses the function and is prohibited.
+    pub(super) fn enter_function(&mut self, label: Option<String>) -> FunctionReturnFrame {
+        FunctionReturnFrame {
+            label: std::mem::replace(&mut self.function_label, label),
+            bare_target: std::mem::replace(&mut self.bare_target, ReturnTarget::Function),
+            chain: std::mem::take(&mut self.active_chain),
+            inlined: std::mem::take(&mut self.active_inlined),
+        }
     }
 
-    pub(super) fn restore_function_label(&mut self, label: Option<String>) {
-        self.function_label = label;
+    pub(super) fn leave_function(&mut self, frame: FunctionReturnFrame) {
+        self.function_label = frame.label;
+        self.bare_target = frame.bare_target;
+        self.active_chain = frame.chain;
+        self.active_inlined = frame.inlined;
     }
 
     pub(super) fn replace_bare_target(&mut self, target: ReturnTarget) -> ReturnTarget {
@@ -96,6 +120,7 @@ impl LambdaReturnScopes {
         lambda: ExprId,
         label: Option<String>,
         expected: Option<Ty>,
+        inlined: bool,
     ) -> LambdaReturnFrame {
         let frame = LambdaReturnFrame {
             label_depth: self.labels.len(),
@@ -109,6 +134,7 @@ impl LambdaReturnScopes {
             self.labels.push((label, lambda));
         }
         self.active_chain.push(lambda);
+        self.active_inlined.push(inlined);
         self.returned_types.remove(&lambda);
         frame
     }
@@ -120,6 +146,25 @@ impl LambdaReturnScopes {
         };
         self.labels.truncate(frame.label_depth);
         self.active_chain.truncate(frame.chain_depth);
+        self.active_inlined.truncate(frame.chain_depth);
+    }
+
+    /// Whether a return to `target` leaves a frame it may not: a lambda that is not inlined into
+    /// the frame around it, or the named function whose body is being checked. kotlinc reports
+    /// such a return as `'return' is prohibited here.`: the lambda's body runs in its own frame (a
+    /// `noinline` or non-inline argument, or a lambda that is no argument at all) or inside an
+    /// object's method (`crossinline`), where the enclosing declaration's frame is gone.
+    pub(super) fn leaves_its_frame(&self, target: ReturnTarget) -> bool {
+        for (&lambda, &inlined) in self.active_chain.iter().zip(&self.active_inlined).rev() {
+            if target == ReturnTarget::Lambda(lambda) {
+                return false;
+            }
+            if !inlined {
+                return true;
+            }
+        }
+        // Every lambda of this function's body is behind us, so a lambda target lies outside it.
+        matches!(target, ReturnTarget::Lambda(_))
     }
 
     pub(super) fn expected_type(&self, lambda: ExprId) -> Option<Ty> {
@@ -232,14 +277,14 @@ mod tests {
         let outer = ExprId(1);
         let inner = ExprId(2);
         let mut scopes = LambdaReturnScopes::default();
-        let outer_frame = scopes.enter_lambda(outer, Some("scope".into()), Some(Ty::String));
+        let outer_frame = scopes.enter_lambda(outer, Some("scope".into()), Some(Ty::String), true);
         assert_eq!(
             scopes.target(Some("scope")),
             Some(ReturnTarget::Lambda(outer))
         );
         assert_eq!(scopes.expected_type(outer), Some(Ty::String));
 
-        let inner_frame = scopes.enter_lambda(inner, Some("scope".into()), Some(Ty::Int));
+        let inner_frame = scopes.enter_lambda(inner, Some("scope".into()), Some(Ty::Int), true);
         assert_eq!(
             scopes.target(Some("scope")),
             Some(ReturnTarget::Lambda(inner))
@@ -254,5 +299,23 @@ mod tests {
         scopes.leave_lambda(outer, outer_frame);
         assert_eq!(scopes.target(Some("scope")), None);
         assert_eq!(scopes.expected_type(outer), None);
+    }
+
+    #[test]
+    fn a_return_may_leave_only_through_inlined_lambdas() {
+        let inlined = ExprId(1);
+        let stored = ExprId(2);
+        let mut scopes = LambdaReturnScopes::default();
+        let inlined_frame = scopes.enter_lambda(inlined, Some("plain".into()), None, true);
+        assert!(!scopes.leaves_its_frame(ReturnTarget::Function));
+
+        let stored_frame = scopes.enter_lambda(stored, Some("kept".into()), None, false);
+        assert!(scopes.leaves_its_frame(ReturnTarget::Function));
+        assert!(scopes.leaves_its_frame(ReturnTarget::Lambda(inlined)));
+        assert!(!scopes.leaves_its_frame(ReturnTarget::Lambda(stored)));
+        scopes.leave_lambda(stored, stored_frame);
+
+        assert!(!scopes.leaves_its_frame(ReturnTarget::Function));
+        scopes.leave_lambda(inlined, inlined_frame);
     }
 }

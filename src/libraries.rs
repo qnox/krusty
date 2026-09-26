@@ -17,6 +17,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 
+use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
@@ -918,7 +919,7 @@ impl LibraryCallable {
             origin: Origin::Library,
             source_receiver: None,
             declared_params: None,
-            lambda_materialized: Box::new([]),
+            inline_modifiers: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,
@@ -1100,11 +1101,11 @@ pub struct LibraryCallable {
     /// boxed Result). Providers retain the declaration fact; a representation backend consumes it only
     /// after FIR has selected this exact callable identity.
     pub declared_params: Option<Box<[Ty]>>,
-    /// Per logical parameter, whether an inline declaration materializes its function argument
-    /// instead of substituting it at each invoke site. This declaration metadata excludes an
-    /// extension receiver. Retaining it on the selected external callable keeps target realization
-    /// from inferring `noinline` from an argument's type or from bytecode shape.
-    pub lambda_materialized: Box<[bool]>,
+    /// Per logical parameter, the `crossinline`/`noinline` modifier an inline declaration wrote
+    /// ([`InlineParameterModifier`]), extension receiver excluded. Retaining it on the selected
+    /// external callable keeps target realization from inferring either modifier from an
+    /// argument's type or from bytecode shape.
+    pub inline_modifiers: Box<[InlineParameterModifier]>,
     /// The callee's DECLARED (un-erased, pre-substitution) return type — the return analogue of
     /// [`Self::source_receiver`], carried for the same reason and read by the same pass. See
     /// [`LibraryMember::declared_ret`]: [`Self::ret`] is the SUBSTITUTED type, which cannot say whether
@@ -1225,10 +1226,9 @@ pub struct CallSig {
     pub lambda_receiver_params: Vec<bool>,
     /// Leading context receiver count for each function-typed parameter.
     pub lambda_context_counts: Vec<usize>,
-    /// Per logical param: whether it is `crossinline`/`noinline` — its lambda argument is MATERIALIZED
-    /// (a real `FunctionN`/nested class) rather than inline-spliced, so a mutable local it captures must
-    /// be `Ref`-boxed like an ordinary closure. Parallel to the params; all-false for a non-inline fn.
-    pub lambda_materialized: Vec<bool>,
+    /// Per logical param: its `crossinline`/`noinline` modifier ([`InlineParameterModifier`]).
+    /// Parallel to the params; empty when the source publishes none.
+    pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
     pub platform_nullable_params: Vec<bool>,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
@@ -1560,8 +1560,8 @@ impl CallSig {
                 .get(start..)
                 .unwrap_or_default()
                 .to_vec(),
-            lambda_materialized: self
-                .lambda_materialized
+            inline_modifiers: self
+                .inline_modifiers
                 .get(start..)
                 .unwrap_or_default()
                 .to_vec(),
@@ -1671,12 +1671,12 @@ impl CallSig {
         defaults: Vec<bool>,
         lambda_receivers: Vec<Option<Ty>>,
         lambda_receiver_params: Vec<bool>,
-        lambda_materialized: Vec<bool>,
+        inline_modifiers: Vec<InlineParameterModifier>,
         vararg_index: Option<usize>,
     ) -> Self {
         let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg_index);
         sig.set_lambda_receiver_shape(param_count, lambda_receivers, lambda_receiver_params);
-        sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
+        sig.inline_modifiers = vec_for_arity(inline_modifiers, param_count);
         sig
     }
 
@@ -2140,11 +2140,7 @@ impl FunctionInfo {
             .generic_sig
             .as_ref()
             .map(|signature| signature.parameters_with_receiver(member.context_count));
-        callable.lambda_materialized = member
-            .call_sig
-            .lambda_materialized
-            .clone()
-            .into_boxed_slice();
+        callable.inline_modifiers = member.call_sig.inline_modifiers.clone().into_boxed_slice();
         callable.inline = member.inline;
         callable.inline_body_plan = member.inline_body_plan.clone();
         callable.suspend = member.suspend();

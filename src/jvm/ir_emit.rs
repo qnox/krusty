@@ -10006,11 +10006,7 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
-        let Some(materialized_roles) = self
-            .ir
-            .call_materialized_lambda_params
-            .get(&call_expression)
-        else {
+        let Some(inline_modifiers) = self.ir.call_inline_modifiers.get(&call_expression) else {
             return false;
         };
         let lambda_parameters: Vec<usize> = args
@@ -10025,8 +10021,8 @@ impl<'a> Emitter<'a> {
                     }
                 ) && index
                     .checked_sub(leading_non_argument_operands)
-                    .and_then(|parameter| materialized_roles.get(parameter))
-                    == Some(&false)
+                    .and_then(|parameter| inline_modifiers.get(parameter))
+                    == Some(&crate::types::InlineParameterModifier::None)
             })
             .map(|(i, _)| i)
             .collect();
@@ -10849,11 +10845,7 @@ impl<'a> Emitter<'a> {
             )
         });
         if has_lambda_arg {
-            let Some(materialized_roles) = self
-                .ir
-                .call_materialized_lambda_params
-                .get(&call_expression)
-            else {
+            let Some(inline_modifiers) = self.ir.call_inline_modifiers.get(&call_expression) else {
                 return false;
             };
             let substitutes_literal = args.iter().enumerate().any(|(index, &argument)| {
@@ -10865,8 +10857,8 @@ impl<'a> Emitter<'a> {
                     }
                 ) && index
                     .checked_sub(leading_non_argument_operands)
-                    .and_then(|parameter| materialized_roles.get(parameter))
-                    == Some(&false)
+                    .and_then(|parameter| inline_modifiers.get(parameter))
+                    == Some(&crate::types::InlineParameterModifier::None)
             });
             // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
             // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the
@@ -10878,8 +10870,8 @@ impl<'a> Emitter<'a> {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
                 });
             if body_invokes_lambda && substitutes_literal {
-                let materialized_roles = materialized_roles.clone();
-                let route = self.lambda_call_route(&inline_call, &materialized_roles, code);
+                let inline_modifiers = inline_modifiers.clone();
+                let route = self.lambda_call_route(&inline_call, &inline_modifiers, code);
                 let reason = match route {
                     Ok(bytecode_inline_call::LambdaCallRoute::MethodInliner(callee)) => {
                         if let Err(reason) =

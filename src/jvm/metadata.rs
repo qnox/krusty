@@ -7,6 +7,7 @@ pub(super) mod builtin_bridge;
 mod class_identity;
 mod property_identity;
 mod string_table;
+mod value_parameter;
 
 use property_identity::{inline_underlying_property_name_id, parse_jvm_property_signature};
 #[cfg(test)]
@@ -14,6 +15,7 @@ pub(crate) use string_table::PREDEFINED_STRINGS;
 use string_table::{
     decode_d1, parse_string_table, resolve_class_name, resolve_string, split_d1, Rec,
 };
+pub use value_parameter::{MetaValueParam, MvpFlags};
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -102,14 +104,6 @@ fn type_variance(variance: ParsedVariance) -> crate::types::TypeVariance {
         ParsedVariance::Out => crate::types::TypeVariance::Out,
         ParsedVariance::Invariant => crate::types::TypeVariance::Invariant,
     }
-}
-
-fn parameter_has_default(parameter: &ParsedValueParam) -> bool {
-    parameter.flags & (1 << 1) != 0
-}
-
-fn parameter_is_materialized(parameter: &ParsedValueParam) -> bool {
-    parameter.flags & ((1 << 2) | (1 << 3)) != 0
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
@@ -1324,127 +1318,6 @@ fn build_property_generic_sig(
     })
 }
 
-/// Bit-packed boolean flags for a [`MetaValueParam`], collapsing its `has_default`/`materialized`/
-/// `vararg`/`recv_fun`/`nullable`/`suspend_fun`/`has_type_facts`/`no_infer` bytes into one. Read through
-/// the `MetaValueParam` accessors of the same names; built with the `with_*` chain. Headroom for
-/// their accessors below.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MvpFlags(u8);
-
-impl MvpFlags {
-    const HAS_DEFAULT: u8 = 1 << 0;
-    const MATERIALIZED: u8 = 1 << 1;
-    const VARARG: u8 = 1 << 2;
-    const RECV_FUN: u8 = 1 << 3;
-    const NULLABLE: u8 = 1 << 4;
-    const SUSPEND_FUN: u8 = 1 << 5;
-    const HAS_TYPE_FACTS: u8 = 1 << 6;
-    const NO_INFER: u8 = 1 << 7;
-
-    #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u8) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_has_default(self, on: bool) -> Self {
-        self.with(Self::HAS_DEFAULT, on)
-    }
-    #[inline]
-    pub const fn with_materialized(self, on: bool) -> Self {
-        self.with(Self::MATERIALIZED, on)
-    }
-    #[inline]
-    pub const fn with_vararg(self, on: bool) -> Self {
-        self.with(Self::VARARG, on)
-    }
-    #[inline]
-    pub const fn with_recv_fun(self, on: bool) -> Self {
-        self.with(Self::RECV_FUN, on)
-    }
-    #[inline]
-    pub const fn with_nullable(self, on: bool) -> Self {
-        self.with(Self::NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_suspend_fun(self, on: bool) -> Self {
-        self.with(Self::SUSPEND_FUN, on)
-    }
-    #[inline]
-    pub const fn with_has_type_facts(self, on: bool) -> Self {
-        self.with(Self::HAS_TYPE_FACTS, on)
-    }
-
-    #[inline]
-    pub const fn with_no_infer(self, on: bool) -> Self {
-        self.with(Self::NO_INFER, on)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MetaValueParam {
-    pub ty: Option<TypeName>,
-    pub name: String,
-    /// Bit-packed `has_default`/`materialized`/`vararg`/`recv_fun`/`nullable`/`suspend_fun` (read
-    /// via the accessors below).
-    /// `vararg` — `vararg elem: T`. Only `@Metadata` records this: the JVM descriptor shows just the
-    /// packed array, so `f(vararg c: Char)` and `f(c: CharArray)` are indistinguishable without it,
-    /// and overload resolution cannot know it may spread trailing arguments into the array.
-    pub flags: MvpFlags,
-    pub recv_fun_receiver: Option<TypeName>,
-}
-
-impl MetaValueParam {
-    #[inline]
-    pub fn has_default(&self) -> bool {
-        self.flags.has(MvpFlags::HAS_DEFAULT)
-    }
-    #[inline]
-    pub fn materialized(&self) -> bool {
-        self.flags.has(MvpFlags::MATERIALIZED)
-    }
-    #[inline]
-    pub fn vararg(&self) -> bool {
-        self.flags.has(MvpFlags::VARARG)
-    }
-    #[inline]
-    pub fn nullable(&self) -> bool {
-        self.flags.has(MvpFlags::NULLABLE)
-    }
-    #[inline]
-    pub fn recv_fun(&self) -> bool {
-        self.flags.has(MvpFlags::RECV_FUN)
-    }
-    /// The parameter's declared type is a `suspend` FUNCTION TYPE (`suspend Scope.(Req) -> Resp`) —
-    /// metadata's `Type.flags` SUSPEND_TYPE bit, the only witness that the CPS-erased
-    /// `FunctionN+1<…, Continuation<T>, Any?>` shape is a suspend function type and not a
-    /// source-level continuation-taking one.
-    #[inline]
-    pub fn suspend_fun(&self) -> bool {
-        self.flags.has(MvpFlags::SUSPEND_FUN)
-    }
-    /// Whether the parameter's declared `Type` was resolved, either inline or through its enclosing
-    /// type table. If neither representation can be read, type-level facts are absent rather than
-    /// false, and a consumer must not treat them as disclaimers.
-    #[inline]
-    pub fn has_type_facts(&self) -> bool {
-        self.flags.has(MvpFlags::HAS_TYPE_FACTS)
-    }
-    #[inline]
-    pub fn no_infer(&self) -> bool {
-        self.flags.has(MvpFlags::NO_INFER)
-    }
-}
-
 /// Bit-packed boolean flags for a [`MetaFn`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MfnFlags(u16);
@@ -1643,7 +1516,7 @@ impl MetaFn {
             parameters.iter().map(|p| p.has_default()).collect(),
             lambda_receivers,
             lambda_receiver_params,
-            parameters.iter().map(|p| p.materialized()).collect(),
+            parameters.iter().map(|p| p.inline_modifier()).collect(),
             self.vararg_index()
                 .map(|index| index + self.context_count()),
         );
@@ -2465,14 +2338,15 @@ fn decode_functions(
                                 })
                             })
                         });
+                        let declared = crate::metadata::DeclaredValueParameter::of_flags(p.flags);
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
                             // Param names are plain string-table entries (like the JVM name/desc), not class names.
                             name: resolve_string(records, d2, p.name_id as usize)
                                 .unwrap_or_default(),
                             flags: MvpFlags::default()
-                                .with_has_default(parameter_has_default(p))
-                                .with_materialized(parameter_is_materialized(p))
+                                .with_has_default(declared.declares_default)
+                                .with_inline_modifier(declared.inline_modifier)
                                 .with_vararg(
                                     p.vararg_elem_body.is_some() || p.vararg_elem_id.is_some(),
                                 )
@@ -3136,7 +3010,10 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                                 resolve_string(records, d2, parameter.name_id as usize)
                                     .unwrap_or_default(),
                             );
-                            defaults.push(parameter_has_default(&parameter));
+                            defaults.push(
+                                crate::metadata::DeclaredValueParameter::of_flags(parameter.flags)
+                                    .declares_default,
+                            );
                             let (decoded, receiver_type) = decode_value_parameter_types(
                                 &parameter,
                                 type_table.as_deref(),

@@ -557,13 +557,13 @@ impl Emitter<'_> {
             }
             if function_typed(argument) {
                 let parameter = index.checked_sub(leading_non_argument_operands)?;
-                let materialized = self
+                let inlining = self
                     .ir
-                    .call_materialized_lambda_params
+                    .call_inline_modifiers
                     .get(&call_expression)?
                     .get(parameter)
                     .copied()?;
-                supplies.push(if materialized {
+                supplies.push(if inlining != crate::types::InlineParameterModifier::None {
                     evaluated
                 } else {
                     Supply::CallerLocal

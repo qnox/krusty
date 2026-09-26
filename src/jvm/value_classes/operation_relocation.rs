@@ -43,7 +43,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(call_declared_ret);
     move_fact!(call_declared_params);
     move_fact!(static_extension_receivers);
-    move_fact!(call_materialized_lambda_params);
+    move_fact!(call_inline_modifiers);
 
     target
 }
@@ -52,6 +52,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
 mod tests {
     use super::*;
     use crate::ir::IrExpr;
+    use crate::types::InlineParameterModifier as Modifier;
     use crate::types::Ty;
 
     #[test]
@@ -83,8 +84,10 @@ mod tests {
         ir.call_declared_params
             .insert(source, vec![Ty::String].into_boxed_slice());
         ir.static_extension_receivers.insert(source, 0);
-        ir.call_materialized_lambda_params
-            .insert(source, vec![false, true].into_boxed_slice());
+        ir.call_inline_modifiers.insert(
+            source,
+            vec![Modifier::None, Modifier::Crossinline].into_boxed_slice(),
+        );
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -105,11 +108,9 @@ mod tests {
         assert_eq!(ir.static_extension_receivers.remove(&target), Some(0));
         assert!(!ir.static_extension_receivers.contains_key(&source));
         assert_eq!(
-            ir.call_materialized_lambda_params
-                .get(&target)
-                .map(AsRef::as_ref),
-            Some([false, true].as_slice())
+            ir.call_inline_modifiers.get(&target).map(AsRef::as_ref),
+            Some([Modifier::None, Modifier::Crossinline].as_slice())
         );
-        assert!(!ir.call_materialized_lambda_params.contains_key(&source));
+        assert!(!ir.call_inline_modifiers.contains_key(&source));
     }
 }

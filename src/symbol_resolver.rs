@@ -21,6 +21,7 @@ mod classifier_scope;
 mod declaration_specificity;
 mod generic_inference;
 mod hierarchy_projection;
+mod lambda_call_shape;
 mod member_hierarchy;
 mod member_specialization;
 mod overload_selection;
@@ -44,6 +45,7 @@ pub(crate) use hierarchy_projection::{
 use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
 };
+pub use lambda_call_shape::LambdaCallShape;
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
     declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
@@ -68,33 +70,6 @@ use overload_selection::{
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
 pub(crate) use sam::{semantic_sam_signature, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LambdaCallShape {
-    /// Exact identities of the selected overload's generic formals. A postponed lambda frame may
-    /// collect and suppress constraints only for these variables; symbolic types owned by an
-    /// enclosing declaration remain fixed expectations.
-    pub generic_formals: Vec<String>,
-    /// Selected declaration parameters in source-argument order. This preserves the ordinary
-    /// argument constraints that must be published before a later lambda is contextually checked,
-    /// even when the selected callable comes from a provider rather than the source module.
-    pub argument_parameters: Vec<Ty>,
-    pub param_types: Option<Vec<Vec<Ty>>>,
-    /// The selected callable parameter in source-argument order. Lambda checking consumes the
-    /// decomposed inputs above; callable-reference adaptation needs the complete function type,
-    /// including its return type, receiver bit, and still-unbound generic variables.
-    pub expected_types: Option<Vec<Option<Ty>>>,
-    /// Complete callable expectations whose result is fixed strongly enough to contextualize a
-    /// lambda literal. Callable references may use the symbolic [`Self::expected_types`] above to
-    /// select by input shape while contributing a result constraint; a lambda body must not be
-    /// coerced to a widenable receiver lower bound before overload inference finishes.
-    pub fixed_expected_types: Option<Vec<Option<Ty>>>,
-    pub receivers: Option<Vec<Option<Ty>>>,
-    pub context_counts: Option<Vec<usize>>,
-    pub materialized: Option<Vec<bool>>,
-    /// The selected callable permits its non-materialized lambda arguments to be spliced.
-    pub inline: bool,
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
@@ -8449,7 +8424,7 @@ mod tests {
             origin: Origin::Library,
             source_receiver: None,
             declared_params: None,
-            lambda_materialized: Box::new([]),
+            inline_modifiers: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,

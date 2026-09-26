@@ -102,7 +102,6 @@ pub(super) fn declared_value_parameters(
     fid: u32,
     defaults: impl IntoIterator<Item = bool>,
 ) -> Vec<crate::metadata::DeclaredValueParameter> {
-    use crate::ir::IrInlineParameterModifier as Modifier;
     let modifiers = ir.declared_inline_modifiers(fid);
     let mut declared = defaults
         .into_iter()
@@ -112,8 +111,7 @@ pub(super) fn declared_value_parameters(
         declared.resize(modifiers.len(), Default::default());
     }
     for (parameter, modifier) in declared.iter_mut().zip(modifiers) {
-        parameter.crossinline = modifier == Modifier::Crossinline;
-        parameter.noinline = modifier == Modifier::Noinline;
+        parameter.inline_modifier = modifier;
     }
     declared
 }

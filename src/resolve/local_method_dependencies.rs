@@ -645,6 +645,11 @@ impl Checker<'_> {
                 .iter()
                 .map(|parameter| parameter.ty.fun_has_receiver())
                 .collect(),
+            inline_modifiers: function
+                .params
+                .iter()
+                .map(super::written_inline_modifier)
+                .collect(),
             visibility: function.visibility,
             context_count: function.context_count,
             source_decl: None,
