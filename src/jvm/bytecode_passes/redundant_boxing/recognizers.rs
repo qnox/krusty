@@ -37,7 +37,7 @@ fn is_wrapper(owner: &str) -> bool {
 
 /// `isBoxing`: a primitive's `valueOf`, `Reflection.getOrCreateKotlinClass`, a value class's
 /// `box-impl` or a coroutine `Boxing.boxInt`-style helper.
-pub(super) fn is_boxing(insn: &Insn, value_classes: &dyn ValueClasses) -> bool {
+pub(crate) fn is_boxing(insn: &Insn, value_classes: &dyn ValueClasses) -> bool {
     let Some((owner, name, desc)) = method(insn, INVOKESTATIC) else {
         return false;
     };
@@ -127,7 +127,7 @@ pub(super) fn is_class_unboxing(insn: &Insn) -> bool {
 }
 
 /// `isIteratorMethodCall`: `Iterable.iterator()` through an interface.
-pub(super) fn is_iterator_call(insn: &Insn) -> bool {
+pub(crate) fn is_iterator_call(insn: &Insn) -> bool {
     method(insn, INVOKEINTERFACE)
         .is_some_and(|(_, name, desc)| name == "iterator" && desc == "()Ljava/util/Iterator;")
 }

@@ -98,24 +98,39 @@ pub(super) struct ProgressionIterator {
     pub(super) element: &'static str,
 }
 
+/// The element of a `CharRange`/`IntRange`/`LongRange` or its progression, by descriptor.
+fn progression_element(descriptor: &str) -> Option<&'static str> {
+    Some(match descriptor {
+        "Lkotlin/ranges/CharRange;" | "Lkotlin/ranges/CharProgression;" => "Char",
+        "Lkotlin/ranges/IntRange;" | "Lkotlin/ranges/IntProgression;" => "Int",
+        "Lkotlin/ranges/LongRange;" | "Lkotlin/ranges/LongProgression;" => "Long",
+        _ => return None,
+    })
+}
+
+/// The class of the iterator a progression of `element`s returns.
+fn iterator_descriptor(element: &str) -> &'static str {
+    match element {
+        "Char" => "Lkotlin/collections/CharIterator;",
+        "Int" => "Lkotlin/collections/IntIterator;",
+        _ => "Lkotlin/collections/LongIterator;",
+    }
+}
+
+/// The descriptor of the iterator a progression class's `iterator()` returns
+/// (`ProgressionIteratorBasicValue.byProgressionClassType`); `None` for any other class.
+pub(crate) fn progression_iterator(progression: &str) -> Option<&'static str> {
+    progression_element(progression).map(iterator_descriptor)
+}
+
 impl ProgressionIterator {
     /// `byProgressionClassType`: the iterator of a progression class's values, by its descriptor.
     pub(super) fn of_progression(call: usize, descriptor: &str) -> Option<ProgressionIterator> {
-        let element = match descriptor {
-            "Lkotlin/ranges/CharRange;" | "Lkotlin/ranges/CharProgression;" => "Char",
-            "Lkotlin/ranges/IntRange;" | "Lkotlin/ranges/IntProgression;" => "Int",
-            "Lkotlin/ranges/LongRange;" | "Lkotlin/ranges/LongProgression;" => "Long",
-            _ => return None,
-        };
-        Some(ProgressionIterator { call, element })
+        progression_element(descriptor).map(|element| ProgressionIterator { call, element })
     }
 
     pub(super) fn descriptor(&self) -> &'static str {
-        match self.element {
-            "Char" => "Lkotlin/collections/CharIterator;",
-            "Int" => "Lkotlin/collections/IntIterator;",
-            _ => "Lkotlin/collections/LongIterator;",
-        }
+        iterator_descriptor(self.element)
     }
 
     pub(super) fn internal_name(&self) -> &'static str {
