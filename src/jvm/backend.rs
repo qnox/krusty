@@ -1012,6 +1012,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
+        crate::jvm::result_null_checks::check_before_result_coercion(&mut file.ir);
         self.emit_streamed_ir(
             file,
             property_realizations,

@@ -2011,6 +2011,8 @@ mod frame_computation_e2e;
 mod local_class_naming_e2e;
 #[path = "platform_primitive_operand_e2e.rs"]
 mod platform_primitive_operand_e2e;
+#[path = "platform_result_check_e2e.rs"]
+mod platform_result_check_e2e;
 #[path = "unboxing_coercion_e2e.rs"]
 mod unboxing_coercion_e2e;
 
