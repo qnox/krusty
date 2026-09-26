@@ -4663,7 +4663,11 @@ shadow with no output change.
   emitted place (the `@Metadata` `d2` name `T` of a reified function); a coroutine-transformed
   method's entries are dropped when unreferenced but not moved; an `invokedynamic` interns its call
   site before its bootstrap arguments (`kt45444_privateFunInterface`'s `Foo`); an `ldc_w` whose entry
-  moves below 256 stays `ldc_w`.
+  moves below 256 stays `ldc_w`. kotlinc's `canBeOptimized` gate runs before the first pass
+  (`optimization_limits::fits_optimization`): a method whose analysis would weigh 50 MiB or more,
+  counting a frame per node as krusty's analyzer keeps them, gets only the final dead-code step and
+  slot compaction. No box file changes with it (447 byte-identical before and after); a function of
+  3,700 unused `Long` locals keeps the jump kotlinc keeps (`tests/optimization_gate_e2e.rs`).
 - ☐ 5g–5i, 6. The rest of kotlinc's transformer order: no all-or-nothing rewrite, and the
   mandatory steps.
 

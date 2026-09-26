@@ -1349,6 +1349,8 @@ mod operator_expected_result_seeding_e2e;
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
+#[path = "optimization_gate_e2e.rs"]
+mod optimization_gate_e2e;
 #[path = "overload_declaration_specificity_e2e.rs"]
 mod overload_declaration_specificity_e2e;
 #[path = "overloaded_extension_e2e.rs"]
