@@ -30,7 +30,8 @@ pub(super) fn reference_constructor_locals(
 /// The erased `FunctionN.invoke(Object…)Object` bridge to a carrier's own specialized `invoke`:
 /// each argument is cast or unboxed to the specialized parameter (a value class through its
 /// `unbox-impl`), and the result is returned as an object (`Unit` for a `void` specialization, a
-/// value class through its `box-impl`). Flagged, lined and tabled as kotlinc's bridge.
+/// value class through its `box-impl`). Past the numbered interfaces the arguments arrive as one
+/// array, whose length is checked first. Flagged, lined and tabled as kotlinc's bridge.
 pub(super) fn emit_reference_invoke_bridge(
     ir: &IrFile,
     cw: &mut ClassWriter,
@@ -49,12 +50,33 @@ pub(super) fn emit_reference_invoke_bridge(
     if !fr.invoke_renamed && specialized == erased {
         return;
     }
+    let high_arity = is_high_arity_function(arity);
+    let erased_words = if high_arity { 1 } else { u16::from(arity) };
     cw.seed_utf8("invoke");
     cw.seed_utf8(&erased);
-    let mut code = CodeBuilder::new(1 + u16::from(arity));
+    let mut code = CodeBuilder::new(1 + erased_words);
+    if high_arity {
+        let counted = code.new_label();
+        code.aload(1);
+        code.arraylength();
+        code.push_int(i32::from(arity), cw);
+        code.if_icmpeq(counted);
+        let exception = cw.class_ref("java/lang/IllegalArgumentException");
+        code.new_obj(exception);
+        code.dup();
+        code.push_string(&format!("Expected {arity} arguments"), cw);
+        let constructor = cw.methodref(
+            "java/lang/IllegalArgumentException",
+            "<init>",
+            "(Ljava/lang/String;)V",
+        );
+        code.invokespecial(constructor, 1, 0);
+        code.athrow();
+        code.bind(counted);
+    }
     code.aload(0);
     for (index, parameter) in parameters.iter().enumerate() {
-        code.aload(1 + index as u16);
+        load_erased_function_argument(cw, &mut code, high_arity, index);
         if let Some(value_class) = fr.unbox_params.get(index).copied().flatten() {
             emit_value_class_unbox_adapter(
                 cw,
@@ -101,6 +123,14 @@ pub(super) fn emit_reference_invoke_bridge(
     code.areturn();
     let this_desc = format!("L{class};");
     let mut locals = vec![("this".to_string(), this_desc, 0u16)];
+    if high_arity {
+        locals.push(("args".to_string(), "[Ljava/lang/Object;".to_string(), 1));
+        cw.reserve_method_lvt(&locals);
+        finish_code::<0x1051>(cw, "invoke", &erased, &mut code, 2);
+        // The array check has no source line, so kotlinc maps none of the bridge.
+        cw.set_method_debug("invoke", &erased, None, &locals);
+        return;
+    }
     for index in 0..arity as u16 {
         locals.push((
             crate::jvm::parameter_names::reference_invoke_bridge_parameter(
