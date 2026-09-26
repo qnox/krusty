@@ -88,6 +88,22 @@ pub struct FuncRef {
     /// (`charAt(I)C` for `String::get`, `padStart(Ljava/lang/String;IC)Ljava/lang/String;` for an
     /// extension). `None` derives the signature from the reflection types above.
     pub reflection_signature: Option<String>,
+    /// What the reflected declaration is, which decides how a backend realizes its reflected name.
+    pub reflected: ReflectedCallable,
+    /// A backend renamed the carrier's own `invoke` (a value-class signature mangles it), so the
+    /// erased `FunctionN.invoke` bridges to it even when their descriptors agree.
+    pub invoke_renamed: bool,
+}
+
+/// The kind of declaration a function-reference carrier reflects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReflectedCallable {
+    /// A declaration of this module, reflected by its source name until a backend realizes it.
+    Source,
+    /// A class constructor, reflected as the constructor itself.
+    Constructor,
+    /// A dependency declaration whose provider published its physical name and signature.
+    Physical,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
