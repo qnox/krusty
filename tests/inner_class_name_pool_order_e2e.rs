@@ -51,12 +51,12 @@ fn a_deep_nest_interns_each_row_inner_outer_then_name() {
 }
 
 /// A table spanning a NESTING CHAIN — `A$B`, `A$B$Alpha`, `A$B$Companion`, whose rows carry two
-/// different outers. Two things have to hold here that a flat table cannot show: every row's class
-/// entry is interned before ANY simple name (interleaving per row transposes them once the outers
-/// differ), and the retained set has to be a FIXPOINT, because interning one row's outer ref is
-/// what makes the enclosing row referenced and therefore kept.
+/// different outers. Two things have to hold here that a flat table cannot show: each row interns
+/// its inner class, outer class and simple name before the next row, and the retained set has to
+/// be a FIXPOINT, because one row's outer ref is what makes the enclosing row referenced and
+/// therefore kept.
 #[test]
-fn a_nesting_chain_interns_every_class_entry_before_any_name() {
+fn a_nesting_chain_keeps_its_enclosing_row_and_interns_row_by_row() {
     let src = "class Outer {\n\
                \x20   class Middle {\n\
                \x20       class Alpha\n\
