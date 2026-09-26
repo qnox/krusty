@@ -194,25 +194,44 @@ const CARRIERS: &[&str] = &[
     "ReferenceInvokeKt$route$same$1",
 ];
 
+/// One source compiled by both compilers, and the carrier classes whose contract it pins.
+struct Fixture<'a> {
+    source: &'a str,
+    stem: &'a str,
+    carriers: &'a [&'a str],
+}
+
+const FIXTURE: Fixture<'static> = Fixture {
+    source: SOURCE,
+    stem: "ReferenceInvoke",
+    carriers: CARRIERS,
+};
+
 /// `javap -p -c -s` of `class` from both compilers, with constant-pool indices and column
 /// alignment removed so two pools interned in different orders compare equal.
-fn disassembly_both(classes: &[&str]) -> Option<Vec<(String, String, String)>> {
+fn disassembly_both(
+    fixture: &Fixture<'_>,
+    classes: &[&str],
+) -> Option<Vec<(String, String, String)>> {
     let dir = common::scratch_dir()?;
     let reference_dir = dir.join("ref");
     let ours_dir = dir.join("out");
     std::fs::create_dir_all(&reference_dir).ok()?;
     std::fs::create_dir_all(&ours_dir).ok()?;
-    let source_path = dir.join("ReferenceInvoke.kt");
-    std::fs::write(&source_path, SOURCE).ok()?;
+    let source_path = dir.join(format!("{}.kt", fixture.stem));
+    std::fs::write(&source_path, fixture.source).ok()?;
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         source_path.to_string_lossy().into_owned(),
     ])?;
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let emitted =
-        common::compile_in_process_metadata_cp(SOURCE, "ReferenceInvoke", &[common::stdlib_jar()])
-            .expect("krusty compiles the carriers");
+    let emitted = common::compile_in_process_metadata_cp(
+        fixture.source,
+        fixture.stem,
+        &[common::stdlib_jar()],
+    )
+    .expect("krusty compiles the carriers");
     for (name, bytes) in &emitted {
         let path = ours_dir.join(format!("{name}.class"));
         std::fs::create_dir_all(path.parent().expect("class parent")).ok()?;
@@ -236,7 +255,7 @@ fn disassembly_both(classes: &[&str]) -> Option<Vec<(String, String, String)>> {
     };
     let mut out = Vec::new();
     for class in classes {
-        if CARRIERS.contains(class) {
+        if fixture.carriers.contains(class) {
             let reference = std::fs::read(reference_dir.join(format!("{class}.class")))
                 .unwrap_or_else(|error| panic!("kotlinc did not emit {class}: {error}"));
             let ours = std::fs::read(ours_dir.join(format!("{class}.class")))
@@ -254,7 +273,7 @@ fn disassembly_both(classes: &[&str]) -> Option<Vec<(String, String, String)>> {
 
 #[test]
 fn reference_carriers_declare_kotlincs_specialized_invoke_and_bridge() {
-    let Some(dumps) = disassembly_both(CARRIERS) else {
+    let Some(dumps) = disassembly_both(&FIXTURE, CARRIERS) else {
         eprintln!("skipping: reference kotlinc unavailable");
         return;
     };
@@ -266,7 +285,7 @@ fn reference_carriers_declare_kotlincs_specialized_invoke_and_bridge() {
 /// The use site hands the carrier on as the function type, as kotlinc's implicit cast does.
 #[test]
 fn reference_use_site_casts_the_carrier_to_its_function_type() {
-    let Some(dumps) = disassembly_both(&["ReferenceInvokeKt"]) else {
+    let Some(dumps) = disassembly_both(&FIXTURE, &["ReferenceInvokeKt"]) else {
         eprintln!("skipping: reference kotlinc unavailable");
         return;
     };
@@ -436,4 +455,56 @@ fn retained_dispatching_reference_shapes_run() {
         "retained shapes must keep the exact dispatching-invoke plan",
     );
     common::expect_box_same_as_kotlinc(&source, "ReferenceInvokeRetainedRun");
+}
+
+/// Compare `fixture`'s carriers with kotlinc's, then run its `box()` under both compilers.
+fn assert_carriers_match_and_run(fixture: &Fixture<'_>) {
+    let dumps =
+        disassembly_both(fixture, fixture.carriers).expect("reference kotlinc is provisioned");
+    for (class, reference, ours) in dumps {
+        assert_eq!(ours, reference, "{class}: carrier differs from kotlinc");
+    }
+    common::expect_box_same_as_kotlinc(fixture.source, &format!("{}Run", fixture.stem));
+}
+
+const EXTENSION_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+class Gauge(val level: Int)
+
+fun Gauge.read(): Int = level
+fun String.twice(): String = this + this
+
+fun carriers(gauge: Gauge): Held {
+    val unbound = Gauge::read
+    val text = String::twice
+    val boundText = "x"::twice
+    val bound = gauge::read
+    return Held(unbound, text, boundText, bound)
+}
+
+@Suppress("UNCHECKED_CAST")
+fun box(): String {
+    val all = carriers(Gauge(4)).all
+    if ((all[0] as (Gauge) -> Int)(Gauge(3)) != 3) return "unbound"
+    if ((all[1] as (String) -> String)("y") != "yy") return "text"
+    if ((all[2] as () -> String)() != "xx") return "bound text"
+    if ((all[3] as () -> Int)() != 4) return "bound"
+    return "OK"
+}
+"##;
+
+/// An extension reference is reflected with its receiver as the declaration's first parameter,
+/// and a bound one enters the reference's line at its call, after the stored receiver is read.
+#[test]
+fn extension_reference_carriers_reflect_the_receiver_parameter() {
+    assert_carriers_match_and_run(&Fixture {
+        source: EXTENSION_SOURCE,
+        stem: "ExtensionReferenceInvoke",
+        carriers: &[
+            "ExtensionReferenceInvokeKt$carriers$unbound$1",
+            "ExtensionReferenceInvokeKt$carriers$text$1",
+            "ExtensionReferenceInvokeKt$carriers$boundText$1",
+            "ExtensionReferenceInvokeKt$carriers$bound$1",
+        ],
+    });
 }

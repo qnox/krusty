@@ -2441,6 +2441,10 @@ pub struct IrFile {
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
     /// Source end line for every lowered expression whose AST node has a source location.
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
+    /// Source line a generated expression enters only where it dispatches: its operands carry no
+    /// source position of their own, so nothing marks the line at its start (a callable-reference
+    /// carrier's `invoke`, whose stored receiver is read ahead of the call's line).
+    pub dispatch_lines: std::collections::HashMap<u32, u32>,
     /// Implicit return identity → the expression body's closing source line.
     ///
     /// An explicit `return expression` keeps the call/return line already in effect. An

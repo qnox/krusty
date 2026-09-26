@@ -479,6 +479,14 @@ impl BodyLowering<'_> {
             [receiver] => Some(*receiver),
             _ => return Ok(None),
         };
+        // The declaration's own parameter list: its extension receiver follows its context
+        // parameters, as the declaration takes them.
+        let mut declaration_parameters = signature_parameters;
+        if let Some(receiver) = callable.shape.extension_receiver {
+            let position =
+                (callable.shape.context_parameter_count as usize).min(declaration_parameters.len());
+            declaration_parameters.insert(position, specialize(receiver.get()));
+        }
         Ok(Some(self.ir.add_expr(IrExpr::CallableReference(
             crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
@@ -486,7 +494,7 @@ impl BodyLowering<'_> {
                 captures: Vec::new(),
                 bound_receiver,
                 function_type: reference_ty,
-                declaration_parameters: signature_parameters.into_boxed_slice(),
+                declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result: signature_result,
                 declaration_suspend,
                 adaptation: adaptation.cloned().map(Box::new),
