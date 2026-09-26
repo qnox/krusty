@@ -86,7 +86,10 @@ pub(super) fn emit_reference_invoke_bridge(
     let mut locals = vec![("this".to_string(), this_desc, 0u16)];
     for index in 0..arity as u16 {
         locals.push((
-            crate::jvm::parameter_names::reference_invoke_bridge_parameter(index),
+            crate::jvm::parameter_names::reference_invoke_bridge_parameter(
+                index,
+                fr.is_suspend && index + 1 == u16::from(arity),
+            ),
             "Ljava/lang/Object;".to_string(),
             index + 1,
         ));

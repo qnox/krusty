@@ -503,6 +503,11 @@ pub(crate) fn lower_suspend(
             // return each `Object` directly, without a state machine, exactly as kotlinc does.
             for &call in forward.calls() {
                 let cont = ir.add_expr(IrExpr::GetValue(p_old));
+                // A generated call that enters its line only where its operands begin (a
+                // reference carrier's `invoke`) enters it at the continuation it now reads too.
+                if let Some(line) = ir.dispatch_line(call) {
+                    ir.expr_source_lines.insert(cont, line);
+                }
                 if !append_continuation(ir, call, cont, default_call_operands) {
                     return false;
                 }

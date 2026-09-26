@@ -436,7 +436,7 @@ impl BodyLowering<'_> {
             callable.id,
             dispatch_receiver,
             extension_receiver,
-            SameFileExtensionReceiverMode::Materialized,
+            SameFileExtensionReceiverMode::Direct,
             &arguments,
             &signature_parameters,
             substitutions,

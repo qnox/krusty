@@ -312,9 +312,9 @@ fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function
 }
 
 /// Whether a structural reference's adapter can become the carrier's own `invoke`. The remaining
-/// shapes keep the synthesized dispatching `invoke`: suspend references (their `invoke` is a
-/// coroutine entry point), `FunctionN` arities past the numbered interfaces, field captures of a
-/// local function, and value-class signatures (their bridge boxes through `box-impl`).
+/// shapes keep the synthesized dispatching `invoke`: `FunctionN` arities past the numbered
+/// interfaces, field captures of a local function, and value-class signatures (their bridge boxes
+/// through `box-impl`).
 fn own_invoke_realizable(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
@@ -334,9 +334,6 @@ fn own_invoke_realizable(
             })
     };
     reference.captures.is_empty()
-        && !function_type.suspend
-        && !reference.declaration_suspend
-        && !ir.suspend_funs.contains(&reference.adapter)
         && function_type.params.len() <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY
         && !function_type.params.iter().any(value_class)
         && !value_class(&function_type.ret)
@@ -422,8 +419,10 @@ fn realize_own_invoke(
         }
     }
     let parameters = function_type.params.clone();
+    // A suspend `invoke` keeps its declared result: the suspend lowering that follows appends the
+    // continuation and returns the result as an object, boxed as a coroutine boxes it.
     let result = match function_type.ret {
-        ret if ret.is_jvm_scalar() => Ty::nullable(ret),
+        ret if ret.is_jvm_scalar() && !function_type.suspend => Ty::nullable(ret),
         ret => ret,
     };
     // The adapter returns the `FunctionN` result value; the specialized `invoke` returns its own
@@ -444,10 +443,11 @@ fn realize_own_invoke(
             ir.exprs[current as usize] = IrExpr::Return(Some(boxed));
         }
     }
+    // kotlinc checks no parameter of a suspend reference's `invoke`.
     let param_checks = parameters
         .iter()
         .map(|ty| {
-            (ty.is_reference() && !ty.upper_bound_admits_null())
+            (!function_type.suspend && ty.is_reference() && !ty.upper_bound_admits_null())
                 .then_some(crate::ir::IrParameterCheck::NonNull)
         })
         .collect();
@@ -610,7 +610,7 @@ mod tests {
             [
                 ("ordinary", true),
                 ("captured", false),
-                ("suspend", false),
+                ("suspend", true),
                 ("high arity", false),
                 ("value class", false),
             ]
