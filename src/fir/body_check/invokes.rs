@@ -447,17 +447,32 @@ impl BodyFirChecker<'_> {
         declaration: Option<DeclarationId>,
         arguments: &[ResolvedContextArgument],
     ) -> Result<Box<[FirReceiver]>, BodyCheckFailure> {
-        let declared: Vec<Ty> = declaration
-            .and_then(|declaration| {
+        // An external property (no stable declaration) is compiled elsewhere against the types
+        // its arguments were selected for; a stable one must supply every declared context
+        // parameter it was selected with.
+        let declared: Vec<Ty> = match declaration {
+            None => Vec::new(),
+            Some(declaration) => {
                 let property = self
                     .index
                     .property_for_declaration(declaration)
-                    .and_then(|property| self.index.property(property))?;
-                let parameters = &self.index.signature(declaration)?.parameters;
-                parameters.get(..property.context_parameter_count as usize)
-            })
-            .map(|parameters| parameters.iter().map(|parameter| parameter.get()).collect())
-            .unwrap_or_default();
+                    .and_then(|property| self.index.property(property))
+                    .ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
+                    })?;
+                let count = property.context_parameter_count as usize;
+                let parameters = self
+                    .index
+                    .signature(declaration)
+                    .map(|signature| &signature.parameters)
+                    .filter(|_| count == arguments.len())
+                    .and_then(|parameters| parameters.get(..count))
+                    .ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                    })?;
+                parameters.iter().map(|parameter| parameter.get()).collect()
+            }
+        };
         arguments
             .iter()
             .enumerate()

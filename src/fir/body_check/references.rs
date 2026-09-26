@@ -1160,11 +1160,18 @@ impl BodyFirChecker<'_> {
             ResolvedTy::new(ty)
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
         };
-        let declared_receiver = self
+        let property = self
             .index
             .property(target)
-            .and_then(|property| property.extension_receiver)
-            .filter(|_| extension_receiver_target);
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let declared_receiver =
+            if extension_receiver_target {
+                Some(property.extension_receiver.ok_or_else(|| {
+                    self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                })?)
+            } else {
+                None
+            };
         let declared_property_type = self
             .index
             .signature(declaration)

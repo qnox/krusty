@@ -143,10 +143,14 @@ impl BodyFirChecker<'_> {
             (
                 FirCallTarget::Module(target),
                 FirIteratorReceiver::Extension | FirIteratorReceiver::MemberExtension { .. },
-            ) => self
-                .index
-                .callable(*target)
-                .and_then(|callable| callable.shape.extension_receiver),
+            ) => Some(
+                self.index
+                    .callable(*target)
+                    .and_then(|callable| callable.shape.extension_receiver)
+                    .ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                    })?,
+            ),
             _ => None,
         };
         let receiver_conversion = declared_receiver
