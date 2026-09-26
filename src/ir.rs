@@ -2261,12 +2261,14 @@ pub struct IrFile {
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
     pub(crate) local_class_name_provenance:
         std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
-    /// The same naming context for each source callable-reference node, by expression id. A target
-    /// that realizes the reference as a class of its own names that class from it.
+    /// The same naming context for each source callable-reference node and each suspend-lambda
+    /// node, by expression id. A target that realizes one as a class of its own names that class
+    /// from it.
     pub(crate) callable_reference_provenance:
         std::collections::HashMap<u32, IrLocalClassNameProvenance>,
-    /// The executable scope each source callable-reference node is written in, by expression id. A
-    /// target that realizes the reference as a class of its own records that class's enclosure.
+    /// The executable scope each source callable-reference and suspend-lambda node is written in,
+    /// by expression id. A target that realizes one as a class of its own records that class's
+    /// enclosure.
     pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
     /// Every lifting site the file's bodies declare (see [`crate::fir::FirLiftingSite`]), by
     /// sequence and source position: the step's source name, and whether it is lifted at all.
@@ -2280,7 +2282,8 @@ pub struct IrFile {
     /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
     /// callables are all lifted, once a target has numbered the sequences.
     pub(crate) lifted_names: std::collections::HashMap<FunId, String>,
-    /// The class name a target chose for each source callable reference, by expression id.
+    /// The class name a target chose for each source callable reference and suspend lambda, by
+    /// expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire

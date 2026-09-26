@@ -184,13 +184,17 @@ fn source_name(ir: &IrFile, class: crate::ir::ClassId) -> String {
         .clone()
 }
 
+/// A function's continuation class or a suspend lambda's class: both are state machines kotlinc
+/// generates, not source declarations.
 fn is_coroutine_state_machine(class: &IrClass) -> bool {
-    class
-        .superclass
-        .matches("kotlin/coroutines/jvm/internal/ContinuationImpl")
-        || class
-            .superclass
-            .matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
+    [
+        "kotlin/coroutines/jvm/internal/ContinuationImpl",
+        "kotlin/coroutines/jvm/internal/RestrictedContinuationImpl",
+        "kotlin/coroutines/jvm/internal/SuspendLambda",
+        "kotlin/coroutines/jvm/internal/RestrictedSuspendLambda",
+    ]
+    .iter()
+    .any(|superclass| class.superclass.matches(superclass))
 }
 
 pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {

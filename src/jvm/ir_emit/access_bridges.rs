@@ -133,6 +133,12 @@ pub(super) fn emit_facade_function_access_bridge(
         load(t, slot, &mut g);
         slot += slot_words(t);
     }
+    // One accessor per target, as kotlinc's `SyntheticAccessorLowering` keys them: a function whose
+    // emission-built state machine re-enters it through `access$<name>` already has it.
+    let name = format!("access${}", f.name);
+    if cw.declares_method(&name, &desc) {
+        return;
+    }
     let m = cw.methodref(facade, &f.name, &desc);
     let aw: i32 = words as i32;
     g.invokestatic(m, aw, slot_words(ret) as i32);
@@ -141,8 +147,6 @@ pub(super) fn emit_facade_function_access_bridge(
     g.link();
     cw.add_method(
         0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-        &format!("access${}", f.name),
-        &desc,
-        &g,
+        &name, &desc, &g,
     );
 }

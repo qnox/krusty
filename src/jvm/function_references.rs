@@ -282,26 +282,6 @@ fn own_invoke_realizable(
             })
 }
 
-/// Expressions in one function body's value namespace. A lambda's captures read this namespace,
-/// while its `inline_body` uses the lambda function's own slots and return boundary; never carry a
-/// callable-reference adapter rewrite through that boundary.
-fn adapter_body_expressions(ir: &IrFile, body: crate::ir::ExprId) -> Vec<crate::ir::ExprId> {
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![body];
-    let mut expressions = Vec::new();
-    while let Some(current) = pending.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        match &ir.exprs[current as usize] {
-            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
-            _ => crate::ir::for_each_child(&ir.exprs, current, &mut |child| pending.push(child)),
-        }
-        expressions.push(current);
-    }
-    expressions
-}
-
 /// Turn the reference's generated adapter into the carrier's specialized `invoke`, the method
 /// kotlinc's `FunctionReferenceLowering` writes: an instance method over the function type's own
 /// parameters that returns its result, boxed where it overrides the generic `R`. The adapter's
@@ -320,7 +300,7 @@ fn realize_own_invoke(
     let Some(body) = ir.functions[adapter as usize].body else {
         return;
     };
-    let expressions = adapter_body_expressions(ir, body);
+    let expressions = crate::ir::value_namespace_expressions(ir, body);
     let receiver_ty = bound.then(|| ir.functions[adapter as usize].params[0]);
     if let Some(receiver_ty) = receiver_ty {
         let field = u32::try_from(ir.classes[class as usize].fields.len())
@@ -909,7 +889,7 @@ mod tests {
             value: None,
         });
 
-        let expressions = adapter_body_expressions(&ir, body);
+        let expressions = crate::ir::value_namespace_expressions(&ir, body);
 
         for expected in [body, lambda, capture, outer_return, outer_value] {
             assert!(

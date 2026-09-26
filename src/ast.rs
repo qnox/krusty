@@ -1632,9 +1632,9 @@ pub struct File {
     /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
     /// in the body, while this count preserves the function type's context-receiver shape.
     pub anon_fun_context_count: std::collections::HashMap<u32, u32>,
-    /// Backend-neutral naming provenance of each callable reference, by expression id, from the
-    /// file's local-class naming walk. A backend that realizes the reference as a class of its own
-    /// names it from this.
+    /// Backend-neutral naming provenance of each callable reference and each lambda, by expression
+    /// id, from the file's local-class naming walk. A backend that realizes one as a class of its
+    /// own (a suspend lambda's `SuspendLambda`) names it from this.
     pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
     /// Lifting provenance of each lambda literal, by expression id, from the file's local-function
     /// naming walk.

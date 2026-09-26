@@ -7,9 +7,11 @@
 //! class is written. This pass creates the continuation class with the fields every machine has;
 //! the spill fields and `@DebugMetadata` come from the transformer.
 //!
-//! The functions taken so far are top-level functions whose suspension points are all plain calls
-//! outside any `try`, and which call no inline function. Members, `try`, spliced inline bodies and suspend lambdas are the next steps
-//! of the plan; until then they keep the IR machine.
+//! The functions taken so far are top-level functions and final members whose suspension points
+//! are all plain calls outside any `try`, and which call no inline function; suspend lambdas of
+//! that shape go through `suspend_lambda`, which shares the eligibility and suspension collection
+//! here. Open members, `try` and spliced inline bodies are the next steps of the plan; until then
+//! they keep the IR machine.
 
 use std::collections::HashSet;
 
@@ -38,6 +40,14 @@ pub(super) struct Route<'a, 'b> {
         &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
 }
 
+/// What the transformer is asked to take: a named function, whose continuation is a class of its
+/// own, or a suspend lambda's body, whose class is the continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Subject {
+    NamedFunction,
+    SuspendLambda,
+}
+
 /// Whether the transformer takes `fid`.
 pub(super) enum Routed {
     Taken,
@@ -47,34 +57,14 @@ pub(super) enum Routed {
 }
 
 /// Route `fid`, whose body is `body`, to the transformer when it is one of the shapes it takes.
-pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, route: Route<'_, '_>) -> Routed {
-    if eligible_points(ir, fid, body, &route).is_none() {
+pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_, '_>) -> Routed {
+    if eligible_points(ir, fid, body, &route, Subject::NamedFunction).is_none() {
         return Routed::NotEligible;
     }
-    // Common IR is a DAG: the CPS rewrites below change nodes in place, so this body first owns
-    // one node per use, as it does on the IR machine's path.
-    for (source, target) in crate::ir::make_expression_children_unique_tracked(ir, body) {
-        let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
-            continue;
-        };
-        if !route.default_call_operands.clone_call(source, target, args) {
-            return Routed::Failed;
-        }
-    }
-    let Some(points) = eligible_points(ir, fid, body, &route) else {
+    let Some(suspensions) = owned_suspensions(ir, fid, body, &mut route, Subject::NamedFunction)
+    else {
         return Routed::Failed;
     };
-    let suspensions: Vec<TransformedSuspension> = points
-        .iter()
-        .map(|&call| TransformedSuspension {
-            call,
-            result: match suspend_call_fid(ir, call, route.suspend_set) {
-                Some(callee) => route.context.orig_rets[callee as usize],
-                None => recorded_suspension_result(ir, call)
-                    .expect("an eligible suspension point records its result"),
-            },
-        })
-        .collect();
     let function = &ir.functions[fid as usize];
     let name = function.name.clone();
     let declared_params = function.params.clone();
@@ -143,17 +133,54 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, route: Route<'_, '_
         TransformedMachine {
             continuation_class,
             suspensions,
+            lambda: None,
         },
     );
     Routed::Taken
 }
 
-/// The suspension points of `fid` in order, when the transformer takes it.
-fn eligible_points(
+/// Give `body`, which the transformer takes, one node per use, and its suspension points in order
+/// with each callee's declared result. `None` when a call could not be given its own copy.
+pub(super) fn owned_suspensions(
+    ir: &mut IrFile,
+    fid: u32,
+    body: ExprId,
+    route: &mut Route<'_, '_>,
+    subject: Subject,
+) -> Option<Vec<TransformedSuspension>> {
+    // Common IR is a DAG: the CPS rewrites change nodes in place, so this body first owns one node
+    // per use, as it does on the IR machine's path.
+    for (source, target) in crate::ir::make_expression_children_unique_tracked(ir, body) {
+        let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+            continue;
+        };
+        if !route.default_call_operands.clone_call(source, target, args) {
+            return None;
+        }
+    }
+    let points = eligible_points(ir, fid, body, route, subject)?;
+    Some(
+        points
+            .iter()
+            .map(|&call| TransformedSuspension {
+                call,
+                result: match suspend_call_fid(ir, call, route.suspend_set) {
+                    Some(callee) => route.context.orig_rets[callee as usize],
+                    None => recorded_suspension_result(ir, call)
+                        .expect("an eligible suspension point records its result"),
+                },
+            })
+            .collect(),
+    )
+}
+
+/// The suspension points of `fid` in order, when the transformer takes it as `subject`.
+pub(super) fn eligible_points(
     ir: &IrFile,
     fid: u32,
     body: ExprId,
     route: &Route<'_, '_>,
+    subject: Subject,
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
@@ -178,10 +205,13 @@ fn eligible_points(
             "no spill clean-up in the runtime",
         ),
         (
-            &|| !(top_level || final_member),
+            &|| subject == Subject::NamedFunction && !(top_level || final_member),
             "not top-level or a final member",
         ),
-        (&|| ir.private_methods.contains(&fid), "private"),
+        (
+            &|| subject == Subject::NamedFunction && ir.private_methods.contains(&fid),
+            "private",
+        ),
         (
             &|| !ir.fn_decl_lines.contains_key(&fid),
             "no declaration line",

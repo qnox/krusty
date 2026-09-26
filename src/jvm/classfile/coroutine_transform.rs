@@ -13,7 +13,8 @@ use super::constant_pool_queries::PoolLookup;
 use super::method_rewrite::MethodIdentity;
 use super::ClassWriter;
 use crate::jvm::bytecode_passes::coroutines::{
-    transform_named_function, CoroutineError, DebugMetadata, NamedFunction, SpillField, Transformed,
+    transform_named_function, transform_suspend_lambda, CoroutineError, DebugMetadata,
+    DeclaredSpillFields, NamedFunction, SpillField, SuspendLambda, Transformed,
 };
 
 /// A method the emitter asks the transformer to rewrite, and what the transformer needs about it
@@ -29,6 +30,10 @@ pub(crate) struct CoroutineRequest {
     /// The internal name of the dispatch receiver the continuation's constructor takes, for a
     /// member function.
     pub dispatch_receiver: Option<String>,
+    /// Set for a suspend lambda's `invokeSuspend`, whose class is the continuation: the spill fields
+    /// the class declares for the lambda's parameters, by normalized descriptor with the highest
+    /// index of each.
+    pub suspend_lambda: Option<Vec<(String, usize)>>,
 }
 
 /// What the transformation of one function found.
@@ -122,6 +127,35 @@ impl ClassWriter {
             .clone()
             .ok_or("the transformed source method has no SourceFile identity")?;
         let owner = self.internal_name.clone();
+        if let Some(declared) = &request.suspend_lambda {
+            let declared_spill_fields: Vec<DeclaredSpillFields> = declared
+                .iter()
+                .map(|(descriptor, max_index)| DeclaredSpillFields {
+                    descriptor,
+                    max_index: *max_index,
+                })
+                .collect();
+            let lambda = SuspendLambda {
+                class: &owner,
+                source_file: &source_file,
+                line_number: request.line_number,
+                declared_spill_fields: &declared_spill_fields,
+            };
+            let machine =
+                transform_suspend_lambda(node, &lambda).map_err(|error| describe(&error))?;
+            // The lambda's class is its continuation: it declares the spill fields ahead of its own,
+            // and its `@DebugMetadata` leads its annotations, as kotlinc writes them.
+            for field in machine.layout.fields.iter().rev() {
+                self.add_leading_field(0, &field.name, &field.descriptor);
+            }
+            self.lead_with_debug_metadata(&machine.debug_metadata);
+            let outcome = CoroutineOutcome::StateMachine {
+                fields: machine.layout.fields,
+                debug_metadata: machine.debug_metadata,
+            };
+            self.install_transformed(index, access, &method_name, &method_desc, machine.method)?;
+            return Ok(outcome);
+        }
         let function = NamedFunction {
             owner: &owner,
             continuation_class: &request.continuation_class,
@@ -141,6 +175,20 @@ impl ClassWriter {
                     },
                 ),
             };
+        self.install_transformed(index, access, &method_name, &method_desc, node)?;
+        Ok(outcome)
+    }
+
+    /// Replace method `index` with its transformed body, then run kotlinc's optimizer over it, as
+    /// kotlinc's visitor chain hands the transformer's method on.
+    fn install_transformed(
+        &mut self,
+        index: usize,
+        access: u16,
+        method_name: &str,
+        method_desc: &str,
+        node: crate::jvm::method_node::MethodNode,
+    ) -> Result<(), String> {
         // The transformed body's constants intern here, in its instruction order, as kotlinc's
         // writer interns them when the transformed method is visited.
         let assembled = node
@@ -173,15 +221,15 @@ impl ClassWriter {
         // kotlinc's optimizer takes the transformer's method, as its visitor chain hands it on.
         let identity = MethodIdentity {
             access,
-            name: &method_name,
-            desc: &method_desc,
+            name: method_name,
+            desc: method_desc,
         };
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let optimized = self.optimized(&self.methods[index], identity, node, None, &mut pool);
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }
-        Ok(outcome)
+        Ok(())
     }
 }
 

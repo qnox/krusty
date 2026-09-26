@@ -82,23 +82,40 @@ impl Emitter<'_> {
 
 impl Emitter<'_> {
     /// Arm the emission of a function the transformer takes: its suspension points, and the
-    /// `$completion` parameter (value-index `completion`) they pass on. The completion's slot.
+    /// `$completion` parameter (value-index `completion`) they pass on, which a suspend lambda has
+    /// none of. The completion's slot.
     pub(super) fn arm_transformed_machine(
         &mut self,
         machine: &TransformedMachine,
-        completion: u32,
+        completion: Option<u32>,
     ) -> u16 {
-        let (slot, _) = *self
-            .slots
-            .get(&completion)
-            .expect("a transformed suspend function retains its completion identity");
-        self.continuation_slot = Some(slot);
+        let slot = completion.map_or(0, |completion| {
+            let (slot, _) = *self
+                .slots
+                .get(&completion)
+                .expect("a transformed suspend function retains its completion identity");
+            self.continuation_slot = Some(slot);
+            slot
+        });
         self.transformed_suspensions = machine
             .suspensions
             .iter()
             .map(|suspension| (suspension.call, suspension.result))
             .collect();
+        self.suspend_lambda_parameter_reads = machine
+            .lambda
+            .as_ref()
+            .map(|lambda| lambda.parameter_reads.iter().copied().collect())
+            .unwrap_or_default();
         slot
+    }
+
+    /// Mark the read of a suspend lambda's parameter from its field, just stored by declaration
+    /// `e`, as kotlinc's codegen marks it: the coroutine starts after the last one.
+    pub(super) fn mark_suspend_lambda_parameter_read(&mut self, e: ExprId, code: &mut CodeBuilder) {
+        if self.suspend_lambda_parameter_reads.contains(&e) {
+            code.suspend_marker(SuspendMarker::SuspendLambdaParameter as i32, self.cw);
+        }
     }
 }
 
@@ -123,7 +140,11 @@ pub(super) fn request_transform(
                 .expect("a transformed source function retains its declaration line"))
             .min(u16::MAX as u32) as u16,
             completion_slot,
-            dispatch_receiver: dispatch_receiver(ir, fid),
+            dispatch_receiver: dispatch_receiver(ir, fid).filter(|_| machine.lambda.is_none()),
+            suspend_lambda: machine
+                .lambda
+                .as_ref()
+                .map(|lambda| lambda.declared_spill_fields.clone()),
         },
     );
 }

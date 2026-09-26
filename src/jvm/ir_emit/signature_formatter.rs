@@ -298,10 +298,18 @@ impl<'a> JvmSignatureFormatter<'a> {
             rendered.push_str(&self.type_argument(TypeVariance::In, *parameter, wildcards)?);
         }
         if signature.suspend {
-            rendered.push_str("-Lkotlin/coroutines/Continuation<-");
+            // The continuation's own `in` projection is part of the type; the wildcards on the
+            // `FunctionN` arguments follow the position, like every other argument's.
+            if wildcards == Wildcards::Declared {
+                rendered.push('-');
+            }
+            rendered.push_str("Lkotlin/coroutines/Continuation<-");
             rendered.push_str(&self.ty_at(&signature.ret, wildcards)?);
             rendered.push_str(">;");
-            rendered.push_str("+Ljava/lang/Object;");
+            if wildcards == Wildcards::Declared {
+                rendered.push('+');
+            }
+            rendered.push_str("Ljava/lang/Object;");
         } else {
             rendered.push_str(&self.type_argument(TypeVariance::Out, signature.ret, wildcards)?);
         }

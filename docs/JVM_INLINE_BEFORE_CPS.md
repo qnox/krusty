@@ -117,6 +117,35 @@ Known gaps, both byte differences in the function's own method (the continuation
   that carries the machine and leaves `<name>` a trampoline, which krusty does only for interface
   members so far.
 
+### Step 6 as landing
+
+* A suspend lambda the transformer takes becomes a class of its own, as kotlinc's
+  `SuspendLambdaLowering` makes it: `final Outer$fn$N extends SuspendLambda implements FunctionN`,
+  its own continuation (`jvm::suspend::suspend_lambda`). The naming walk gives every lambda its
+  class ordinal, because whether a lambda is suspend is only known once it is typed; the
+  suspend ones carry it into IR like a callable reference.
+* The lifted lambda function becomes `invokeSuspend(Object $result)`. Captured values are final
+  `$name` fields (`this$0` for the enclosing class's `this`, the `Ref` cell for a shared `var`),
+  stored by the constructor before `SuspendLambda(arity, completion)`. Each parameter the body
+  reads is kept in a spill-named field (`L$0`, `I$0`, one counter per normalized kind, the
+  receiver's private) and read back into its local at the top of the body, where the emitter
+  writes `mark(10)`.
+* The emitter writes the members kotlinc writes (`jvm::ir_emit::suspend_lambda_class`): the
+  constructor, `invokeSuspend`, `create` for a lambda of at most one parameter, the typed
+  `invoke` (through `create`, or building and filling the copy itself) and the erased bridge.
+  The transformer runs in its lambda mode when the class is written; the spill fields it adds
+  lead the field table and its `@DebugMetadata` leads the annotations.
+* The value is `new Outer$fn$N(captures…, null)`, typed as the class: a consumer that needs the
+  `FunctionN` casts it, one that takes `Any` does not, as in kotlinc.
+* The lambdas taken are the shapes steps 2 and 3 take: plain-call suspension points outside any
+  `try`, no spliced inline body, no assigned capture, not an argument an inline call consumes.
+  Invoking a suspend function value is not a plain call yet. The rest keep the lifted function
+  with an IR-machine continuation.
+
+Known gaps: the class's `@Metadata` has no lambda `d1`/`d2`, the pool interns the transformer's
+constants last (as for named functions), and a local declared in the lambda's body ends its range
+before the final `areturn` (the body lowers as `return <block>`; plain lambdas share this).
+
 ## 2. The symptom this exists to fix
 
 `JVM backend inline error: call arity mismatch` — always exactly one operand short, and the missing
