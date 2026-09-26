@@ -89,6 +89,8 @@ pub struct PropMeta {
     /// `@JvmField` property of an INTERFACE's companion, whose backing field was hoisted onto the
     /// interface itself. A reader uses it to find the field on the interface rather than here.
     pub moved_from_interface_companion: bool,
+    /// A `companion { … }` block property: a static member of this class (`Property.flags` bit 19).
+    pub companion: bool,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -307,6 +309,11 @@ fn property_flags(prop: &PropMeta) -> u64 {
             0
         }
         | prop.return_value_status.metadata_value() << property_flags::RETURN_VALUE_STATUS_SHIFT
+        | if prop.companion {
+            property_flags::IS_COMPANION
+        } else {
+            0
+        }
 }
 
 /// kotlinc's name for a setter value parameter source did not name
@@ -1521,6 +1528,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             })
         };
 
@@ -1596,6 +1604,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             }],
             &[],
             &[],
@@ -1656,6 +1665,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             }],
             &[],
             &[],
@@ -1847,6 +1857,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             },
             PropMeta {
                 return_value_status: Default::default(),
@@ -1873,6 +1884,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             },
         ];
         let (d1, _d2) = build_class(
@@ -1948,6 +1960,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             }],
             &[],
             &[],
@@ -2102,6 +2115,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             }],
             &[],
             &[],
@@ -2164,6 +2178,7 @@ mod tests {
                 field_annotations: Vec::new(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
+                companion: false,
             }],
             &[],
             &[],
@@ -2234,6 +2249,7 @@ mod tests {
                     field_annotations: Vec::new(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
+                    companion: false,
                 },
                 PropMeta {
                     return_value_status: Default::default(),
@@ -2264,6 +2280,7 @@ mod tests {
                     field_annotations: Vec::new(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
+                    companion: false,
                 },
             ],
             &[],

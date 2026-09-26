@@ -1120,6 +1120,7 @@ pub fn facade_package_metadata_from_ir(
                 has_function_typed_parameter: declaration.has_function_typed_parameter,
                 operator: declaration.operator,
                 infix: declaration.infix,
+                companion: declaration.companion,
                 contract: declaration
                     .contract
                     .as_ref()
@@ -1168,11 +1169,12 @@ pub fn facade_package_metadata_from_ir(
                 )
                 | None => None,
             };
+            let companion = declaration.is_companion_extension();
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
                 .copied()
-                .chain(declaration.receiver)
+                .chain(declaration.receiver.filter(|_| !companion))
                 .collect::<Vec<_>>();
             let descriptor_parameters = accessor_parameters
                 .iter()
@@ -1232,6 +1234,7 @@ pub fn facade_package_metadata_from_ir(
                 spellings: declaration.spellings.clone(),
                 has_backing_field: declaration.has_backing_field,
                 has_declared_getter: declaration.has_declared_getter,
+                companion,
             }
         })
         .collect::<Vec<_>>();
@@ -1265,7 +1268,8 @@ fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> Str
         .iter()
         .map(|(_, parameter)| *parameter)
         .collect::<Vec<_>>();
-    if let Some(receiver) = declaration.receiver {
+    // A companion extension's receiver is recorded but has no JVM parameter.
+    if let Some(receiver) = declaration.receiver.filter(|_| !declaration.companion) {
         physical.insert(declaration.context_count.min(physical.len()), receiver);
     }
     let mut descriptor = physical

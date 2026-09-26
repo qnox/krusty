@@ -62,6 +62,9 @@ pub(super) fn facade_source_ordered_members(
 
 pub(super) enum SourceOrderedMember<'a> {
     Property(&'a IrProperty),
+    /// A `companion { … }` block property stored in one of this class's static fields; its
+    /// generated public accessors take the property's place among the class's members.
+    StaticProperty(u32),
     Function(u32),
     SecondaryConstructor(usize, &'a IrSecondaryCtor),
 }
@@ -70,7 +73,7 @@ pub(super) enum SourceOrderedMember<'a> {
 /// excluded only when their producer recorded an exact later placement; JVM access flags never
 /// participate in this semantic schedule.
 pub(super) fn source_ordered_members<'a>(
-    ir: &IrFile,
+    ir: &'a IrFile,
     class: &'a IrClass,
     deferred_serialization_constructor: Option<u32>,
 ) -> Vec<SourceOrderedMember<'a>> {
@@ -102,6 +105,21 @@ pub(super) fn source_ordered_members<'a>(
                 (
                     property.source_order,
                     SourceOrderedMember::Property(property),
+                )
+            }),
+    );
+    ordered.extend(
+        ir.statics
+            .iter()
+            .enumerate()
+            .filter(|(index, property)| {
+                ir.companion_blocks.is_storage(*index as u32)
+                    && property.owner == Some(class.fq_name_id())
+            })
+            .map(|(index, property)| {
+                (
+                    property.source_order,
+                    SourceOrderedMember::StaticProperty(index as u32),
                 )
             }),
     );

@@ -206,6 +206,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_interface_delegations(index, self.ir)?;
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
+        super::companion_blocks::realize_companion_block_calls(self.ir);
         self.ir
             .validate_determined_types()
             .map_err(FirFileLoweringFailure::UndeterminedType)
@@ -1125,6 +1126,21 @@ impl<'a> CommonIrBodySink<'a> {
             let entry_class = anchor
                 .owner
                 .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
+            // A `companion { … }` member is a static member of the classifier whose block declared
+            // it. Its receiver is that classifier's name-resolution coordinate, never a value.
+            let placement = super::companion_blocks::static_placement(
+                declaration_header.flags,
+                callable
+                    .shape
+                    .extension_receiver
+                    .map(|receiver| receiver.get()),
+                FirFileLoweringFailure::MissingCallable(declaration),
+            )?;
+            let companion_block_owner = super::companion_blocks::declaring_class_in_file(
+                self.ir,
+                placement,
+                FirFileLoweringFailure::MissingCallable(declaration),
+            )?;
             let class = entry_class
                 .map(Ok)
                 .or_else(|| {
@@ -1156,6 +1172,10 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            if let Some(owner) = companion_block_owner {
+                self.ir.classes[owner as usize].methods.push(function);
+                self.ir.companion_blocks.place_function(function, owner);
+            }
             self.ir.fn_source_names.insert(function, source_name);
             self.ir.fn_source_order.insert(
                 function,

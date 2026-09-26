@@ -34,11 +34,13 @@ pub enum IrNodeOrigin {
 mod bindings;
 mod bottom_values;
 mod bridges;
+mod companion_blocks;
 mod constants;
 mod constructors;
 mod default_arguments;
 mod expression_provenance;
 mod intrinsic;
+mod jvm_static_realization;
 mod local_class_names;
 mod overrides;
 mod progression;
@@ -46,10 +48,12 @@ mod references;
 mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
+
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
+pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrConstructorAccess, IrConstructorTarget};
@@ -2387,6 +2391,9 @@ pub struct IrFile {
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// JVM field name of a static whose source name its owner already uses for another static
+    /// field (a hoisted companion property beside a same-named `companion { … }` property).
+    jvm_static_field_names: std::collections::HashMap<u32, String>,
     /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by JVM property
     /// storage passes. Common lowering never populates this physical realization table.
     jvm_field_statics: std::collections::HashSet<u32>,
@@ -2525,6 +2532,8 @@ pub struct IrFile {
     /// `fn_context_counts`: Kotlin signs a context extension `(contexts…, receiver, values…)`, so the
     /// receiver is `params[0]` only when the function declares no `context(…)` clause.
     pub extension_receiver_fns: std::collections::HashSet<u32>,
+    /// Members this file's `companion { … }` blocks declared, placed on their classes.
+    pub companion_blocks: IrCompanionBlocks,
     /// Function id → how many of its LEADING physical parameters are context parameters. Class
     /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
     /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without
@@ -3037,6 +3046,8 @@ pub struct IrPackageFunction {
     pub infix: bool,
     /// A value parameter (context parameters excluded) or the extension receiver has a function type.
     pub has_function_typed_parameter: bool,
+    /// `companion fun C.name`: the receiver is a lookup coordinate, absent from the JVM method.
+    pub companion: bool,
     pub contract: Option<crate::contracts::ResolvedContract>,
     pub type_params: Vec<IrPackageTypeParameter>,
     pub context_count: usize,
@@ -3105,6 +3116,8 @@ pub struct IrModuleCallable {
     /// Resolved declaration annotations with only the compact constant-string payload needed by
     /// target realization. No source spelling, expression, or parser coordinate survives here.
     pub annotations: Box<[IrHeaderAnnotation]>,
+    /// Where the function lives when `owner` is absent.
+    pub placement: IrStaticPlacement,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3135,6 +3148,8 @@ pub struct IrModuleProperty {
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
     pub flags: crate::fir::DeclarationFlags,
+    /// Where the property lives when `owner` is absent.
+    pub placement: IrStaticPlacement,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3450,48 +3465,6 @@ impl IrFile {
             .iter()
             .position(|c| c.fq_name == internal)
             .map(|i| i as ClassId)
-    }
-
-    /// Record/query the JVM-only companion backing-storage realization selected after common
-    /// lowering. Keeping this in a backend-populated side table prevents a physical JVM layout bit
-    /// from becoming part of an ordinary common-IR static declaration.
-    pub(crate) fn mark_jvm_companion_hoisted_static(&mut self, index: u32) {
-        self.jvm_companion_hoisted_statics.insert(index);
-    }
-
-    pub(crate) fn mark_jvm_companion_property_static(
-        &mut self,
-        companion: TypeName,
-        property: u32,
-        index: u32,
-    ) {
-        self.jvm_companion_property_statics
-            .insert((companion, property), index);
-    }
-
-    pub(crate) fn jvm_companion_property_static(
-        &self,
-        companion: TypeName,
-        property: u32,
-    ) -> Option<u32> {
-        self.jvm_companion_property_statics
-            .get(&(companion, property))
-            .copied()
-    }
-
-    pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {
-        self.jvm_companion_hoisted_statics.contains(&index)
-    }
-
-    /// Record/query the `@JvmField` realization of a hoisted companion property: the static IS the
-    /// property's public JVM surface — no accessors, no `access$…$cp` bridges — so every reader and
-    /// writer goes `getstatic`/`putstatic` on the owner directly (kotlinc's shape).
-    pub(crate) fn mark_jvm_field_static(&mut self, index: u32) {
-        self.jvm_field_statics.insert(index);
-    }
-
-    pub(crate) fn is_jvm_field_static(&self, index: u32) -> bool {
-        self.jvm_field_statics.contains(&index)
     }
 
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {

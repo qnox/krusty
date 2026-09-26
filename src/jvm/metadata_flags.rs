@@ -87,5 +87,17 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     let return_value_status = ir.fn_return_value_statuses.get(&fid).map_or(0, |status| {
         status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
     });
-    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
+    // A `companion { … }` member is companion-associated, as kotlinc records it.
+    let companion = if ir.companion_blocks.is_function(fid) {
+        crate::metadata::function_flags::IS_COMPANION
+    } else {
+        0
+    };
+    (visibility << 1)
+        | (modality << 4)
+        | operator
+        | infix
+        | inline
+        | return_value_status
+        | companion
 }
