@@ -32,7 +32,7 @@ pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut 
 /// enters only there.
 pub(super) fn mark_dispatch(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
     mark_expression_start(ir, expression, code);
-    if let Some(&line) = ir.dispatch_lines.get(&expression) {
+    if let Some(line) = ir.dispatch_line(expression) {
         if line != 0 {
             code.mark_line(line);
         }
@@ -46,11 +46,10 @@ pub(super) fn mark_dispatch(ir: &IrFile, expression: ExprId, code: &mut CodeBuil
 /// to the pending return. A `return` written as a statement carries that line in the statement map
 /// rather than the per-expression one, so both are consulted.
 pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir
-        .implicit_return_end_lines
-        .get(&returned)
-        .or_else(|| ir.expr_source_lines.get(&returned))
-        .or_else(|| ir.expr_lines.get(&returned))
+    if let Some(line) = ir
+        .implicit_return_end_line(returned)
+        .or_else(|| ir.expr_source_lines.get(&returned).copied())
+        .or_else(|| ir.expr_lines.get(&returned).copied())
     {
         if line != 0 {
             code.mark_line(line);
