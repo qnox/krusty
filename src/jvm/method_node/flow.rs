@@ -68,7 +68,7 @@ impl MethodNode {
     /// Every label something in the method refers to: a jump or switch, a line number, a protected
     /// range or a local variable's range. ASM only creates such labels, so a label outside this set
     /// separates no two nodes in the list kotlinc's passes see.
-    pub fn referenced_labels(&self) -> BTreeSet<LabelId> {
+    pub(crate) fn referenced_labels(&self) -> BTreeSet<LabelId> {
         let mut labels = BTreeSet::new();
         for node in &self.nodes {
             match node {

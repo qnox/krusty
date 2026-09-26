@@ -108,6 +108,12 @@ mod tests {
     /// `kotlin.jvm.internal.Intrinsics.reifiedOperationMarker(1, "T")`, the placeholder of an
     /// `as T` on a reified `T`.
     fn marker() -> [Node; 3] {
+        call_named_marker("(ILjava/lang/String;)V", false)
+    }
+
+    /// A static call spelled `Intrinsics.reifiedOperationMarker` with `desc` and `interface`, after
+    /// the marker's two arguments.
+    fn call_named_marker(desc: &str, interface: bool) -> [Node; 3] {
         [
             op(ICONST_1),
             Node::Insn(Insn::Ldc(Constant::String("T".into()))),
@@ -115,8 +121,8 @@ mod tests {
                 op: INVOKESTATIC,
                 owner: "kotlin/jvm/internal/Intrinsics".to_string(),
                 name: "reifiedOperationMarker".to_string(),
-                desc: "(ILjava/lang/String;)V".to_string(),
-                interface: false,
+                desc: desc.to_string(),
+                interface,
             }),
         ]
     }
@@ -177,6 +183,26 @@ mod tests {
         let mut method = store(element);
         assert!(remove(&mut method));
         assert_eq!(method, store(Vec::new()));
+    }
+
+    /// Only the cast goes after a call that has the marker's name but not its descriptor, or that
+    /// is an interface method: the call and its arguments are ordinary bytecode.
+    #[test]
+    fn a_call_that_only_shares_the_markers_name_stays() {
+        for (desc, interface) in [
+            ("(ILjava/lang/String;)Ljava/lang/Object;", false),
+            ("(ILjava/lang/String;)V", true),
+        ] {
+            let mut element: Vec<Node> = call_named_marker(desc, interface).into();
+            element.push(cast("java/lang/Object"));
+            let mut method = store(element);
+            assert!(remove(&mut method), "{desc} interface={interface}");
+            assert_eq!(
+                method,
+                store(call_named_marker(desc, interface).into()),
+                "{desc} interface={interface}"
+            );
+        }
     }
 
     #[test]
