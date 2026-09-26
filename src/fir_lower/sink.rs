@@ -1251,7 +1251,13 @@ impl<'a> CommonIrBodySink<'a> {
                     .callable_parameter(callable.id, *ordinal as u32)
                     .is_some_and(|parameter| parameter.flags().is_vararg())
             }) {
-                self.ir.fn_vararg_index.insert(function, vararg);
+                self.ir.fn_varargs.insert(
+                    function,
+                    crate::ir::IrVarargParameter {
+                        index: vararg,
+                        is_last: vararg + 1 == signature.parameters.len(),
+                    },
+                );
             }
             attach_callable_generic_facts(index, declaration, function, self.ir);
             assert!(

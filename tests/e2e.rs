@@ -1100,6 +1100,10 @@ mod metadata_return_value_status_e2e;
 mod metadata_type_reference_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
 mod metadata_version_requirement_e2e;
+#[path = "method_access_flags_e2e.rs"]
+mod method_access_flags_e2e;
+#[path = "method_generic_signature_e2e.rs"]
+mod method_generic_signature_e2e;
 #[path = "method_pool_order_e2e.rs"]
 mod method_pool_order_e2e;
 #[path = "missing_return_check_e2e.rs"]
@@ -1345,6 +1349,8 @@ mod overloaded_extension_e2e;
 mod overloaded_inferred_return_e2e;
 #[path = "overloaded_receiver_extension_expectation_e2e.rs"]
 mod overloaded_receiver_extension_expectation_e2e;
+#[path = "override_type_parameter_bounds_e2e.rs"]
+mod override_type_parameter_bounds_e2e;
 #[path = "package_qualified_type_no_import_e2e.rs"]
 mod package_qualified_type_no_import_e2e;
 #[path = "pair_triple_e2e.rs"]

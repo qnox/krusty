@@ -112,46 +112,6 @@ fn supplied_constructor_parameters<'a>(
         })
 }
 
-/// Kotlin override declarations remain overridable unless explicitly final. Pass 1 already
-/// published their exact declaration edges, so this representation pass marks the corresponding
-/// IR methods without searching supertypes or comparing names.
-pub(crate) fn apply_override_final_drop(ir: &mut IrFile) {
-    let mut override_opens = HashSet::new();
-    for (&owner, edges) in &ir.function_overrides {
-        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
-            continue;
-        };
-        if class.is_interface {
-            continue;
-        }
-        for edge in edges {
-            if edge.implementation_owner != owner {
-                continue;
-            }
-            let function = edge.implementation_function.or_else(|| {
-                let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
-                    edge.implementation
-                else {
-                    return None;
-                };
-                ir.checked_callable_functions.get(&declaration).copied()
-            });
-            let Some(function) = function else {
-                continue;
-            };
-            if class.methods.contains(&function)
-                && ir
-                    .functions
-                    .get(function as usize)
-                    .is_some_and(|function| !function.is_static)
-            {
-                override_opens.insert(function);
-            }
-        }
-    }
-    ir.open_methods.extend(override_opens);
-}
-
 #[must_use]
 /// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
 /// value-class type to its single field's type, rewrite construction/sole-property access, and insert

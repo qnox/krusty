@@ -2586,9 +2586,10 @@ pub struct IrFile {
     /// classes from ordinary classes here. Expressions use the ordinary constructor frame (`this` =
     /// value 0, parameters = 1..=n) until a backend deliberately reframes them.
     class_ctor_defaults: std::collections::HashMap<TypeName, Vec<Option<u32>>>,
-    /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
-    /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
-    /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
+    /// Overridable methods: `open`, `abstract`, a non-`final` `override` (the data-class
+    /// `Object`-overrides among them), and interface members. Every other instance method is
+    /// final, in an open class as much as in a final one. The JVM backend omits `ACC_FINAL` for a
+    /// `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
@@ -2754,10 +2755,10 @@ pub struct IrFile {
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
     /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
-    /// SOURCE index of a member function's `vararg` parameter (receiver excluded) — class
-    /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
-    /// literal array (`too many arguments`).
-    pub fn_vararg_index: std::collections::HashMap<u32, usize>,
+    /// A declared function's `vararg` parameter — class `@Metadata` must emit
+    /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
+    /// arguments`).
+    pub fn_varargs: std::collections::HashMap<u32, IrVarargParameter>,
     /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
     /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
     /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
@@ -3589,7 +3590,7 @@ pub use generated_members::{
 mod function_parameters;
 pub use function_parameters::{
     FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
-    IrParameterProvenance, IrParameterRole,
+    IrParameterProvenance, IrParameterRole, IrVarargParameter,
 };
 mod traversal;
 pub use traversal::*;

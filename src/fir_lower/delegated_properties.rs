@@ -364,9 +364,11 @@ pub(super) fn materialize_member_delegate(
     if let Some(setter) = setter {
         ir.classes[class_id as usize].methods.push(setter);
     }
-    ir.fn_source_order.insert(getter, source_order);
-    if let Some(setter) = setter {
-        ir.fn_source_order.insert(setter, source_order);
+    for function in std::iter::once(getter).chain(setter) {
+        ir.fn_source_order.insert(function, source_order);
+        if property.flags.has(DeclarationFlags::OPEN) {
+            ir.open_methods.insert(function);
+        }
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {

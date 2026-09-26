@@ -3,6 +3,8 @@ use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
 mod context_parameters;
+mod value_parameters;
+pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod ranges;
@@ -853,24 +855,6 @@ pub enum FirControlTargetKind {
 pub struct FirControlTarget {
     pub origin: OriginId,
     pub kind: FirControlTargetKind,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirValueParameter {
-    pub origin: OriginId,
-    pub value: LocalValueId,
-    pub ty: ResolvedTy,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirDefaultValue {
-    pub origin: OriginId,
-    pub parameter: u32,
-    /// Checked declaration-boundary type of this default's parameter. Context type receivers are
-    /// not runtime value parameters, so their presence makes `parameter` unsuitable as an index
-    /// into [`FirBody::parameters`]. Lowering consumes this resolved type directly.
-    pub ty: ResolvedTy,
-    pub value: FirExprId,
 }
 
 /// One checked interface-delegate value evaluated at an anonymous-object construction site. The
@@ -1918,6 +1902,7 @@ pub struct FirBody {
     property_storage_type: Option<ResolvedTy>,
     property_delegate: Option<FirPropertyDelegatePlan>,
     debug_name: Option<Box<str>>,
+    vararg_parameter: Option<FirVarargParameter>,
     source_lambda: bool,
     debug_binding_name: Option<Box<str>>,
     /// Checked execution-scope fact; nested callable bodies own their own value.
@@ -1978,6 +1963,7 @@ impl FirBody {
             property_storage_type: None,
             property_delegate: None,
             debug_name: None,
+            vararg_parameter: None,
             source_lambda: false,
             debug_binding_name: None,
             direct_suspension: false,

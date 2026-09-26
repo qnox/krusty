@@ -39,6 +39,8 @@ pub(crate) struct OverrideInputShape<'a> {
     pub params: &'a [Ty],
     pub receiver: Option<Ty>,
     pub formals: &'a [String],
+    /// Declared upper bounds, parallel to `formals`; an empty slot is Kotlin's implicit `Any?`.
+    pub formal_bounds: &'a [Vec<Ty>],
     pub context_count: usize,
     pub suspend: bool,
 }
@@ -55,6 +57,7 @@ pub(crate) fn override_input_shapes_match(
     inherited.formals.len() == implementation.formals.len()
         && inherited.context_count == implementation.context_count
         && inherited.suspend == implementation.suspend
+        && override_formal_bounds_match(source, &inherited, &implementation)
         && override_parameter_types_match(
             source,
             inherited.params,
@@ -75,6 +78,39 @@ pub(crate) fn override_input_shapes_match(
             }
             (None, Some(_)) | (Some(_), None) => false,
         }
+}
+
+/// A declaration overrides only one whose type parameters carry the same upper bounds, compared
+/// after alpha-renaming both sides' formals: `fun <S : B> foo(s: S)` does not override
+/// `fun <S : A> foo(s: S)`, although both take one type-parameter value.
+fn override_formal_bounds_match(
+    source: &dyn SymbolSource,
+    inherited: &OverrideInputShape<'_>,
+    implementation: &OverrideInputShape<'_>,
+) -> bool {
+    let bounds = |shape: &OverrideInputShape<'_>, ordinal: usize| -> Vec<Ty> {
+        match shape.formal_bounds.get(ordinal).map(Vec::as_slice) {
+            None | Some([]) => vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+            Some(declared) => declared
+                .iter()
+                .map(|bound| crate::types::ty_canonicalize_params(*bound, shape.formals))
+                .collect(),
+        }
+    };
+    let equivalent = |left: Ty, right: Ty| {
+        left == right
+            || resolution_subtype(source, left, right) && resolution_subtype(source, right, left)
+    };
+    (0..inherited.formals.len()).all(|ordinal| {
+        let inherited = bounds(inherited, ordinal);
+        let implementation = bounds(implementation, ordinal);
+        inherited
+            .iter()
+            .all(|left| implementation.iter().any(|right| equivalent(*left, *right)))
+            && implementation
+                .iter()
+                .all(|right| inherited.iter().any(|left| equivalent(*left, *right)))
+    })
 }
 
 pub(super) fn declared_callables(
@@ -862,6 +898,7 @@ mod tests {
             params: &[],
             receiver: None,
             formals: &[],
+            formal_bounds: &[],
             context_count,
             suspend,
         };
@@ -880,6 +917,41 @@ mod tests {
             &source,
             shape(1, true),
             shape(1, false),
+        ));
+    }
+
+    #[test]
+    fn override_input_shape_includes_type_parameter_bounds() {
+        let source = crate::libraries::EmptySymbolSource;
+        let formals = ["S".to_string()];
+        let param = [Ty::ty_param("S", Ty::nullable(Ty::obj("kotlin/Any")))];
+        let wide = [vec![Ty::obj("app/Shape")]];
+        let narrow = [vec![Ty::obj("app/Circle")]];
+        let implicit = [Vec::new()];
+        let explicit_top = [vec![Ty::nullable(Ty::obj("kotlin/Any"))]];
+        let shape = |formal_bounds| OverrideInputShape {
+            params: &param,
+            receiver: None,
+            formals: &formals,
+            formal_bounds,
+            context_count: 0,
+            suspend: false,
+        };
+
+        assert!(override_input_shapes_match(
+            &source,
+            shape(&wide),
+            shape(&wide),
+        ));
+        assert!(!override_input_shapes_match(
+            &source,
+            shape(&wide),
+            shape(&narrow),
+        ));
+        assert!(override_input_shapes_match(
+            &source,
+            shape(&implicit),
+            shape(&explicit_top),
         ));
     }
 }
