@@ -4664,8 +4664,35 @@ shadow with no output change.
   method's entries are dropped when unreferenced but not moved; an `invokedynamic` interns its call
   site before its bootstrap arguments (`kt45444_privateFunInterface`'s `Foo`); an `ldc_w` whose entry
   moves below 256 stays `ldc_w`.
-- ☐ 5g–5i, 6. The rest of kotlinc's transformer order: no all-or-nothing rewrite, and the
-  mandatory steps.
+- ✅ 5g. No all-or-nothing rewrite over an empty local (`classfile/method_rewrite.rs`,
+  `classfile.rs` `add_method`). A local whose range holds no instruction (a `val` that is the last
+  statement of its block, a `for` variable with an empty body) now stays in the method through every
+  pass, as in kotlinc's method until `prepareForEmitting`: the store before it is a named local's,
+  which the temporaries pass leaves, and the final dead-code step drops the entry. Before, the entry
+  was dropped when the method was added, so the store was taken for a temporary nothing loads and
+  became a `nop`. The class-file boundary's exit for a local laid out with an empty range is gone
+  (the final dead-code step leaves none since 5d, which is also what made `someStuff`'s `test4` and
+  catch parameters with a discarded constant body rewritten); a method still written as emitted
+  (a pass declined it, no frames, or a coroutine transform's method no pass changed) drops its
+  empty locals when the class is written, as `prepareForEmitting` does for every method, and each
+  remaining reason a rewrite keeps a method as emitted is traced (`KRUSTY_TRACE=bytecode`). In the
+  2.4.20 box corpus 170 of the 25,406 classes krusty writes change against 5f and one is added
+  (without `JvmInlineKt`), in 158 box files, 171 methods: 41 methods become identical to kotlinc's
+  instructions and none stops being so; box files byte-identical to kotlinc go from 416 to 418
+  (`dataflow/scope1`, `deadCodeElimination/intersectingVariableRangeInFinally`) with none lost. Box
+  pass/fail is unchanged. `innerObjectRetransformation`'s `check` now gets its state machine and
+  continuation class `MainKt$check$1`, as kotlinc's does: the unused `val f: Unit` holding the
+  suspending call's result makes the call no tail call. Of the other changed methods 34 come closer
+  to kotlinc's listing, 21 are as close and 58 move further by an instruction diff: 52 of those are
+  the generated `illegalStep*`/`legalStepThenIllegalStep` tests, where the kept store is one kotlinc
+  also makes (`istore` of an empty `for` body's variable) inside a loop shape that already differed
+  (the `for`-loop port), and the rest keep a named local's store kotlinc keeps too, next to the
+  inliner's `$i$f$` marker locals kotlinc has and krusty does not.
+  `inline/genericFunctionReference` still keeps its `checkcast Z; aastore`: the method is not kept
+  as emitted, but the end label of `f$iv`'s range stands between the cast and the `aastore`, which
+  kotlinc's transformer also respects; kotlinc inlines `::Z` and has no cast there (inliner).
+- ☐ 5h–5i, 6. The rest of kotlinc's transformer order: the mandatory steps, and the emitter's
+  statement `if` values for PopBackward.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.
