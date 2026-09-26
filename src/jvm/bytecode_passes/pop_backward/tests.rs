@@ -278,3 +278,39 @@ fn the_index_order_finds_what_the_stack_order_finds() {
     };
     assert_eq!(run(true), run(false));
 }
+
+/// `iconst_0; pop` 500 times, then `return`: 1,001 frames, each `pop` removable.
+fn discarded_constants(max_locals: u16) -> MethodNode {
+    let mut nodes = Vec::new();
+    for _ in 0..500 {
+        nodes.extend([Op(ICONST_0), Op(POP)]);
+    }
+    nodes.push(Op(RETURN));
+    let mut method = body("()V", max_locals, &nodes);
+    method.max_stack = 1;
+    method
+}
+
+#[test]
+fn a_method_just_inside_the_source_analysis_limit_is_optimized() {
+    // 1,001 frames squared, 52 values wide: 49.7 MiB.
+    let mut method = discarded_constants(51);
+    assert_eq!(propagate(&mut method, "T"), Ok(true));
+    assert!(method
+        .instructions()
+        .all(|insn| matches!(opcode(insn), NOP | RETURN)));
+}
+
+#[test]
+fn a_method_over_the_source_analysis_limit_is_declined_before_the_analysis() {
+    // 53 values wide: 50.6 MiB. The body starts with a `pop` of an empty stack, which the analysis
+    // would reject; declining first leaves it, and the rest of the body, as it is.
+    let mut method = discarded_constants(52);
+    method.nodes.insert(0, Node::Insn(Insn::Op(POP)));
+    let emitted = method.clone();
+    assert_eq!(propagate(&mut method, "T"), Ok(false));
+    assert_eq!(method, emitted);
+    // The same body inside the limit reaches the analysis, which rejects it.
+    method.max_locals = 50;
+    assert!(propagate(&mut method, "T").is_err());
+}
