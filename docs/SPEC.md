@@ -4521,6 +4521,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after its metadata or when it is written; a single pass at write time dropped `A$B` and left `A`
   and `B` to intern after the attribute names. Test:
   `tests/inner_class_name_pool_order_e2e.rs::a_facade_interns_an_enclosing_row_its_nested_row_keeps`.
+- **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
+  interface's inherited members supertype by supertype in the order they are written, at every
+  level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`
+  bridges and `DefaultImpls` forwarders, and a class implementing `Child`, list `left` before
+  `right`. The interface closure walks every supertype list in declaration order; only the direct
+  list was ordered before, so siblings one level up came out reversed. Test:
+  `tests/class_member_order_e2e.rs::inherited_interface_members_follow_sibling_supertypes_in_declaration_order`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
