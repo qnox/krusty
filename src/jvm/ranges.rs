@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
 use crate::fir::FirRangeOperation;
-use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{
+    Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrProgressionSource, IrTypeOp,
+};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,9 +115,12 @@ pub(super) fn realize(
                 variable,
                 variable_name,
                 counter,
-                operation,
-                start,
-                end,
+                source:
+                    IrProgressionSource::Literal {
+                        operation,
+                        start,
+                        end,
+                    },
                 body,
                 label,
             }) => {
@@ -143,6 +148,9 @@ pub(super) fn realize(
                 ))?;
                 ir.exprs[expression] = replacement;
             }
+            // The checker counts an unsigned loop only over a range literal; any other checked
+            // progression stays unrealized and the emitter's `jvm_can_emit` check rejects it.
+            IrExpr::Checked(IrCheckedOperation::RangeLoop { .. }) => {}
             IrExpr::Checked(IrCheckedOperation::RangeContains {
                 operation,
                 value,
@@ -163,6 +171,9 @@ pub(super) fn realize(
                     },
                 ))?;
                 ir.exprs[expression] = replacement;
+            }
+            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
+                ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
             }
             IrExpr::Checked(
                 IrCheckedOperation::Call { .. }
@@ -263,7 +274,7 @@ fn unsigned_range_loop(
         body,
         label,
     } = lp;
-    let end_slot = next_value_slot(ir);
+    let end_slot = ir.next_value_slot();
     let variable_declaration = ir.add_expr(IrExpr::Variable {
         index: variable,
         ty: counter,
@@ -362,7 +373,7 @@ fn unsigned_range_contains(
     negated: bool,
     counter: Ty,
 ) -> Option<IrExpr> {
-    let value_slot = next_value_slot(ir);
+    let value_slot = ir.next_value_slot();
     let start_slot = value_slot.checked_add(1)?;
     let end_slot = value_slot.checked_add(2)?;
     let declarations = vec![
@@ -450,31 +461,29 @@ fn unsigned_compare_slots(
     }))
 }
 
-fn next_value_slot(ir: &IrFile) -> u32 {
-    let parameter_slots = ir
-        .functions
-        .iter()
-        .map(|function| {
-            function.params.len() as u32
-                + u32::from(function.dispatch_receiver.is_some() && !function.is_static)
-        })
-        .max()
-        .unwrap_or(0);
-    let used = ir
-        .exprs
-        .iter()
-        .fold(parameter_slots, |highest, expression| {
-            let index = match expression {
-                IrExpr::GetValue(index)
-                | IrExpr::SetValue { var: index, .. }
-                | IrExpr::Variable { index, .. } => Some(*index),
-                IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).max(),
-                IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => Some(*variable),
-                _ => None,
-            };
-            index.map_or(highest, |index| highest.max(index + 1))
-        });
-    used
+/// `throw IllegalArgumentException("Step must be positive, was: $step.")`, as the stdlib's `step`
+/// checks it.
+fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
+    let prefix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        crate::kt_string::KtString::from("Step must be positive, was: "),
+    )));
+    let suffix = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        crate::kt_string::KtString::from("."),
+    )));
+    let message = ir.add_expr(IrExpr::StringConcat(vec![prefix, step, suffix]));
+    let exception = ir.add_expr(IrExpr::New {
+        internal: crate::types::type_name("java/lang/IllegalArgumentException"),
+        args: vec![message],
+        ctor_params: None,
+        ctor_desc: Some("(Ljava/lang/String;)V".to_string()),
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    });
+    for expression in [prefix, suffix, message, exception] {
+        copy_expression_facts(ir, cause, expression);
+    }
+    IrExpr::Throw { operand: exception }
 }
 
 fn static_call(callable: crate::libraries::LibraryCallable, start: ExprId, end: ExprId) -> IrExpr {
@@ -515,33 +524,5 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if let Some(line) = ir.expr_end_lines.get(&source).copied() {
         ir.expr_end_lines.insert(target, line);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::next_value_slot;
-    use crate::fir::FirRangeOperation;
-    use crate::ir::{IrCheckedOperation, IrConst, IrExpr, IrFile};
-    use crate::types::Ty;
-
-    #[test]
-    fn a_checked_range_declaration_reserves_its_value_slot() {
-        let mut ir = IrFile::default();
-        let start = ir.add_expr(IrExpr::Const(IrConst::UInt(0)));
-        let end = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
-        let body = ir.add_expr(IrExpr::UnitInstance);
-        ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
-            variable: 7,
-            variable_name: None,
-            counter: Ty::UInt,
-            operation: FirRangeOperation::Through,
-            start,
-            end,
-            body,
-            label: "loop".to_string(),
-        }));
-
-        assert_eq!(next_value_slot(&ir), 8);
     }
 }

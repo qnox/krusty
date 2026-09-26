@@ -214,3 +214,69 @@ fn classpath_var_extension_property_uses_the_selected_metadata_accessors() {
         .expect("reference compiler unavailable");
     assert_eq!(out, "OK");
 }
+
+/// A counted loop over a progression value reads `first`, `last` and `step` as the members the
+/// checker selects on the progression's declaration. The stdlib provider must publish each of them
+/// as an external property of the progression's element type (`step` of its difference type).
+#[test]
+fn progression_classes_publish_first_last_and_step() {
+    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![common::stdlib_jar()])))
+        .expect("JVM provider initialization");
+    let resolver = krusty::symbol_resolver::SymbolResolver::new(&lib);
+    let classes = [
+        ("kotlin/ranges/IntRange", Ty::Int, Ty::Int),
+        ("kotlin/ranges/LongRange", Ty::Long, Ty::Long),
+        ("kotlin/ranges/CharRange", Ty::Char, Ty::Int),
+        ("kotlin/ranges/UIntRange", Ty::UInt, Ty::Int),
+        ("kotlin/ranges/ULongRange", Ty::ULong, Ty::Long),
+        ("kotlin/ranges/IntProgression", Ty::Int, Ty::Int),
+        ("kotlin/ranges/LongProgression", Ty::Long, Ty::Long),
+        ("kotlin/ranges/CharProgression", Ty::Char, Ty::Int),
+        ("kotlin/ranges/UIntProgression", Ty::UInt, Ty::Int),
+        ("kotlin/ranges/ULongProgression", Ty::ULong, Ty::Long),
+    ];
+    for (class, element, difference) in classes {
+        let receiver = Ty::obj(class);
+        assert!(
+            krusty::types::wk::progression_class(krusty::types::type_name(class)).is_some(),
+            "{class} is a well-known progression class"
+        );
+        for (member, expected) in [("first", element), ("last", element), ("step", difference)] {
+            let selected = resolver
+                .select_member_property(receiver, member)
+                .unwrap_or_else(|| panic!("{class}.{member} is selected from its declaration"));
+            assert_eq!(selected.ty, expected, "{class}.{member} type");
+            let property = selected
+                .property
+                .unwrap_or_else(|| panic!("{class}.{member} is a Kotlin property"));
+            assert!(
+                property.getter.external_property_identity.is_some(),
+                "{class}.{member} publishes an external property identity"
+            );
+        }
+    }
+    // A stepped progression moves `last` with the `getProgressionLastElement` overload over its
+    // element type (`Int` for a `Char` progression), selected from the stdlib's declarations.
+    let symbols = lib.symbols(
+        krusty::symbol_source::SymbolNamespace::Package(
+            krusty::types::wk::kotlin_internal_package(),
+        ),
+        krusty::types::wk::PROGRESSION_LAST_ELEMENT,
+    );
+    let (functions, _) = symbols.callables.clone().into_parts();
+    for element in [Ty::Int, Ty::Long, Ty::UInt, Ty::ULong] {
+        let overload = functions
+            .overloads
+            .iter()
+            .find(|function| {
+                matches!(function.callable.params.as_slice(), [first, last, _]
+                    if *first == element && *last == element)
+                    && function.callable.ret == element
+            })
+            .unwrap_or_else(|| panic!("getProgressionLastElement over {element:?} is declared"));
+        assert!(
+            overload.callable.external_identity.is_some(),
+            "getProgressionLastElement over {element:?} publishes an external identity"
+        );
+    }
+}

@@ -770,6 +770,10 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::Count
                 | crate::libraries::CompilerIntrinsic::TrimIndent
                 | crate::libraries::CompilerIntrinsic::TrimMargin
+                | crate::libraries::CompilerIntrinsic::RangeDownTo
+                | crate::libraries::CompilerIntrinsic::RangeUntil
+                | crate::libraries::CompilerIntrinsic::ProgressionStep
+                | crate::libraries::CompilerIntrinsic::ProgressionReversed
                 | crate::libraries::CompilerIntrinsic::NumericConversion
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | crate::libraries::CompilerIntrinsic::PrimitiveCompare
@@ -845,8 +849,18 @@ pub(super) fn realize(
                     } else {
                         let semantic_array_declaration =
                             crate::types::Ty::obj_name(callable.owner).is_array();
+                        let (owner, interface) = if semantic_array_declaration {
+                            (callable.owner, callable.owner_is_interface)
+                        } else {
+                            call_site_owner(
+                                classpath,
+                                callable.owner,
+                                callable.owner_is_interface,
+                                ir.ext_call_source_receiver.get(&expression).copied(),
+                            )
+                        };
                         *callee = Callee::Virtual {
-                            owner: callable.owner,
+                            owner,
                             name: callable.name,
                             descriptor,
                             // Primitive/reference arrays are Kotlin classifiers but have no JVM
@@ -856,7 +870,7 @@ pub(super) fn realize(
                             // their provider descriptor as the sole physical source.
                             params: semantic_array_declaration
                                 .then_some((semantic_params.clone(), semantic_ret)),
-                            interface: callable.owner_is_interface,
+                            interface,
                         };
                     }
                 }
@@ -956,6 +970,57 @@ pub(super) fn realize(
         )?);
     }
     Ok(())
+}
+
+/// The class a virtual call names. kotlinc calls an inherited member through the dispatch
+/// receiver's own class, whose fake override FIR2IR selects (`IntRange.getFirst`, not
+/// `IntProgression.getFirst`), unless that class does not inherit the member or an interface
+/// receiver reaches a class member (`toString` on an interface stays `Object.toString`). A class
+/// the call site cannot name (a package-private JDK base) never becomes the owner.
+fn call_site_owner(
+    classpath: &Classpath,
+    declared: crate::types::TypeName,
+    declared_is_interface: bool,
+    receiver: Option<crate::types::Ty>,
+) -> (crate::types::TypeName, bool) {
+    let declaration = (declared, declared_is_interface);
+    let Some(receiver) = receiver
+        .and_then(|receiver| receiver.non_null().obj_internal())
+        .and_then(|receiver| classpath.find_name(receiver))
+    else {
+        return declaration;
+    };
+    let receiver_is_interface = receiver.access & crate::jvm::classfile::ACC_INTERFACE != 0;
+    if receiver.this_class == declared
+        || receiver.access & crate::jvm::classfile::ACC_PUBLIC == 0
+        || (receiver_is_interface && !declared_is_interface)
+        || !inherits_from(classpath, receiver.this_class, declared)
+    {
+        return declaration;
+    }
+    (receiver.this_class, receiver_is_interface)
+}
+
+fn inherits_from(
+    classpath: &Classpath,
+    class: crate::types::TypeName,
+    ancestor: crate::types::TypeName,
+) -> bool {
+    let mut pending = vec![class];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = pending.pop() {
+        if current == ancestor {
+            return true;
+        }
+        if !seen.insert(current) {
+            continue;
+        }
+        if let Some(info) = classpath.find_name(current) {
+            pending.extend(info.super_class);
+            pending.extend(info.interfaces.iter_ids());
+        }
+    }
+    false
 }
 
 fn external_constructor_descriptor(

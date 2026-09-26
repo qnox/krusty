@@ -213,6 +213,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         }
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => reject("range counter", *counter),
+        IrCheckedOperation::IllegalProgressionStep { .. } => Ok(()),
         IrCheckedOperation::CallableReference {
             function_type,
             substitutions,

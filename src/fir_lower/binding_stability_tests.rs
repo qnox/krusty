@@ -42,9 +42,11 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
         variable: 2,
         variable_name: Some("element".into()),
         counter: Ty::Int,
-        operation: FirRangeOperation::Until,
-        start,
-        end,
+        source: crate::ir::IrProgressionSource::Literal {
+            operation: FirRangeOperation::Until,
+            start,
+            end,
+        },
         body,
         label: "loop".to_string(),
     }));

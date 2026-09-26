@@ -67,4 +67,10 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
+    /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
+    /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
+    RangeDownTo,
+    RangeUntil,
+    ProgressionStep,
+    ProgressionReversed,
 }

@@ -11,17 +11,6 @@ pub struct PlatformAccessor {
     pub descriptor: String,
 }
 
-/// The platform/library shape of a range-like type that can be iterated as a counted loop. This keeps
-/// library class names, mangled value-class accessors, and backend descriptors out of common lowering.
-#[derive(Clone, Debug)]
-pub struct CountedLoopInfo {
-    pub elem: Ty,
-    pub first: PlatformAccessor,
-    pub last: PlatformAccessor,
-    /// `None` for unit-step ranges; `Some` for progressions whose step is read from the value.
-    pub step: Option<(PlatformAccessor, Ty)>,
-}
-
 /// Platform construction plan for a Kotlin range value expression. `elem` is the semantic element
 /// type operands coerce to; `through` constructs `a..b`; `until` realizes `a..<b` when supported.
 #[derive(Clone, Debug)]

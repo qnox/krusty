@@ -724,15 +724,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
         Vec::new()
     }
-
-    /// Element type for platform iterable/range/progression values.
-    fn iterable_element_type(&self, _internal: &str) -> Option<Ty> {
-        None
-    }
-
-    fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
-        None
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

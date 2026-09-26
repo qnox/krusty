@@ -170,6 +170,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *start = map(*start);
                 *end = map(*end);
             }
+            IrCheckedOperation::IllegalProgressionStep { step } => *step = map(*step),
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {
@@ -177,11 +178,8 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *start = map(*start);
                 *end = map(*end);
             }
-            IrCheckedOperation::RangeLoop {
-                start, end, body, ..
-            } => {
-                *start = map(*start);
-                *end = map(*end);
+            IrCheckedOperation::RangeLoop { source, body, .. } => {
+                source.map_operands(&mut map);
                 *body = map(*body);
             }
             IrCheckedOperation::CallableReference {
