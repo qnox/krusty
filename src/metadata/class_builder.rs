@@ -123,9 +123,9 @@ pub struct FnMeta {
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
-    /// Per-parameter `DECLARES_DEFAULT_VALUE` for a DECLARED member (`fun f(a: Int, b: Int = 2)`),
-    /// parallel to `params` (empty = none default). Composes with `params_have_defaults`.
-    pub param_defaults: Vec<bool>,
+    /// What each parameter of a DECLARED member wrote (`fun f(a: Int, b: Int = 2)`), parallel to
+    /// `params` (empty = nothing). Composes with `params_have_defaults`.
+    pub param_modifiers: Vec<crate::metadata::DeclaredValueParameter>,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
     /// (f4), the only place vararg-ness survives into metadata.
     pub vararg_index: Option<usize>,
@@ -172,7 +172,7 @@ impl FnMeta {
             has_function_typed_parameter: false,
             params_have_defaults: false,
             receiver: None,
-            param_defaults: Vec::new(),
+            param_modifiers: Vec::new(),
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
@@ -544,6 +544,23 @@ pub enum ClassMemberOrder {
     EnumEntry(usize),
 }
 
+/// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
+#[derive(Clone, Copy, Debug)]
+pub enum CapturedTypeParameters<'a> {
+    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
+    /// first.
+    Reserved(&'a [String]),
+    /// A local or anonymous class's: its own parameters come first, and each captured one takes
+    /// the next id on first use (see `TypeParameters`).
+    NumberedOnUse(&'a [String]),
+}
+
+impl Default for CapturedTypeParameters<'_> {
+    fn default() -> Self {
+        Self::Reserved(&[])
+    }
+}
+
 pub struct ClassTail<'a> {
     /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
     /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
@@ -613,8 +630,8 @@ pub struct ClassTail<'a> {
     pub type_params: &'a [String],
     pub type_param_bounds: &'a [crate::ir::IrTypeParameter],
     /// Enclosing declaration parameters referenced by this class's members. Kotlin metadata does
-    /// not repeat their declarations, but reserves their IDs before this class's own parameters.
-    pub captured_type_params: &'a [String],
+    /// not repeat their declarations.
+    pub captured_type_params: CapturedTypeParameters<'a>,
     /// Resolved identities of direct sealed subtypes.
     pub sealed_subclasses: &'a [TypeName],
     /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
@@ -663,7 +680,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: &[],
+            captured_type_params: CapturedTypeParameters::Reserved(&[]),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &[],
@@ -728,9 +745,16 @@ pub fn build_class(
         tail.type_params.len(),
         "metadata class type parameters require semantic identities"
     );
-    let captured_count = tail.captured_type_params.len();
-    let mut class_type_parameters = TypeParameters::new();
-    for (index, semantic) in tail.captured_type_params.iter().enumerate() {
+    let (reserved, numbered_on_use) = match tail.captured_type_params {
+        CapturedTypeParameters::Reserved(parameters) => (parameters, &[][..]),
+        CapturedTypeParameters::NumberedOnUse(parameters) => (&[][..], parameters),
+    };
+    let captured_count = reserved.len();
+    let mut class_type_parameters = TypeParameters::classifier(
+        captured_count + tail.type_params.len(),
+        numbered_on_use.iter().cloned(),
+    );
+    for (index, semantic) in reserved.iter().enumerate() {
         class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
     }
     for (index, (source, parameter)) in tail
@@ -769,12 +793,30 @@ pub fn build_class(
         })
         .collect();
 
-    // Enums use `Enum<E>`; classes without declarations use `Any`.
+    // An enum lists its declared interfaces, then the implicit `Enum<E>`; a class without declared
+    // supertypes lists `Any`.
     let mut supertype_msgs: Vec<Pb> = Vec::new();
     if !enum_entries.is_empty() {
+        for (index, supertype) in tail.supertypes.iter().enumerate() {
+            if matches!(supertype, Ty::Obj(classifier, _) if *classifier == crate::types::wk::kotlin_enum())
+            {
+                continue;
+            }
+            supertype_msgs.push(type_pb_declared(
+                &mut st,
+                *supertype,
+                tail.supertype_spellings
+                    .get(index)
+                    .unwrap_or(crate::spelling::Spelled::NONE),
+                &class_type_parameters,
+            ));
+        }
         supertype_msgs.push(type_pb(
             &mut st,
-            Ty::obj_args("kotlin/Enum", &[Ty::obj_name(class_internal)]),
+            Ty::obj_args_name(
+                crate::types::wk::kotlin_enum(),
+                &[Ty::obj_name(class_internal)],
+            ),
             &class_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
@@ -820,7 +862,7 @@ pub fn build_class(
                 vararg_index: tail.ctor_vararg_index,
                 annotations: tail.primary_ctor_annotations,
             },
-            &class_type_parameters,
+            &class_type_parameters.member(0).0,
         )]
     } else {
         Vec::new()
@@ -841,7 +883,7 @@ pub fn build_class(
                 vararg_index: sc.vararg_index,
                 annotations: sc.annotations,
             },
-            &class_type_parameters,
+            &class_type_parameters.member(0).0,
         ));
     }
 
@@ -849,7 +891,8 @@ pub fn build_class(
         let mut prop = Pb::new();
         // kotlinc's serializer names a type parameter the declaration being written owns
         // (`Type.type_parameter_name`) and addresses an enclosing class's by table id.
-        let mut property_type_parameters = class_type_parameters.clone();
+        let (mut property_type_parameters, first_own) =
+            class_type_parameters.member(p.type_params.len());
         property_type_parameters.extend(semantic_named_type_parameters(
             p.type_params
                 .iter()
@@ -869,9 +912,9 @@ pub fn build_class(
         };
         // The setter is a declaration of its own: the property's type parameters are not its own,
         // so its value parameter addresses them by table id.
-        let mut setter_type_parameters = class_type_parameters.clone();
+        let (mut setter_type_parameters, _) = property_type_parameters.member(0);
         for (index, parameter) in p.type_params.iter().enumerate() {
-            let id = TypeParameterRef::Id((captured_count + tail.type_params.len() + index) as u64);
+            let id = TypeParameterRef::Id(first_own + index as u64);
             setter_type_parameters.insert(parameter.name.clone(), id.clone());
             setter_type_parameters.insert(parameter.semantic_name.clone(), id);
         }
@@ -895,7 +938,7 @@ pub fn build_class(
         });
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
         for (index, parameter) in p.type_params.iter().enumerate() {
-            let id = captured_count + tail.type_params.len() + index;
+            let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
@@ -1098,7 +1141,8 @@ pub fn build_class(
                       m: &FnMeta| {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
-        let mut function_type_parameters = class_type_parameters.clone();
+        let (mut function_type_parameters, first_own) =
+            class_type_parameters.member(m.type_params.len());
         assert_eq!(
             m.semantic_type_params.len(),
             m.type_params.len(),
@@ -1110,7 +1154,7 @@ pub fn build_class(
             m.semantic_type_params.iter().map(String::as_str),
         ));
         for (index, name) in m.type_params.iter().enumerate() {
-            let id = captured_count + tail.type_params.len() + index;
+            let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
@@ -1179,12 +1223,13 @@ pub fn build_class(
             let annotations = m.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
             // `ValueParameter.flags` (f1): DECLARES_DEFAULT_VALUE for a defaulted parameter,
             // HAS_ANNOTATIONS when the f7 records below are written. Both precede the name.
-            let flags =
-                if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
-                    DECLARES_DEFAULT_VALUE
-                } else {
-                    0
-                } | if records_annotations(annotations) {
+            let declared = m.param_modifiers.get(i).copied().unwrap_or_default();
+            let flags = if m.params_have_defaults {
+                DECLARES_DEFAULT_VALUE
+            } else {
+                0
+            } | declared.flags()
+                | if records_annotations(annotations) {
                     HAS_ANNOTATIONS
                 } else {
                     0
@@ -1705,7 +1750,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1727,7 +1772,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1749,7 +1794,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1771,7 +1816,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1793,7 +1838,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1815,7 +1860,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,

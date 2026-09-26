@@ -88,7 +88,7 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
-use super::metadata_flags::{class_metadata_flags, function_flags};
+use super::metadata_flags::{class_metadata_flags, declared_value_parameters, function_flags};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -779,24 +779,6 @@ fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> 
     field_nullability_kind(ir, fq_name, name, t) == 1
 }
 
-/// Field indices a class `init_body` assigns a compile-time literal — a BODY property such as
-/// `val y: Int = 2`. kotlinc sets `Property.hasConstant` for exactly these.
-fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
-    let mut out = std::collections::HashSet::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if matches!(ir.expr(*value), IrExpr::Const(_)) {
-                out.insert(*index);
-            }
-        }
-    }
-    out
-}
-
 /// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
 /// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
 /// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
@@ -1099,7 +1081,6 @@ fn build_class_metadata(
     // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
     let names_local =
         |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
-    let const_fields = init_body_constant_fields(ir, c);
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
@@ -1208,12 +1189,13 @@ fn build_class_metadata(
                     // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
                     // HAS_CONSTANT flag exactly like an instance-field one.
                     has_constant: backing.is_some_and(|(index, field)| {
-                        field.is_final()
-                            && index >= c.ctor_param_count
-                            && const_fields.contains(&index)
-                    }) || hoisted_static_for(ir, c, property_index).is_some_and(
-                        |s| !s.is_var && static_fields::const_value_idx_peek(ir, s.init),
-                    ),
+                        field.is_final() && index >= c.ctor_param_count
+                    }) && property
+                        .initializer
+                        .is_some_and(|init| static_fields::const_value_idx_peek(ir, init))
+                        || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
+                            !s.is_var && static_fields::const_value_idx_peek(ir, s.init)
+                        }),
                     is_const: false,
                     modifiers: property.modifiers,
                     setter_is_private: property.setter_is_private,
@@ -1670,18 +1652,16 @@ fn build_class_metadata(
                     .take(member_context_count)
                     .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
-                // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
-                // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
-                let param_defaults: Vec<bool> = ir
-                    .param_defaults(fid)
-                    .map(|ds| {
-                        ds.iter()
-                            .enumerate()
-                            .filter(|(i, _)| receiver_index != Some(*i))
-                            .map(|(_, d)| d.is_some())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // Per-parameter declaration facts. Only the defaults the declaration writes itself
+                // count; an override's inherited defaults stay with the declaration it overrides.
+                let defaults = ir.declared_param_defaults(fid).into_iter().flat_map(|ds| {
+                    let own = ds
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| receiver_index != Some(*i));
+                    own.map(|(_, d)| d.is_some())
+                });
+                let param_modifiers = declared_value_parameters(ir, fid, defaults);
                 // Recorded exactly when a reader cannot rebuild the physical descriptor from the
                 // declared types (kotlinc's `requiresFunctionSignature`).
                 let physical = crate::jvm::names::method_descriptor(&f.params, f.ret);
@@ -1719,7 +1699,7 @@ fn build_class_metadata(
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     has_function_typed_parameter: ir.function_typed_parameter_fns.contains(&fid),
                     params_have_defaults: false,
-                    param_defaults,
+                    param_modifiers,
                     vararg_index,
                     context_count: member_context_count,
                     context_parameter_kinds,
@@ -1795,7 +1775,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1834,7 +1814,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1860,7 +1840,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1887,7 +1867,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1914,7 +1894,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1946,7 +1926,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
@@ -1968,7 +1948,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
@@ -1990,7 +1970,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),
@@ -2186,7 +2166,7 @@ fn build_class_metadata(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: &c.captured_type_params,
+            captured_type_params: super::local_classifiers::captured_type_parameters(c),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
