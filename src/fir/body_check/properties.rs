@@ -312,16 +312,20 @@ impl BodyFirChecker<'_> {
             .or_else(|| self.index.enclosing_classifier(owner))
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let current_storage_owner = self.current_storage_owner();
+        // An inherited member is read through the current instance, which a superclass
+        // constructor's arguments cannot use: there a supertype names an enclosing instance
+        // (`object : A(b)` inside `A`, an inner class's outer `A` whose inner chain extends `A`).
         let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
             current == owner
-                || self
-                    .index
-                    .classifier_hierarchy(current)
-                    .is_some_and(|hierarchy| {
-                        hierarchy
-                            .iter()
-                            .any(|entry| entry.classifier == classifier.classifier)
-                    })
+                || !self.constructor_prefix_capture_access
+                    && self
+                        .index
+                        .classifier_hierarchy(current)
+                        .is_some_and(|hierarchy| {
+                            hierarchy
+                                .iter()
+                                .any(|entry| entry.classifier == classifier.classifier)
+                        })
         });
         if current_storage_is_owner && self.body.local_callable().is_none() {
             let depth = self

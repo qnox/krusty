@@ -46,7 +46,6 @@ casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
 casts/objectToPrimitiveWithAssertion.kt
 classes/kt2224.kt
-classes/selfcreate.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
 collections/clashWithInternalMapMethod.kt
@@ -210,8 +209,6 @@ inlineClasses/boxReturnValueOnOverride/kt31585.kt
 inlineClasses/boxReturnValueOnOverride/kt31585Generic.kt
 inlineClasses/callableReferences/inlineClassPrimaryConstructor.kt
 inlineClasses/callableReferences/inlineClassPrimaryConstructorGeneric.kt
-inlineClasses/checkForInstanceOfInlineClass.kt
-inlineClasses/checkForInstanceOfInlineClassGeneric.kt
 inlineClasses/checkUnboxingResultFromTypeVariableGeneric.kt
 inlineClasses/checkUnboxingResultFromTypeVariableGeneric2.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion.kt
@@ -265,7 +262,6 @@ inlineClasses/unboxNullableValueOfInlineClassWithNullablePrimitiveUnderlyingType
 inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
-innerNested/superConstructorCall/deepInnerHierarchy.kt
 intrinsics/kt8666.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
@@ -284,7 +280,6 @@ multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/kt66970.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
-nullCheckOptimization/isNullable.kt
 nullCheckOptimization/kt22410.kt
 objects/flist.kt
 objects/interfaceCompanionObjectReference.kt
@@ -341,18 +336,11 @@ reified/catchParameter/tryCatchReifiedType.kt
 reified/extensionLambda.kt
 reified/extensionMethod.kt
 reified/innerObject.kt
-reified/isBool.kt
-reified/isChar.kt
-reified/isClass.kt
-reified/isNumber.kt
-reified/isString.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
 reified/method.kt
-reified/reifiedChain.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
-reified/withInlineTurnedOff.kt
 safeCall/parenthesizedSafeCallsAndOperators.kt
 sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt

@@ -91,7 +91,7 @@ mod tests {
             &[],
             0,
             &mut cw,
-            &super::super::ReifiedArguments::default(),
+            &crate::jvm::reified_arguments::ReifiedArguments::default(),
         )
         .expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
@@ -127,7 +127,7 @@ mod tests {
             &[],
             0,
             &mut cw,
-            &super::super::ReifiedArguments::default(),
+            &crate::jvm::reified_arguments::ReifiedArguments::default(),
         )
         .expect("terminal branchless splice");
 

@@ -49,6 +49,20 @@ impl Emitter<'_> {
         }
         let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
         match op {
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf if type_operand.is_nullable() => {
+                if physical_arg.is_jvm_scalar() {
+                    box_prim_free(
+                        self.cw,
+                        code,
+                        semantic_scalar_adapter(semantic_arg, physical_arg),
+                    );
+                }
+                self.emit_nullable_instance_check(&internal, code);
+                if op == IrTypeOp::NotInstanceOf {
+                    code.push_int(1, self.cw);
+                    code.ixor();
+                }
+            }
             IrTypeOp::InstanceOf => {
                 if physical_arg.is_jvm_scalar() {
                     box_prim_free(
@@ -113,6 +127,23 @@ impl Emitter<'_> {
             }
             IrTypeOp::SafeCast => {}
         }
+    }
+
+    /// `is T?` for a type the checker could not expand into `x == null || x is T`: a reified type
+    /// argument substituted with a nullable type. kotlinc's `generateIsCheck` accepts `null`
+    /// before the `instanceof` itself.
+    pub(super) fn emit_nullable_instance_check(&mut self, internal: &str, code: &mut CodeBuilder) {
+        let null = code.new_label();
+        let end = code.new_label();
+        code.dup();
+        code.ifnull(null);
+        let class = self.cw.class_ref(internal);
+        code.instance_of(class);
+        code.goto(end);
+        code.bind(null);
+        code.pop();
+        code.push_int(1, self.cw);
+        code.bind(end);
     }
 
     fn emit_non_null_cast(
