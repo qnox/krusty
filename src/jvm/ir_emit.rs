@@ -10008,19 +10008,11 @@ impl<'a> Emitter<'a> {
         }
         // The splice substitutes each literal the body's invokes expand, `crossinline` included; a
         // `noinline` literal stays an ordinary argument.
-        let mut lambda_parameters = Vec::new();
-        for (index, &argument) in args.iter().enumerate() {
-            match self.is_inlined_literal(
-                call_expression,
-                leading_non_argument_operands,
-                index,
-                argument,
-            ) {
-                Ok(true) => lambda_parameters.push(index),
-                Ok(false) => {}
-                Err(_) => return false,
-            }
-        }
+        let Ok(lambda_parameters) =
+            self.inlined_literal_positions(call_expression, leading_non_argument_operands, args)
+        else {
+            return false;
+        };
         // ONE plan for caller locals: where the relocated host body ends, and where each
         // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
         // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
@@ -10846,23 +10838,19 @@ impl<'a> Emitter<'a> {
             if !self.ir.call_inline_modifiers.contains_key(&call_expression) {
                 return false;
             }
-            let mut inlines_literal = false;
-            for (index, &argument) in args.iter().enumerate() {
-                match self.is_inlined_literal(
-                    call_expression,
-                    leading_non_argument_operands,
-                    index,
-                    argument,
-                ) {
-                    Ok(inlined) => inlines_literal |= inlined,
-                    Err(reason) => {
-                        self.run.set_inline_bail(reason);
-                        return true;
-                    }
+            match self.inlined_literal_positions(
+                call_expression,
+                leading_non_argument_operands,
+                &args,
+            ) {
+                Ok(positions) if positions.is_empty() => {
+                    return self.try_inline_classpath_body(&inline_call, code).is_some();
                 }
-            }
-            if !inlines_literal {
-                return self.try_inline_classpath_body(&inline_call, code).is_some();
+                Ok(_) => {}
+                Err(reason) => {
+                    self.run.set_inline_bail(reason);
+                    return true;
+                }
             }
             // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
             // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the

@@ -526,6 +526,28 @@ impl Emitter<'_> {
         Ok(*modifier != crate::types::InlineParameterModifier::Noinline)
     }
 
+    /// The positions of `args` holding a literal the inline body's invokes expand, by
+    /// [`Self::is_inlined_literal`].
+    pub(super) fn inlined_literal_positions(
+        &self,
+        call_expression: u32,
+        leading_non_argument_operands: usize,
+        args: &[u32],
+    ) -> Result<Vec<usize>, &'static str> {
+        let mut positions = Vec::new();
+        for (index, &argument) in args.iter().enumerate() {
+            if self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            )? {
+                positions.push(index);
+            }
+        }
+        Ok(positions)
+    }
+
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
     /// argument that is already a local from that local (`genOrGetLocal`); its extension receiver
     /// is always stored. When the body loads its parameters first, the stored arguments are instead
