@@ -140,3 +140,77 @@ fn dependency_property_references_bind_the_recorded_accessors() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(result, "OK");
 }
+
+const BUILTIN_SOURCE: &str = r#"package app
+
+enum class Mode { Idle, Busy }
+
+class Fault(reason: Fault?) : Throwable(null, reason)
+
+fun box(): String {
+    val name = Mode::name
+    val ordinal = Mode::ordinal
+    val reason = Fault::cause
+    if (name.get(Mode.Busy) != "Busy") return "name reached the platform field"
+    if (ordinal.get(Mode.Busy) != 1) return "ordinal reached the platform field"
+    val inner = Fault(null)
+    if (reason.get(Fault(inner)) !== inner) return "cause reached the platform field"
+    return "OK"
+}
+"#;
+
+/// A Kotlin builtin realized by a platform class declares only its Kotlin members: `Mode::name`
+/// is `Enum.name`, read through `name()`, never `java.lang.Enum`'s private `name` field, and
+/// `Fault::cause` is `Throwable.cause`, never `java.lang.Throwable`'s private `cause` field.
+#[test]
+fn builtin_property_references_bind_kotlin_members_not_platform_fields() {
+    let dir = common::scratch_dir().expect("scratch directory");
+    let reference_out = dir.join("ref");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let source = dir.join("Builtins.kt");
+    std::fs::write(&source, BUILTIN_SOURCE).expect("write source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+
+    let jdk = common::jdk_modules();
+    let ours = common::compile_in_process(
+        BUILTIN_SOURCE,
+        "Builtins",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("krusty compiles the fixture");
+
+    let carriers = [
+        "app/BuiltinsKt$box$name$1",
+        "app/BuiltinsKt$box$ordinal$1",
+        "app/BuiltinsKt$box$reason$1",
+    ];
+    let mismatched = carriers
+        .iter()
+        .filter(|class| {
+            let reference = std::fs::read(reference_out.join(format!("{class}.class")))
+                .unwrap_or_else(|error| panic!("kotlinc did not emit {class}: {error}"));
+            let (_, bytes) = ours
+                .iter()
+                .find(|(name, _)| name == *class)
+                .unwrap_or_else(|| panic!("krusty did not emit {class}"));
+            *bytes != reference
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mismatched,
+        Vec::<&&str>::new(),
+        "carriers differ from kotlinc"
+    );
+
+    let result =
+        common::run_box(&ours, "app.BuiltinsKt", &[common::stdlib_jar()]).expect("box runner");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(result, "OK");
+}
