@@ -270,14 +270,12 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
             }
         }
 
-        /// The operand of a `return` or a coercion. When it is the self-call itself, the step
-        /// takes the holder's place: it leaves the turn and yields nothing to return or convert.
+        /// The operand of a `return` or a coercion. The holder's edge travels down through
+        /// transparent coercions, so a self-call reached through them takes the holder's place:
+        /// the step leaves the turn and yields nothing to return or convert. A block or `when`
+        /// replaces the edge with its own child edges; any other node drops it.
         fn visit_held(&mut self, held: ExprId, tail: bool, holder: Option<Edge>) {
-            let direct = matches!(
-                self.ir.expr(held),
-                IrExpr::Call { .. } | IrExpr::MethodCall { .. }
-            );
-            self.visit(held, tail, if direct { holder } else { None });
+            self.visit(held, tail, holder);
         }
 
         fn is_self_call(&self, call: ExprId) -> bool {
@@ -696,6 +694,15 @@ fn fillable_defaults(ir: &IrFile, frame: &Frame, positions: impl Iterator<Item =
     })
 }
 
+/// The children of `expression` that read this frame's slots. A lambda's inline body numbers its
+/// slots from the lambda's own frame, so only its captures belong to this one.
+fn for_each_frame_child(ir: &IrFile, expression: ExprId, f: &mut impl FnMut(ExprId)) {
+    match ir.expr(expression) {
+        IrExpr::Lambda { captures, .. } => captures.iter().copied().for_each(f),
+        _ => crate::ir::for_each_child(&ir.exprs, expression, f),
+    }
+}
+
 fn reads_value(ir: &IrFile, root: ExprId, matches: &dyn Fn(u32) -> bool) -> bool {
     let mut pending = vec![root];
     let mut seen = std::collections::HashSet::new();
@@ -706,7 +713,7 @@ fn reads_value(ir: &IrFile, root: ExprId, matches: &dyn Fn(u32) -> bool) -> bool
         if matches!(ir.expr(expression), IrExpr::GetValue(slot) if matches(*slot)) {
             return true;
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
     }
     false
 }
@@ -961,7 +968,7 @@ fn step_assignments(
                 }
                 continue;
             }
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+            for_each_frame_child(ir, expression, &mut |child| pending.push(child));
         }
     }
 
@@ -1132,6 +1139,58 @@ mod tests {
         ir.exprs.iter().any(|expression| {
             matches!(expression, IrExpr::Continue { label: Some(label) } if label == LOOP_LABEL)
         })
+    }
+
+    /// `return step(n)` whose value reaches the return through a coercion (an erased result, an
+    /// elvis operand widened to the declared type) is still a tail call. The step takes the
+    /// RETURN's place: no coercion is left holding it, and nothing is returned.
+    #[test]
+    fn a_self_call_under_a_coercion_replaces_its_return() {
+        let mut ir = file();
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let coerced = ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: Ty::nullable(Ty::Int),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(coerced)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        let body = finish_tailrec_body(
+            &mut ir,
+            vec![returned, tail],
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: None,
+                    first_parameter: 0,
+                },
+                1,
+            ),
+            false,
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+
+        assert!(steps(&ir), "the coerced self call is the loop step");
+        let mut reachable = vec![body];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(expression) = reachable.pop() {
+            if seen.insert(expression) {
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                    reachable.push(child)
+                });
+            }
+        }
+        assert!(
+            !seen.contains(&returned) && !seen.contains(&coerced) && !seen.contains(&call),
+            "the step took the place of the return, its coercion and the call"
+        );
     }
 
     /// The control for the two member tests below: a receiver spilled from `this` is still `this`,

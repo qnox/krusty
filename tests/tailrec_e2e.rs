@@ -645,7 +645,7 @@ fun box(): String {\n\
 }
 
 /// Tail calls that leave parameters to their defaults, named out of order, and called on a
-/// singleton. kotlinc's `TailrecLowering` evaluates the supplied arguments in the order they are
+/// singleton, and a default lambda whose own parameter is not the frame's. kotlinc's `TailrecLowering` evaluates the supplied arguments in the order they are
 /// written, then each omitted parameter's default in declaration order, seeing the NEW values of
 /// the parameters before it; only then are the parameters written. A default with a side effect
 /// therefore runs once per turn, after the supplied arguments.
@@ -662,6 +662,9 @@ tailrec fun named(a: Int, b: Int, c: Int = a + b): Int =\n\
 \n\
 tailrec fun counted(n: Int, mark: Int = Log.next()): Int =\n\
     if (n == 0) mark else counted(n - 1)\n\
+\n\
+tailrec fun scaled(n: Int, op: (Int) -> Int = { x -> x * 3 + n }): Int =\n\
+    if (n == 0) op(5) else scaled(n - 1)\n\
 \n\
 object Walker {\n\
     tailrec fun down(n: Int, acc: Int = 0): Int = if (n == 0) acc else Walker.down(n - 1, acc + 1)\n\
@@ -691,6 +694,7 @@ fun box(): String {\n\
     if (named(1000000, 0) != 1000000) return \"fail named \" + named(1000000, 0)\n\
     val mark = counted(1000000)\n\
     if (mark != 1000001 || Log.calls != 1000001) return \"fail counted \" + mark + \" \" + Log.calls\n\
+    if (scaled(1000000) != 15) return \"fail scaled \" + scaled(1000000)\n\
     if (Walker.down(1000000) != 1000000) return \"fail object\"\n\
     if (Host.down(1000000) != 2000000) return \"fail companion\"\n\
     return \"OK\"\n\
@@ -716,7 +720,7 @@ fn tailrec_defaults_and_singleton_receivers_run_flat_like_kotlinc() {
 fn tailrec_default_loops_match_kotlinc() {
     let sources = [("Defaults.kt", DEFAULTS), ("Log.kt", DEFAULTS_LOG)];
     let pair = common::ModuleClassPair::compile(&sources, "tr/DefaultsKt");
-    for method in ["sum", "follow", "named", "counted"] {
+    for method in ["sum", "follow", "named", "counted", "scaled"] {
         let (kotlinc, krusty) = pair.method_code("tr/DefaultsKt", method);
         assert_eq!(krusty, kotlinc, "{method} differs from kotlinc's");
     }
