@@ -118,13 +118,7 @@ delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegation/delegationDifferentModule.kt
-diagnostics/functions/tailRecursion/defaultArgs.kt
-diagnostics/functions/tailRecursion/defaultArgs2.kt
-diagnostics/functions/tailRecursion/defaultArgsWithSideEffects.kt
-diagnostics/functions/tailRecursion/defaultArgsWithSideEffects2.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
-diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher.kt
-diagnostics/functions/tailRecursion/tailrecWithExplicitObjectDispatcher.kt
 elvis/kt6694ExactAnnotationForElvis.kt
 enum/emptyEnumValuesValueOf.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt

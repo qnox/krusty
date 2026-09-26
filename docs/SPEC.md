@@ -5355,6 +5355,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_return_reached_by_one_path_becomes_a_loop_step`), which state the three rules above on the IR
   directly — a DAG edge crossing an opaque boundary has no Kotlin source that produces it.
 
+- **A tail call may leave parameters to their defaults, and a singleton receiver is the same
+  frame.** kotlinc's `TailrecLowering` runs the body inside `do { body; break } while (true)`, and a
+  tail self-call becomes one loop step: the supplied arguments are evaluated into temporaries in the
+  order they are WRITTEN (so `named(b = b + 1, a = a - 1)` evaluates `b + 1` first), then each
+  omitted parameter's default in declaration order, reading the new values of the parameters before
+  it; only then are the parameters written, supplied ones first. A default with a side effect
+  therefore runs once per turn, after the supplied arguments. A constant argument or default is
+  written directly, and an argument that is already a temporary nobody reassigns is not copied again.
+  A call through an `object` or a companion (`O.f(…)`, `C.f(…)` inside `C`'s companion) steps the
+  same frame, as kotlinc treats a singleton receiver as `this`. A call to a `tailrec` function is no
+  longer spilled at its call site. A member's loop still differs from kotlinc's in one respect:
+  kotlinc also keeps a `$this` variable and stores the receiver into a temporary.
+  Tests: `tests/tailrec_e2e.rs` (`tailrec_defaults_and_singleton_receivers_run_flat_like_kotlinc`,
+  `tailrec_default_loops_match_kotlinc`).
+
 - **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
   expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
   the `Char` overload wins over `String`); `fq.split('.')` additionally requires every parameter
