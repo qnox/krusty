@@ -159,8 +159,10 @@ impl ProgressionHeader {
         let Some(compare) = realizer.unsigned_compare.clone() else {
             return realizer.add(IrExpr::PrimitiveBinOp { op, lhs, rhs });
         };
-        // `lhs.compareTo(rhs) < 0` (`<= 0`) through the selected unsigned comparison.
+        // `lhs.compareTo(rhs) < 0` (`<= 0`) through the selected unsigned comparison: kotlinc calls
+        // the inline `UInt.compareTo`, whose body is that comparison.
         let compared = realizer.runtime_call(&compare, vec![lhs, rhs]);
+        realizer.inlined_calls.push(compared);
         let zero = realizer.add(IrExpr::Const(IrConst::Int(0)));
         realizer.add(IrExpr::PrimitiveBinOp {
             op,
@@ -478,11 +480,17 @@ impl Realizer<'_> {
         } else {
             // The selected overload's element type (`Int` for a `Char` progression).
             let element_ty = last_element.result;
+            // An unsigned progression passes its bounds in their `Int`/`Long` representation
+            // (`asElementType().asUnsigned()`) and takes the result back unchanged (`asSigned()`).
+            let first = self.element_representation(first, nested.ty);
+            let last = self.element_representation(last, nested.ty);
             let first = self.as_step_type(first, nested.ty, element_ty);
             let last = self.as_step_type(last, nested.ty, element_ty);
             let element = self.runtime_call(last_element, vec![first, last, final_step.value]);
+            let element = self.as_step_type(element, element_ty, nested.ty);
+            self.represented.push(element);
             Operand {
-                value: self.as_step_type(element, element_ty, nested.ty),
+                value: element,
                 can_change: true,
             }
         };

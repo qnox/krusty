@@ -4,7 +4,8 @@
 //! those locations into `LineNumberTable` marks without teaching expression emission how the maps
 //! are represented.
 
-use crate::ir::{ExprId, IrFile};
+use crate::fir::SyntheticOriginKind;
+use crate::ir::{ExprId, IrFile, IrNodeOrigin};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
@@ -136,6 +137,26 @@ impl Emitter<'_> {
     /// [`Self::mark_inline_call_site_line`]).
     pub(super) fn mark_dispatch_line(&self, expression: ExprId, code: &mut CodeBuilder) {
         mark_expression_start(self.ir, expression, code);
+    }
+
+    /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
+    /// place (`SyntheticOriginKind::InlinedCall`).
+    ///
+    /// Inside a condition the line in effect is written again at once, for the jump that follows;
+    /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
+    /// last line number after an inlined body, which ran under the callee's lines.
+    pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
+        let Some(IrNodeOrigin::Synthetic {
+            kind: SyntheticOriginKind::InlinedCall,
+            ..
+        }) = self.ir.fir_origins.get(&expression)
+        else {
+            return;
+        };
+        match code.current_line() {
+            Some(line) if self.inside_condition => code.inlined_line(line),
+            _ => code.forget_line(),
+        }
     }
 
     /// Mark the site of an INLINE call, at the first instruction its expansion emits.

@@ -2691,6 +2691,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `for` is always a statement) before a loop's update, and before the bottom condition of a
   `do…while` whose condition has no source line of its own; a written `do…while` condition marks its
   own. `tests/loop_control_lines_e2e.rs` (full-byte against kotlinc).
+- **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
+  `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
+  condition and otherwise forgets it, so the next expression's mark is written even on the same
+  line. Besides user inline functions (the inliner's), this applies to the calls `ForLoopsLowering`
+  inlines into an unsigned `for` header: `toInt()`/`toLong()` on a non-constant `UInt`/`ULong`
+  bound (constants are folded) and `UInt.compareTo`/`ULong.compareTo` in the ordering test;
+  `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
+  records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
+  `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
 - **`LocalVariableTable` for regular function bodies**: block locals end at block exit; method
   locals, `this`, and parameters span to method end. Parsed non-suspend functions record source
   local names through `IrFile::value_names`; synthesized and suspend methods retain their existing

@@ -13,6 +13,10 @@ pub enum SyntheticOriginKind {
     MissingElseUnit,
     GeneratedAccessor,
     GeneratedControlFlow,
+    /// A backend lowering's in-place realization of a call of an inline function that kotlinc
+    /// inlines, such as the `toInt()` an unsigned counted loop converts a bound with: the call
+    /// leaves no dispatch of its own, only the end of an inlined call.
+    InlinedCall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

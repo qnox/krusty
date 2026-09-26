@@ -11130,6 +11130,7 @@ impl<'a> Emitter<'a> {
         self.open_transformed_suspension(e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
+        self.mark_after_inlined_call(e, code);
         self.machine_after(suspension, code);
         self.close_transformed_suspension(e, false, code);
     }

@@ -4723,6 +4723,20 @@ shadow with no output change.
     module. In the 2.4.20 box corpus box files byte-identical to kotlinc go from 458 to 580 (122
     gained, none lost; the 5i head measures 458 with the reference cache as it now stands), and box
     pass/fail is unchanged (`tests/loop_control_lines_e2e.rs`).
+  - ✅ 6b. The line after an inlined call (`LineNumberMapper.markLineNumberAfterInlineIfNeeded`) for
+    the calls `ForLoopsLowering` itself inlines into an unsigned loop's header: the `toInt()`/`toLong()`
+    element representation of a non-constant `UInt`/`ULong` bound and the `UInt.compareTo` ordering
+    test. The counted-loop realizer records those nodes as `SyntheticOriginKind::InlinedCall` and
+    gives every generated node the loop's line; after one, the emitter re-marks the line in effect
+    inside a condition and otherwise forgets it, so the next mark is written. Box files
+    byte-identical to kotlinc go from 580 to 680 (100 gained, none lost), box pass/fail unchanged
+    (`tests/unsigned_loop_lines_e2e.rs`).
+  - ☐ 6c. Remaining line-only differences at 6b (127 files, 4,298 methods): unsigned range
+    literals (`rangeTo`/`rangeUntil` are `@InlineOnly` and need their after-inline marks, ~58
+    files; the range needs its selected operator declaration), a catch clause's line at the
+    handler's exception store (~19 files), and methods emitted with no line table at all
+    (local-class constructors, property-reference accessors, `access$` bridges). Coroutine
+    `resumeWith` and inlined bodies' lines and SMAP belong to the inliner and coroutine work.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

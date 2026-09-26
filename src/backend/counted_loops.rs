@@ -64,6 +64,8 @@ pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
             ir: &mut *ir,
             style,
             unsigned_compare,
+            inlined_calls: Vec::new(),
+            represented: Vec::new(),
         };
         let replacement = realizer.progression_loop(CountedLoop {
             variable,
@@ -74,7 +76,9 @@ pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
             label,
         });
         next_slot = Some(realizer.next_slot);
-        record_generated_origins(ir, expression as ExprId, first_generated);
+        let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
+        record_generated_origins(ir, expression as ExprId, first_generated, &inlined_calls);
+        record_generated_lines(ir, expression as ExprId, first_generated);
         ir.exprs[expression] = replacement;
     }
 }
@@ -106,13 +110,17 @@ impl Operand {
     }
 }
 
-/// The IR file being rewritten, the target's loop style, the next free value slot, and the
-/// comparison the loop being realized orders an unsigned counter with.
+/// The IR file being rewritten, the target's loop style, the next free value slot, the
+/// comparison the loop being realized orders an unsigned counter with, the nodes realizing a call
+/// kotlinc inlines, and the unsigned values the header already holds in their `Int`/`Long`
+/// representation.
 struct Realizer<'a> {
     ir: &'a mut IrFile,
     style: CounterLoopStyle,
     next_slot: u32,
     unsigned_compare: Option<IrRuntimeFunction>,
+    inlined_calls: Vec<ExprId>,
+    represented: Vec<ExprId>,
 }
 
 impl Realizer<'_> {
@@ -123,7 +131,17 @@ impl Realizer<'_> {
     /// A second use of a leaf operand (a constant or a value read) as its own node.
     fn reread(&mut self, expression: ExprId) -> ExprId {
         let copy = self.ir.expr(expression).clone();
-        self.add(copy)
+        let copy = self.add(copy);
+        self.keep_representation(expression, copy);
+        copy
+    }
+
+    /// A read of a value the header holds in its `Int`/`Long` representation is in it too, as
+    /// kotlinc's temporary takes the type of what it stores.
+    fn keep_representation(&mut self, value: ExprId, read: ExprId) {
+        if self.represented.contains(&value) {
+            self.represented.push(read);
+        }
     }
 
     fn allocate_temporary(&mut self) -> u32 {
@@ -153,7 +171,9 @@ impl Realizer<'_> {
             named: false,
         });
         statements.push(declaration);
-        (Some(slot), self.add(IrExpr::GetValue(slot)))
+        let read = self.add(IrExpr::GetValue(slot));
+        self.keep_representation(operand.value, read);
+        (Some(slot), read)
     }
 
     /// The loop variable's declaration, carrying its source name.
@@ -203,6 +223,26 @@ impl Realizer<'_> {
             arg: expression,
             type_operand: target,
         })
+    }
+
+    /// `asElementType` of an unsigned bound: kotlinc converts a `UInt`/`ULong` value to its
+    /// `Int`/`Long` representation with the inline `toInt()`/`toLong()`, folds a constant instead,
+    /// and needs no conversion of a value already in that representation. The conversion is the
+    /// identity on the JVM, so its node carries only the provenance of that inlined call.
+    fn element_representation(&mut self, value: ExprId, ty: Ty) -> ExprId {
+        if !is_unsigned(ty)
+            || constant_bound(self.ir, value).is_some()
+            || self.represented.contains(&value)
+        {
+            return value;
+        }
+        let converted = self.add(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: value,
+            type_operand: ty,
+        });
+        self.inlined_calls.push(converted);
+        converted
     }
 
     /// A call of a runtime function resolution selected, realized by the backend like any other
@@ -285,7 +325,12 @@ fn step_constant(step_ty: Ty, value: i64) -> IrConst {
     }
 }
 
-fn record_generated_origins(ir: &mut IrFile, source: ExprId, first_generated: usize) {
+fn record_generated_origins(
+    ir: &mut IrFile,
+    source: ExprId,
+    first_generated: usize,
+    inlined_calls: &[ExprId],
+) {
     let Some(origin) = ir.fir_origins.get(&source).copied() else {
         return;
     };
@@ -295,12 +340,28 @@ fn record_generated_origins(ir: &mut IrFile, source: ExprId, first_generated: us
         }
     };
     for raw in first_generated..ir.exprs.len() {
+        let kind = if inlined_calls.contains(&(raw as ExprId)) {
+            crate::fir::SyntheticOriginKind::InlinedCall
+        } else {
+            crate::fir::SyntheticOriginKind::GeneratedControlFlow
+        };
         ir.fir_origins.insert(
             raw as ExprId,
-            crate::ir::IrNodeOrigin::Synthetic {
-                cause,
-                kind: crate::fir::SyntheticOriginKind::GeneratedControlFlow,
-            },
+            crate::ir::IrNodeOrigin::Synthetic { cause, kind },
         );
+    }
+}
+
+/// Give every node the loop generated the loop's source line, as kotlinc's `ForLoopsLowering`
+/// builds them at the loop's offsets: codegen marks each of them like any other expression, which
+/// shows wherever the line in effect is not already the loop's — after the body, and after an
+/// inlined call has reset it. A `for` loop is always a statement, so its line is the one its
+/// statement records.
+fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usize) {
+    let Some(line) = ir.expr_lines.get(&source).copied() else {
+        return;
+    };
+    for raw in first_generated..ir.exprs.len() {
+        ir.expr_source_lines.insert(raw as ExprId, line);
     }
 }
