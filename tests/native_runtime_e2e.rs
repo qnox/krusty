@@ -366,6 +366,24 @@ fn a_result_answers_its_operations_and_get_or_throw_stops_at_the_throw() {
     run_driver("result_operations");
 }
 
+#[test]
+fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
+    run_driver_expecting_failure(
+        "rw_property_get_unknown_delegate",
+        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
+         Delegates.notNull() nor Delegates.observable()\n",
+    );
+}
+
+#[test]
+fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
+    run_driver_expecting_failure(
+        "rw_property_set_unknown_delegate",
+        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
+         Delegates.notNull() nor Delegates.observable()\n",
+    );
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

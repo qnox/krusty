@@ -7571,6 +7571,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exception it holds and answers NULL at once — never the failure marker, which is no value of the
   program's type.
   Tests: `tests/native_runtime_e2e.rs` (`result_operations`).
+- **A native `ReadWriteProperty` call names the two delegates it implements.**
+  `kt_rw_property_get`/`kt_rw_property_set` serve exactly `Delegates.notNull()` and
+  `Delegates.observable(…)`, recognized by their own descriptors. Any other receiver ends the
+  program with `krusty: a ReadWriteProperty read|write of a <descriptor name>, which is neither
+  Delegates.notNull() nor Delegates.observable()`, rather than being read as a `NotNullVar`.
+  Tests: `tests/native_runtime_e2e.rs` (`rw_property_get_unknown_delegate`,
+  `rw_property_set_unknown_delegate`).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

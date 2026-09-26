@@ -1999,7 +1999,10 @@ KRef kt_observable(KRef initial, KRef on_change) {
 /* The two entry points a `ReadWriteProperty` receiver reaches, dispatching on the DESCRIPTOR. No
    static type separates the delegates this runtime builds — `notNull()` and `observable(…)` are
    both a `ReadWriteProperty<Any?, T>` at the call site — so the object says which it is, exactly as
-   every other runtime answer here does.
+   every other runtime answer here does. Each of the two descriptors is checked by name; any other
+   object arriving here is a delegate these two entry points do not implement, and reading its
+   fields as either layout would answer from memory that means something else, so that is a loud
+   failure naming the descriptor.
 
    `get` is handed the property's NAME rather than the property, because the only thing it can need
    is the text of the error a `notNull` read-before-write raises. `set` is handed the PROPERTY,
@@ -2010,6 +2013,11 @@ KRef kt_rw_property_get(KRef self, KRef name) {
     }
     if (self->header.type == &kt_type_observable) {
         return ((const KObservable *)self)->value;
+    }
+    if (self->header.type != &kt_type_not_null_var) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read of a ", self->header.type,
+                              ", which is neither Delegates.notNull() nor "
+                              "Delegates.observable()\n");
     }
     KRef value = ((const KNotNullVar *)self)->value;
     if (value == NULL) {
@@ -2023,9 +2031,14 @@ void kt_rw_property_set(KRef self, KRef property, KRef value) {
     if (self == NULL) {
         KT_FAIL("krusty: member access on a null receiver\n");
     }
-    if (self->header.type != &kt_type_observable) {
+    if (self->header.type == &kt_type_not_null_var) {
         ((KNotNullVar *)self)->value = value;
         return;
+    }
+    if (self->header.type != &kt_type_observable) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty write of a ", self->header.type,
+                              ", which is neither Delegates.notNull() nor "
+                              "Delegates.observable()\n");
     }
     KObservable *observable = (KObservable *)self;
     KRef old = observable->value;

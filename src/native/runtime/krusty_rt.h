@@ -601,7 +601,8 @@ KRef kt_observable(KRef initial, KRef on_change);
 /* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
    it is, no static type separating them. `get` takes the property's NAME, the only thing it can
    need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. */
+   observable passes to its callback. Any object other than those two delegates ends the program
+   with a message naming its descriptor. */
 KRef kt_rw_property_get(KRef self, KRef name);
 void kt_rw_property_set(KRef self, KRef property, KRef value);
 
