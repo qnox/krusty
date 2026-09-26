@@ -475,25 +475,8 @@ impl BodyLowering<'_> {
                 })
             })
             .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
-        // The protocol call carries no substitution of its declaration's type parameters, so a
-        // scalar receiver of a generic module extension (`fun <T : Any> T?.iterator()`) is boxed
-        // into the declared receiver here.
-        let receiver = match (&call.target, &call.receiver) {
-            (
-                crate::fir::FirCallTarget::Module(target),
-                FirIteratorReceiver::Extension | FirIteratorReceiver::MemberExtension { .. },
-            ) => {
-                let declared = self
-                    .index
-                    .callable(*target)
-                    .ok_or(FirLoweringFailure::MissingCallable(*target))?
-                    .shape
-                    .extension_receiver
-                    .ok_or(FirLoweringFailure::MissingCallable(*target))?;
-                self.box_into_erased_parameter(receiver, receiver_ty, declared.get())
-            }
-            _ => receiver,
-        };
+        let receiver =
+            self.lowered_with_conversion(receiver, receiver_ty, call.receiver_conversion)?;
         let (dispatch_receiver, extension_receiver) = match &call.receiver {
             FirIteratorReceiver::Dispatch => (Some(receiver), None),
             FirIteratorReceiver::Extension => (None, Some(receiver)),

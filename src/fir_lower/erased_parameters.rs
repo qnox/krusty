@@ -1,12 +1,11 @@
-//! Values crossing into a declaration's erased parameter.
+//! Values crossing into a declaration's declared parameter types.
 //!
 //! A call site sees a declaration's parameters substituted (`T` = `Int`), but the declaration's
-//! body is compiled once against its declared types. Where no selected-call boundary realizes the
-//! difference (a local function, a context argument of a property accessor), lowering converts a
-//! substituted scalar to the declared reference type itself, as a module call's argument policy
-//! does.
+//! body is compiled once against its declared types. Where no selected-call boundary carries the
+//! difference (a local function's arguments, a specialized property reference's receiver), lowering
+//! records it as a semantic coercion from the checked type to the declared one.
 
-use crate::fir::{FirConversion, FirConversionKind, FirExprId, FirReceiver, PropertyId};
+use crate::fir::{FirConversion, FirConversionKind, FirExprId};
 use crate::ir::{ExprId, IrExpr, IrTypeOp};
 use crate::types::Ty;
 
@@ -38,15 +37,13 @@ impl BodyLowering<'_> {
         })
     }
 
-    /// Box a substituted scalar passed to a declared reference parameter. A `Unit` value is left to
-    /// its consumer, which materializes the singleton.
-    pub(super) fn box_into_erased_parameter(
-        &mut self,
-        value: ExprId,
-        source: Ty,
-        declared: Ty,
-    ) -> ExprId {
-        if source.is_reference() || source == Ty::Unit || !declared.is_reference() {
+    /// `value`, of checked type `actual`, crossing into a slot declared `declared`.
+    ///
+    /// The comparison is semantic and nothing else: identical types have no boundary to cross, and
+    /// what a differing pair costs — a box, an unbox, a `checkcast`, or no instruction — is read
+    /// off the physical types by the backend when it emits the coercion.
+    pub(super) fn coerce_to_declared(&mut self, value: ExprId, actual: Ty, declared: Ty) -> ExprId {
+        if actual == declared {
             return value;
         }
         self.ir.add_expr(IrExpr::TypeOp {
@@ -54,40 +51,5 @@ impl BodyLowering<'_> {
             arg: value,
             type_operand: declared,
         })
-    }
-
-    /// Context arguments of a module property accessor, converted to the accessor's declared
-    /// context parameters.
-    pub(super) fn module_property_context_arguments(
-        &mut self,
-        target: PropertyId,
-        context_arguments: &[FirReceiver],
-    ) -> Result<Vec<ExprId>, FirLoweringFailure> {
-        let property = self
-            .index
-            .property(target)
-            .ok_or(FirLoweringFailure::MissingProperty(target))?;
-        let declared = self
-            .index
-            .signature(property.declaration)
-            .ok_or(FirLoweringFailure::MissingProperty(target))?
-            .parameters
-            .get(..property.context_parameter_count as usize)
-            .ok_or(FirLoweringFailure::MissingProperty(target))?
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect::<Vec<_>>();
-        if declared.len() != context_arguments.len() {
-            return Err(FirLoweringFailure::MissingProperty(target));
-        }
-        context_arguments
-            .iter()
-            .zip(declared)
-            .map(|(receiver, declared)| {
-                let value = self.expression_with_conversion(receiver.value, receiver.conversion)?;
-                let source = self.converted_type(receiver.value, receiver.conversion)?;
-                Ok(self.box_into_erased_parameter(value, source, declared))
-            })
-            .collect()
     }
 }

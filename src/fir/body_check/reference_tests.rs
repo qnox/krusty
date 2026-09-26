@@ -773,6 +773,8 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
         property_type,
         getter_name,
         setter_name,
+        declared_receiver,
+        declared_property_type,
     } = target
     else {
         panic!("source property reference must carry its selected specialized callable view")
@@ -784,6 +786,9 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
     assert_eq!(*property_type, int);
     assert_eq!(getter_name.as_ref(), "getItem");
     assert_eq!(setter_name, &None);
+    // The accessor is compiled against the declaration's own `T`, which the reference crosses.
+    assert_eq!(*declared_receiver, Some(*declared_property_type));
+    assert_ne!(*declared_property_type, int);
 }
 
 #[test]

@@ -189,7 +189,7 @@ impl BodyLowering<'_> {
                     .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?;
                 let value = self.expression_with_conversion(receiver.value, receiver.conversion)?;
                 let source = self.converted_type(receiver.value, receiver.conversion)?;
-                Ok(self.box_into_erased_parameter(value, source, declared))
+                Ok(self.coerce_to_declared(value, source, declared))
             })
             .transpose()?;
         if realization.has_extension_receiver {
@@ -201,8 +201,8 @@ impl BodyLowering<'_> {
                 .copied()
                 .ok_or(FirLoweringFailure::MissingExternalParameter { parameter })
         })?;
-        // A local function is not specialized per call: its parameters keep their declared (erased)
-        // types, so a scalar argument for a generic parameter is boxed here, as a module call's is.
+        // A local function is not specialized per call: its parameters keep their declared types,
+        // so an argument whose checked type differs crosses into the declared one here.
         for (argument, lowered) in arguments.iter().zip(&mut lowered) {
             let (
                 crate::fir::FirCallArgument::Expression {
@@ -222,7 +222,7 @@ impl BodyLowering<'_> {
                     parameter: *parameter,
                 })?;
             let source = self.converted_type(*source, *conversion)?;
-            *value = self.box_into_erased_parameter(*value, source, declared);
+            *value = self.coerce_to_declared(*value, source, declared);
         }
         let call = self.materialize_local_call(
             &target,
