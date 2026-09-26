@@ -87,9 +87,9 @@ impl InnerClasses {
                 });
                 continue;
             }
-            // A function reference class is anonymous too, and synthetic; it is public only where
+            // A callable reference class is anonymous too, and synthetic; it is public only where
             // spliced inline code constructs it from elsewhere.
-            if class.func_ref.is_some() {
+            if class.func_ref.is_some() || class.prop_ref.is_some() {
                 let public = if ir.public_synthetics.contains(&identity) {
                     0x0001
                 } else {
