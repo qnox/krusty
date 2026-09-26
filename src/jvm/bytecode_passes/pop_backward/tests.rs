@@ -230,3 +230,51 @@ fn a_method_with_neither_pop_nor_pure_push_is_not_analyzed() {
     let nodes = [Op(RETURN)];
     propagates("()V", 0, &nodes, &nodes, false);
 }
+
+/// The pass visits nodes in index order to avoid revisiting the rest of a method after every
+/// joining branch; the frames and the instructions it must not touch are those the stack order
+/// finds.
+#[test]
+fn the_index_order_finds_what_the_stack_order_finds() {
+    let method = body(
+        "(I)I",
+        3,
+        &[
+            Var(ILOAD, 0),
+            Jump(IFEQ, 0),
+            Op(ICONST_2),
+            Var(ISTORE, 1),
+            At(0),
+            Var(ILOAD, 0),
+            Jump(IFEQ, 1),
+            Op(ICONST_2),
+            Var(ISTORE, 2),
+            At(1),
+            Var(ILOAD, 1),
+            Op(POP),
+            At(2),
+            Var(ILOAD, 2),
+            Var(ISTORE, 1),
+            Var(ILOAD, 0),
+            Jump(IFNE, 2),
+            Var(ILOAD, 1),
+            Op(IRETURN),
+        ],
+    );
+    let run = |in_index_order| {
+        let mut interpreter = HazardsTracking::new(method.nodes.len());
+        let frames = analyze_with(
+            &method,
+            "Owner",
+            &mut interpreter,
+            &mut PlainFrames,
+            AnalyzerOptions {
+                in_index_order,
+                ..AnalyzerOptions::default()
+            },
+        )
+        .expect("the body analyzes");
+        (frames, interpreter.dont_touch)
+    };
+    assert_eq!(run(true), run(false));
+}

@@ -5,6 +5,7 @@
 //! arithmetic, jump, field or array access, call or `throw` needs the value to exist.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use super::super::analysis::{opcode, AnalyzerError, At, Interpreter, Value};
 use super::super::descriptors;
@@ -27,11 +28,13 @@ const LAND: u8 = 0x7f;
 const LOR: u8 = 0x81;
 
 /// ASM's `SourceValue`: the words the value takes and the node indices of the instructions that
-/// can have pushed it (none for a parameter, an unassigned slot or a caught exception).
+/// can have pushed it (none for a parameter, an unassigned slot or a caught exception). The set is
+/// shared: the analyzer copies every frame at every instruction, and a method with hundreds of
+/// locals (a large data class's `copy$default`) would otherwise copy each local's set each time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SourceValue {
     pub size: usize,
-    pub insns: BTreeSet<usize>,
+    pub insns: Rc<BTreeSet<usize>>,
 }
 
 impl Value for SourceValue {
@@ -44,7 +47,7 @@ impl SourceValue {
     fn pushed(size: usize, at: &At) -> SourceValue {
         SourceValue {
             size,
-            insns: BTreeSet::from([at.index]),
+            insns: Rc::new(BTreeSet::from([at.index])),
         }
     }
 }
@@ -63,7 +66,7 @@ impl HazardsTracking {
     }
 
     fn mark(&mut self, value: &SourceValue) {
-        for &insn in &value.insns {
+        for &insn in value.insns.iter() {
             self.dont_touch[insn] = true;
         }
     }
@@ -96,7 +99,7 @@ impl Interpreter for HazardsTracking {
         };
         Some(SourceValue {
             size,
-            insns: BTreeSet::new(),
+            insns: Rc::default(),
         })
     }
 
@@ -195,7 +198,7 @@ impl Interpreter for HazardsTracking {
         }
         SourceValue {
             size: first.size.min(second.size),
-            insns: first.insns.union(&second.insns).copied().collect(),
+            insns: Rc::new(first.insns.union(&second.insns).copied().collect()),
         }
     }
 }

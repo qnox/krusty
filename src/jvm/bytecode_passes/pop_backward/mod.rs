@@ -25,7 +25,7 @@ mod tests;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
-use super::analysis::{analyze, opcode, AnalyzerError, Frame};
+use super::analysis::{analyze_with, opcode, AnalyzerError, AnalyzerOptions, Frame, PlainFrames};
 use super::opcodes::*;
 use super::redundant_boxing::is_primitive_boxing_insn;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
@@ -125,7 +125,7 @@ impl Run<'_> {
     }
 
     fn mark(&mut self, value: &SourceValue) {
-        for &index in &value.insns {
+        for &index in value.insns.iter() {
             self.dont_touch[index] = true;
         }
     }
@@ -213,7 +213,7 @@ impl Run<'_> {
                 continue;
             }
             transformations.insert(index, Transformation::ReplaceWithNop);
-            for &source in &top.insns {
+            for &source in top.insns.iter() {
                 if let Entry::Vacant(entry) = transformations.entry(source) {
                     entry.insert(self.combine_with_pop(source, top.size)?);
                 }
@@ -233,7 +233,18 @@ pub(crate) fn propagate(method: &mut MethodNode, owner: &str) -> Result<bool, An
         return Ok(false);
     }
     let mut interpreter = HazardsTracking::new(method.nodes.len());
-    let frames = analyze(method, owner, &mut interpreter)?;
+    // The frames, and the instructions marked untouchable, are the same in any visiting order; the
+    // index order only spares revisiting the rest of the method after every joining branch.
+    let frames = analyze_with(
+        method,
+        owner,
+        &mut interpreter,
+        &mut PlainFrames,
+        AnalyzerOptions {
+            in_index_order: true,
+            ..AnalyzerOptions::default()
+        },
+    )?;
     let mut run = Run {
         nodes: &method.nodes,
         frames: &frames,
