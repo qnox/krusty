@@ -26,6 +26,10 @@ pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
 
+/// The clean failure of a call whose reified checks the byte splice cannot write.
+pub(super) const REIFIED_CHECKS_ON_BYTE_SPLICE: &str =
+    "a reified type check in a byte-spliced inline body";
+
 /// How the call site supplies one parameter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Supply {
@@ -35,6 +39,24 @@ enum Supply {
     InPlace,
     /// Read from the caller local the argument lives in.
     CallerLocal,
+}
+
+/// Whether the call's reified arguments turn one of the callee's markers into a check kotlinc
+/// writes code for (`ReifiedTypeInliner`). Only the MethodInliner port writes that code; the
+/// byte splice repoints markers and nothing else, so such a call never takes it.
+pub(super) fn reified_checks_need_method_inliner(call: &ClasspathInlineCall<'_, '_>) -> bool {
+    if call.reified.classes.is_empty() {
+        return false;
+    }
+    MethodNode::read(
+        ACC_STATIC,
+        call.target.name,
+        call.target.splice_desc,
+        call.body,
+    )
+    .is_ok_and(|callee| {
+        crate::jvm::inliner::reified_specialization_generates_checks(&callee, call.reified)
+    })
 }
 
 impl Emitter<'_> {

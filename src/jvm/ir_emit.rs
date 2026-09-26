@@ -11630,7 +11630,15 @@ impl<'a> Emitter<'a> {
                         }
                         return true;
                     }
-                    Ok(bytecode_inline_call::LambdaCallRoute::Splice(reason)) => reason,
+                    Ok(bytecode_inline_call::LambdaCallRoute::Splice(reason)) => {
+                        if bytecode_inline_call::reified_checks_need_method_inliner(&inline_call) {
+                            self.run.set_inline_bail(
+                                bytecode_inline_call::REIFIED_CHECKS_ON_BYTE_SPLICE,
+                            );
+                            return true;
+                        }
+                        reason
+                    }
                     Err(reason) => {
                         self.run.set_inline_bail(reason);
                         return true;
@@ -11653,6 +11661,11 @@ impl<'a> Emitter<'a> {
             // A literal lambda used as a value needs kotlinc's anonymous-object regeneration
             // before MethodNode can own it. Keep only that still-unmigrated shape on the byte
             // bridge; no-lambda calls never fall back to it.
+            if bytecode_inline_call::reified_checks_need_method_inliner(&inline_call) {
+                self.run
+                    .set_inline_bail(bytecode_inline_call::REIFIED_CHECKS_ON_BYTE_SPLICE);
+                return true;
+            }
             return self
                 .try_inline_materialized_lambda_body(&inline_call, code)
                 .is_some();

@@ -45,6 +45,7 @@ pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::AnonymousObjects;
 pub(crate) use parameters::{Binding, Parameter, Parameters};
+pub(in crate::jvm) use reified::generates_checks as reified_specialization_generates_checks;
 
 /// Why a body could not be inlined.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -65,17 +65,6 @@ pub(super) fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
     true
 }
 
-/// Whether kotlinc's `ReifiedTypeInliner` writes code of its own for marker `operation`
-/// (`OperationKind`: 1 `as`, 2 `as?`, 3 `is`) over a class argument.
-fn needs_generated_check(operation: Option<i32>, nullable: bool, intrinsic: bool) -> bool {
-    match operation {
-        Some(1) => !nullable || intrinsic,
-        Some(2) => true,
-        Some(3) => nullable || intrinsic,
-        _ => false,
-    }
-}
-
 /// One post-relocation rewrite of a reified marker site, keyed by instruction index.
 pub(super) enum ReifiedRepoint {
     /// Point the type-bearing op (`anewarray`/`checkcast`/…/`ldc class`) at this concrete class.
@@ -213,20 +202,13 @@ pub(super) fn reify_markers(
         }
         let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
         let repoint = match reified.classes.get(marker.trim_end_matches('?'))? {
-            // An operation that needs code around its type-bearing op (a nullable `is`, a non-null
-            // `as`, any `as?`, or a `TypeIntrinsics` target) needs new branches; only the symbolic
-            // inliner inserts those.
-            ReifiedArgument::Class {
-                nullable,
-                intrinsic,
-                ..
-            } if needs_generated_check(
-                marker_operation(&insns[i - 2]),
-                *nullable || marker.ends_with('?'),
-                intrinsic.is_some(),
-            ) =>
+            // A nullable `instanceof` becomes kotlinc's null-accepting sequence, which needs new
+            // branches; only the symbolic inliner inserts those.
+            ReifiedArgument::Class { nullable, .. }
+                if (*nullable || marker.ends_with('?'))
+                    && matches!(insns[j], Insn::Plain { op: 0xc1, .. }) =>
             {
-                crate::trace_compiler!("splice", "reified {marker} check is not spliceable");
+                crate::trace_compiler!("splice", "nullable reified instanceof is not spliceable");
                 return None;
             }
             ReifiedArgument::Class { internal, .. } => ReifiedRepoint::Class(j, internal.clone()),

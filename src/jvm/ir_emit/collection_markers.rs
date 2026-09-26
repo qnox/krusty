@@ -16,7 +16,8 @@ pub(super) fn marker_interfaces(class: &IrClass) -> Vec<&'static str> {
         let Some(marker) = supertype
             .non_null()
             .obj_internal()
-            .and_then(collection_marker)
+            .and_then(crate::types::wk::mapped_collection)
+            .map(collection_marker)
         else {
             continue;
         };

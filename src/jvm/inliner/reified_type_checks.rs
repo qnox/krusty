@@ -6,8 +6,9 @@
 //! rejects it, an `as?` tests before it casts, and a mutable collection or a function type goes
 //! through `TypeIntrinsics`.
 
+use crate::ir::TypeCheckRole;
 use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
-use crate::jvm::type_intrinsics::{IntrinsicCall, TypeIntrinsic};
+use crate::jvm::type_intrinsics::{self, IntrinsicCall};
 
 /// kotlinc's `ReifiedTypeInliner.OperationKind` values for the operations handled here.
 const AS: i32 = 1;
@@ -23,9 +24,24 @@ pub(super) struct ReifiedTarget<'a> {
     pub(super) class: &'a str,
     /// Whether the substituted type is nullable (the argument's own `?` or the marker's `T?`).
     pub(super) nullable: bool,
-    pub(super) intrinsic: Option<TypeIntrinsic>,
+    pub(super) intrinsic: Option<TypeCheckRole>,
     /// The substituted type as kotlinc renders it in `null cannot be cast to non-null type …`.
     pub(super) rendered: &'a str,
+}
+
+/// Whether marker operation `mode` over the type-bearing instruction `stub` needs code of its own:
+/// a nullable `is` accepts `null`, a non-null `as` rejects it, an `as?` tests first, and a
+/// `TypeIntrinsics` target calls it. Every other operation only repoints `stub`.
+pub(super) fn writes_code(mode: i32, stub: &Node, nullable: bool, intrinsic: bool) -> bool {
+    let Node::Insn(Insn::Type { op, .. }) = stub else {
+        return false;
+    };
+    match (mode, *op) {
+        (IS, INSTANCEOF) => nullable || intrinsic,
+        (AS, CHECKCAST) => !nullable || intrinsic,
+        (SAFE_AS, CHECKCAST) => true,
+        _ => false,
+    }
 }
 
 /// The nodes that replace the marker's type-bearing instruction `stub`, or `None` when repointing
@@ -39,11 +55,14 @@ pub(super) fn expand(
     let Node::Insn(Insn::Type { op, .. }) = stub else {
         return None;
     };
+    if !writes_code(mode, stub, target.nullable, target.intrinsic.is_some()) {
+        return None;
+    }
     match (mode, *op) {
         (IS, INSTANCEOF) if target.nullable => Some(nullable_instance_check(node, target)),
         (IS, INSTANCEOF) => target
             .intrinsic
-            .map(|intrinsic| intrinsic_call(&intrinsic.instance_check())),
+            .map(|intrinsic| intrinsic_call(&type_intrinsics::instance_check(intrinsic))),
         (AS, CHECKCAST) if !target.nullable || target.intrinsic.is_some() => {
             let mut nodes = Vec::new();
             if !target.nullable {
@@ -60,7 +79,7 @@ pub(super) fn expand(
 /// `TypeIntrinsics.instanceOf`: the instance test, leaving an `int` 0/1.
 fn instance_check(target: &ReifiedTarget<'_>) -> Vec<Node> {
     match target.intrinsic {
-        Some(intrinsic) => intrinsic_call(&intrinsic.instance_check()),
+        Some(intrinsic) => intrinsic_call(&type_intrinsics::instance_check(intrinsic)),
         None => vec![Node::Insn(Insn::Type {
             op: INSTANCEOF,
             class: target.class.to_owned(),
@@ -76,7 +95,7 @@ fn cast(target: &ReifiedTarget<'_>) -> Vec<Node> {
     });
     match target.intrinsic {
         Some(intrinsic) => {
-            let (call, keeps_checkcast) = intrinsic.cast();
+            let (call, keeps_checkcast) = type_intrinsics::cast(intrinsic);
             let mut nodes = intrinsic_call(&call);
             if keeps_checkcast {
                 nodes.push(checkcast);

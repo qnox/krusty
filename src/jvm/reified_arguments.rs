@@ -28,7 +28,7 @@ pub(in crate::jvm) enum ReifiedArgument {
     Class {
         internal: String,
         nullable: bool,
-        intrinsic: Option<crate::jvm::type_intrinsics::TypeIntrinsic>,
+        intrinsic: Option<crate::ir::TypeCheckRole>,
         rendered: String,
     },
     /// A reified type parameter of the HOST (its source name, and whether the argument is `T?`). The

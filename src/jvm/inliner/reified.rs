@@ -6,7 +6,7 @@ use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
 use super::reified_type_checks::{self, ReifiedTarget};
 use super::InlineError;
-use crate::jvm::type_intrinsics::TypeIntrinsic;
+use crate::ir::TypeCheckRole;
 
 const INVOKESTATIC: u8 = 0xb8;
 const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
@@ -18,7 +18,7 @@ enum Repoint {
         mode: i32,
         class: String,
         nullable: bool,
-        intrinsic: Option<TypeIntrinsic>,
+        intrinsic: Option<TypeCheckRole>,
         rendered: String,
     },
     Forwarded {
@@ -38,13 +38,97 @@ struct Marker {
     repoint: Repoint,
 }
 
+/// Whether specializing `node` for `arguments` writes code of its own around a marker's
+/// type-bearing instruction (kotlinc's `ReifiedTypeInliner` checks), rather than only repointing
+/// it. A body whose markers cannot be planned generates nothing here; specialization reports it.
+pub(in crate::jvm) fn generates_checks(node: &MethodNode, arguments: &ReifiedArguments) -> bool {
+    plan(node, arguments).is_ok_and(|markers| {
+        markers.iter().any(|marker| match &marker.repoint {
+            Repoint::Class {
+                instruction,
+                mode,
+                nullable,
+                intrinsic,
+                ..
+            } => reified_type_checks::writes_code(
+                *mode,
+                &node.nodes[*instruction],
+                *nullable,
+                intrinsic.is_some(),
+            ),
+            Repoint::Forwarded { .. } | Repoint::TypeOf { .. } => false,
+        })
+    })
+}
+
 /// Specialize every exact `reifiedOperationMarker` before ordinary inliner transforms inspect the
 /// stack. Planning is all-or-nothing: malformed or unbound markers leave `node` untouched.
 pub(super) fn specialize(
     node: &mut MethodNode,
     arguments: &ReifiedArguments,
 ) -> Result<(), InlineError> {
+    let markers = plan(node, arguments)?;
+
+    // Replacements that change the node count are applied last to first, so every recorded index
+    // still names its node when its turn comes.
+    let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
+    for marker in &markers {
+        match &marker.repoint {
+            Repoint::Class {
+                instruction,
+                mode,
+                class,
+                nullable,
+                intrinsic,
+                rendered,
+            } => {
+                set_type_operand(&mut node.nodes[*instruction], class)?;
+                erase_marker(node, marker);
+                let target = ReifiedTarget {
+                    class,
+                    nullable: *nullable,
+                    intrinsic: *intrinsic,
+                    rendered,
+                };
+                let stub = node.nodes[*instruction].clone();
+                if let Some(nodes) = reified_type_checks::expand(node, *mode, &stub, &target) {
+                    replacements.push((*instruction, nodes));
+                }
+            }
+            Repoint::Forwarded {
+                name_instruction,
+                name,
+            } => {
+                node.nodes[*name_instruction] =
+                    Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
+            }
+            Repoint::TypeOf {
+                placeholder,
+                argument,
+            } => {
+                erase_marker(node, marker);
+                let realization = arguments
+                    .type_of
+                    .get(argument)
+                    .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
+                replacements.push((
+                    *placeholder,
+                    realization.iter().flat_map(type_of_nodes).collect(),
+                ));
+            }
+        }
+    }
+    replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (at, nodes) in replacements {
+        node.nodes.splice(at..=at, nodes);
+    }
+    Ok(())
+}
+
+/// Every marker of `node` and what `arguments` make of it.
+fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, InlineError> {
     let mut markers = Vec::new();
+
     for (call, entry) in node.nodes.iter().enumerate() {
         let Node::Insn(Insn::Method {
             op,
@@ -124,61 +208,7 @@ pub(super) fn specialize(
             repoint,
         });
     }
-
-    // Replacements that change the node count are applied last to first, so every recorded index
-    // still names its node when its turn comes.
-    let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
-    for marker in &markers {
-        match &marker.repoint {
-            Repoint::Class {
-                instruction,
-                mode,
-                class,
-                nullable,
-                intrinsic,
-                rendered,
-            } => {
-                set_type_operand(&mut node.nodes[*instruction], class)?;
-                erase_marker(node, marker);
-                let target = ReifiedTarget {
-                    class,
-                    nullable: *nullable,
-                    intrinsic: *intrinsic,
-                    rendered,
-                };
-                let stub = node.nodes[*instruction].clone();
-                if let Some(nodes) = reified_type_checks::expand(node, *mode, &stub, &target) {
-                    replacements.push((*instruction, nodes));
-                }
-            }
-            Repoint::Forwarded {
-                name_instruction,
-                name,
-            } => {
-                node.nodes[*name_instruction] =
-                    Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
-            }
-            Repoint::TypeOf {
-                placeholder,
-                argument,
-            } => {
-                erase_marker(node, marker);
-                let realization = arguments
-                    .type_of
-                    .get(argument)
-                    .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
-                replacements.push((
-                    *placeholder,
-                    realization.iter().flat_map(type_of_nodes).collect(),
-                ));
-            }
-        }
-    }
-    replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    for (at, nodes) in replacements {
-        node.nodes.splice(at..=at, nodes);
-    }
-    Ok(())
+    Ok(markers)
 }
 
 fn erase_marker(node: &mut MethodNode, marker: &Marker) {
@@ -424,6 +454,61 @@ mod tests {
                 "{marker_name} with a nullable={nullable} argument"
             );
         }
+    }
+
+    /// Only a check kotlinc writes code for sends a call off the byte splice: a non-null `is`
+    /// repoints its `instanceof`, while a nullable `is`, a non-null `as`, and a `TypeIntrinsics`
+    /// target each need the symbolic inliner. A forwarded argument keeps its marker.
+    #[test]
+    fn generated_checks_are_the_ones_kotlinc_writes_code_for() {
+        let body = |mode, op| {
+            let mut node = MethodNode::new(0x0008, "t", "(Ljava/lang/Object;)Ljava/lang/Object;");
+            node.nodes = marker("T", mode);
+            node.nodes.push(Node::Insn(Insn::Type {
+                op,
+                class: "java/lang/Object".into(),
+            }));
+            node
+        };
+        let class = |nullable, intrinsic| ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "a/Token".to_owned(),
+                    nullable,
+                    intrinsic,
+                    rendered: "a.Token".to_owned(),
+                },
+            )]),
+            ..Default::default()
+        };
+        let function = Some(TypeCheckRole::FunctionOfArity(1));
+        let cases = [
+            ((3, 0xc1), class(false, None), false),
+            ((3, 0xc1), class(true, None), true),
+            ((3, 0xc1), class(false, function), true),
+            ((1, 0xc0), class(true, None), false),
+            ((1, 0xc0), class(false, None), true),
+            ((2, 0xc0), class(true, None), true),
+        ];
+        for ((mode, op), arguments, expected) in cases {
+            assert_eq!(
+                generates_checks(&body(mode, op), &arguments),
+                expected,
+                "mode {mode} over {arguments:?}"
+            );
+        }
+        let forwarded = ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Forwarded {
+                    name: "R".to_owned(),
+                    nullable: true,
+                },
+            )]),
+            ..Default::default()
+        };
+        assert!(!generates_checks(&body(3, 0xc1), &forwarded));
     }
 
     #[test]

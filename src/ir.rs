@@ -43,6 +43,7 @@ mod local_class_names;
 mod overrides;
 mod progression;
 mod references;
+mod type_check_role;
 mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
@@ -60,6 +61,7 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{FuncRef, PropRef};
+pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
 

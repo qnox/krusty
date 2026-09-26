@@ -203,7 +203,7 @@ fn k_type_descriptor(arguments: &[&str]) -> String {
 /// Mutable Kotlin collection classifiers, which share a JVM class with their read-only face and
 /// are told apart only by `Reflection.mutableCollectionType`.
 fn is_mutable_collection(name: TypeName) -> bool {
-    super::type_intrinsics::mutable_collection(name).is_some()
+    crate::types::wk::mapped_collection(name).is_some_and(|collection| collection.mutable)
 }
 
 /// The class instance kotlinc's `generateClassInstance(wrapPrimitives = false)` pushes for a

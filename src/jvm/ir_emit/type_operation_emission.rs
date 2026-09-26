@@ -3,9 +3,10 @@
 //! Checked common IR fixes the semantic operation and target. This boundary owns wrapper classes,
 //! erasure, null-check call shape, reload-versus-dup selection, casts, and numeric representation.
 
+use crate::ir::TypeCheckRole;
 use crate::ir::{ExprId, IrBindingStability, IrExpr, IrTypeOp};
 use crate::jvm::classfile::CodeBuilder;
-use crate::jvm::type_intrinsics::{IntrinsicCall, TypeIntrinsic};
+use crate::jvm::type_intrinsics::{cast, instance_check, IntrinsicCall};
 use crate::types::{stored_value_ty, Ty};
 
 use super::{
@@ -163,8 +164,8 @@ impl Emitter<'_> {
         type_operand: Ty,
         code: &mut CodeBuilder,
     ) {
-        match TypeIntrinsic::of(type_operand) {
-            Some(intrinsic) => self.emit_type_intrinsic_call(&intrinsic.instance_check(), code),
+        match TypeCheckRole::of(type_operand) {
+            Some(intrinsic) => self.emit_type_intrinsic_call(&instance_check(intrinsic), code),
             None => {
                 let class = self.cw.class_ref(internal);
                 code.instance_of(class);
@@ -189,8 +190,8 @@ impl Emitter<'_> {
         &self,
         expression: ExprId,
         type_operand: Ty,
-    ) -> Option<TypeIntrinsic> {
-        TypeIntrinsic::of(type_operand).filter(|_| self.ir.written_casts.contains(&expression))
+    ) -> Option<TypeCheckRole> {
+        TypeCheckRole::of(type_operand).filter(|_| self.ir.written_casts.contains(&expression))
     }
 
     /// kotlinc's `TypeIntrinsics.checkcast` for a non-safe cast to a mutable collection or a
@@ -198,10 +199,10 @@ impl Emitter<'_> {
     fn emit_intrinsic_cast(
         &mut self,
         internal: &str,
-        intrinsic: TypeIntrinsic,
+        intrinsic: TypeCheckRole,
         code: &mut CodeBuilder,
     ) {
-        let (call, checkcast) = intrinsic.cast();
+        let (call, checkcast) = cast(intrinsic);
         self.emit_type_intrinsic_call(&call, code);
         if checkcast {
             let class = self.cw.class_ref(internal);
