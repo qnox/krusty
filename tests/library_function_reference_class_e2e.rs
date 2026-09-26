@@ -106,3 +106,92 @@ fn library_function_reference_classes_are_byte_identical_to_kotlinc() {
         "carriers that differ from kotlinc"
     );
 }
+
+const BOUNDARY_LIBRARY: &str = r#"package lib
+
+@JvmInline
+value class Box(val item: Any)
+
+@JvmInline
+value class Tag(val text: String)
+
+@JvmName("labelOf")
+fun Box.label(): String = "box:" + item
+
+fun <T> T.describe(): String = "any:" + this
+
+fun makeBox(item: Any): Box = Box(item)
+
+fun <T> pass(value: T): T = value
+
+fun twice(value: Int): Int = value * 2
+"#;
+
+const BOUNDARY_SOURCE: &str = r#"package app
+
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
+import lib.Box
+import lib.Tag
+import lib.describe
+import lib.label
+import lib.makeBox
+import lib.pass
+import lib.twice
+
+object Unused : Continuation<Int> {
+    override val context: CoroutineContext get() = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Int>) {}
+}
+
+fun box(): String {
+    val labelled = Box::label
+    if (labelled(Box("a")) != "box:a") return "declared value-class receiver"
+    val described = Box::describe
+    if (described(Box("a")) != "any:Box(item=a)") return "generic receiver"
+    val made = ::makeBox
+    if (made("b").item != "b") return "declared value-class result"
+    val passed: (Tag) -> Tag = ::pass
+    if (passed(Tag("c")).text != "c") return "generic result specialized to a value class"
+    val doubled: suspend (Int) -> Int = ::twice
+    @Suppress("UNCHECKED_CAST")
+    val raw = doubled as (Int, Continuation<Int>) -> Any?
+    if (raw(21, Unused) != 42) return "suspend-converted reference"
+    return "OK"
+}
+"#;
+
+/// A dependency reference's adapter calls its declaration with the facts an ordinary call records.
+/// `Box` erases to `Object` like a bare type parameter, so only the declared receiver and result
+/// tell `labelOf(Box)` and `makeBox(): Box` (the carrier) from `T.describe()` and `pass(T): T` (a
+/// box); the suspend-converted `::twice` returns its boxed result through the continuation-taking
+/// `invoke`. These carriers keep the dispatching `invoke`, so they are checked at runtime.
+#[test]
+fn library_function_references_keep_declared_value_class_boundaries() {
+    let dir = common::scratch_dir().expect("scratch directory");
+    let library_out = dir.join("lib");
+    std::fs::create_dir_all(&library_out).expect("library output directory");
+    let library = dir.join("Lib.kt");
+    std::fs::write(&library, BOUNDARY_LIBRARY).expect("write library");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        library_out.to_string_lossy().into_owned(),
+        library.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed on the library: {stderr}");
+
+    let ours = common::compile_in_process_metadata_cp_module_target(
+        BOUNDARY_SOURCE,
+        "Probe",
+        &[library_out.clone(), common::stdlib_jar()],
+        "main",
+        None,
+    )
+    .expect("krusty compiles the fixture");
+    let result = common::run_box(&ours, "app.ProbeKt", &[library_out, common::stdlib_jar()])
+        .expect("box runner");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(result, "OK");
+}
