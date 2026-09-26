@@ -46,10 +46,18 @@ static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_bu
 static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                       (kt_fn)kt_any_to_string};
 
+/* The names of a class of the runtime's own: `simple` in `package` (which ends in its dot), both
+   published as a member class's (`KType.class_names`), and the rendered name their join. Written
+   as two literals so the simple name is its own text rather than the tail of a split. */
+#define KT_NAMED(package, simple)                                                                  \
+    .name = package simple, .name_length = sizeof(package simple) - 1,                             \
+    .qualified_name = package simple, .qualified_name_length = sizeof(package simple) - 1,         \
+    .simple_name = simple, .simple_name_length = sizeof(simple) - 1,                               \
+    .class_names = KT_CLASS_NAMES_MEMBER
+
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
-const KType kt_type_any = {.name = "kotlin.Any",
-                           .name_length = 10,
+const KType kt_type_any = {KT_NAMED("kotlin.", "Any"),
                            .instance_size = sizeof(KObjectHeader),
                            .vtable = kt_any_vtable,
                            .vtable_length = 3};
@@ -58,9 +66,8 @@ const KType kt_type_any = {.name = "kotlin.Any",
    nothing else. Every descriptor names its fields, because a positional initializer silently
    shifts when `KType` gains a field and leaves every field after the last one written to a
    default nobody chose. */
-#define KT_MARKER_TYPE(identifier, kotlin_name)                                                    \
-    const KType identifier = {.name = kotlin_name,                                                 \
-                              .name_length = sizeof(kotlin_name) - 1,                              \
+#define KT_MARKER_TYPE(identifier, package, simple)                                                \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = sizeof(KObjectHeader),                              \
                               .super = &kt_type_any,                                               \
                               .vtable = kt_any_vtable,                                             \
@@ -71,14 +78,14 @@ const KType kt_type_any = {.name = "kotlin.Any",
    against them has something to compare. Kotlin's own hierarchy decides which points at which, and
    it is asymmetric: `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer
    is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
-KT_MARKER_TYPE(kt_type_number, "kotlin.Number")
-KT_MARKER_TYPE(kt_type_comparable, "kotlin.Comparable")
+KT_MARKER_TYPE(kt_type_number, "kotlin.", "Number")
+KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
 
 /* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
    it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
-KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.CharSequence")
+KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.", "CharSequence")
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -87,9 +94,9 @@ KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.CharSequence")
 
    None of them has instances, exactly like `Number` and `Comparable` above. 22 is Kotlin's largest
    function arity, so the set is complete rather than open-ended. */
-KT_MARKER_TYPE(kt_type_function, "kotlin.Function")
+KT_MARKER_TYPE(kt_type_function, "kotlin.", "Function")
 
-#define KT_FUNCTION_TYPE(arity) KT_MARKER_TYPE(kt_type_function##arity, "kotlin.Function" #arity)
+#define KT_FUNCTION_TYPE(arity) KT_MARKER_TYPE(kt_type_function##arity, "kotlin.", "Function" #arity)
 
 KT_FUNCTION_TYPE(0)
 KT_FUNCTION_TYPE(1)
@@ -118,17 +125,17 @@ KT_FUNCTION_TYPE(22)
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
    its own — a reference object's type is one the generator emits per property — so these are what
    an `is` against `KProperty0` or `KMutableProperty` compares with. */
-#define KT_REFLECT_TYPE(identifier, kotlin_name) KT_MARKER_TYPE(identifier, kotlin_name)
+#define KT_REFLECT_TYPE(identifier, simple) KT_MARKER_TYPE(identifier, "kotlin.reflect.", simple)
 
-KT_REFLECT_TYPE(kt_type_kcallable, "kotlin.reflect.KCallable")
-KT_REFLECT_TYPE(kt_type_kproperty, "kotlin.reflect.KProperty")
-KT_REFLECT_TYPE(kt_type_kproperty0, "kotlin.reflect.KProperty0")
-KT_REFLECT_TYPE(kt_type_kproperty1, "kotlin.reflect.KProperty1")
-KT_REFLECT_TYPE(kt_type_kproperty2, "kotlin.reflect.KProperty2")
-KT_REFLECT_TYPE(kt_type_kmutable_property, "kotlin.reflect.KMutableProperty")
-KT_REFLECT_TYPE(kt_type_kmutable_property0, "kotlin.reflect.KMutableProperty0")
-KT_REFLECT_TYPE(kt_type_kmutable_property1, "kotlin.reflect.KMutableProperty1")
-KT_REFLECT_TYPE(kt_type_kmutable_property2, "kotlin.reflect.KMutableProperty2")
+KT_REFLECT_TYPE(kt_type_kcallable, "KCallable")
+KT_REFLECT_TYPE(kt_type_kproperty, "KProperty")
+KT_REFLECT_TYPE(kt_type_kproperty0, "KProperty0")
+KT_REFLECT_TYPE(kt_type_kproperty1, "KProperty1")
+KT_REFLECT_TYPE(kt_type_kproperty2, "KProperty2")
+KT_REFLECT_TYPE(kt_type_kmutable_property, "KMutableProperty")
+KT_REFLECT_TYPE(kt_type_kmutable_property0, "KMutableProperty0")
+KT_REFLECT_TYPE(kt_type_kmutable_property1, "KMutableProperty1")
+KT_REFLECT_TYPE(kt_type_kmutable_property2, "KMutableProperty2")
 
 /* Flattened and transitive, as `KType.interfaces` requires: a `Number` is also `Comparable`, so a
    numeric box names both rather than relying on a walk that does not exist. */
@@ -137,9 +144,8 @@ static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
 static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
 static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
 
-#define KT_TYPE_WITH(identifier, kotlin_name, size, count, offsets, ifaces)                        \
-    const KType identifier = {.name = kotlin_name,                                                 \
-                              .name_length = sizeof(kotlin_name) - 1,                              \
+#define KT_TYPE_WITH(identifier, package, simple, size, count, offsets, ifaces)                    \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = size,                                               \
                               .reference_count = count,                                            \
                               .reference_offsets = offsets,                                        \
@@ -149,9 +155,8 @@ static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequenc
                               .interfaces = ifaces,                                                \
                               .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
 
-#define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
-    const KType identifier = {.name = kotlin_name,                                                 \
-                              .name_length = sizeof(kotlin_name) - 1,                              \
+#define KT_TYPE(identifier, package, simple, size, count, offsets)                                 \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = size,                                               \
                               .reference_count = count,                                            \
                               .reference_offsets = offsets,                                        \
@@ -161,9 +166,8 @@ static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequenc
 
 /* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
    so it takes `kotlin.Any`'s vtable rather than the built-in value one. */
-#define KT_ARRAY_TYPE(identifier, kotlin_name, stride, references)                                 \
-    const KType identifier = {.name = kotlin_name,                                                 \
-                              .name_length = sizeof(kotlin_name) - 1,                              \
+#define KT_ARRAY_TYPE(identifier, package, simple, stride, references)                             \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = sizeof(KArray),                                     \
                               .element_size = stride,                                              \
                               .super = &kt_type_any,                                               \
@@ -173,23 +177,23 @@ static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequenc
 
 /* Every array, including the raw bytes behind a string's text. `KArray` says where the elements
    begin; the type says how wide they are and whether the collector looks inside. */
-KT_ARRAY_TYPE(kt_type_array, "kotlin.Array", sizeof(void *), 1)
-KT_ARRAY_TYPE(kt_type_byte_array, "kotlin.ByteArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_short_array, "kotlin.ShortArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_int_array, "kotlin.IntArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_long_array, "kotlin.LongArray", 8, 0)
-KT_ARRAY_TYPE(kt_type_char_array, "kotlin.CharArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.BooleanArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_float_array, "kotlin.FloatArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_double_array, "kotlin.DoubleArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_array, "kotlin.", "Array", sizeof(void *), 1)
+KT_ARRAY_TYPE(kt_type_byte_array, "kotlin.", "ByteArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_short_array, "kotlin.", "ShortArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_int_array, "kotlin.", "IntArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_long_array, "kotlin.", "LongArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_char_array, "kotlin.", "CharArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.", "BooleanArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_float_array, "kotlin.", "FloatArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_double_array, "kotlin.", "DoubleArray", 8, 0)
 
 /* An unsigned array is a value class over the signed array of the same width, so it takes that
    array's STRIDE and its own NAME. Sharing the signed descriptor would read and write the same
    bytes correctly and answer `is IntArray` with `true`, where the two are distinct classes. */
-KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.UByteArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.UShortArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.UIntArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.ULongArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.", "UByteArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.", "UShortArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.", "UIntArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.", "ULongArray", 8, 0)
 
 KRef kt_array_new(const KType *type, kt_int length) {
     if (length < 0) {
@@ -277,26 +281,26 @@ struct KObject {
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-KT_TYPE_WITH(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references, kt_text_interfaces)
-KT_TYPE_WITH(kt_type_byte, "kotlin.Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE_WITH(kt_type_short, "kotlin.Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE_WITH(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE_WITH(kt_type_long, "kotlin.Long", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE_WITH(kt_type_char, "kotlin.Char", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
-KT_TYPE_WITH(kt_type_boolean, "kotlin.Boolean", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
-KT_TYPE_WITH(kt_type_float, "kotlin.Float", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE_WITH(kt_type_double, "kotlin.Double", sizeof(KObject), 0, NULL, kt_number_interfaces)
-KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
+KT_TYPE_WITH(kt_type_string, "kotlin.", "String", sizeof(KObject), 1, kt_string_references, kt_text_interfaces)
+KT_TYPE_WITH(kt_type_byte, "kotlin.", "Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_short, "kotlin.", "Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_int, "kotlin.", "Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_long, "kotlin.", "Long", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_char, "kotlin.", "Char", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_boolean, "kotlin.", "Boolean", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_float, "kotlin.", "Float", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_double, "kotlin.", "Double", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE(kt_type_unit, "kotlin.", "Unit", sizeof(KObject), 0, NULL)
 
 /* Kotlin's four unsigned integers. Each is a value class over a signed primitive, and the generated
    code carries it as the machine integer it wraps — the right machine shape, and the wrong one to
    ask questions of, since `4294967295u` is that `Int`'s bits and not its value. A descriptor of its
    own is what keeps `1u as? Int` false and makes a boxed one render its value; the bits live in the
    signed field of the matching width, and only the descriptor says how to read them. */
-KT_TYPE_WITH(kt_type_ubyte, "kotlin.UByte", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
-KT_TYPE_WITH(kt_type_ushort, "kotlin.UShort", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
-KT_TYPE_WITH(kt_type_uint, "kotlin.UInt", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
-KT_TYPE_WITH(kt_type_ulong, "kotlin.ULong", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_ubyte, "kotlin.", "UByte", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_ushort, "kotlin.", "UShort", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_uint, "kotlin.", "UInt", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_ulong, "kotlin.", "ULong", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
 
 #undef KT_TYPE
 
@@ -1180,18 +1184,15 @@ static KRef kt_string_builder_to_string(KRef self);
 static const kt_fn kt_string_builder_vtable[] = {
     (kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code, (kt_fn)kt_string_builder_to_string};
 
-const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
-                                      sizeof("kotlin.text.StringBuilder") - 1,
-                                      sizeof(KStringBuilder),
-                                      1,
-                                      0,
-                                      kt_string_builder_offsets,
-                                      &kt_type_any,
-                                      kt_string_builder_vtable,
-                                      3,
-                                      0,
-                                      kt_char_sequence_interfaces,
-                                      1};
+const KType kt_type_string_builder = {KT_NAMED("kotlin.text.", "StringBuilder"),
+                                      .instance_size = sizeof(KStringBuilder),
+                                      .reference_count = 1,
+                                      .reference_offsets = kt_string_builder_offsets,
+                                      .super = &kt_type_any,
+                                      .vtable = kt_string_builder_vtable,
+                                      .vtable_length = 3,
+                                      .interfaces = kt_char_sequence_interfaces,
+                                      .interface_count = 1};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
     /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
@@ -1633,16 +1634,11 @@ static KRef kt_class_to_string(KRef self);
 static const kt_fn kt_class_vtable[] = {(kt_fn)kt_class_equals, (kt_fn)kt_class_hash_code,
                                         (kt_fn)kt_class_to_string};
 
-const KType kt_type_kclass = {"kotlin.reflect.KClass",
-                              sizeof("kotlin.reflect.KClass") - 1,
-                              sizeof(KClass),
-                              0,
-                              0,
-                              NULL,
-                              &kt_type_any,
-                              kt_class_vtable,
-                              3,
-                              0};
+const KType kt_type_kclass = {KT_NAMED("kotlin.reflect.", "KClass"),
+                              .instance_size = sizeof(KClass),
+                              .super = &kt_type_any,
+                              .vtable = kt_class_vtable,
+                              .vtable_length = 3};
 
 KRef kt_class_literal(const KType *type) {
     KClass *literal = (KClass *)kt_gc_allocate(&kt_type_kclass, sizeof(KClass));
@@ -1683,26 +1679,64 @@ static KRef kt_class_to_string(KRef self) {
     return kt_string_plus(prefix, name);
 }
 
-KRef kt_class_qualified_name(KRef self) {
-    const KType *described = ((const KClass *)self)->described;
-    return kt_string_utf8(described->name, (kt_int)described->name_length);
+/* A descriptor that cannot answer what it was asked is a fault in whatever emitted it, not a state
+   the program can reach; the runtime ends the program and says which descriptor it was, since
+   nothing else in the message would find it. */
+static void kt_fail_on_descriptor(const char *before, size_t before_length, const KType *type,
+                                  const char *after, size_t after_length) {
+    kt_sys_write(2, before, before_length);
+    kt_sys_write(2, type->name, type->name_length);
+    kt_sys_fail(after, after_length);
 }
 
-/* The last segment of the qualified name. A name with no separator is its own simple name, which
-   is what a class in the root package has.
+#define KT_FAIL_ON_DESCRIPTOR(before, type, after)                                                 \
+    kt_fail_on_descriptor(before, sizeof(before) - 1, type, after, sizeof(after) - 1)
 
-   Both separators count. A package is spelled with dots and NESTING with `$` — `A$Companion` is
-   the companion of `A` — so splitting on dots alone answered the whole nested name where Kotlin
-   answers `Companion`. */
-KRef kt_class_simple_name(KRef self) {
+/* The descriptor a class literal stands for, once it has been checked to publish names consistent
+   with its kind: a member class names both, a local class its simple name, and an anonymous object
+   neither. Anything else is a descriptor no answer can be read from. */
+static const KType *kt_class_described(KRef self) {
     const KType *described = ((const KClass *)self)->described;
-    kt_int start = 0;
-    for (kt_int at = 0; at < (kt_int)described->name_length; at++) {
-        if (described->name[at] == '.' || described->name[at] == '$') {
-            start = at + 1;
-        }
+    kt_boolean consistent = 0;
+    switch (described->class_names) {
+    case KT_CLASS_NAMES_MEMBER:
+        consistent = described->qualified_name != NULL && described->simple_name != NULL;
+        break;
+    case KT_CLASS_NAMES_LOCAL:
+        consistent = described->qualified_name == NULL && described->simple_name != NULL;
+        break;
+    case KT_CLASS_NAMES_ANONYMOUS:
+        consistent = described->qualified_name == NULL && described->simple_name == NULL;
+        break;
+    default:
+        break;
     }
-    return kt_string_utf8(described->name + start, (kt_int)described->name_length - start);
+    if (!consistent) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: the class ", described,
+                              " publishes no reflection names consistent with its kind\n");
+    }
+    return described;
+}
+
+/* `qualifiedName`: the name the descriptor publishes, which for a nested class is joined with
+   dots (`pkg.Outer.Inner`), and `null` for a local class or an anonymous object, as in Kotlin. */
+KRef kt_class_qualified_name(KRef self) {
+    const KType *described = kt_class_described(self);
+    if (described->qualified_name == NULL) {
+        return NULL;
+    }
+    return kt_string_utf8(described->qualified_name, (kt_int)described->qualified_name_length);
+}
+
+/* `simpleName`: the name the class was declared with, taken whole from the descriptor. It is not
+   the tail of the qualified name: a backticked name may itself hold a `$` or a `.`, and an
+   anonymous object has a rendered name but no simple name at all (`null`). */
+KRef kt_class_simple_name(KRef self) {
+    const KType *described = kt_class_described(self);
+    if (described->simple_name == NULL) {
+        return NULL;
+    }
+    return kt_string_utf8(described->simple_name, (kt_int)described->simple_name_length);
 }
 
 /* ---- lazy ---------------------------------------------------------------------------------- */
@@ -1724,16 +1758,13 @@ static KRef kt_lazy_to_string(KRef self);
 static const kt_fn kt_lazy_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                        (kt_fn)kt_lazy_to_string};
 
-const KType kt_type_lazy = {"kotlin.Lazy",
-                            sizeof("kotlin.Lazy") - 1,
-                            sizeof(KLazy),
-                            2,
-                            0,
-                            kt_lazy_offsets,
-                            &kt_type_any,
-                            kt_lazy_vtable,
-                            3,
-                            0};
+const KType kt_type_lazy = {KT_NAMED("kotlin.", "Lazy"),
+                            .instance_size = sizeof(KLazy),
+                            .reference_count = 2,
+                            .reference_offsets = kt_lazy_offsets,
+                            .super = &kt_type_any,
+                            .vtable = kt_lazy_vtable,
+                            .vtable_length = 3};
 
 /* `kotlin.Result` is a value class over `Any?`, and its representation is Kotlin's own: a SUCCESS
    is the value itself, so `Result.success(x)` is `x` and costs nothing, and a FAILURE is this
@@ -1748,16 +1779,13 @@ typedef struct KResultFailure {
 
 static const uint32_t kt_result_failure_offsets[] = {offsetof(KResultFailure, exception)};
 
-static const KType kt_type_result_failure = {"kotlin.Result.Failure",
-                                             sizeof("kotlin.Result.Failure") - 1,
-                                             sizeof(KResultFailure),
-                                             1,
-                                             0,
-                                             kt_result_failure_offsets,
-                                             &kt_type_any,
-                                             kt_any_vtable,
-                                             3,
-                                             0};
+static const KType kt_type_result_failure = {KT_NAMED("kotlin.Result.", "Failure"),
+                                             .instance_size = sizeof(KResultFailure),
+                                             .reference_count = 1,
+                                             .reference_offsets = kt_result_failure_offsets,
+                                             .super = &kt_type_any,
+                                             .vtable = kt_any_vtable,
+                                             .vtable_length = 3};
 
 /* `Result.success(x)` IS `x`. This exists so the call site has a target of the ordinary shape
    rather than a special case; it costs one call and no allocation. */
@@ -1882,16 +1910,13 @@ static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)}
 static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                            (kt_fn)kt_any_to_string};
 
-const KType kt_type_not_null_var = {"kotlin.properties.NotNullVar",
-                                sizeof("kotlin.properties.NotNullVar") - 1,
-                                sizeof(KNotNullVar),
-                                1,
-                                0,
-                                kt_not_null_var_offsets,
-                                &kt_type_any,
-                                kt_not_null_var_vtable,
-                                3,
-                                0};
+const KType kt_type_not_null_var = {KT_NAMED("kotlin.properties.", "NotNullVar"),
+                                    .instance_size = sizeof(KNotNullVar),
+                                    .reference_count = 1,
+                                    .reference_offsets = kt_not_null_var_offsets,
+                                    .super = &kt_type_any,
+                                    .vtable = kt_not_null_var_vtable,
+                                    .vtable_length = 3};
 
 KRef kt_not_null_var(void) {
     KNotNullVar *var = (KNotNullVar *)kt_gc_allocate(&kt_type_not_null_var, sizeof(KNotNullVar));
@@ -1918,16 +1943,13 @@ static const uint32_t kt_observable_offsets[] = {offsetof(KObservable, value),
 static const kt_fn kt_observable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                              (kt_fn)kt_any_to_string};
 
-const KType kt_type_observable = {"kotlin.properties.ObservableProperty",
-                                  sizeof("kotlin.properties.ObservableProperty") - 1,
-                                  sizeof(KObservable),
-                                  2,
-                                  0,
-                                  kt_observable_offsets,
-                                  &kt_type_any,
-                                  kt_observable_vtable,
-                                  3,
-                                  0};
+const KType kt_type_observable = {KT_NAMED("kotlin.properties.", "ObservableProperty"),
+                                  .instance_size = sizeof(KObservable),
+                                  .reference_count = 2,
+                                  .reference_offsets = kt_observable_offsets,
+                                  .super = &kt_type_any,
+                                  .vtable = kt_observable_vtable,
+                                  .vtable_length = 3};
 
 KRef kt_observable(KRef initial, KRef on_change) {
     KObservable *observable =
@@ -1995,16 +2017,13 @@ static KRef kt_pair_to_string(KRef self);
 static const kt_fn kt_pair_vtable[] = {(kt_fn)kt_pair_equals, (kt_fn)kt_pair_hash_code,
                                        (kt_fn)kt_pair_to_string};
 
-const KType kt_type_pair = {"kotlin.Pair",
-                            sizeof("kotlin.Pair") - 1,
-                            sizeof(KPair),
-                            2,
-                            0,
-                            kt_pair_offsets,
-                            &kt_type_any,
-                            kt_pair_vtable,
-                            3,
-                            0};
+const KType kt_type_pair = {KT_NAMED("kotlin.", "Pair"),
+                            .instance_size = sizeof(KPair),
+                            .reference_count = 2,
+                            .reference_offsets = kt_pair_offsets,
+                            .super = &kt_type_any,
+                            .vtable = kt_pair_vtable,
+                            .vtable_length = 3};
 
 KRef kt_pair_of(KRef first, KRef second) {
     /* Both components stay in these parameters across the allocation: they are its roots. */

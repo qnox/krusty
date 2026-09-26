@@ -329,6 +329,19 @@ fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
     run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
 }
 
+#[test]
+fn a_class_answers_the_names_its_descriptor_publishes() {
+    run_driver("class_names");
+}
+
+#[test]
+fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
+    run_driver_expecting_failure(
+        "class_names_unpublished",
+        "krusty: the class pkg.Unpublished publishes no reflection names consistent with its kind\n",
+    );
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

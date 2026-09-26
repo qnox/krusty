@@ -7539,6 +7539,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   pending afterwards is the very object the call threw. That is Kotlin's answer: the generated
   data-class members and `Result.toString` propagate the first exception from where it was thrown.
   Tests: `tests/native_runtime_e2e.rs` (`pair_component_throws`, `result_to_string_throws`).
+- **A native `KClass` answers the names its descriptor publishes.** `simpleName` and
+  `qualifiedName` are not derived from the descriptor's rendered name: each `KType` publishes its
+  qualified and simple names and a kind (`KT_CLASS_NAMES_*` in `src/native/runtime/krusty_rt.h`).
+  A member class, top-level or nested, has both — `pkg.Top.Nested` and `Nested`, joined with dots
+  whatever the rendered name uses; a backticked `` `a$b` `` is `a$b` and `pkg.a$b`, not `b`. A local
+  class has only its simple name (`qualifiedName` is `null`), and an anonymous object has neither
+  (`simpleName` and `qualifiedName` are both `null`), as kotlinc 2.4.10 answers on the JVM for the
+  program recorded in the driver. A descriptor that publishes no names, or a kind without the names
+  it needs, is a fault in whatever emitted it and ends the program naming the descriptor.
+  Tests: `tests/native_runtime_e2e.rs` (`class_names`, `class_names_unpublished`).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

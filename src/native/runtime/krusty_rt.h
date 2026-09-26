@@ -104,7 +104,32 @@ typedef struct KType {
        runtime answers about TEXT be asked of text the program wrote. */
     kt_int (*walk_length)(struct KObject *self);
     kt_char (*walk_char_at)(struct KObject *self, kt_int index);
+    /* The class's reflection identity: what `KClass.qualifiedName` and `KClass.simpleName` answer,
+       published by whoever emits the descriptor rather than reconstructed from `name`. `name` is
+       the rendered name `toString` prints, and no split of it recovers the identity: a nested
+       class and a backticked name holding a `$` or a `.` spell their separators alike, and a local
+       or anonymous class has names Kotlin does not answer at all. `class_names` says which of the
+       two this class has (`KT_CLASS_NAMES_*`); a name the kind does not include is NULL. Appended
+       after every other field, and every descriptor names its fields, so no existing initializer
+       moves. */
+    const char *qualified_name;
+    uint32_t qualified_name_length;
+    const char *simple_name;
+    uint32_t simple_name_length;
+    uint32_t class_names;
 } KType;
+
+/* What a descriptor publishes about its class's names, in `KType.class_names`.
+
+   UNPUBLISHED is the zero a descriptor gets by not saying: asking such a class for its names is a
+   loud failure naming the descriptor, since any answer would be a guess. A MEMBER class — at top
+   level or nested in another — has both names: `pkg.Outer.Inner` and `Inner`. A LOCAL class has
+   only its simple name; Kotlin's `qualifiedName` is `null` for it. An ANONYMOUS object has
+   neither. */
+#define KT_CLASS_NAMES_UNPUBLISHED 0u
+#define KT_CLASS_NAMES_MEMBER 1u
+#define KT_CLASS_NAMES_LOCAL 2u
+#define KT_CLASS_NAMES_ANONYMOUS 3u
 
 
 typedef struct KObjectHeader {
@@ -966,7 +991,10 @@ KRef kt_class_of(KRef value);
 /* Named for the FORM rather than for what it takes: `kt_class_for` is the collector's own
    size-class helper, and a freestanding program links one namespace. */
 KRef kt_class_literal(const KType *type);
-/* `simpleName` and `qualifiedName`, read off the descriptor's own Kotlin name. */
+/* `simpleName` and `qualifiedName`, as the descriptor publishes them (`KType.class_names`): `null`
+   where Kotlin answers `null` — the qualified name of a local class, both names of an anonymous
+   object. A descriptor that publishes no names, or publishes a kind without the names it needs,
+   fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
 
