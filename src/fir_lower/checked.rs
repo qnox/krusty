@@ -223,6 +223,7 @@ impl BodyLowering<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver,
+                substitutions,
                 adaptation,
                 reference_ty,
             );
