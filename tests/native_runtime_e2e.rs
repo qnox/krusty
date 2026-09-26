@@ -342,6 +342,11 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
     );
 }
 
+#[test]
+fn a_result_answers_its_operations_and_get_or_throw_stops_at_the_throw() {
+    run_driver("result_operations");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

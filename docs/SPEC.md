@@ -7563,6 +7563,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `builder_from_throwing_char_sequence`, `builder_append_throwing_to_string`,
   `builder_append_line_throwing_to_string`, `pair_component_throws`, `result_to_string_throws`,
   `lazy_initializer_throws`).
+- **Native `Result` operations.** A success is its value and a failure a marker holding the
+  exception, so `Result.success(null)` is a success distinct from every failure. `isSuccess`,
+  `isFailure`, `getOrNull`, `exceptionOrNull` and `toString` (`Success(1)`, `Success(null)`,
+  `Failure(<exception's own toString>)`) answer as kotlinc 2.4.10 does on the JVM for the program
+  recorded in the driver. `getOrThrow` answers a success's value, and on a failure throws the very
+  exception it holds and answers NULL at once — never the failure marker, which is no value of the
+  program's type.
+  Tests: `tests/native_runtime_e2e.rs` (`result_operations`).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

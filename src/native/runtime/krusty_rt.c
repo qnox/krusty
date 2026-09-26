@@ -1843,9 +1843,13 @@ KRef kt_result_exception_or_null(KRef value) {
     return kt_result_is_failure(value) ? ((const KResultFailure *)value)->exception : NULL;
 }
 
+/* A failure throws the exception it holds and returns at once. `kt_throw` comes back, and falling
+   through would hand the failure marker to a caller expecting a `T`: a value of no type the program
+   declared, which the caller would read if it ever read before looking for the exception. */
 KRef kt_result_get_or_throw(KRef value) {
     if (kt_result_is_failure(value)) {
         kt_throw(((const KResultFailure *)value)->exception);
+        return NULL;
     }
     return value;
 }
