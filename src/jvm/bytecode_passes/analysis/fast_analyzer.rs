@@ -33,6 +33,12 @@ pub(crate) struct AnalyzerOptions {
     pub fast_handlers: bool,
     /// `useFastMergeControlFlowEdge`: a node keeps the first frame that reaches it.
     pub fast_merge: bool,
+    /// Take the queued node with the lowest index next instead of the last one queued. Without
+    /// `fast_merge` the frames an analysis reaches do not depend on the order it visits nodes in,
+    /// only how often it revisits them: last-in-first-out walks the rest of a method again after
+    /// every branch that joins it, which a method with hundreds of branches (a large data class's
+    /// `copy$default`) cannot afford with values as large as instruction sets.
+    pub in_index_order: bool,
 }
 
 /// How a frame executes one instruction: ASM's `Frame.execute` unless an analysis's own frame
@@ -121,7 +127,7 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
     let mut work = Worklist {
         frames: vec![None; count],
         queued: vec![false; count],
-        queue: Vec::new(),
+        queue: Queue::new(options.in_index_order && !options.fast_merge),
         merge_nodes: merge_nodes(method, &positions),
         fast_merge: options.fast_merge,
     };
@@ -183,10 +189,40 @@ fn successors(insn: &Insn, index: usize, positions: &LabelPositions) -> Vec<usiz
     targets
 }
 
+/// The nodes waiting to be visited: a stack, or, `in_index_order`, a min-heap by node index.
+enum Queue {
+    Stack(Vec<usize>),
+    Ordered(std::collections::BinaryHeap<std::cmp::Reverse<usize>>),
+}
+
+impl Queue {
+    fn new(in_index_order: bool) -> Queue {
+        if in_index_order {
+            Queue::Ordered(std::collections::BinaryHeap::new())
+        } else {
+            Queue::Stack(Vec::new())
+        }
+    }
+
+    fn push(&mut self, index: usize) {
+        match self {
+            Queue::Stack(stack) => stack.push(index),
+            Queue::Ordered(heap) => heap.push(std::cmp::Reverse(index)),
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        match self {
+            Queue::Stack(stack) => stack.pop(),
+            Queue::Ordered(heap) => heap.pop().map(|std::cmp::Reverse(index)| index),
+        }
+    }
+}
+
 struct Worklist<V> {
     frames: Vec<Option<Frame<V>>>,
     queued: Vec<bool>,
-    queue: Vec<usize>,
+    queue: Queue,
     merge_nodes: Vec<bool>,
     fast_merge: bool,
 }
