@@ -84,6 +84,10 @@ pub struct FuncRef {
     /// The reference's Kotlin function type: the generic interface the carrier implements, which
     /// its class `Signature` spells.
     pub function_type: Ty,
+    /// The complete reflected JVM signature of a dependency target, as its provider publishes it
+    /// (`charAt(I)C` for `String::get`, `padStart(Ljava/lang/String;IC)Ljava/lang/String;` for an
+    /// extension). `None` derives the signature from the reflection types above.
+    pub reflection_signature: Option<String>,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced

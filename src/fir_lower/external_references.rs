@@ -10,13 +10,16 @@ use crate::types::Ty;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    #[allow(clippy::too_many_arguments)]
+    /// A dependency callable reference is an ordinary [`IrExpr::CallableReference`]: a generated
+    /// adapter calls the provider-selected declaration, and the target backend chooses its carrier
+    /// exactly as for a module declaration. A bound receiver is the adapter's first parameter.
     pub(super) fn checked_external_callable_reference(
         &mut self,
         target: FirCallableReferenceTarget,
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
+        substitutions: &[crate::fir::FirTypeSubstitution],
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<ExprId, FirLoweringFailure> {
@@ -24,9 +27,12 @@ impl BodyLowering<'_> {
             declaration,
             default_provider,
             receiver,
+            declared_receiver,
             extension_receiver: target_is_extension,
             parameters,
             result,
+            declared_result,
+            suspend: declaration_suspend,
         } = target
         else {
             unreachable!("module references stay on the module materializer")
@@ -36,8 +42,6 @@ impl BodyLowering<'_> {
                 declaration,
             ));
         };
-        let arity = u8::try_from(reference.params.len())
-            .map_err(|_| FirLoweringFailure::UnsupportedExternalCallableReference(declaration))?;
         let dispatch_capture = dispatch_receiver
             .map(|receiver| self.expression_with_conversion(receiver.value, receiver.conversion))
             .transpose()?;
@@ -171,14 +175,14 @@ impl BodyLowering<'_> {
             target: declaration,
             default_provider,
             receiver_ty: receiver,
-            declared_receiver: None,
+            declared_receiver,
             parameters: &parameters,
             result,
-            declared_result: None,
-            suspend: false,
+            declared_result,
+            suspend: declaration_suspend,
             can_inline: false,
             inline_plan: None,
-            substitutions: &[],
+            substitutions,
             extension_receiver_parameter: None,
             dispatch_receiver,
             extension_receiver,
@@ -204,19 +208,41 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        if adaptation.is_some_and(|adaptation| adaptation.suspend_conversion) {
+        if reference.suspend {
             self.ir.suspend_funs.push(function);
         }
         self.ir.private_methods.insert(function);
         self.ir
             .lambda_own_params_from
             .insert(function, captures.len() as u32);
-        Ok(self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: function,
-            arity,
-            captures,
-            sam: None,
-            inline_body: None,
-        }))
+        self.attach_generated_static_to_lexical_class(function);
+        let bound_receiver = match captures.as_slice() {
+            [] => None,
+            [receiver] => Some(*receiver),
+            _ => {
+                return Err(FirLoweringFailure::UnsupportedExternalCallableReference(
+                    declaration,
+                ))
+            }
+        };
+        Ok(self
+            .ir
+            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::External {
+                    declaration,
+                    receiver: receiver.map(crate::fir::ResolvedTy::get),
+                },
+                adapter: function,
+                captures: Vec::new(),
+                bound_receiver,
+                function_type: reference_ty,
+                declaration_parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                declaration_result: result.get(),
+                declaration_suspend,
+                adaptation: adaptation.cloned().map(Box::new),
+            })))
     }
 }

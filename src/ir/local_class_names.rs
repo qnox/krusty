@@ -156,14 +156,6 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             return;
         }
         IrCheckedOperation::IllegalProgressionStep { .. } => return,
-        IrCheckedOperation::CallableReference {
-            function_type,
-            substitutions,
-            ..
-        } => {
-            *function_type = ty(*function_type, names);
-            substitutions
-        }
         IrCheckedOperation::PropertyReference { substitutions, .. } => substitutions,
         IrCheckedOperation::LateinitFieldRead { .. }
         | IrCheckedOperation::BackingFieldRead { .. }
@@ -273,6 +265,10 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
                 IrCallableReferenceTarget::Local {
                     owner: Some(owner), ..
                 } => name(owner, names),
+                IrCallableReferenceTarget::External {
+                    receiver: Some(receiver),
+                    ..
+                } => *receiver = ty(*receiver, names),
                 _ => {}
             }
             reference.function_type = ty(reference.function_type, names);

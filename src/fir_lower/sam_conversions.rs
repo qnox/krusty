@@ -15,11 +15,7 @@ impl BodyLowering<'_> {
         conversion: &FirSamConversion,
         function: ExprId,
     ) -> Option<ExprId> {
-        let function_adapter = matches!(
-            self.ir.expr(function),
-            IrExpr::CallableReference(_)
-                | IrExpr::Checked(crate::ir::IrCheckedOperation::CallableReference { .. })
-        );
+        let function_adapter = matches!(self.ir.expr(function), IrExpr::CallableReference(_));
         let arity = u8::try_from(conversion.parameters.len()).ok()?;
         let function_type = Ty::fun_with_shape(
             conversion

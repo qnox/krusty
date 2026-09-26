@@ -69,9 +69,20 @@ pub(super) fn operation(
             }
             let op = binary_operation(intrinsic)?;
             let (lhs_ty, rhs_ty) = primitive_binary_operands(intrinsic, parameter, result)?;
-            let lhs = coerce(ir, receiver, receiver_ty, lhs_ty);
-            let rhs = coerce(ir, *argument, parameter, rhs_ty);
-            Some(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+            // JVM arithmetic has no `char` form: `Char.plus(Int)` adds as `int` and narrows the sum.
+            let arithmetic = |ty: Ty| if ty == Ty::Char { Ty::Int } else { ty };
+            let lhs = coerce(ir, receiver, receiver_ty, arithmetic(lhs_ty));
+            let rhs = coerce(ir, *argument, parameter, arithmetic(rhs_ty));
+            let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
+            if arithmetic(result) == result {
+                return Some(value);
+            }
+            let value = ir.add_expr(value);
+            Some(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: value,
+                type_operand: result,
+            })
         }
         _ => None,
     }

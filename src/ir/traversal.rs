@@ -102,12 +102,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 source.operands().into_iter().for_each(&mut *f);
                 f(*body);
             }
-            IrCheckedOperation::CallableReference {
-                dispatch_receiver,
-                extension_receiver,
-                ..
-            }
-            | IrCheckedOperation::PropertyReference {
+            IrCheckedOperation::PropertyReference {
                 dispatch_receiver,
                 extension_receiver,
                 ..

@@ -591,15 +591,6 @@ pub enum IrCheckedOperation {
         body: ExprId,
         label: String,
     },
-    CallableReference {
-        target: crate::fir::FirCallableReferenceTarget,
-        binding: crate::fir::FirCallableReferenceBinding,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        function_type: Ty,
-        substitutions: Vec<IrCheckedSubstitution>,
-        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
-    },
     PropertyReference {
         target: crate::fir::FirPropertyReferenceTarget,
         /// This reference is the compiler-generated `KProperty` metadata argument of a delegated
@@ -631,9 +622,12 @@ pub enum IrCallableReferenceTarget {
     },
     /// A DEPENDENCY declaration, by the provider-owned identity that names it. Kept opaque, as
     /// every other dependency edge is: the owner spelling, the published name and whatever the
-    /// declaration is realized as are the target's to read from its provider.
+    /// declaration is realized as are the target's to read from its provider. `receiver` is the
+    /// checked receiver type the reference was selected on (`None` for a top-level function), whose
+    /// classifier a reflective carrier names as the member's owner.
     External {
         declaration: crate::fir::ExternalCallableId,
+        receiver: Option<Ty>,
     },
 }
 

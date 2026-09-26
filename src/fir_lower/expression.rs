@@ -1397,8 +1397,7 @@ impl BodyLowering<'_> {
                 self.ir.exprs[raw],
                 crate::ir::IrExpr::CallableReference(_)
                     | crate::ir::IrExpr::Checked(
-                        crate::ir::IrCheckedOperation::CallableReference { .. }
-                            | crate::ir::IrCheckedOperation::PropertyReference { .. }
+                        crate::ir::IrCheckedOperation::PropertyReference { .. }
                     )
             )
         });

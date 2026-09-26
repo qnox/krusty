@@ -611,12 +611,6 @@ fn adapted_generic_extension_reference_consumes_published_substitution() {
                 crate::ir::IrCallableReferenceTarget::Module(_)
             )
     }));
-    assert!(ir.exprs.iter().all(|expression| {
-        !matches!(
-            expression,
-            IrExpr::Checked(IrCheckedOperation::CallableReference { .. })
-        )
-    }));
 }
 
 #[test]
@@ -924,10 +918,7 @@ fn companion_extension_references_lower_as_receiverless_static_values() {
     assert!(ir.exprs.iter().all(|expression| {
         !matches!(
             expression,
-            IrExpr::Checked(
-                IrCheckedOperation::CallableReference { .. }
-                    | IrCheckedOperation::PropertyReference { .. }
-            )
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
         )
     }));
 }
