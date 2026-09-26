@@ -4,12 +4,13 @@
 //!
 //! The coroutine transformation runs from `classfile::coroutine_transform`. The optimizer passes
 //! (redundant-null-check, redundant-cast, captured-vars and redundant-boxing elimination, temporary
-//! elimination, the stack peephole, `goto` and `nop` cleanup, jump negation, dead-code elimination
-//! and slot compaction) run in kotlinc's order from [`pipeline`], which `classfile::method_rewrite`
+//! elimination, the stack peephole, `goto` and `nop` cleanup, jump negation, the casts before array
+//! stores, dead-code elimination and slot compaction) run in kotlinc's order from [`pipeline`], which `classfile::method_rewrite`
 //! calls for every method, the coroutine transformation's result included.
 
 pub(crate) mod analysis;
 pub(crate) mod captured_vars;
+pub(crate) mod checkcasts_before_aastore;
 pub(crate) mod coroutines;
 pub(crate) mod dead_code;
 pub(crate) mod descriptors;

@@ -22,11 +22,16 @@ pub(crate) trait StackTops {
     fn is_exactly(&self, index: usize, class: &str) -> bool;
 }
 
-fn is_reified_marker(insn: &Insn) -> bool {
+/// Whether `insn` is kotlinc's `Intrinsics.reifiedOperationMarker` call (`ReifiedTypeInliner`'s
+/// `isOperationReifiedMarker`): the static, non-interface `(ILjava/lang/String;)V` method of that
+/// name on `Intrinsics`. Another call spelled the same is ordinary bytecode.
+pub(super) fn is_reified_marker(insn: &Insn) -> bool {
     matches!(
         insn,
-        Insn::Method { op: INVOKESTATIC, owner, name, .. }
-            if owner == "kotlin/jvm/internal/Intrinsics" && name == "reifiedOperationMarker"
+        Insn::Method { op: INVOKESTATIC, owner, name, desc, interface: false }
+            if owner == "kotlin/jvm/internal/Intrinsics"
+                && name == "reifiedOperationMarker"
+                && desc == "(ILjava/lang/String;)V"
     )
 }
 

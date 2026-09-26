@@ -4548,10 +4548,19 @@ shadow with no output change.
   the verifier's view of the emitted bytes, pool, LVT re-keying, frame proof), and the coroutine
   transformer's call is unchanged. In the 2.4.20 box corpus 0 of 26,135 classes change against
   4g (only `JvmInlineKt`, which varies run to run, differs).
-- ☐ 5b–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
-  PopBackwardPropagation and the mid-pipeline DeadCode, the complete RedundantNullCheck,
-  RedundantCheckcastsBeforeAastore), the first three passes in kotlinc's order, no all-or-nothing
-  rewrite, and the mandatory steps.
+- ✅ 5b. RedundantCheckcastsBeforeAastore (`bytecode_passes/checkcasts_before_aastore.rs`): a
+  `checkcast` whose next node is an `aastore` goes, with the reified-operation marker (and its two
+  arguments) right before it, as kotlinc's transformer does; an unreferenced label separates
+  nothing. `negated_jumps`' referenced-label set moved to `MethodNode::referenced_labels` for both.
+  In the 2.4.20 box corpus 23 of 26,135 classes change against 5a, in 20 box files, all by removed
+  casts (192 `checkcast`s, nothing else): `VarargBridge2Kt` becomes byte-identical to kotlinc, and
+  of the 15 changed methods whose class kotlinc compiles on its own, 7 more now match kotlinc's
+  instructions exactly. No box file becomes byte-identical (363 before and after); box pass/fail is
+  unchanged. One cast before an `aastore` remains in the corpus (`inline/genericFunctionReference`,
+  a method the rewrite keeps as emitted; 5g).
+- ☐ 5c–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
+  PopBackwardPropagation and the mid-pipeline DeadCode, the complete RedundantNullCheck), the first
+  three passes in kotlinc's order, no all-or-nothing rewrite, and the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

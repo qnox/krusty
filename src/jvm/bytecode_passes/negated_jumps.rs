@@ -26,27 +26,6 @@ fn negated(op: u8) -> Option<u8> {
     })
 }
 
-/// Every label something in `method` refers to.
-fn referenced(method: &MethodNode) -> BTreeSet<LabelId> {
-    let mut labels = BTreeSet::new();
-    for node in &method.nodes {
-        match node {
-            Node::Insn(insn) => labels.extend(insn.jump_targets()),
-            Node::Line { start, .. } => {
-                labels.insert(*start);
-            }
-            Node::Label(_) => {}
-        }
-    }
-    for block in &method.try_catch_blocks {
-        labels.extend([block.start, block.end, block.handler]);
-    }
-    for local in &method.local_variables {
-        labels.extend([local.start, local.end]);
-    }
-    labels
-}
-
 /// The `goto`'s target and position when the conditional jump at node `at` is one to negate.
 fn negatable(
     method: &MethodNode,
@@ -77,7 +56,7 @@ fn negatable(
         return None;
     }
     if goto > at + 1 {
-        let referenced = referenced(method);
+        let referenced = method.referenced_labels();
         let separated = nodes[at + 1..goto]
             .iter()
             .any(|node| matches!(node, Node::Label(label) if referenced.contains(label)));
