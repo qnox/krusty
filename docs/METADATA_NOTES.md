@@ -193,6 +193,15 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
+  of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
+  per-declaration interner: the class's own parameters first, then each captured one on first use,
+  and a member's first use is numbered in that member's own scope. An inner class instead keeps its
+  outer classes' parameters at the ids before its own. Test:
+  `tests/metadata_captured_type_parameters_e2e.rs`.
+- Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and
+  bit 3 for `noinline`, beside `DECLARES_DEFAULT_VALUE` (bit 1). Also written on a nullable
+  function type and on extensions. Test: `tests/metadata_inline_parameter_modifiers_e2e.rs`.
 - `tailrec` (kotlinc 2.4.20): `Function.flags` bit 11 on every tailrec function, top-level or
   member, whether or not the backend loops it. Test: `tests/metadata_function_flags_e2e.rs`.
 - Parameter defaults (kotlinc 2.4.20): `DECLARES_DEFAULT_VALUE` only on a parameter whose own

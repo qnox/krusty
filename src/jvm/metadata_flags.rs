@@ -94,3 +94,26 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     });
     (visibility << 1) | (modality << 4) | operator | infix | inline | tailrec | return_value_status
 }
+
+/// What each value parameter of `fid` declared, extension receiver excluded: `defaults` says which
+/// write a default value, and the IR's recorded inline modifiers supply `crossinline`/`noinline`.
+pub(super) fn declared_value_parameters(
+    ir: &IrFile,
+    fid: u32,
+    defaults: impl IntoIterator<Item = bool>,
+) -> Vec<crate::metadata::DeclaredValueParameter> {
+    use crate::ir::IrInlineParameterModifier as Modifier;
+    let modifiers = ir.declared_inline_modifiers(fid);
+    let mut declared = defaults
+        .into_iter()
+        .map(crate::metadata::DeclaredValueParameter::defaulted)
+        .collect::<Vec<_>>();
+    if declared.len() < modifiers.len() {
+        declared.resize(modifiers.len(), Default::default());
+    }
+    for (parameter, modifier) in declared.iter_mut().zip(modifiers) {
+        parameter.crossinline = modifier == Modifier::Crossinline;
+        parameter.noinline = modifier == Modifier::Noinline;
+    }
+    declared
+}

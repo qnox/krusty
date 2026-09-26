@@ -1239,9 +1239,12 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 }
             }
-            self.ir
-                .fn_params
-                .insert(function, FnParamInfo::identities(identities));
+            let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
+            self.ir.fn_params.insert(function, {
+                let mut info = FnParamInfo::identities(identities);
+                info.inline_modifiers = inline_modifiers;
+                info
+            });
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
                 self.ir
                     .plugin_declaration_functions
@@ -1484,18 +1487,9 @@ impl<'a> CommonIrBodySink<'a> {
             };
             *slot = Some(value);
         }
-        let identities = self
-            .ir
-            .fn_params
-            .get(&function)
-            .map(|info| info.identities.clone())
-            .unwrap_or_default();
-        self.ir.fn_params.insert(function, {
-            let mut info = FnParamInfo::identities(identities);
-            info.defaults = Some(defaults);
-            info.defaults_inherited = defaults_inherited;
-            info
-        });
+        let info = self.ir.fn_params.entry(function).or_default();
+        info.defaults = Some(defaults);
+        info.defaults_inherited = defaults_inherited;
         Ok(())
     }
 }
@@ -1540,4 +1534,34 @@ fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
             ir.infix_fns.insert(function);
         }
     }
+}
+
+/// The inline modifier each parameter in `identities` wrote, parallel to it. The extension receiver is not a declared value parameter and never carries one.
+fn inline_parameter_modifiers(
+    index: &ResolvedModuleIndex,
+    callable: crate::fir::CallableId,
+    identities: &[crate::ir::IrParameterIdentity],
+) -> Vec<crate::ir::IrInlineParameterModifier> {
+    use crate::ir::IrInlineParameterModifier as Modifier;
+    let mut ordinal = 0;
+    identities
+        .iter()
+        .map(|identity| {
+            if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
+                return Modifier::None;
+            }
+            let flags = index
+                .callable_parameter(callable, ordinal)
+                .expect("published parameter-name count must address every parameter")
+                .flags();
+            ordinal += 1;
+            if flags.materializes_its_lambda() {
+                Modifier::Noinline
+            } else if flags.is_crossinline() {
+                Modifier::Crossinline
+            } else {
+                Modifier::None
+            }
+        })
+        .collect()
 }
