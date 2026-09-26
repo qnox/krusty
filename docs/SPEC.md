@@ -7247,6 +7247,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 > compile a *Kotlin consumer* of it with real kotlinc — if kotlinc accepts krusty's `@Metadata` and
 > resolves the API, the output is a genuine Kotlin library.
 
+- **A method whose analysis would weigh 50 MiB or more gets only the final dead-code step, as
+  kotlinc's `canBeOptimized` decides.** kotlinc 2.4.20's `OptimizationMethodVisitor` runs its
+  normalization and `UninitializedStoresProcessor` over every method, then the optimization passes
+  only when `canBeOptimized` admits the method, and then the final `DeadCodeEliminationMethodTransformer`
+  (which also closes the unused slots) and `prepareForEmitting` always. `canBeOptimized` turns a
+  method away when it has more than 16 try/catch blocks whose ranges weigh more than 50 MiB, or
+  when the whole method weighs 50 MiB or more; a weight is frames times `max_locals + max_stack`,
+  in whole MiB. The pipeline checks it once, before the first pass (`pipeline::optimize`,
+  `optimization_limits::fits_optimization`). The frames are the ones krusty's analyzer retains,
+  one per node (labels, line numbers and `nop`s included) and the entry frame, as the
+  source-interpreter gate counts them, so a method close to the limit may be declined where
+  kotlinc still optimizes it (a function of about 2,560 to 3,618 unused `Long` locals); every
+  product is checked and a weight that does not fit declines. A function of 3,700 unused `Long`
+  locals then `val k = 2; return if (k > 1) h() else 0` keeps its `if_icmple`, as kotlinc's does;
+  with 2,500 locals the jump is folded in both. Tests: `optimization_limits::tests` (below, above
+  and overflowing weights, the handler ranges), `pipeline::tests` (a declined method gets only the
+  final dead-code step and slot compaction, the same body one value narrower reaches the analyses,
+  a label and line number with no instruction cross the limit), and `tests/optimization_gate_e2e.rs`
+  (the whole class against kotlinc).
 - **Local functions** (`fun` inside a function body): a non-capturing local function is lifted to a
   `private static` method on the facade, mangled `$local$<stmtId>` (the checker assigns the name and
   rejects captures). Calls route through the checker's `local_call_map` to the lifted `FunId`
