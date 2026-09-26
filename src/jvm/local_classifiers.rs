@@ -25,6 +25,21 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
             })
 }
 
+/// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
+/// declared in executable code with no enclosing serializer, so its captured parameters are
+/// numbered on first use; a class nested in another is serialized under the outer one, whose
+/// parameters keep the ids before its own.
+pub(super) fn captured_type_parameters(
+    class: &IrClass,
+) -> crate::metadata::class_builder::CapturedTypeParameters<'_> {
+    use crate::metadata::class_builder::CapturedTypeParameters;
+    if class.is_local_class || class.is_anonymous_object {
+        CapturedTypeParameters::NumberedOnUse(&class.captured_type_params)
+    } else {
+        CapturedTypeParameters::Reserved(&class.captured_type_params)
+    }
+}
+
 /// Every classifier of the file whose `@Metadata` class id is local: those for which [`is_local`]
 /// holds, and enum entry bodies.
 pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
