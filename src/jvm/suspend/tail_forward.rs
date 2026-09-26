@@ -179,15 +179,29 @@ fn tail_expression(
                 {
                     last
                 }
-                // Source grouping can leave statement-only blocks nested at the tail.
+                // Source grouping can leave statement-only blocks nested at the tail. Such a
+                // block's own value is discarded, so it forwards only as a `Unit` call.
                 _ if matches!(ir.exprs[last as usize], IrExpr::Block { .. }) => {
-                    return tail_expression(
+                    let tail = tail_expression(
                         ir,
                         last,
                         suspend_functions,
                         unit_return,
                         original_returns,
-                    );
+                    )?;
+                    let discarded = yields_value(ir, last, tail);
+                    if discarded
+                        && !(unit_return
+                            && suspension_returns_unit(
+                                ir,
+                                tail,
+                                suspend_functions,
+                                original_returns,
+                            ))
+                    {
+                        return None;
+                    }
+                    tail
                 }
                 _ => return None,
             },
@@ -196,6 +210,19 @@ fn tail_expression(
         _ => return None,
     };
     Some(tail)
+}
+
+/// Whether `tail` is the value `block` yields, as opposed to one it returns.
+fn yields_value(ir: &IrFile, block: ExprId, tail: ExprId) -> bool {
+    match &ir.exprs[block as usize] {
+        IrExpr::Block {
+            value: Some(value), ..
+        } => *value == tail || yields_value(ir, *value, tail),
+        IrExpr::Block { value: None, stmts } => stmts
+            .last()
+            .is_some_and(|&last| yields_value(ir, last, tail)),
+        _ => false,
+    }
 }
 
 fn suspension_returns_unit(
