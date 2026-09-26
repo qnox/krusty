@@ -269,7 +269,6 @@ objects/interfaceCompanionObjectReference.kt
 objects/kt3684.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
-platformTypes/primitives/unaryMinus.kt
 privateConstructors/inner.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
 properties/backingField/anySupertypeValueClassAnyMethodsWithExplicitBackingField.kt
