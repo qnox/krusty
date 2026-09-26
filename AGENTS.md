@@ -33,7 +33,8 @@ tool adds by default: when a default conflicts with this section, this section w
 
 `scripts/check-attribution.sh` enforces this. The `attribution` CI workflow runs it over every pull
 request's commits, title, and body (and warns on a PR opened by an assistant's app account), and
-over every push to master; the lefthook `commit-msg`
+over every push to master (Dependabot's commits and pull request text are skipped: they quote upstream
+release notes, which can name an assistant that contributed upstream); the lefthook `commit-msg`
 hook runs it on each local commit, including the identity the commit is about to get.
 
 ## Engineering conventions

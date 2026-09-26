@@ -39,6 +39,8 @@ case "${1:-}" in
     ;;
   *)
     while read -r sha; do
+      # Dependabot is a dependency bot, not an assistant; its messages quote upstream text.
+      [[ $(git log -1 --format=%ae "$sha") == *'+dependabot[bot]@users.noreply.github.com' ]] && continue
       check_text "commit $sha identity" "$(git log -1 --format='%an <%ae> / %cn <%ce>' "$sha")"
       check_text "commit $sha message" "$(git log -1 --format='%B' "$sha")"
     done < <(git rev-list "$1")
