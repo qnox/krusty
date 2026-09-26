@@ -255,6 +255,63 @@ pub(crate) fn unsigned_range_construction(
     .then_some(MemberRealization::RangeConstruction { open_end })
 }
 
+/// A `UInt`/`ULong` member whose JVM realization is the JDK's own unsigned operation on the carrier
+/// (kotlinc's unsigned `IntrinsicMethods` entries) rather than a call of the stdlib declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnsignedMemberOperation {
+    CompareTo,
+    Divide,
+    Remainder,
+    ToString,
+}
+
+/// The unsigned value class an [`UnsignedMemberOperation`] is declared on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnsignedElement {
+    UInt,
+    ULong,
+}
+
+impl UnsignedElement {
+    fn ty(self) -> Ty {
+        match self {
+            Self::UInt => Ty::UInt,
+            Self::ULong => Ty::ULong,
+        }
+    }
+}
+
+/// The unsigned value class and operation of an exact `UInt`/`ULong` declaration:
+/// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, and
+/// `toString(): String`. Any other overload, including the mixed-width ones, stays ordinary.
+pub(crate) fn unsigned_member_operation(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<(UnsignedElement, UnsignedMemberOperation)> {
+    use crate::types::wk;
+    let class = if facts.owner == wk::uint() {
+        UnsignedElement::UInt
+    } else if facts.owner == wk::ulong() {
+        UnsignedElement::ULong
+    } else {
+        return None;
+    };
+    let element = class.ty();
+    if facts.is_property || facts.is_infix {
+        return None;
+    }
+    let binary = facts.is_operator && facts.params == [element];
+    let operation = match facts.name {
+        "compareTo" if binary && facts.ret == Ty::Int => UnsignedMemberOperation::CompareTo,
+        "div" if binary && facts.ret == element => UnsignedMemberOperation::Divide,
+        "rem" if binary && facts.ret == element => UnsignedMemberOperation::Remainder,
+        "toString" if facts.params.is_empty() && facts.ret == Ty::String => {
+            UnsignedMemberOperation::ToString
+        }
+        _ => return None,
+    };
+    Some((class, operation))
+}
+
 fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberRealization> {
     let open_end = match facts.name {
         "rangeTo" => false,
@@ -426,6 +483,46 @@ mod tests {
         assert_eq!(
             realization(facts("kotlin/Int", "plus", &[Ty::Long], Ty::Int)),
             MemberRealization::Dispatch
+        );
+    }
+
+    #[test]
+    fn unsigned_operation_requires_the_exact_unsigned_declaration() {
+        assert_eq!(
+            unsigned_member_operation(&facts("kotlin/UInt", "compareTo", &[Ty::UInt], Ty::Int)),
+            Some((UnsignedElement::UInt, UnsignedMemberOperation::CompareTo))
+        );
+        assert_eq!(
+            unsigned_member_operation(&facts("kotlin/ULong", "rem", &[Ty::ULong], Ty::ULong)),
+            Some((UnsignedElement::ULong, UnsignedMemberOperation::Remainder))
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_operator: false,
+                ..facts("kotlin/UInt", "toString", &[], Ty::String)
+            }),
+            Some((UnsignedElement::UInt, UnsignedMemberOperation::ToString))
+        );
+        // A mixed-width overload, a non-operator binary, a foreign owner and a wrong result all
+        // stay ordinary declarations.
+        assert_eq!(
+            unsigned_member_operation(&facts("kotlin/UInt", "compareTo", &[Ty::ULong], Ty::Int)),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_operator: false,
+                ..facts("kotlin/UInt", "div", &[Ty::UInt], Ty::UInt)
+            }),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&facts("sample/Counter", "div", &[Ty::UInt], Ty::UInt)),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&facts("kotlin/UInt", "div", &[Ty::UInt], Ty::ULong)),
+            None
         );
     }
 
