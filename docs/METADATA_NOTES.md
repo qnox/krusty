@@ -214,6 +214,7 @@ Decoded from kotlinc output over a top-level property shape matrix (`Package.pro
 | shape | f11 flags | notes |
 |---|---|---|
 | `val a = "hi"` | 8710 | 518 base + `hasConstant`(1<<13); const-literal initializer only |
+| `val z: Int = 0` (member) | 8710 | a zero literal counts too, though no field store is emitted for it; `1 + 2`, `val x: Any = 0` and `val x: Int? = 0` do not. Read from the declared initializer. Test: `tests/metadata_property_flags_e2e.rs` |
 | `val b = run { … }` | omitted (=518) | computed initializer ⇒ no `hasConstant`; f11 elided at wire default |
 | `const val c = 7` | 10758 | + `isConst`(1<<11); f100 = field entry ONLY (no getter method exists) |
 | `val d get() = 5L` | omitted | f7 (getter_flags) = 70 = public·final·`isNotDefault`(1<<6); NO field entry |

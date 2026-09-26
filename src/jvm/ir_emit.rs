@@ -779,24 +779,6 @@ fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> 
     field_nullability_kind(ir, fq_name, name, t) == 1
 }
 
-/// Field indices a class `init_body` assigns a compile-time literal — a BODY property such as
-/// `val y: Int = 2`. kotlinc sets `Property.hasConstant` for exactly these.
-fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
-    let mut out = std::collections::HashSet::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if matches!(ir.expr(*value), IrExpr::Const(_)) {
-                out.insert(*index);
-            }
-        }
-    }
-    out
-}
-
 /// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
 /// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
 /// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
@@ -1099,7 +1081,6 @@ fn build_class_metadata(
     // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
     let names_local =
         |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
-    let const_fields = init_body_constant_fields(ir, c);
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
@@ -1208,12 +1189,13 @@ fn build_class_metadata(
                     // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
                     // HAS_CONSTANT flag exactly like an instance-field one.
                     has_constant: backing.is_some_and(|(index, field)| {
-                        field.is_final()
-                            && index >= c.ctor_param_count
-                            && const_fields.contains(&index)
-                    }) || hoisted_static_for(ir, c, property_index).is_some_and(
-                        |s| !s.is_var && static_fields::const_value_idx_peek(ir, s.init),
-                    ),
+                        field.is_final() && index >= c.ctor_param_count
+                    }) && property
+                        .initializer
+                        .is_some_and(|init| static_fields::const_value_idx_peek(ir, init))
+                        || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
+                            !s.is_var && static_fields::const_value_idx_peek(ir, s.init)
+                        }),
                     is_const: false,
                     modifiers: property.modifiers,
                     setter_is_private: property.setter_is_private,
