@@ -113,9 +113,20 @@ Known gaps, both byte differences in the function's own method (the continuation
   `-impl` static) takes the same route. Its continuation nests under the class (`Box$work$1`), captures the
   receiver as `this$0` (the transformer's `needDispatchReceiver`), and re-enters the member through
   it; a class's methods are transformed when the class is written, as the facade's are.
-* An open member is next: kotlinc moves its body to a static `<name>$suspendImpl(receiver, …)`
-  that carries the machine and leaves `<name>` a trampoline, which krusty does only for interface
-  members so far.
+* An overridable class member (`open`, `abstract` or a non-`final` `override`, in a class that can
+  be subclassed) is split as kotlinc's `createStaticSuspendImpl` splits it
+  (`jvm::suspend_impls`): the member becomes a trampoline without a line table, and its body moves
+  to a package-private synthetic static `<name>$suspendImpl($this, …)`, emitted right after it and
+  ahead of its `$default` stub. The transformer builds the machine in that static: its
+  continuation still captures the receiver as `this$0`, but re-enters the static with it, which
+  is also the continuation's enclosing method and `@DebugMetadata`'s `m`. A member that is not
+  overridable keeps its machine, also when its class is open. Interface members keep the IR
+  machine in their `$suspendImpl` until a later step.
+* Known gaps shared with final members: a generic class's continuation has no `Signature` for the
+  class's type parameters, a member returning a type parameter has no `@Nullable` on its erased
+  `Object` result, and a suspension point whose result is widened (`scale * value()` with an
+  `Int` result) unboxes to the declared type and widens it where kotlinc unboxes to the wider type
+  directly.
 
 ### Step 6 as landing
 

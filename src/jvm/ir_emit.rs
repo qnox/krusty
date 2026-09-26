@@ -5082,6 +5082,10 @@ fn emit_scheduled_member(
     // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
     // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
     // uses the self-carrying variant.
+    let Some(fid) = crate::jvm::suspend_impls::default_stub_after(ir, fid) else {
+        return;
+    };
+    let f = &ir.functions[fid as usize];
     if let Some(defaults) = ir.param_defaults(fid) {
         if f.is_static {
             // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
@@ -5103,23 +5107,6 @@ fn emit_scheduled_member(
             emit_default_stub(ir, fid, fq_name, facade, cw, defaults, env, false);
         }
     }
-}
-
-/// The `$annotations` marker methods emitted with their property's accessors, by fid. kotlinc emits a
-/// marker directly after the accessors of the property it describes, not after every property's — so
-/// the class's method loop must skip a marker it already wrote here.
-fn property_annotation_marker_fids(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-) -> std::collections::HashSet<u32> {
-    c.properties
-        .iter()
-        .filter_map(|property| {
-            ir.property_annotation_markers
-                .get(&(c.fq_name_id(), property.name.clone()))
-                .copied()
-        })
-        .collect()
 }
 
 /// A local, anonymous or generated class's `EnclosingMethod`: the JVM class its scope belongs to,
@@ -5720,7 +5707,7 @@ fn emit_class(
         c.fq_name_id(),
         crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
     );
-    let markers = property_annotation_marker_fids(ir, c);
+    let markers = member_schedule::property_annotation_marker_fids(ir, c);
     let member_emission = ScheduledMemberEmission {
         ir,
         class: c,
@@ -7501,11 +7488,11 @@ fn emit_interface_class(
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
         let deferred_suspend_declaration = ir
-            .jvm_suspend_interface_bodies
+            .jvm_suspend_impl_bodies
             .values()
             .any(|(_, declaration)| *declaration == fid);
         let default_fid = ir
-            .jvm_suspend_interface_bodies
+            .jvm_suspend_impl_bodies
             .get(&fid)
             .map(|(_, declaration)| *declaration)
             .unwrap_or(fid);
@@ -8017,7 +8004,7 @@ fn emit_enum_class(
         }
         .emit(ordinal, constructor);
     }
-    let markers = property_annotation_marker_fids(ir, c);
+    let markers = member_schedule::property_annotation_marker_fids(ir, c);
     // kotlinc's enum member order is `<init>`, the DECLARED members, `values`/`valueOf`/
     // `getEntries`, the lifted local functions, `$values`, the lambdas, anything a PLUGIN
     // synthesized onto the class (`_init_$_anonymous_`, `access$…`), then `<clinit>`.
@@ -9177,7 +9164,7 @@ fn emit_method_inner_with_holder(
             method_sig.as_deref(),
             &method_descriptor(&param_tys, ret),
         ),
-        None => match ir.jvm_suspend_interface_bodies.get(&fid).copied() {
+        None => match ir.jvm_suspend_impl_bodies.get(&fid).copied() {
             Some((receiver, _)) => holder_method_signature(
                 &signature_formatter,
                 ir,

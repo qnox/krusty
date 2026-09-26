@@ -7,11 +7,12 @@
 //! class is written. This pass creates the continuation class with the fields every machine has;
 //! the spill fields and `@DebugMetadata` come from the transformer.
 //!
-//! The functions taken so far are top-level functions and final members whose suspension points
-//! are all plain calls outside any `try`, and which call no inline function; suspend lambdas of
-//! that shape go through `suspend_lambda`, which shares the eligibility and suspension collection
-//! here. Open members, `try` and spliced inline bodies are the next steps of the plan; until then
-//! they keep the IR machine.
+//! The functions taken so far are top-level functions and class members whose suspension points
+//! are all plain calls outside any `try`, and which call no inline function; an overridable
+//! member's machine is built in the `$suspendImpl` its body moves to (`jvm::suspend_impls`).
+//! Suspend lambdas of that shape go through `suspend_lambda`, which shares the eligibility and
+//! suspension collection here. Interface bodies, `try` and spliced inline bodies are the next steps
+//! of the plan; until then they keep the IR machine.
 
 use std::collections::HashSet;
 
@@ -112,17 +113,29 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
         &declared_params,
     );
     let function = &ir.functions[fid as usize];
+    // The continuation belongs to the method that carries the machine: an overridable member's is
+    // the `$suspendImpl` its body moves to, which takes the receiver first.
+    let (method, method_params) =
+        match receiver.filter(|_| crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid)) {
+            Some(owner) => (
+                crate::jvm::suspend_impls::suspend_impl_name(&name),
+                std::iter::once(Ty::obj_name(owner))
+                    .chain(function.params.iter().copied())
+                    .collect(),
+            ),
+            None => (name, function.params.clone()),
+        };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.continuation_metadata.insert(
         continuation_class.clone(),
         ContinuationMetadata {
-            m: name.clone(),
+            m: method.clone(),
             c: owner.replace('/', "."),
             v: 2,
             enclosing_class: owner,
-            enclosing_method: name,
+            enclosing_method: method,
             enclosing_descriptor: crate::jvm::names::method_descriptor(
-                &function.params,
+                &method_params,
                 function.ret,
             ),
             ..ContinuationMetadata::default()
@@ -184,18 +197,13 @@ pub(super) fn eligible_points(
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
-    // A member of a final class: an overridable one's machine lives in its `$suspendImpl`, and an
-    // interface body's in its own static, both later steps.
-    let final_member = !function.is_static
-        && !ir.open_methods.contains(&fid)
+    // A class member: its machine stays in the member, or, for an overridable one, moves with its
+    // body to `$suspendImpl`. An interface body's is a later step.
+    let class_member = !function.is_static
         && function.dispatch_receiver.is_some_and(|owner| {
-            ir.classes.iter().any(|class| {
-                class.fq_name_id() == owner
-                    && !(class.is_open
-                        || class.is_abstract
-                        || class.is_sealed
-                        || class.is_interface)
-            })
+            ir.classes
+                .iter()
+                .any(|class| class.fq_name_id() == owner && !class.is_interface)
         });
     let suspend_set = route.suspend_set;
     // Checked in order, each only while every earlier one holds.
@@ -205,8 +213,8 @@ pub(super) fn eligible_points(
             "no spill clean-up in the runtime",
         ),
         (
-            &|| subject == Subject::NamedFunction && !(top_level || final_member),
-            "not top-level or a final member",
+            &|| subject == Subject::NamedFunction && !(top_level || class_member),
+            "not top-level or a class member",
         ),
         (
             &|| subject == Subject::NamedFunction && ir.private_methods.contains(&fid),
@@ -217,7 +225,7 @@ pub(super) fn eligible_points(
             "no declaration line",
         ),
         (
-            &|| ir.jvm_suspend_interface_bodies.contains_key(&fid),
+            &|| ir.jvm_suspend_impl_bodies.contains_key(&fid),
             "an interface body",
         ),
         // Spliced inline bodies are a later step: the splice does not mark the call's own line

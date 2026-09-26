@@ -7,6 +7,8 @@
 //!   local function precedes the one that declares it; indy lambda methods come after all of them;
 //! - an enum's declared members precede `values`/`valueOf`/`getEntries`; its lifted local functions
 //!   come next, then EnumClassLowering's `$values`, then the indy lambda methods;
+//! - an overridable suspend member's `$suspendImpl` follows the member, ahead of its `$default`
+//!   stub (AddContinuationLowering replaces the member with both after the stub is generated);
 //! - a synthetic `access$…` bridge (SyntheticAccessorLowering) is appended after every declared and
 //!   lifted member;
 //! - a class's lexical captures and outer instance (LocalDeclarationsLowering, InnerClassesLowering)
@@ -172,6 +174,19 @@ fn an_enum_places_local_functions_before_values_array_and_lambdas_after_it() {
          \x20       return step()\n\
          \x20   }\n\
          \x20   fun spare() = 5\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_suspend_member_s_static_body_precedes_its_default_stub() {
+    assert_same_member_order(
+        "SuspendImplOrder",
+        // No suspension point: the member is still split, and no continuation class is written.
+        "open class Store {\n\
+         \x20   open suspend fun fetch(key: String, retries: Int = 3): String = key + retries\n\
+         \x20   fun after(): Int = 1\n\
+         \x20   open suspend fun plain(key: String): String = key\n\
          }\n",
     );
 }

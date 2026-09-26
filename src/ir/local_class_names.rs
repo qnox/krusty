@@ -852,7 +852,7 @@ impl super::IrFile {
         for point in self.intrinsic_suspension_points.values_mut() {
             point.result = ty(point.result, names);
         }
-        for (classifier, _) in self.jvm_suspend_interface_bodies.values_mut() {
+        for (classifier, _) in self.jvm_suspend_impl_bodies.values_mut() {
             name(classifier, names);
         }
         for (classifier, underlying) in self.erased_value_constructions.values_mut() {
