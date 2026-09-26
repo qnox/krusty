@@ -318,31 +318,16 @@ fn reference_carriers_run() {
 /// backend unit test separately pins the exact decision that keeps these shapes on that path.
 #[test]
 fn retained_dispatching_reference_shapes_run() {
-    let high_parameters = (0..23)
-        .map(|ordinal| format!("p{ordinal}: Int"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let high_function_parameters = std::iter::repeat_n("Int", 23)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!(
-        "fun wide({high_parameters}): Int = p0 + p22\n\
-         fun shapes(): String {{\n\
+    let source = "fun shapes(): String {\n\
          \x20   val prefix = \"K\"\n\
          \x20   fun local(value: String): String = prefix + value\n\
          \x20   val captured: (String) -> String = ::local\n\
-         \x20   val high: ({high_function_parameters}) -> Int = ::wide\n\
-         \x20   arrayOf<Any>(captured, high)\n\
-         \x20   return captured(\"!\") + high({})\n\
-         }}\n\
-         fun box(): String = if (shapes() == \"K!22\") \"OK\" else \"fail: \" + shapes()\n",
-        (0..23)
-            .map(|ordinal| ordinal.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
+         \x20   arrayOf<Any>(captured)\n\
+         \x20   return captured(\"!\")\n\
+         }\n\
+         fun box(): String = if (shapes() == \"K!\") \"OK\" else \"fail: \" + shapes()\n";
     let emitted = common::compile_in_process_metadata_cp(
-        &source,
+        source,
         "ReferenceInvokeRetainedRun",
         &[common::stdlib_jar()],
     )
@@ -372,54 +357,27 @@ fn retained_dispatching_reference_shapes_run() {
             )
         })
         .collect::<Vec<_>>();
-    let expected = [
-        (
-            "ReferenceInvokeRetainedRunKt$shapes$captured$1",
-            vec![("$captured$0", 0x0012, "Ljava/lang/String;")],
-            vec![
-                ("<init>", 0, "(Ljava/lang/String;)V"),
-                ("invoke", 0x0001, "(Ljava/lang/Object;)Ljava/lang/Object;"),
-            ],
-        ),
-        (
-            "ReferenceInvokeRetainedRunKt$shapes$high$1",
-            vec![(
-                "INSTANCE",
-                0x0019,
-                "LReferenceInvokeRetainedRunKt$shapes$high$1;",
-            )],
-            vec![
-                ("<init>", 0, "()V"),
-                ("invoke", 0x0001, "([Ljava/lang/Object;)Ljava/lang/Object;"),
-                ("<clinit>", 0x0008, "()V"),
-            ],
-        ),
-    ];
-    let expected = expected
-        .into_iter()
-        .map(|(name, fields, methods)| {
+    let expected = vec![(
+        "ReferenceInvokeRetainedRunKt$shapes$captured$1".to_string(),
+        vec![(
+            "$captured$0".to_string(),
+            0x0012,
+            "Ljava/lang/String;".to_string(),
+        )],
+        vec![
+            ("<init>".to_string(), 0, "(Ljava/lang/String;)V".to_string()),
             (
-                name.to_string(),
-                fields
-                    .into_iter()
-                    .map(|(name, access, descriptor)| {
-                        (name.to_string(), access, descriptor.to_string())
-                    })
-                    .collect::<Vec<_>>(),
-                methods
-                    .into_iter()
-                    .map(|(name, access, descriptor)| {
-                        (name.to_string(), access, descriptor.to_string())
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>();
+                "invoke".to_string(),
+                0x0001,
+                "(Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
+            ),
+        ],
+    )];
     assert_eq!(
         retained_plan, expected,
         "retained shapes must keep the exact dispatching-invoke plan",
     );
-    common::expect_box_same_as_kotlinc(&source, "ReferenceInvokeRetainedRun");
+    common::expect_box_same_as_kotlinc(source, "ReferenceInvokeRetainedRun");
 }
 
 /// Compare `fixture`'s carriers with kotlinc's, then run its `box()` under both compilers.
@@ -616,6 +574,58 @@ fn extension_reference_carriers_reflect_the_receiver_parameter() {
             "ExtensionReferenceInvokeKt$carriers$text$1",
             "ExtensionReferenceInvokeKt$carriers$boundText$1",
             "ExtensionReferenceInvokeKt$carriers$bound$1",
+        ],
+    });
+}
+
+const HIGH_ARITY_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+fun wide(
+    p0: Int, p1: Int, p2: Int, p3: Int, p4: Int, p5: Int, p6: Int, p7: Int, p8: Int, p9: Int,
+    p10: Int, p11: Int, p12: Int, p13: Int, p14: Int, p15: Int, p16: Int, p17: Int, p18: Int,
+    p19: Int, p20: Int, p21: Int, p22: String?
+): Int = p0 + p21
+
+var seen = ""
+
+fun record(
+    p0: Int, p1: Int, p2: Int, p3: Int, p4: Int, p5: Int, p6: Int, p7: Int, p8: Int, p9: Int,
+    p10: Int, p11: Int, p12: Int, p13: Int, p14: Int, p15: Int, p16: Int, p17: Int, p18: Int,
+    p19: Int, p20: Int, p21: Int, p22: Long, p23: String
+) {
+    seen = p23
+}
+
+fun carriers(): Held = Held(::wide, ::record)
+
+fun box(): String {
+    val all = carriers().all
+    val wide = all[0] as (
+        Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int,
+        Int, Int, Int, Int, String?
+    ) -> Int
+    if (wide(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 41, null) != 42) {
+        return "wide"
+    }
+    val record = all[1] as (
+        Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int,
+        Int, Int, Int, Int, Long, String
+    ) -> Unit
+    record(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7L, "OK")
+    return seen
+}
+"##;
+
+/// Past the numbered `FunctionN` interfaces, a carrier declares kotlinc's typed `invoke` with a
+/// scalar result, and an array bridge that checks the argument count before unboxing each one.
+#[test]
+fn high_arity_reference_carriers_declare_kotlincs_typed_invoke() {
+    assert_carriers_match_and_run(&Fixture {
+        source: HIGH_ARITY_SOURCE,
+        stem: "HighArityReferenceInvoke",
+        carriers: &[
+            "HighArityReferenceInvokeKt$carriers$1",
+            "HighArityReferenceInvokeKt$carriers$2",
         ],
     });
 }
