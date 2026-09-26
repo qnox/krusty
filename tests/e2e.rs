@@ -470,6 +470,8 @@ mod cross_file_serializer_inner_classes_e2e;
 mod cross_file_typealias_e2e;
 #[path = "cross_file_value_param_constructor_e2e.rs"]
 mod cross_file_value_param_constructor_e2e;
+#[path = "crossinline_lambda_inlining_e2e.rs"]
+mod crossinline_lambda_inlining_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -1156,6 +1158,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_entry_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
 mod value_class_nothing_override_bridges_e2e;
+#[path = "value_class_object_carrier_generic_result_e2e.rs"]
+mod value_class_object_carrier_generic_result_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
