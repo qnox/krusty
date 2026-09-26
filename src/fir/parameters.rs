@@ -24,6 +24,7 @@ impl ResolvedValueParameterFlags {
     const ANONYMOUS_CONTEXT: u16 = 1 << 8;
     const LEGACY_CONTEXT_RECEIVER: u16 = 1 << 9;
     const PROPERTY_SETTER_VALUE: u16 = 1 << 10;
+    const CROSSINLINE: u16 = 1 << 11;
 
     pub const fn new(vararg: bool, default: bool, property: bool, mutable_property: bool) -> Self {
         let mut bits = 0;
@@ -104,6 +105,19 @@ impl ResolvedValueParameterFlags {
     /// function-typed — so an expansion that needs the difference must read it here.
     pub const fn materializes_its_lambda(self) -> bool {
         self.0 & Self::MATERIALIZED_LAMBDA != 0
+    }
+
+    pub const fn with_crossinline(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= Self::CROSSINLINE;
+        }
+        self
+    }
+
+    /// The declaration wrote `crossinline` on this parameter. The argument is still spliced; the
+    /// modifier only forbids a non-local return from it, and declaration metadata records it.
+    pub const fn is_crossinline(self) -> bool {
+        self.0 & Self::CROSSINLINE != 0
     }
 
     pub const fn with_context_kind(mut self, kind: crate::types::ContextParameterKind) -> Self {

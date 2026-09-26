@@ -3588,8 +3588,8 @@ pub use generated_members::{
 };
 mod function_parameters;
 pub use function_parameters::{
-    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
-    IrParameterProvenance, IrParameterRole,
+    FnParamInfo, IrGeneratedParameterRole, IrInlineParameterModifier, IrParameterCheck,
+    IrParameterIdentity, IrParameterProvenance, IrParameterRole,
 };
 mod traversal;
 pub use traversal::*;

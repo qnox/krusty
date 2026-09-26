@@ -144,6 +144,16 @@ pub enum IrParameterCheck {
     NonNull,
 }
 
+/// The inline modifier a value parameter WROTE. `noinline` makes its argument a real closure;
+/// `crossinline` still splices it but forbids a non-local return. Declaration metadata records both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrInlineParameterModifier {
+    #[default]
+    None,
+    Noinline,
+    Crossinline,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct FnParamInfo {
     pub identities: Vec<IrParameterIdentity>,
@@ -154,6 +164,8 @@ pub struct FnParamInfo {
     /// The `defaults` were inherited through an override edge, so the declaration itself declares
     /// none: Kotlin forbids an override to write a default value.
     pub defaults_inherited: bool,
+    /// Parallel to `identities` for a source declaration; empty for one the source did not write.
+    pub inline_modifiers: Vec<IrInlineParameterModifier>,
 }
 
 impl FnParamInfo {
@@ -163,6 +175,7 @@ impl FnParamInfo {
             defaults: None,
             stub_only: false,
             defaults_inherited: false,
+            inline_modifiers: Vec::new(),
         }
     }
 
@@ -172,6 +185,7 @@ impl FnParamInfo {
             defaults: None,
             stub_only: false,
             defaults_inherited: false,
+            inline_modifiers: Vec::new(),
         }
     }
 
@@ -195,6 +209,10 @@ impl FnParamInfo {
             "a prepended generated parameter carries generated provenance"
         );
         self.identities.insert(0, identity);
+        if !self.inline_modifiers.is_empty() {
+            self.inline_modifiers
+                .insert(0, IrInlineParameterModifier::None);
+        }
     }
 }
 
@@ -206,6 +224,20 @@ impl IrFile {
             .filter(|info| !info.defaults_inherited)?
             .defaults
             .as_ref()
+    }
+
+    /// The inline modifier each value parameter of `fid` wrote, extension receiver excluded; empty
+    /// for a function the source did not declare.
+    pub fn declared_inline_modifiers(&self, fid: u32) -> Vec<IrInlineParameterModifier> {
+        let Some(info) = self.fn_params.get(&fid) else {
+            return Vec::new();
+        };
+        info.identities
+            .iter()
+            .zip(&info.inline_modifiers)
+            .filter(|(identity, _)| !matches!(identity.role, IrParameterRole::ExtensionReceiver))
+            .map(|(_, modifier)| *modifier)
+            .collect()
     }
 
     /// The single common-IR contract for a function's complete source parameter identities.

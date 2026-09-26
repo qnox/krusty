@@ -1090,6 +1090,8 @@ mod metadata_enum_supertypes_e2e;
 mod metadata_field_presence_e2e;
 #[path = "metadata_function_flags_e2e.rs"]
 mod metadata_function_flags_e2e;
+#[path = "metadata_inline_parameter_modifiers_e2e.rs"]
+mod metadata_inline_parameter_modifiers_e2e;
 #[path = "metadata_jvm_field_e2e.rs"]
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]

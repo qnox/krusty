@@ -88,7 +88,7 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
-use super::metadata_flags::{class_metadata_flags, function_flags};
+use super::metadata_flags::{class_metadata_flags, declared_value_parameters, function_flags};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -1652,18 +1652,16 @@ fn build_class_metadata(
                     .take(member_context_count)
                     .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
-                // Per-parameter DECLARES_DEFAULT_VALUE, for the defaults the declaration writes
-                // itself; an override's inherited defaults stay with the declaration it overrides.
-                let param_defaults: Vec<bool> = ir
-                    .declared_param_defaults(fid)
-                    .map(|ds| {
-                        ds.iter()
-                            .enumerate()
-                            .filter(|(i, _)| receiver_index != Some(*i))
-                            .map(|(_, d)| d.is_some())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // Per-parameter declaration facts. Only the defaults the declaration writes itself
+                // count; an override's inherited defaults stay with the declaration it overrides.
+                let defaults = ir.declared_param_defaults(fid).into_iter().flat_map(|ds| {
+                    let own = ds
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| receiver_index != Some(*i));
+                    own.map(|(_, d)| d.is_some())
+                });
+                let param_modifiers = declared_value_parameters(ir, fid, defaults);
                 // Recorded exactly when a reader cannot rebuild the physical descriptor from the
                 // declared types (kotlinc's `requiresFunctionSignature`).
                 let physical = crate::jvm::names::method_descriptor(&f.params, f.ret);
@@ -1701,7 +1699,7 @@ fn build_class_metadata(
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     has_function_typed_parameter: ir.function_typed_parameter_fns.contains(&fid),
                     params_have_defaults: false,
-                    param_defaults,
+                    param_modifiers,
                     vararg_index,
                     context_count: member_context_count,
                     context_parameter_kinds,
@@ -1777,7 +1775,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1816,7 +1814,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1842,7 +1840,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1869,7 +1867,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1896,7 +1894,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1928,7 +1926,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
@@ -1950,7 +1948,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
@@ -1972,7 +1970,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),

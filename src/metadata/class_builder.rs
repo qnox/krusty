@@ -123,9 +123,9 @@ pub struct FnMeta {
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
-    /// Per-parameter `DECLARES_DEFAULT_VALUE` for a DECLARED member (`fun f(a: Int, b: Int = 2)`),
-    /// parallel to `params` (empty = none default). Composes with `params_have_defaults`.
-    pub param_defaults: Vec<bool>,
+    /// What each parameter of a DECLARED member wrote (`fun f(a: Int, b: Int = 2)`), parallel to
+    /// `params` (empty = nothing). Composes with `params_have_defaults`.
+    pub param_modifiers: Vec<crate::metadata::DeclaredValueParameter>,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
     /// (f4), the only place vararg-ness survives into metadata.
     pub vararg_index: Option<usize>,
@@ -172,7 +172,7 @@ impl FnMeta {
             has_function_typed_parameter: false,
             params_have_defaults: false,
             receiver: None,
-            param_defaults: Vec::new(),
+            param_modifiers: Vec::new(),
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
@@ -1197,12 +1197,13 @@ pub fn build_class(
             let annotations = m.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
             // `ValueParameter.flags` (f1): DECLARES_DEFAULT_VALUE for a defaulted parameter,
             // HAS_ANNOTATIONS when the f7 records below are written. Both precede the name.
-            let flags =
-                if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
-                    DECLARES_DEFAULT_VALUE
-                } else {
-                    0
-                } | if records_annotations(annotations) {
+            let declared = m.param_modifiers.get(i).copied().unwrap_or_default();
+            let flags = if m.params_have_defaults {
+                DECLARES_DEFAULT_VALUE
+            } else {
+                0
+            } | declared.flags()
+                | if records_annotations(annotations) {
                     HAS_ANNOTATIONS
                 } else {
                     0
@@ -1723,7 +1724,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1745,7 +1746,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1767,7 +1768,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1789,7 +1790,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1811,7 +1812,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1833,7 +1834,7 @@ mod tests {
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
