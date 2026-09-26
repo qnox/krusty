@@ -703,12 +703,37 @@ mod tests {
         );
     }
 
+    /// Publishes the mutable face of the list collection for one classifier, as the provider's
+    /// class map does.
+    struct MutableListRole;
+
+    impl crate::types::ClassifierFactSource for MutableListRole {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {
+            (classifier == crate::types::type_name("kotlin/collections/MutableList")).then_some(
+                crate::types::ClassifierRole::MappedCollection(crate::types::MappedCollection {
+                    kind: crate::types::CollectionKind::List,
+                    mutable: true,
+                }),
+            )
+        }
+    }
+
     #[test]
     fn a_mutable_collection_is_marked_after_its_read_only_class() {
-        let out = realize(Ty::obj_args(
-            "kotlin/collections/MutableList",
-            &[Ty::String],
-        ));
+        let ty = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(0, vec![("T".to_owned(), ty)]);
+        ir.publish_classifier_roles(&MutableListRole);
+        let parameters = TypeParameters::new(&ir, "AKt");
+        let mut out = Vec::new();
+        generate(ty, &parameters, &mut out).expect("describable");
         assert_eq!(out[0], TypeOfInsn::LdcClass("java/util/List".to_owned()));
         assert_eq!(
             out.last(),
