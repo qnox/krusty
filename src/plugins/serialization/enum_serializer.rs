@@ -158,6 +158,7 @@ mod tests {
             constructor_parameter_types: Vec::new(),
             default_parameters: Vec::new(),
             decl_line: 0,
+            source_order: 0,
             subclass: None,
         }
     }

@@ -197,6 +197,7 @@ impl<'a> CommonIrBodySink<'a> {
             false,
         )?;
         self.predeclare_functions(index)?;
+        finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
         super::constructors::finalize_local_superclass_captures(self.ir)?;
@@ -836,6 +837,9 @@ impl<'a> CommonIrBodySink<'a> {
                         .is_some_and(|child_anchor| child_anchor.owner == Some(entry))
                 });
                 let subclass = has_body.then(|| header.classifier.nested_child(&name));
+                let source_order = index
+                    .source_order(entry)
+                    .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
                 self.ir.classes[class as usize]
                     .enum_entries
                     .push(crate::ir::IrEnumEntry {
@@ -845,6 +849,7 @@ impl<'a> CommonIrBodySink<'a> {
                         constructor_parameter_types: Vec::new(),
                         default_parameters: Vec::new(),
                         decl_line: 0,
+                        source_order,
                         subclass,
                     });
                 if let Some(subclass) = subclass {
@@ -1163,12 +1168,6 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
-            let inherited = index.callable_inherited_status(callable.id);
-            if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
-                self.ir
-                    .fn_return_value_statuses
-                    .insert(function, inherited.return_value);
-            }
             if callable.shape.extension_receiver.is_some() && !companion_associated {
                 self.ir.extension_receiver_fns.insert(function);
             }
@@ -1194,21 +1193,25 @@ impl<'a> CommonIrBodySink<'a> {
             {
                 self.ir.inline_fns.insert(function);
             }
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::TAILREC)
+            {
+                self.ir.tailrec_fns.insert(function);
+            }
             if index.has_function_typed_parameter(callable.id) {
                 self.ir.function_typed_parameter_fns.insert(function);
             }
-            // An override inherits `operator` / `infix` from the declarations it overrides.
-            if inherited.operator
-                || declaration_header
-                    .flags
-                    .has(crate::fir::DeclarationFlags::OPERATOR)
+            // An override also inherits `operator` / `infix`; see `finalize_inherited_statuses`.
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::OPERATOR)
             {
                 self.ir.operator_fns.insert(function);
             }
-            if inherited.infix
-                || declaration_header
-                    .flags
-                    .has(crate::fir::DeclarationFlags::INFIX)
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::INFIX)
             {
                 self.ir.infix_fns.insert(function);
             }
@@ -1236,9 +1239,12 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 }
             }
-            self.ir
-                .fn_params
-                .insert(function, FnParamInfo::identities(identities));
+            let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
+            self.ir.fn_params.insert(function, {
+                let mut info = FnParamInfo::identities(identities);
+                info.inline_modifiers = inline_modifiers;
+                info
+            });
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
                 self.ir
                     .plugin_declaration_functions
@@ -1349,6 +1355,7 @@ impl<'a> CommonIrBodySink<'a> {
                 function,
                 lowered.defaults.into_vec(),
                 companion_associated,
+                index.callable_default_provider(callable.id).is_some(),
             );
         }
         let roots = lowered.roots.into_vec();
@@ -1439,6 +1446,7 @@ impl<'a> CommonIrBodySink<'a> {
             function,
             lowered.defaults.into_vec(),
             companion_associated,
+            index.callable_default_provider(callable.id).is_some(),
         )?;
         Ok(())
     }
@@ -1449,6 +1457,7 @@ impl<'a> CommonIrBodySink<'a> {
         function: u32,
         lowered: Vec<(u32, crate::ir::ExprId)>,
         companion_associated: bool,
+        defaults_inherited: bool,
     ) -> Result<(), FirFileLoweringFailure> {
         if lowered.is_empty() {
             return Ok(());
@@ -1478,17 +1487,9 @@ impl<'a> CommonIrBodySink<'a> {
             };
             *slot = Some(value);
         }
-        let identities = self
-            .ir
-            .fn_params
-            .get(&function)
-            .map(|info| info.identities.clone())
-            .unwrap_or_default();
-        self.ir.fn_params.insert(function, {
-            let mut info = FnParamInfo::identities(identities);
-            info.defaults = Some(defaults);
-            info
-        });
+        let info = self.ir.fn_params.entry(function).or_default();
+        info.defaults = Some(defaults);
+        info.defaults_inherited = defaults_inherited;
         Ok(())
     }
 }
@@ -1513,4 +1514,54 @@ impl CheckedBodySink for IndexedCommonIrBodySink<'_, '_> {
             }
         }
     }
+}
+
+/// Record what each lowered callable inherits from the declarations it overrides: its
+/// return-value status and `operator` / `infix`. A local classifier's override plan, and with it
+/// what its members inherit, is published when the body declaring it is checked, after the members
+/// were predeclared, so these are read once every body has been.
+fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    for (&callable, &function) in &ir.checked_callable_functions {
+        let inherited = index.callable_inherited_status(callable);
+        if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
+            ir.fn_return_value_statuses
+                .insert(function, inherited.return_value);
+        }
+        if inherited.operator {
+            ir.operator_fns.insert(function);
+        }
+        if inherited.infix {
+            ir.infix_fns.insert(function);
+        }
+    }
+}
+
+/// The inline modifier each parameter in `identities` wrote, parallel to it. The extension receiver is not a declared value parameter and never carries one.
+fn inline_parameter_modifiers(
+    index: &ResolvedModuleIndex,
+    callable: crate::fir::CallableId,
+    identities: &[crate::ir::IrParameterIdentity],
+) -> Vec<crate::ir::IrInlineParameterModifier> {
+    use crate::ir::IrInlineParameterModifier as Modifier;
+    let mut ordinal = 0;
+    identities
+        .iter()
+        .map(|identity| {
+            if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
+                return Modifier::None;
+            }
+            let flags = index
+                .callable_parameter(callable, ordinal)
+                .expect("published parameter-name count must address every parameter")
+                .flags();
+            ordinal += 1;
+            if flags.materializes_its_lambda() {
+                Modifier::Noinline
+            } else if flags.is_crossinline() {
+                Modifier::Crossinline
+            } else {
+                Modifier::None
+            }
+        })
+        .collect()
 }

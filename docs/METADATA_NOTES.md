@@ -186,6 +186,37 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   covered: the public visibility and bit 7 kotlinc writes for such a class regenerated from an
   inline function (`xi = 0x3b0`/`0x5b0`), and the pre-release bit (2) under experimental language
   features. Test: `tests/metadata_synthetic_classes_e2e.rs`.
+- Member visit order (kotlinc 2.4.20): constructors first, then the class's declarations in source
+  order, the primary-constructor properties first and enum entries at their declaration position
+  (so after those properties and before the body's other members), then the members the compiler
+  generates: `componentN`, `copy`, `equals`, `hashCode`, `toString` for a data class and `equals`,
+  `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
+  order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
+  in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
+  of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
+  per-declaration interner: the class's own parameters first, then each captured one on first use,
+  and a member's first use is numbered in that member's own scope. An inner class instead keeps its
+  outer classes' parameters at the ids before its own. Test:
+  `tests/metadata_captured_type_parameters_e2e.rs`.
+- Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and
+  bit 3 for `noinline`, beside `DECLARES_DEFAULT_VALUE` (bit 1). Also written on a nullable
+  function type and on extensions. Test: `tests/metadata_inline_parameter_modifiers_e2e.rs`.
+- `tailrec` (kotlinc 2.4.20): `Function.flags` bit 11 on every tailrec function, top-level or
+  member, whether or not the backend loops it. Test: `tests/metadata_function_flags_e2e.rs`.
+- Parameter defaults (kotlinc 2.4.20): `DECLARES_DEFAULT_VALUE` only on a parameter whose own
+  declaration writes the default. An override, or a member that only implements an interface
+  function through a subclass's fake override, inherits the default for callers but does not
+  declare it. Test: `tests/metadata_parameter_defaults_e2e.rs`.
+- Enum supertypes (kotlinc 2.4.20): the declared interfaces in source order, then the implicit
+  `kotlin.Enum<E>`. Test: `tests/metadata_enum_supertypes_e2e.rs`.
+- Enum entry body (kotlinc 2.4.20): the `Enum$ENTRY` class is `k=1` with an `ENUM_ENTRY` kind and
+  LOCAL visibility (flags 202 for a final body) and no constructor record. Its class id keeps the
+  `pkg/Enum.ENTRY` spelling and is marked local (`StringTableTypes.local_name`), since kotlinc gives
+  an entry's anonymous object no raw-name replacement. A class nested in the body is a local class
+  (LOCAL visibility, no nullability annotations) whose id is `pkg/Enum.ENTRY.Nested`, and a
+  signature naming it records its JVM descriptor. The body keeps its members' nullability
+  annotations. Test: `tests/metadata_enum_entry_classes_e2e.rs`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one
@@ -200,6 +231,7 @@ Decoded from kotlinc output over a top-level property shape matrix (`Package.pro
 | shape | f11 flags | notes |
 |---|---|---|
 | `val a = "hi"` | 8710 | 518 base + `hasConstant`(1<<13); const-literal initializer only |
+| `val z: Int = 0` (member) | 8710 | a zero literal counts too, though no field store is emitted for it; `1 + 2`, `val x: Any = 0` and `val x: Int? = 0` do not. Read from the declared initializer. Test: `tests/metadata_property_flags_e2e.rs` |
 | `val b = run { … }` | omitted (=518) | computed initializer ⇒ no `hasConstant`; f11 elided at wire default |
 | `const val c = 7` | 10758 | + `isConst`(1<<11); f100 = field entry ONLY (no getter method exists) |
 | `val d get() = 5L` | omitted | f7 (getter_flags) = 70 = public·final·`isNotDefault`(1<<6); NO field entry |

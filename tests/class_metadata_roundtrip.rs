@@ -10,7 +10,8 @@ use krusty::jvm::metadata::{
     class_constructors, class_functions, decode_metadata, package_functions,
 };
 use krusty::metadata::class_builder::{
-    build_class, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
+    build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS,
+    EQUALS_FN_FLAGS,
 };
 use krusty::types::{type_name, Ty, TypeVariance};
 
@@ -252,7 +253,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         has_function_typed_parameter: false,
         receiver: None,
         params_have_defaults: false,
-        param_defaults: Vec::new(),
+        param_modifiers: Vec::new(),
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
@@ -272,7 +273,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         &ClassTail {
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
-            captured_type_params: &captured,
+            captured_type_params: CapturedTypeParameters::Reserved(&captured),
             ..Default::default()
         },
     );
@@ -318,7 +319,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         has_function_typed_parameter: false,
         receiver: None,
         params_have_defaults: false,
-        param_defaults: Vec::new(),
+        param_modifiers: Vec::new(),
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
@@ -338,7 +339,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         &ClassTail {
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
-            captured_type_params: &captured,
+            captured_type_params: CapturedTypeParameters::Reserved(&captured),
             ..Default::default()
         },
     );
@@ -423,7 +424,10 @@ fn package_value_param_defaults_round_trip() {
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
         receiver: None,
-        param_defaults: vec![false, true],
+        param_modifiers: vec![
+            krusty::metadata::DeclaredValueParameter::defaulted(false),
+            krusty::metadata::DeclaredValueParameter::defaulted(true),
+        ],
         suspend: false,
         jvm_desc: None,
         contract: None,
@@ -431,6 +435,7 @@ fn package_value_param_defaults_round_trip() {
         has_function_typed_parameter: false,
         operator: false,
         infix: false,
+        tailrec: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
@@ -473,7 +478,7 @@ fn package_function_type_parameter_bound_round_trips() {
         params: vec![("value".to_string(), t)],
         ret: t,
         receiver: None,
-        param_defaults: Vec::new(),
+        param_modifiers: Vec::new(),
         suspend: false,
         jvm_desc: Some("(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;".to_string()),
         contract: None,
@@ -481,6 +486,7 @@ fn package_function_type_parameter_bound_round_trips() {
         has_function_typed_parameter: false,
         operator: false,
         infix: false,
+        tailrec: false,
         type_params: vec![("T".to_string(), false)],
         semantic_type_params: vec!["T".to_string()],
         type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
@@ -525,7 +531,7 @@ fn package_extension_receiver_round_trips() {
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
         receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
-        param_defaults: Vec::new(),
+        param_modifiers: Vec::new(),
         suspend: false,
         jvm_desc: None,
         contract: None,
@@ -533,6 +539,7 @@ fn package_extension_receiver_round_trips() {
         has_function_typed_parameter: false,
         operator: true,
         infix: false,
+        tailrec: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
@@ -595,7 +602,7 @@ fn package_receiver_function_type_param_round_trips() {
         )],
         ret: Ty::Unit,
         receiver: None,
-        param_defaults: Vec::new(),
+        param_modifiers: Vec::new(),
         suspend: false,
         jvm_desc: None,
         contract: None,
@@ -603,6 +610,7 @@ fn package_receiver_function_type_param_round_trips() {
         has_function_typed_parameter: false,
         operator: false,
         infix: false,
+        tailrec: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
