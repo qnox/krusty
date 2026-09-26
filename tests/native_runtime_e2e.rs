@@ -249,6 +249,16 @@ fn surrogate_halves_concatenate_into_their_character() {
     run_driver("string_plus_surrogates");
 }
 
+#[test]
+fn a_bound_between_surrogate_halves_cuts_the_pair_and_a_search_finds_either_half() {
+    run_driver("string_surrogate_halves");
+}
+
+#[test]
+fn a_builder_receiver_or_suffix_is_read_as_text_and_sliced_into_a_copy() {
+    run_driver("string_builder_receivers");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

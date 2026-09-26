@@ -688,10 +688,11 @@ kt_int kt_string_length(KRef self);
 /* `s[index]` — the UTF-16 code unit at `index`, walking the UTF-8 bytes to find it. */
 kt_char kt_string_get(KRef self, kt_int index);
 
-/* `s.substring(start, end)` and `s.subSequence(start, end)`, both by UTF-16 unit as Kotlin indexes.
-   The result SHARES the receiver's storage — a substring is a view, and the text it names is
-   already there. Slicing BETWEEN the halves of a surrogate pair is a loud failure: UTF-8 has no
-   encoding for half a character, so there is no string to hand back. */
+/* `s.substring(start, end)` and `s.subSequence(start, end)`, both by UTF-16 unit as Kotlin indexes,
+   on a `String` or a `StringBuilder`. A string's result SHARES its storage — a substring is a view,
+   and the text it names is already there; a builder's is a copy, because the next `append` may
+   rewrite what a view would name. A bound BETWEEN the halves of a surrogate pair answers the half
+   on its side of the bound, stored as the three bytes its code unit encodes to, as on the JVM. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end);
 
 /* `s.substring(start)`: from there to the end. */
@@ -701,9 +702,9 @@ KRef kt_string_substring_from(KRef self, kt_int start);
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
 
-/* `s.removeSuffix(suffix)`: the receiver without it, or the receiver itself when it does not end
-   there. Bytes settle it — UTF-8 is a prefix code, so two texts end the same way exactly when
-   their trailing bytes do. */
+/* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
+   `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
+   as itself, and a builder as a copy of its text. */
 KRef kt_string_remove_suffix(KRef self, KRef suffix);
 
 /* `s.isEmpty()` / `s.isNotEmpty()`: a text has zero UTF-16 units exactly when it has zero bytes. */
@@ -722,9 +723,10 @@ KRef kt_string_trim(KRef self);
 KRef kt_string_trim_start(KRef self);
 KRef kt_string_trim_end(KRef self);
 
-/* `s.startsWith(prefix)`, `s.endsWith(suffix)`, `s.contains(other)`. Bytes settle all three, the
-   way they settle `removeSuffix`. Only the case-SENSITIVE forms arrive: the generator declines
-   `ignoreCase = true`, which asks about Unicode case folding rather than about text. */
+/* `s.startsWith(prefix)`, `s.endsWith(suffix)`, `s.contains(other)`, by UTF-16 unit: `"😀"` holds
+   and ends with its own low half. Bytes settle them while neither text holds a lone surrogate.
+   Only the case-SENSITIVE forms arrive: the generator declines `ignoreCase = true`, which asks
+   about Unicode case folding rather than about text. */
 kt_boolean kt_string_starts_with(KRef self, KRef prefix);
 kt_boolean kt_string_ends_with(KRef self, KRef suffix);
 kt_boolean kt_string_contains(KRef self, KRef other);

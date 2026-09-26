@@ -473,89 +473,6 @@ kt_int kt_string_compare_to(KRef a, KRef b) {
     }
 }
 
-/* The BYTE offset at which UTF-16 unit `index` begins; `index` equal to the length answers the end
-   of the text. An index outside the text raises Kotlin's `IndexOutOfBoundsException` and answers
-   -1, which is the caller's signal to return rather than slice: `kt_throw` comes back. */
-static kt_int kt_string_offset(KRef self, kt_int index) {
-    const char *bytes = self->as.string.bytes;
-    kt_int byte_length = self->as.string.byte_length;
-    /* Before the walk, which would otherwise take a negative index for one that falls inside the
-       first character and report a surrogate pair the text does not have. */
-    if (index < 0) {
-        kt_index_out_of_bounds(index, kt_string_length(self));
-        return -1;
-    }
-    kt_int unit = 0;
-    kt_int at = 0;
-    while (at < byte_length) {
-        if (unit == index) {
-            return at;
-        }
-        unsigned char lead = (unsigned char)bytes[at];
-        kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
-        kt_int units = width == 4 ? 2 : 1;
-        if (index < unit + units) {
-            /* Between the halves of one character. Kotlin lets a program ask for this and answers
-               with an unpaired surrogate; UTF-8 has no encoding for one, so there is no string to
-               hand back and saying so is better than handing back a different text. */
-            KT_FAIL("krusty: a string index inside a surrogate pair\n");
-        }
-        unit += units;
-        at += width;
-    }
-    if (unit == index) {
-        return at;
-    }
-    kt_index_out_of_bounds(index, unit);
-    return -1;
-}
-
-/* After a raise these return the receiver rather than a slice, for the reason `kt_string_first`
-   gives: the call site tests for the exception before it reads the answer, and a slice cut from
-   bounds that were refused would be text of negative length. */
-KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
-    if (start < 0 || end < start) {
-        kt_index_out_of_bounds(start, end);
-        return self;
-    }
-    kt_int from = kt_string_offset(self, start);
-    if (from < 0) {
-        return self;
-    }
-    kt_int to = kt_string_offset(self, end);
-    if (to < 0) {
-        return self;
-    }
-    /* The storage is shared, not copied: the receiver's own text already holds these bytes, and
-       the collector keeps it alive through the field the new string names. */
-    return kt_string_of(self->as.string.storage, self->as.string.bytes + from, to - from);
-}
-
-KRef kt_string_substring_from(KRef self, kt_int start) {
-    kt_int from = kt_string_offset(self, start);
-    if (from < 0) {
-        return self;
-    }
-    kt_int length = self->as.string.byte_length;
-    return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length - from);
-}
-
-KRef kt_string_remove_suffix(KRef self, KRef suffix) {
-    kt_int length = self->as.string.byte_length;
-    kt_int tail = suffix->as.string.byte_length;
-    if (tail > length) {
-        return self;
-    }
-    const char *bytes = self->as.string.bytes;
-    const char *wanted = suffix->as.string.bytes;
-    for (kt_int index = 0; index < tail; index++) {
-        if (bytes[length - tail + index] != wanted[index]) {
-            return self;
-        }
-    }
-    return kt_string_of(self->as.string.storage, bytes, length - tail);
-}
-
 /* The code point beginning at byte `at`, with the width of its encoding written to `width`.
 
    The UTF-16 walk above answers in UNITS, which is what Kotlin counts; the questions below —
@@ -620,6 +537,132 @@ static KRef kt_string_slice(KRef self, kt_int from, kt_int to) {
         return kt_string_of((KRef)copied, kt_bytes_of(copied), length);
     }
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length);
+}
+
+static kt_int kt_render_char(kt_char unit, char *buffer);
+
+/* The BYTE offset of the character in which UTF-16 unit `index` falls; `index` equal to the length
+   answers the end of the text. When `index` is the SECOND unit of a character above U+FFFF — a
+   bound between the halves of its surrogate pair — the offset is that character's and `*split` is
+   set; otherwise the unit begins the character there and `*split` is clear. An index outside the
+   text raises Kotlin's `IndexOutOfBoundsException` and answers -1, which is the caller's signal to
+   return rather than slice: `kt_throw` comes back. */
+static kt_int kt_string_offset(KRef self, kt_int index, kt_boolean *split) {
+    *split = 0;
+    /* Before the walk, which would otherwise take a negative index for one that falls inside the
+       first character. */
+    if (index < 0) {
+        kt_index_out_of_bounds(index, kt_string_length(self));
+        return -1;
+    }
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int unit = 0;
+    kt_int at = 0;
+    while (at < byte_length) {
+        if (unit == index) {
+            return at;
+        }
+        unsigned char lead = (unsigned char)bytes[at];
+        kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
+        kt_int units = width == 4 ? 2 : 1;
+        if (index < unit + units) {
+            *split = 1;
+            return at;
+        }
+        unit += units;
+        at += width;
+    }
+    if (unit == index) {
+        return at;
+    }
+    kt_index_out_of_bounds(index, unit);
+    return -1;
+}
+
+/* The text between two bounds `kt_string_offset` found. Bounds on character boundaries are a plain
+   slice, which shares a string's storage and copies a builder's.
+
+   A bound between the halves of a pair is a question Kotlin answers with half a character: the
+   JVM's `"😀".substring(0, 1)` is the lone high surrogate D83D, and `substring(1, 2)` the lone low
+   one DE00. The runtime already has a form for a lone half — the three bytes its code unit encodes
+   to, which is what a surrogate `Char` renders as — so the answer is built from that: the LOW half
+   of the character a split start falls in, the whole characters after it, and the HIGH half of the
+   character a split end falls in. Concatenating the two halves back together rejoins them into the
+   character, as it does for any high half followed by a low one. */
+static KRef kt_string_cut(KRef self, kt_int from, kt_boolean from_split, kt_int to,
+                          kt_boolean to_split) {
+    if (!from_split && !to_split) {
+        return kt_string_slice(self, from, to);
+    }
+    /* Both bounds inside the same character: `substring(1, 1)` of it, which is empty. */
+    if (from_split && to_split && from == to) {
+        return kt_string_utf8("", 0);
+    }
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    char head[3];
+    char tail[3];
+    kt_int head_length = 0;
+    kt_int tail_length = 0;
+    kt_int whole_from = from;
+    if (from_split) {
+        kt_int width = 0;
+        uint32_t rest = kt_code_point_at(bytes, from, &width) - 0x10000u;
+        head_length = kt_render_char((kt_char)(0xDC00u + (rest & 0x3FFu)), head);
+        whole_from = from + width;
+    }
+    if (to_split) {
+        kt_int width = 0;
+        uint32_t rest = kt_code_point_at(bytes, to, &width) - 0x10000u;
+        tail_length = kt_render_char((kt_char)(0xD800u + (rest >> 10)), tail);
+    }
+    kt_int whole = to - whole_from;
+    kt_int length = head_length + whole + tail_length;
+    /* A copy for either shape of receiver: the halves exist in no storage to share. The text is
+       read again after the allocation, so what the collector must keep across it is `self`, which
+       this frame still names. */
+    KByteArray *cut = kt_bytes_new(length);
+    char *out = kt_bytes_of(cut);
+    bytes = kt_text_of(self, &byte_length);
+    memcpy(out, head, (size_t)head_length);
+    memcpy(out + head_length, bytes + whole_from, (size_t)whole);
+    memcpy(out + head_length + whole, tail, (size_t)tail_length);
+    return kt_string_of((KRef)cut, out, length);
+}
+
+/* `substring` and `subSequence`, on a `String` or a `StringBuilder` receiver: Kotlin declares the
+   member on `CharSequence`, and routing admits both. After a raise these return the receiver rather
+   than a slice, for the reason `kt_string_first` gives: the call site tests for the exception
+   before it reads the answer, and a slice cut from bounds that were refused would be text of
+   negative length. */
+KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
+    if (start < 0 || end < start) {
+        kt_index_out_of_bounds(start, end);
+        return self;
+    }
+    kt_boolean from_split = 0;
+    kt_int from = kt_string_offset(self, start, &from_split);
+    if (from < 0) {
+        return self;
+    }
+    kt_boolean to_split = 0;
+    kt_int to = kt_string_offset(self, end, &to_split);
+    if (to < 0) {
+        return self;
+    }
+    return kt_string_cut(self, from, from_split, to, to_split);
+}
+
+KRef kt_string_substring_from(KRef self, kt_int start) {
+    kt_boolean from_split = 0;
+    kt_int from = kt_string_offset(self, start, &from_split);
+    if (from < 0) {
+        return self;
+    }
+    kt_int byte_length = 0;
+    (void)kt_text_of(self, &byte_length);
+    return kt_string_cut(self, from, from_split, byte_length, 0);
 }
 
 /* `s.isEmpty()` and `s.isNotEmpty()`. No walk is needed and none would help: a text has zero
@@ -712,18 +755,51 @@ static kt_boolean kt_bytes_match(const char *bytes, kt_int at, const char *wante
     return 1;
 }
 
-/* `s.startsWith(prefix)`, `s.endsWith(suffix)` and `s.contains(other)`.
+/* Whether any of these bytes is a lone surrogate as `kt_render_char` writes one: `ED` followed by
+   `A0..BF`. `ED` is always a lead byte, so where it stands one encoding begins. */
+static kt_boolean kt_holds_surrogate_half(const char *bytes, kt_int length) {
+    for (kt_int at = 0; at + 1 < length; at++) {
+        if ((unsigned char)bytes[at] == 0xEDu && (unsigned char)bytes[at + 1] >= 0xA0u) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
-   Bytes settle all three, for the reason `removeSuffix` already relies on: UTF-8 is a prefix code,
-   so one text begins, ends or holds another exactly when its bytes do — a match can neither start
-   in the middle of a character nor straddle one. Only the case-SENSITIVE forms reach here; the
-   generator declines `ignoreCase = true`, which is a question about Unicode case folding rather
-   than about text. */
+/* Whether the units `text` has left begin with every unit `wanted` has left. Both walks arrive by
+   value, so a caller keeps its own place and can try again one unit further on. */
+static kt_boolean kt_units_begin_with(KUnits text, KUnits wanted) {
+    kt_char unit = 0;
+    while (kt_units_next(&wanted, &unit)) {
+        kt_char have = 0;
+        if (!kt_units_next(&text, &have) || have != unit) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* `s.startsWith(prefix)`, `s.endsWith(suffix)` and `s.contains(other)`, which Kotlin answers by
+   UTF-16 unit.
+
+   Bytes settle all three while neither text holds a lone surrogate: UTF-8 is a prefix code, so one
+   text begins, ends or holds another exactly when its bytes do — a match can neither start in the
+   middle of a character nor straddle one. A lone half breaks that. It is one unit of a character
+   the other text may hold WHOLE, as four bytes that share none of the half's three: `"😀"` holds
+   `"\uD83D"` and ends with `"\uDE00"` on the JVM, and no run of its bytes is either. So a text
+   with a lone half in it is compared unit by unit, which is the question Kotlin asks, and the byte
+   comparison stays the answer for every other text.
+
+   Only the case-SENSITIVE forms reach here; the generator declines `ignoreCase = true`, which is a
+   question about Unicode case folding rather than about text. */
 kt_boolean kt_string_starts_with(KRef self, KRef prefix) {
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int head = 0;
     const char *wanted = kt_text_of(prefix, &head);
+    if (kt_holds_surrogate_half(bytes, byte_length) || kt_holds_surrogate_half(wanted, head)) {
+        return kt_units_begin_with(kt_units_of(self), kt_units_of(prefix));
+    }
     return head <= byte_length && kt_bytes_match(bytes, 0, wanted, head);
 }
 
@@ -732,6 +808,19 @@ kt_boolean kt_string_ends_with(KRef self, KRef suffix) {
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int tail = 0;
     const char *wanted = kt_text_of(suffix, &tail);
+    if (kt_holds_surrogate_half(bytes, byte_length) || kt_holds_surrogate_half(wanted, tail)) {
+        kt_int length = kt_string_length(self);
+        kt_int suffix_length = kt_string_length(suffix);
+        if (suffix_length > length) {
+            return 0;
+        }
+        KUnits text = kt_units_of(self);
+        kt_char skipped = 0;
+        for (kt_int unit = 0; unit < length - suffix_length; unit++) {
+            (void)kt_units_next(&text, &skipped);
+        }
+        return kt_units_begin_with(text, kt_units_of(suffix));
+    }
     return tail <= byte_length && kt_bytes_match(bytes, byte_length - tail, wanted, tail);
 }
 
@@ -740,12 +829,42 @@ kt_boolean kt_string_contains(KRef self, KRef other) {
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int wanted_length = 0;
     const char *wanted = kt_text_of(other, &wanted_length);
+    if (kt_holds_surrogate_half(bytes, byte_length)
+        || kt_holds_surrogate_half(wanted, wanted_length)) {
+        KUnits text = kt_units_of(self);
+        KUnits sought = kt_units_of(other);
+        for (;;) {
+            if (kt_units_begin_with(text, sought)) {
+                return 1;
+            }
+            kt_char skipped = 0;
+            if (!kt_units_next(&text, &skipped)) {
+                return 0;
+            }
+        }
+    }
     for (kt_int at = 0; at + wanted_length <= byte_length; at++) {
         if (kt_bytes_match(bytes, at, wanted, wanted_length)) {
             return 1;
         }
     }
     return 0;
+}
+
+/* `s.removeSuffix(suffix)`, for a `String` or a `StringBuilder` receiver and suffix. It is
+   `endsWith` and then `substring` by unit, which is how Kotlin defines it, and that is what cuts a
+   pair in two when the suffix is its low half: `"😀".removeSuffix("\uDE00")` is `"\uD83D"`.
+
+   A string that does not end with the suffix comes back as itself; a builder does not. Kotlin's
+   answer for a `CharSequence` is `subSequence(0, length)`, a string of its own, and handing back
+   the builder would let the next `append` change text the program already holds. */
+KRef kt_string_remove_suffix(KRef self, KRef suffix) {
+    kt_int length = kt_string_length(self);
+    kt_int kept = kt_string_ends_with(self, suffix) ? length - kt_string_length(suffix) : length;
+    if (kept == length && self->header.type != &kt_type_string_builder) {
+        return self;
+    }
+    return kt_string_substring(self, 0, kept);
 }
 
 /* `s.repeat(n)`. A negative count is Kotlin's own `IllegalArgumentException`. */
@@ -1022,4 +1141,3 @@ KRef kt_string_plus(KRef a, KRef b) {
            (size_t)(right_length - skipped_right));
     return kt_string_of((KRef)joined, out, length);
 }
-

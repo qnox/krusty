@@ -1,15 +1,17 @@
 /* What a driver needs from tiers of the runtime above the one it runs against.
 
    The runtime lands in tiers, and a tier below the last one calls functions a later tier defines:
-   the text accessor behind every question about a string's content, the boxes an exception message
-   renders, and the exception machinery itself. Linked at such a tier those calls reach nothing, so a
-   driver that exercises code making them supplies the missing pieces here. Every one is WEAK: at a
-   tier that defines the real function the linker takes that one, and the driver runs against the
-   runtime as it will ship. `kt_text_of` is the exception — the runtime defines it with internal
-   linkage, so from the tier that does, its calls never reach this definition.
+   the text accessor behind every question about a string's content, the `StringBuilder` it answers
+   for, the boxes an exception message renders, and the exception machinery itself. Linked at such a
+   tier those calls reach nothing, so a driver that exercises code making them supplies the missing
+   pieces here. Every one is WEAK: at a tier that defines the real function the linker takes that
+   one, and the driver runs against the runtime as it will ship. `kt_text_of` is the exception — the
+   runtime defines it with internal linkage, so from the tier that does, its calls never reach this
+   definition.
 
    The string layout below mirrors `struct KObject`'s string arm in `krusty_rt.c`, which keeps the
-   layout private; a driver has no other way to read the text a runtime call hands back. */
+   layout private; a driver has no other way to read the text a runtime call hands back. The builder
+   layout mirrors `KStringBuilder` in the tier that defines `StringBuilder`, for the same reason. */
 #ifndef KRUSTY_DRIVER_STANDINS_H
 #define KRUSTY_DRIVER_STANDINS_H
 
@@ -60,9 +62,53 @@ static inline KRef driver_take_pending(void) {
 
 static inline const KType *driver_type_of(KRef value) { return ((const KObjectHeader *)value)->type; }
 
-/* The stand-ins. A string is the only text a driver hands the runtime, so the text accessor reads
-   only that shape. */
+/* A `StringBuilder` as the tier that defines it lays one out (`KStringBuilder` in `krusty_rt.c`
+   there): the byte array holding its UTF-8 text, whose body follows the array's header, and how
+   many of those bytes are text. The runtime below that tier already asks whether a receiver is one
+   — a string cut from a builder must be a copy — so a driver builds one of exactly this shape to
+   ask it. */
+typedef struct DriverStringBuilder {
+    KObjectHeader header;
+    KRef storage;
+    kt_int byte_length;
+} DriverStringBuilder;
+
+static inline char *driver_builder_bytes(KRef builder) {
+    return (char *)((KArray *)((DriverStringBuilder *)builder)->storage + 1);
+}
+
+static const uint32_t driver_string_builder_offsets[] = {offsetof(DriverStringBuilder, storage)};
+
+__attribute__((weak)) const KType kt_type_string_builder = {
+    .name = "kotlin.text.StringBuilder",
+    .name_length = sizeof("kotlin.text.StringBuilder") - 1,
+    .instance_size = sizeof(DriverStringBuilder),
+    .reference_count = 1,
+    .reference_offsets = driver_string_builder_offsets,
+    .super = &kt_type_any,
+};
+
+/* A builder holding a copy of the `length` bytes at `bytes`. */
+static inline KRef driver_builder_of(const char *bytes, kt_int length) {
+    KRef storage = kt_array_new(&kt_type_byte_array, length);
+    DriverStringBuilder *builder = (DriverStringBuilder *)kt_gc_allocate(
+        &kt_type_string_builder, sizeof(DriverStringBuilder));
+    builder->storage = storage;
+    builder->byte_length = length;
+    char *body = driver_builder_bytes((KRef)builder);
+    for (kt_int index = 0; index < length; index++) {
+        body[index] = bytes[index];
+    }
+    return (KRef)builder;
+}
+
+/* The stand-ins. The text accessor answers for the two shapes a driver hands the runtime, as the
+   real one does: a builder's text is its array's body, and a string's is its own. */
 __attribute__((weak)) const char *kt_text_of(KRef self, kt_int *byte_length) {
+    if (driver_type_of(self) == &kt_type_string_builder) {
+        *byte_length = ((const DriverStringBuilder *)self)->byte_length;
+        return driver_builder_bytes(self);
+    }
     return driver_text(self, byte_length);
 }
 
