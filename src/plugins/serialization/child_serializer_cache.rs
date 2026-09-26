@@ -295,11 +295,10 @@ pub(super) fn add_child_serializer_cache(
             // plan instead of reopening and rewriting generic IR by expression shape.
             let es = emit_cached_element_serializer(ir, plan);
             let returned = ir.add_expr(IrExpr::Return(Some(es)));
-            // `implicit_return_end_lines` marks at the RETURN instruction; `expr_lines` would also
+            // The implicit return end line marks at the RETURN instruction; `expr_lines` would also
             // open the statement at pc 0 and the later mark would collapse into it. kotlinc's
             // factory carries a single entry, on the `areturn`.
-            ir.implicit_return_end_lines
-                .insert(returned, owner_decl_line);
+            ir.mark_implicit_return_end_line(returned, owner_decl_line);
             let factory_body = ir.add_expr(IrExpr::Block {
                 stmts: vec![returned],
                 value: None,

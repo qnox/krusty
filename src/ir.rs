@@ -2441,17 +2441,8 @@ pub struct IrFile {
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
     /// Source end line for every lowered expression whose AST node has a source location.
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
-    /// Source line a generated expression enters only where it dispatches: its operands carry no
-    /// source position of their own, so nothing marks the line at its start (a callable-reference
-    /// carrier's `invoke`, whose stored receiver is read ahead of the call's line).
-    pub dispatch_lines: std::collections::HashMap<u32, u32>,
-    /// Implicit return identity → the expression body's closing source line.
-    ///
-    /// An explicit `return expression` keeps the call/return line already in effect. An
-    /// expression-bodied callable instead maps its generated return instruction to the end of the
-    /// body expression. Common lowering records that semantic distinction once; backends must not
-    /// infer it from a synthetic origin or expression shape.
-    pub(crate) implicit_return_end_lines: std::collections::HashMap<ExprId, u32>,
+    /// Lines generated expressions map to at one physical point; see `debug_lines`.
+    generated_lines: debug_lines::GeneratedLineMarks,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
@@ -3542,6 +3533,7 @@ impl IrFile {
 }
 
 mod data_class_members;
+mod debug_lines;
 mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;

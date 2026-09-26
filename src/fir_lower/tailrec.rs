@@ -42,7 +42,7 @@ pub(super) fn finish_tailrec_body(
                 .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
             let returned = generated(ir, IrExpr::Return(Some(value)), origin);
             if let Some(&end) = ir.expr_end_lines.get(&value) {
-                ir.implicit_return_end_lines.insert(returned, end);
+                ir.mark_implicit_return_end_line(returned, end);
             }
             roots.push(returned);
         }
