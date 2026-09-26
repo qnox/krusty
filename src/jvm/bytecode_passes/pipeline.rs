@@ -9,10 +9,11 @@
 //! slots left unused (`removeUnusedLocalVariables`). A pass krusty does not have yet is a named step
 //! that changes nothing, so the list reads as kotlinc's does.
 //!
-//! One step is out of kotlinc's place: the redundant-null-check and redundant-cast passes select
-//! over the method as emitted (the cast pass asks the verifier's frames of the emitted bytes, by
-//! instruction number), so they run before `CapturedVars`, and what they select is removed together
-//! before the next step.
+//! One step is out of kotlinc's place: the redundant-null-check and redundant-cast passes judge
+//! the method as emitted (the cast pass asks the verifier's frames of the emitted bytes, by
+//! instruction number), so they run before `CapturedVars`. The null-check pass's result waits
+//! until the cast pass has selected its casts in the emitted method; the casts then go from that
+//! result, by where its nodes came from, before the next step.
 //!
 //! The class-file boundary (`classfile::method_rewrite`) builds the node, supplies the facts only it
 //! has ([`PassContext`]), and lays the result out again.
@@ -21,23 +22,23 @@ use std::collections::BTreeSet;
 
 use super::redundant_boxing::{self, ValueClasses};
 use super::redundant_checkcasts::{self, StackTops};
+use super::redundant_null_checks::{self, Rewritten};
 use super::{
-    captured_vars, checkcasts_before_aastore, dead_code, local_slots, negated_jumps,
-    redundant_gotos, redundant_nops, redundant_null_checks, stack_peephole, temporaries,
+    captured_vars, checkcasts_before_aastore, constant_conditions, dead_code, local_slots,
+    negated_jumps, redundant_gotos, redundant_nops, stack_peephole, temporaries,
 };
 use crate::jvm::method_node::{LabelId, MethodNode};
 
 /// One step of kotlinc's optimizer, named after its transformer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pass {
-    /// `RedundantNullCheckMethodTransformer`, its `checkNotNull*` calls only (see
-    /// `redundant_null_checks`).
+    /// `RedundantNullCheckMethodTransformer` (see `redundant_null_checks`).
     RedundantNullCheck,
     /// `RedundantCheckCastEliminationMethodTransformer` (see `redundant_checkcasts`).
     RedundantCheckCast,
     /// `CapturedVarsOptimizationMethodTransformer` (see `captured_vars`).
     CapturedVars,
-    /// `ConstantConditionEliminationMethodTransformer`: not ported yet.
+    /// `ConstantConditionEliminationMethodTransformer` (see `constant_conditions`).
     ConstantCondition,
     /// `RedundantBoxingMethodTransformer` (see `redundant_boxing`).
     RedundantBoxing,
@@ -115,8 +116,10 @@ pub(crate) enum Outcome {
 /// The state the steps hand on to the ones after them.
 #[derive(Default)]
 struct Run {
-    /// Node positions the passes judging the method as emitted selected, not removed yet.
+    /// Node positions of the method as emitted the redundant-cast pass selected, not removed yet.
     emitted_selection: BTreeSet<usize>,
+    /// The redundant-null-check pass's result, applied with the selection.
+    null_checked: Option<Rewritten>,
     /// The labels the temporaries pass pinned; the `goto` and jump passes leave jumps to them.
     pinned: BTreeSet<LabelId>,
     removed_locals: Vec<bool>,
@@ -124,17 +127,25 @@ struct Run {
 }
 
 impl Run {
-    /// Remove what the passes judging the method as emitted selected, together.
+    /// Apply what the passes judging the method as emitted found: the null-check pass's result,
+    /// without the casts selected in the method as emitted.
     fn remove_emitted_selection(&mut self, method: &mut MethodNode) {
-        if self.emitted_selection.is_empty() {
-            return;
-        }
         let selection = std::mem::take(&mut self.emitted_selection);
-        let mut position = 0;
-        method.nodes.retain(|_| {
-            position += 1;
-            !selection.contains(&(position - 1))
-        });
+        let (nodes, origins) = match self.null_checked.take() {
+            Some(rewritten) => (rewritten.nodes, rewritten.origins),
+            None if selection.is_empty() => return,
+            None => {
+                let nodes = std::mem::take(&mut method.nodes);
+                let origins = (0..nodes.len()).map(Some).collect();
+                (nodes, origins)
+            }
+        };
+        method.nodes = nodes
+            .into_iter()
+            .zip(origins)
+            .filter(|(_, origin)| !origin.is_some_and(|origin| selection.contains(&origin)))
+            .map(|(node, _)| node)
+            .collect();
         self.changed = true;
     }
 
@@ -150,8 +161,9 @@ impl Run {
         }
         let changed = match pass {
             Pass::RedundantNullCheck => {
-                self.emitted_selection
-                    .extend(redundant_null_checks::select(method));
+                self.null_checked =
+                    redundant_null_checks::eliminate(method, context.owner, context.value_classes)
+                        .ok()?;
                 false
             }
             Pass::RedundantCheckCast => {
@@ -160,6 +172,9 @@ impl Run {
                 false
             }
             Pass::CapturedVars => captured_vars::eliminate(method, context.owner).ok()?,
+            Pass::ConstantCondition => {
+                constant_conditions::eliminate(method, context.owner).ok()?
+            }
             Pass::RedundantBoxing => {
                 redundant_boxing::eliminate(method, context.owner, context.value_classes).ok()?
             }
@@ -186,7 +201,7 @@ impl Run {
                 let parameters: BTreeSet<u16> = (0..context.parameter_slots).collect();
                 local_slots::compact(method, &parameters)
             }
-            Pass::ConstantCondition | Pass::PopBackwardPropagation | Pass::DeadCode => false,
+            Pass::PopBackwardPropagation | Pass::DeadCode => false,
         };
         self.changed |= changed;
         Some(())

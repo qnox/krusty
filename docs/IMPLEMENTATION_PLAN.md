@@ -4558,9 +4558,57 @@ shadow with no output change.
   instructions exactly. No box file becomes byte-identical (363 before and after); box pass/fail is
   unchanged. One cast before an `aastore` remains in the corpus (`inline/genericFunctionReference`,
   a method the rewrite keeps as emitted; 5g).
-- ☐ 5c–5i, 6. The rest of kotlinc's transformer order: the missing passes (ConstantCondition,
-  PopBackwardPropagation and the mid-pipeline DeadCode, the complete RedundantNullCheck), the first
-  three passes in kotlinc's order, no all-or-nothing rewrite, and the mandatory steps.
+- ✅ 5c. RedundantNullCheck, complete (`bytecode_passes/redundant_null_checks/`): kotlinc's
+  `RedundantNullCheckMethodTransformer` as a whole. Each round writes what each check of a local
+  teaches about it into a copy of the method (`assumptions`: `aconst_null`/`AS_NOT_NULL` stores on
+  the two edges of a null jump or `instanceof` test, after a `checkNotNull*`, and `aconst_null;
+  athrow` after a throwing `Intrinsics` helper), runs `NullabilityInterpreter` over the copy
+  (`nullability`: `new`, reference `ldc`, `Unit.INSTANCE`, boxing, new arrays and progression
+  iterators are non-null; `aconst_null` is null unless it is a `typeOf` placeholder; `checkcast`
+  keeps its operand's value unless it is a reified safe-as), and folds `ifnull`/`ifnonnull` into a
+  `goto` or nothing, `instanceof` of `null` into `false` and of a non-null value of exactly the
+  tested class into `true`, and the `checkNotNull*` calls as before; the rounds repeat while a jump
+  or `instanceof` folds. The old straight-line, locals-only analysis is gone. The pass hands the
+  redundant-cast pass (which still selects on the emitted method, 5f) where each node came from. In
+  the 2.4.20 box corpus 227 of 26,135 classes change against 5b (226 without `JvmInlineKt`), in about
+  219 box files, 256 methods: 20 methods become identical to kotlinc's instructions and none stops
+  being so; one more box file is byte-identical (360). Box pass/fail is unchanged. Where krusty now
+  folds a check kotlinc keeps, the fold is sound and comes from krusty's emitted shape: a safe call
+  or elvis through a temporary local (kotlinc uses `dup`) gives the analysis a local to learn from
+  (`kt245`, `fakeInlinerVariables`, `evaluationOrderForNullableArgument`'s `null in a..b`), or the
+  input is already miscompiled in an expected failure (a missing reified marker lets `x is T` fold).
+- ✅ 5d. ConstantConditionElimination (`bytecode_passes/constant_conditions/`): kotlinc's
+  `ConstantConditionEliminationMethodTransformer` with its `ConstantPropagationInterpreter` (the
+  basic interpreter, with `iconst`/`bipush`/`sipush`/`ldc` of an `int` keeping its value through
+  loads, stores and `dup`s, and two equal constants meeting staying known). On a method with an `int`
+  jump and an `int` constant, each round turns an `if<cond>` on a known value into `pop` + `goto` or
+  `pop`, an `if_icmp<cond>` on two known values into two `pop`s + `goto` or two `pop`s, and one whose
+  top operand is a known `0` into `pop` + `if<cond>`, and removes every node the analysis does not
+  reach except labels; the rounds repeat while one changes anything. The final dead-code step now
+  also drops, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do, a protected range
+  or local variable an earlier pass left with no instruction, even when nothing is dead at that
+  point (without it, a local of a branch this pass removed made the rewrite keep the method as
+  emitted). In the 2.4.20 box corpus 319 of 26,135 classes change against 5c (without
+  `JvmInlineKt`), in 256 box files, 1,053 methods, with 1,118 `int` jumps gone: 74 methods become
+  identical to kotlinc's instructions and one stops being so; box files byte-identical to kotlinc go
+  from 360 to 364 (`kt2482`, `kt1899`, `ea35963`, `kt1634`, `sealedWhenInitialization` in,
+  `overflowChar` out). The dead-code change alone accounts for 24 of those classes (30 methods that
+  were kept as emitted, 4 of them now identical to kotlinc). Box pass/fail is unchanged. Where
+  krusty now folds a jump kotlinc keeps (28 methods, `overflowChar` among them), the fold is sound
+  and comes from krusty's emitted shape: at this pass's position kotlinc still has a boxed value
+  (`Integer.valueOf`/`intValue` through an inlined generic or functional parameter:
+  `1.let { it == 0 }`, `getAndCheck({ 42 }, { 42 })`, an inline `f: (Int) -> Int` result compared
+  with a constant) or an `Intrinsics.compare` (a `Char` comparison, `overflowChar`), which its later
+  passes turn into the constant or `if_icmp` krusty already emits. In `kt7972` krusty emits
+  `this is MutableList<E>` as `true` where kotlinc calls `TypeIntrinsics.isMutableList` (an existing
+  emitter difference); the pass then folds the jump on it. Three methods
+  (`kt248`, `nested`'s `testMultipleReturnsRequireDeeperAnalysisLongRange`,
+  `substituteIntForGeneric`) are now written as emitted: the fold lets RedundantBoxing unbox a local
+  whose new descriptor is not in the constant pool, which the rewrite only looks up (5f). The
+  ForLoopsLowering port can leave the `first > last` guard of constant bounds to this pass.
+- ☐ 5e–5i, 6. The rest of kotlinc's transformer order: the missing passes (PopBackwardPropagation
+  and the mid-pipeline DeadCode), the first three passes in kotlinc's order, no all-or-nothing
+  rewrite, and the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

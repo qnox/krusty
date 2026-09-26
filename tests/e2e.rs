@@ -422,6 +422,8 @@ mod const_constantvalue_e2e;
 mod const_read_inline_e2e;
 #[path = "const_val_e2e.rs"]
 mod const_val_e2e;
+#[path = "constant_conditions_e2e.rs"]
+mod constant_conditions_e2e;
 #[path = "construction_argument_labels_e2e.rs"]
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
@@ -1290,6 +1292,8 @@ mod redundant_checkcast_e2e;
 mod redundant_checkcasts_before_aastore_e2e;
 #[path = "redundant_null_check_e2e.rs"]
 mod redundant_null_check_e2e;
+#[path = "redundant_null_jumps_e2e.rs"]
+mod redundant_null_jumps_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "spill_order_e2e.rs"]

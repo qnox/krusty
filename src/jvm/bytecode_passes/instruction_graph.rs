@@ -113,11 +113,6 @@ impl<'a> InstructionGraph<'a> {
         }
     }
 
-    /// The node position of instruction `index`.
-    pub(crate) fn position(&self, index: usize) -> usize {
-        self.positions[index]
-    }
-
     /// The instruction `label` stands in front of, the exit when it stands after the last one.
     pub(crate) fn at_label(&self, label: LabelId) -> usize {
         self.label_at[&label]

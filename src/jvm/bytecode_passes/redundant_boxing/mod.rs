@@ -11,8 +11,9 @@ mod values;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use recognizers::ValueClasses;
+pub(crate) use recognizers::{is_boxing, is_iterator_call, ValueClasses};
 pub(crate) use rewrite::eliminate;
+pub(crate) use values::progression_iterator;
 
 /// The value classes a class's code may box: internal name → the descriptor of the unboxed value
 /// its `box-impl` takes (kotlinc's `unboxedTypeOfInlineClass`).
