@@ -122,28 +122,56 @@ fn forwarded_tail_calls_still_resume() {
 /// state machine; forwarding the continuation would hand the callee's `Int` to its caller.
 #[test]
 fn a_unit_function_discarding_a_result_keeps_its_state_machine() {
-    let source = "class Gauge {\n\
-        \x20   suspend fun count(): Int = 1\n\
-        \x20   suspend fun tick(): Unit {\n\
-        \x20       count()\n\
-        \x20   }\n\
+    let source = "suspend fun count(): Int = 1\n\
+        suspend fun tick(): Unit {\n\
+        \x20   count()\n\
         }\n";
     let built = compare_with_kotlinc_plugin(
         "UnitDiscardTail",
         source,
-        "Gauge",
+        "UnitDiscardTailKt",
         &[common::stdlib_jar()],
         "25",
         &[],
     )
     .expect("reference kotlinc is provisioned");
     let member = "java.lang.Object tick(";
-    for (compiler, text) in [("kotlinc", &built.reference), ("krusty", &built.krusty)] {
-        let body = method_instructions(text, member);
-        assert!(!body.is_empty(), "{compiler}: {member} not found");
-        assert!(
-            body.iter().any(|insn| insn.contains(".label:I")),
-            "{compiler} forwards the continuation in {member}: {body:#?}"
-        );
-    }
+    let body = method_instructions(&built.krusty, member);
+    assert!(!body.is_empty(), "krusty: {member} not found");
+    assert_eq!(
+        body,
+        method_instructions(&built.reference, member),
+        "{member}"
+    );
+}
+
+/// The discarded result never reaches the caller: once the callee resumes with its `Int`, the
+/// `Unit` function completes its own caller with `Unit`.
+#[test]
+fn a_unit_function_discarding_a_result_resumes_its_caller_with_unit() {
+    let main = "import kotlin.coroutines.*\n\
+         import kotlin.coroutines.intrinsics.*\n\
+         var parked: Continuation<Int>? = null\n\
+         var observed: Any? = \"unset\"\n\
+         class Gauge {\n\
+         \x20   suspend fun count(): Int =\n\
+         \x20       suspendCoroutineUninterceptedOrReturn { parked = it; COROUTINE_SUSPENDED }\n\
+         \x20   suspend fun tick(): Unit {\n\
+         \x20       count()\n\
+         \x20   }\n\
+         }\n\
+         class Observer : Continuation<Unit> {\n\
+         \x20   override val context: CoroutineContext get() = EmptyCoroutineContext\n\
+         \x20   override fun resumeWith(result: Result<Unit>) { observed = result.getOrNull() }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   Gauge::tick.startCoroutine(Gauge(), Observer())\n\
+         \x20   if (observed != \"unset\") return \"completed before resuming: $observed\"\n\
+         \x20   parked!!.resume(7)\n\
+         \x20   return if (observed === Unit) \"OK\" else \"observed $observed\"\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(main, "UnitDiscardTailRun").as_deref(),
+        Some("OK")
+    );
 }
