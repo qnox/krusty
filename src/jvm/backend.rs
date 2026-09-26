@@ -166,7 +166,6 @@ fn run_backend_passes_after_plugins(
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
     // construction/member resolution for source value classes).
-    crate::jvm::value_classes::apply_override_final_drop(ir);
     if !crate::jvm::value_classes::lower_value_classes(
         ir,
         classifiers,

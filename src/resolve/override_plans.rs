@@ -349,6 +349,22 @@ fn declaration_formals(
         .collect()
 }
 
+/// Declared upper bounds of a declaration's own type parameters, parallel to
+/// [`declaration_formals`]; an empty entry is the implicit `Any?`.
+fn declaration_formal_bounds(
+    index: &ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> Vec<Vec<Ty>> {
+    (0..)
+        .map_while(|ordinal| index.type_parameter(declaration, ordinal))
+        .filter_map(|parameter| {
+            index.type_parameter_semantic_name(parameter)?;
+            index.type_parameter_header(parameter)
+        })
+        .map(|header| header.bounds.iter().map(|bound| bound.ty.get()).collect())
+        .collect()
+}
+
 fn publish_inherited_interface_function_plans(
     index: &ResolvedModuleIndex,
     source: &dyn crate::symbol_source::SymbolSource,
@@ -813,31 +829,70 @@ fn property_override_plans(
     overrides
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The overriding side of an override edge: one module declaration's own formals, input shape
+/// (context parameters, then the extension receiver, then value parameters) and result.
+struct OverridingFunction {
+    callable: crate::fir::CallableId,
+    formals: Vec<String>,
+    formal_bounds: Vec<Vec<Ty>>,
+    parameters: Vec<Ty>,
+    receiver: Option<Ty>,
+    context_count: usize,
+    result: Ty,
+    suspend: bool,
+}
+
+impl OverridingFunction {
+    fn of(
+        index: &ResolvedModuleIndex,
+        declaration: crate::fir::DeclarationId,
+        callable: &crate::fir::ResolvedCallableHeader,
+        signature: &crate::fir::ResolvedSignature,
+        suspend: bool,
+    ) -> Self {
+        let mut parameters = signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        let context_count = callable.shape.context_parameter_count as usize;
+        if let Some(receiver) = callable.shape.extension_receiver {
+            parameters.insert(context_count.min(parameters.len()), receiver.get());
+        }
+        Self {
+            callable: callable.id,
+            formals: declaration_formals(index, declaration),
+            formal_bounds: declaration_formal_bounds(index, declaration),
+            parameters,
+            receiver: callable
+                .shape
+                .extension_receiver
+                .map(crate::fir::ResolvedTy::get),
+            context_count,
+            result: signature.result.get().canonical_semantic(),
+            suspend,
+        }
+    }
+}
+
 fn append_function_override_edges(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
     implementation_owner: crate::types::TypeName,
     name: &str,
-    implementation_callable: crate::fir::CallableId,
-    implementation_formals: &[String],
-    implementation_parameters: &[Ty],
-    implementation_receiver: Option<Ty>,
-    implementation_context_count: usize,
-    implementation_result: Ty,
-    suspend: bool,
+    implementation: &OverridingFunction,
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
-    seen: &mut HashSet<ResolvedFunctionOverrideTarget>,
     overrides: &mut Vec<ResolvedFunctionOverride>,
 ) {
+    let mut seen = HashSet::new();
     let first = overrides.len();
-    let mut implementation_inputs = implementation_parameters.to_vec();
-    if implementation_receiver.is_some() {
+    let mut implementation_inputs = implementation.parameters.to_vec();
+    if implementation.receiver.is_some() {
         assert!(
-            implementation_context_count < implementation_inputs.len(),
+            implementation.context_count < implementation_inputs.len(),
             "an extension override must retain its declared receiver parameter"
         );
-        implementation_inputs.remove(implementation_context_count);
+        implementation_inputs.remove(implementation.context_count);
     }
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
@@ -861,6 +916,11 @@ fn append_function_override_edges(
                 .as_ref()
                 .map(|signature| signature.formals.as_slice())
                 .unwrap_or_default();
+            let applied_bounds = applied
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formal_bounds.as_slice())
+                .unwrap_or_default();
             if !crate::symbol_resolver::override_input_shapes_match(
                 source,
                 crate::symbol_resolver::OverrideInputShape {
@@ -869,19 +929,24 @@ fn append_function_override_edges(
                         .semantic_receiver()
                         .filter(|_| applied.is_extension()),
                     formals: applied_formals,
+                    formal_bounds: applied_bounds,
                     context_count: applied.context_count,
                     suspend: applied.flags.suspend,
                 },
                 crate::symbol_resolver::OverrideInputShape {
                     params: &implementation_inputs,
-                    receiver: implementation_receiver,
-                    formals: implementation_formals,
-                    context_count: implementation_context_count,
-                    suspend,
+                    receiver: implementation.receiver,
+                    formals: &implementation.formals,
+                    formal_bounds: &implementation.formal_bounds,
+                    context_count: implementation.context_count,
+                    suspend: implementation.suspend,
                 },
             ) || !crate::symbol_resolver::resolution_subtype(
                 source,
-                crate::types::ty_canonicalize_params(implementation_result, implementation_formals),
+                crate::types::ty_canonicalize_params(
+                    implementation.result,
+                    &implementation.formals,
+                ),
                 crate::types::ty_canonicalize_params(
                     applied.ret.apply(applied.callable.ret).canonical_semantic(),
                     applied_formals,
@@ -892,7 +957,7 @@ fn append_function_override_edges(
             }
             let declared_parameters = declaration_parameters_with_receiver(declared);
             overrides.push(ResolvedFunctionOverride {
-                implementation: ResolvedFunctionOverrideTarget::Module(implementation_callable),
+                implementation: ResolvedFunctionOverrideTarget::Module(implementation.callable),
                 implementation_owner,
                 overridden,
                 overridden_owner: supertype.classifier,
@@ -915,16 +980,16 @@ fn append_function_override_edges(
                     "applied overridden function result",
                 ),
                 implementation_parameters: resolved_types(
-                    implementation_parameters.iter().copied(),
+                    implementation.parameters.iter().copied(),
                     "overriding function parameters",
                 ),
                 implementation_parameter_identities: module_parameter_identities(
                     index,
-                    implementation_callable,
-                    implementation_parameters.len(),
+                    implementation.callable,
+                    implementation.parameters.len(),
                 ),
                 implementation_result: resolved_ty(
-                    implementation_result,
+                    implementation.result,
                     "overriding function result",
                 ),
                 overridden_parameter_defaults: function_default_bitmap(&applied),
@@ -932,7 +997,7 @@ fn append_function_override_edges(
                 overridden_return_value_status: applied.flags.return_value_status,
                 overridden_operator: applied.flags.operator,
                 overridden_infix: applied.flags.infix,
-                suspend,
+                suspend: implementation.suspend,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
@@ -970,38 +1035,20 @@ fn function_override_plans(
         let Some(implementation_signature) = index.signature(declaration) else {
             return;
         };
-        let mut implementation_parameters = implementation_signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect::<Vec<_>>();
-        if let Some(receiver) = implementation_callable.shape.extension_receiver {
-            implementation_parameters.insert(
-                (implementation_callable.shape.context_parameter_count as usize)
-                    .min(implementation_parameters.len()),
-                receiver.get(),
-            );
-        }
-        let implementation_result = implementation_signature.result.get().canonical_semantic();
-        let implementation_formals = declaration_formals(index, declaration);
-        let mut seen = HashSet::new();
+        let implementation = OverridingFunction::of(
+            index,
+            declaration,
+            &implementation_callable,
+            implementation_signature,
+            implementation.is_suspend(),
+        );
         append_function_override_edges(
             index,
             source,
             class.internal_name(),
             name,
-            implementation_callable.id,
-            &implementation_formals,
-            &implementation_parameters,
-            implementation_callable
-                .shape
-                .extension_receiver
-                .map(crate::fir::ResolvedTy::get),
-            implementation_callable.shape.context_parameter_count as usize,
-            implementation_result,
-            implementation.is_suspend(),
+            &implementation,
             hierarchy,
-            &mut seen,
             &mut overrides,
         );
     };
@@ -1120,36 +1167,20 @@ fn enum_entry_override_plans(
                     let Some(callable) = index.callable_for_declaration(member) else {
                         continue;
                     };
-                    let mut parameters = signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect::<Vec<_>>();
-                    if let Some(receiver) = callable.shape.extension_receiver {
-                        parameters.insert(
-                            (callable.shape.context_parameter_count as usize).min(parameters.len()),
-                            receiver.get(),
-                        );
-                    }
-                    let formals = declaration_formals(index, member);
-                    let mut seen = HashSet::new();
+                    let implementation = OverridingFunction::of(
+                        index,
+                        member,
+                        &callable,
+                        signature,
+                        header.flags.has(DeclarationFlags::SUSPEND),
+                    );
                     append_function_override_edges(
                         index,
                         source,
                         implementation_owner,
                         name,
-                        callable.id,
-                        &formals,
-                        &parameters,
-                        callable
-                            .shape
-                            .extension_receiver
-                            .map(crate::fir::ResolvedTy::get),
-                        callable.shape.context_parameter_count as usize,
-                        signature.result.get().canonical_semantic(),
-                        header.flags.has(DeclarationFlags::SUSPEND),
+                        &implementation,
                         &hierarchy,
-                        &mut seen,
                         &mut functions,
                     );
                 }
@@ -1243,37 +1274,20 @@ pub(crate) fn publish_checked_local_override_plans(
                             let Some(callable) = index.callable_for_declaration(declaration) else {
                                 continue;
                             };
-                            let mut parameters = signature
-                                .parameters
-                                .iter()
-                                .map(|parameter| parameter.get())
-                                .collect::<Vec<_>>();
-                            if let Some(receiver) = callable.shape.extension_receiver {
-                                parameters.insert(
-                                    (callable.shape.context_parameter_count as usize)
-                                        .min(parameters.len()),
-                                    receiver.get(),
-                                );
-                            }
-                            let mut seen = HashSet::new();
-                            let implementation_formals = declaration_formals(index, declaration);
+                            let implementation = OverridingFunction::of(
+                                index,
+                                declaration,
+                                &callable,
+                                signature,
+                                member.flags.has(DeclarationFlags::SUSPEND),
+                            );
                             append_function_override_edges(
                                 index,
                                 &source,
                                 implementation_owner,
                                 name,
-                                callable.id,
-                                &implementation_formals,
-                                &parameters,
-                                callable
-                                    .shape
-                                    .extension_receiver
-                                    .map(crate::fir::ResolvedTy::get),
-                                callable.shape.context_parameter_count as usize,
-                                signature.result.get().canonical_semantic(),
-                                member.flags.has(DeclarationFlags::SUSPEND),
+                                &implementation,
                                 &hierarchy,
-                                &mut seen,
                                 &mut functions,
                             );
                         }
