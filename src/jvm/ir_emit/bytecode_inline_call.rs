@@ -16,11 +16,13 @@ use super::*;
 
 mod lambda_node;
 mod lambda_route;
+mod regenerated_objects;
 use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
 pub(super) use lambda_route::LambdaCallRoute;
+pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
 
@@ -190,7 +192,9 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) =
+            inliner::unsupported_shape(&callee, inliner::ObjectRegeneration::Regenerated)
+        {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
@@ -226,7 +230,10 @@ impl Emitter<'_> {
             target.inline_only,
             base,
             reified,
-            &mut UnmappedLines,
+            inliner::InliningContext {
+                lines: &mut UnmappedLines,
+                objects: &mut self.call_objects(call_expression, target.name, false),
+            },
         ) {
             crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
             return None;
@@ -423,6 +430,9 @@ impl Emitter<'_> {
             call_line,
             claimable,
         };
+        let mut objects = lines
+            .emitter
+            .call_objects(call_expression, target.name, true);
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -430,7 +440,10 @@ impl Emitter<'_> {
             target.inline_only,
             base,
             reified,
-            &mut lines,
+            inliner::InliningContext {
+                lines: &mut lines,
+                objects: &mut objects,
+            },
         );
         let inlined = match inlined {
             Ok(inlined) => inlined,

@@ -12,9 +12,11 @@ pub(crate) mod bytecode_analysis;
 mod codegen_markers;
 mod constant_pool_queries;
 mod control_flow;
+mod copied_class;
 mod coroutine_markers;
 mod coroutine_transform;
 mod descriptor_mentions;
+mod inner_classes;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
@@ -22,6 +24,7 @@ mod stack_maps;
 
 use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
 
+pub(crate) use copied_class::CopyError;
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
 
@@ -623,6 +626,7 @@ pub struct ClassWriter {
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
     inner_class_resolver: Option<InnerClassResolver>,
+    inner_class_table: inner_classes::InnerClassTable,
     value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     /// Internal names of every ANNOTATION type this class applies (class/field/method/parameter).
     /// An applied annotation appears only as a descriptor string inside the annotation attribute —
@@ -745,6 +749,7 @@ impl ClassWriter {
             deprecated_methods: std::collections::HashSet::new(),
             inner_class_candidates: Vec::new(),
             inner_class_resolver: None,
+            inner_class_table: inner_classes::InnerClassTable::default(),
             value_classes: Rc::default(),
             annotation_class_refs: std::collections::HashSet::new(),
             permitted_subclasses: Vec::new(),
@@ -814,25 +819,6 @@ impl ClassWriter {
         self.enclosing_method = Some((owner.to_string(), String::new(), String::new()));
     }
 
-    /// Register a candidate `InnerClasses` entry (a nested class in this file). `finish` emits it only
-    /// if `inner` is referenced as a class constant. Register the whole file's nest on every writer —
-    /// the per-class filter then yields exactly the entries kotlinc emits for that class.
-    pub fn add_inner_class(&mut self, spec: InnerClassSpec) {
-        // Preserve the first registration because its order affects byte identity.
-        if self
-            .inner_class_candidates
-            .iter()
-            .any(|s| s.inner == spec.inner)
-        {
-            return;
-        }
-        self.inner_class_candidates.push(spec);
-    }
-
-    pub fn set_inner_class_resolver(&mut self, resolver: Option<InnerClassResolver>) {
-        self.inner_class_resolver = resolver;
-    }
-
     pub(crate) fn set_value_classes(
         &mut self,
         value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
@@ -867,89 +853,6 @@ impl ClassWriter {
     /// `ty` unless it is a synthesized nullability annotation this class does not write.
     fn written_annotation<'a>(&self, ty: &'a str) -> Option<&'a str> {
         (self.nullability_annotations || (ty != NOT_NULL && ty != NULLABLE)).then_some(ty)
-    }
-
-    /// Whether one registered nested-class declaration belongs in this writer's final
-    /// `InnerClasses` table. Keep seeding and attribute construction on this one predicate: adding
-    /// constants for a rejected row changes byte identity, while omitting an annotation-only row
-    /// changes the class structure.
-    fn retains_inner_class(&self, spec: &InnerClassSpec) -> bool {
-        self.retains_inner_class_with_presence(spec, self.cp.has_class(&spec.inner))
-    }
-
-    /// Evaluate the shared retention predicate against an explicit view of the constant pool.
-    /// Seeding uses a hypothetical presence bit while it computes the retained-set fixpoint;
-    /// attribute construction passes the real pool state through `retains_inner_class`.
-    fn retains_inner_class_with_presence(
-        &self,
-        spec: &InnerClassSpec,
-        inner_present: bool,
-    ) -> bool {
-        spec.outer.as_deref() == Some(self.internal_name.as_str())
-            || inner_present
-            || self.annotation_class_refs.contains(&spec.inner)
-            || self.descriptor_mentions(&spec.inner)
-    }
-
-    /// Seed the `InnerClasses` entries' outer-class refs and simple names at kotlinc's
-    /// post-metadata pool position, in the ORDER the finished table will list them (sorted by inner
-    /// internal name), and only for the entries that table will actually keep.
-    ///
-    /// kotlinc interns these as it visits the sorted table, so a class whose table has a sibling
-    /// sorting BEFORE its own row must intern that sibling's name first: `Foo$$serializer` sorts
-    /// ahead of `Foo$Companion` (`'$'` < `'C'`). Seeding only this class's own row put its name
-    /// first and left the two entries transposed in the pool — the class then matched kotlinc in
-    /// every other respect while still differing byte-wise.
-    pub(super) fn seed_inner_class_names(&mut self) {
-        // A referenced dependency nest may not be among the source file's registered candidates.
-        // Discover those rows before sorting; resolving them later from `finish` would intern their
-        // names after every source row and recreate the very order mismatch this seed prevents.
-        self.resolve_inner_classes();
-        let specs = self.inner_class_candidates.clone();
-        // kotlinc interns PER ROW, in the attribute's own field order: the inner class, then the
-        // outer class, then the simple name. Interning every row's classes first and every name
-        // second matches only when no row's INNER class needs interning — true for a flat table
-        // (`Foo$$serializer`/`Foo$Companion`, whose inners the class already references) and for a
-        // single chain, but wrong as soon as an enclosing row's inner is not otherwise referenced:
-        // `A$B$C$Companion` interns `Class(A$B)` at its own row, between two other rows' entries.
-        //
-        // Retention is still a FIXPOINT, and it has to be computed WITHOUT interning: a row is kept
-        // once its inner class is present, and seeding an enclosing row is what puts it there. So
-        // decide the set against a hypothetical pool first, then intern in row order.
-        let mut retained = vec![false; specs.len()];
-        let mut seeded: std::collections::HashSet<String> = std::collections::HashSet::new();
-        loop {
-            let mut grew = false;
-            for (index, spec) in specs.iter().enumerate() {
-                if retained[index] {
-                    continue;
-                }
-                let present = self.cp.has_class(&spec.inner) || seeded.contains(&spec.inner);
-                if self.retains_inner_class_with_presence(spec, present) {
-                    retained[index] = true;
-                    grew = true;
-                    seeded.insert(spec.inner.clone());
-                    if let Some(outer) = &spec.outer {
-                        seeded.insert(outer.clone());
-                    }
-                }
-            }
-            if !grew {
-                break;
-            }
-        }
-        for (spec, keep) in specs.iter().zip(&retained) {
-            if !keep {
-                continue;
-            }
-            self.cp.class(&spec.inner);
-            if let Some(outer) = &spec.outer {
-                self.cp.class(outer);
-            }
-            if let Some(name) = &spec.name {
-                self.cp.utf8(name);
-            }
-        }
     }
 
     pub fn seed_class(&mut self, internal: &str) {
@@ -2373,41 +2276,6 @@ impl ClassWriter {
         }
     }
 
-    fn resolve_inner_classes(&mut self) {
-        if let Some(resolve) = self.inner_class_resolver.clone() {
-            // Class constants first, then annotation types (an applied annotation is a reference
-            // even though only its descriptor string reaches the pool). kotlinc's writer sorts the
-            // final table by inner name, so collection order does not leak into the attribute.
-            let mut referenced = self.cp.class_names();
-            let mut annotation_refs: Vec<String> =
-                self.annotation_class_refs.iter().cloned().collect();
-            annotation_refs.sort();
-            referenced.extend(annotation_refs);
-            for inner in referenced {
-                if self
-                    .inner_class_candidates
-                    .iter()
-                    .any(|candidate| candidate.inner == inner)
-                {
-                    continue;
-                }
-                let Some(details) = resolve(&inner) else {
-                    continue;
-                };
-                self.add_inner_class(InnerClassSpec {
-                    inner,
-                    outer: details.outer,
-                    name: details.name,
-                    access: details.access,
-                });
-            }
-        }
-        // kotlinc writes the complete table sorted by inner internal name (`C$Companion`,
-        // `C$NestObj`, `C$Nested` — case-sensitive), including classpath-discovered entries.
-        self.inner_class_candidates
-            .sort_by(|a, b| a.inner.cmp(&b.inner));
-    }
-
     pub fn finish(self) -> Vec<u8> {
         let (bytes, coroutines) = self.finish_with_coroutines();
         assert!(
@@ -2476,6 +2344,23 @@ impl ClassWriter {
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
         let sourcefile_value = self.source_file.clone().map(|src| self.cp.utf8(&src));
+        // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
+        // consumer reads it back without parsing the class file's own attribute. kotlinc visits it
+        // when the class is done, after the `SourceFile` value and before the method attribute names.
+        let smap_annotation = self.source_map.render().map(|smap| {
+            let mut body = Vec::new();
+            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
+            u2(&mut body, annotation);
+            u2(&mut body, 1); // one element pair
+            let name = self.cp.utf8("value");
+            u2(&mut body, name);
+            body.push(b'['); // an array of one string, which is how kotlinc spells it
+            u2(&mut body, 1);
+            body.push(b's');
+            let value = self.cp.utf8(&smap);
+            u2(&mut body, value);
+            body
+        });
         // Code-related attribute NAMES intern in kotlinc's real first-use order, which is driven by
         // its field-then-method visiting — NOT a fixed order. kotlinc visits fields first, so a field
         // annotation interns `RuntimeInvisibleAnnotations` BEFORE `Code`; then each method, in emit
@@ -2757,20 +2642,8 @@ impl ClassWriter {
         } else {
             None
         };
-        // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
-        // consumer reads it back without parsing the class file's own attribute.
-        if let Some(smap) = self.source_map.render() {
-            let mut body = Vec::new();
-            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
-            u2(&mut body, annotation);
-            u2(&mut body, 1); // one element pair
-            let name = self.cp.utf8("value");
-            u2(&mut body, name);
-            body.push(b'['); // an array of one string, which is how kotlinc spells it
-            u2(&mut body, 1);
-            body.push(b's');
-            let value = self.cp.utf8(&smap);
-            u2(&mut body, value);
+        // The source map's annotation joins the class's invisible ones last.
+        if let Some(body) = smap_annotation {
             self.invisible_annotations.push(body);
         }
         // ONE `RuntimeInvisibleAnnotations` for the BINARY-retained class annotations, written directly
