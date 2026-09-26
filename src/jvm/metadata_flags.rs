@@ -88,8 +88,9 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     // `isInline` (bit 10) is a Kotlin declaration capability, not a bytecode access flag. It must
     // survive class metadata so downstream frontends can select and splice member inline bodies.
     let inline = u64::from(ir.inline_fns.contains(&fid)) << 10;
+    let tailrec = u64::from(ir.tailrec_fns.contains(&fid)) << 11;
     let return_value_status = ir.fn_return_value_statuses.get(&fid).map_or(0, |status| {
         status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
     });
-    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
+    (visibility << 1) | (modality << 4) | operator | infix | inline | tailrec | return_value_status
 }

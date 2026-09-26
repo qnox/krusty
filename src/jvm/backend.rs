@@ -1121,6 +1121,7 @@ pub fn facade_package_metadata_from_ir(
                 has_function_typed_parameter: declaration.has_function_typed_parameter,
                 operator: declaration.operator,
                 infix: declaration.infix,
+                tailrec: declaration.tailrec,
                 contract: declaration
                     .contract
                     .as_ref()

@@ -56,6 +56,8 @@ pub struct FnMeta {
     /// `infix fun` — sets `Function.flags` `IS_INFIX` (bit 9). Same metadata-only story as
     /// `operator`: without it a consumer rejects the `a then b` call form.
     pub infix: bool,
+    /// `tailrec fun` — sets `Function.flags` `IS_TAILREC` (bit 11).
+    pub tailrec: bool,
     /// Declared type parameters in order `(name, reified)` — emitted as the `Function.type_parameter`
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
@@ -117,6 +119,7 @@ impl FnMeta {
             has_function_typed_parameter: false,
             operator: false,
             infix: false,
+            tailrec: false,
             type_params: Vec::new(),
             semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
@@ -417,6 +420,7 @@ fn function_pb(
     let flags = u64::from(!f.annotations.is_empty())
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
+        | (u64::from(f.tailrec) << 11)
         | (u64::from(f.inline) << 10)
         | (u64::from(f.infix) << 9)
         | (u64::from(f.operator) << 8);
