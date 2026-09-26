@@ -96,3 +96,23 @@ fn a_single_row_table_is_unchanged() {
     };
     result.expect("Outer$Alpha byte-identical to kotlinc");
 }
+
+/// A file facade that reads `A.B.C.ok` keeps the `A$B` row only because `A$B$C`'s row names it as
+/// its outer, and `A$B` sorts first. The facade interns its rows when the class is written, which
+/// must use the same retained-set fixpoint as the seeding other classes do after their metadata;
+/// a single pass dropped the `A$B` row there and left `A` and `B` for the attribute's own write.
+#[test]
+fn a_facade_interns_an_enclosing_row_its_nested_row_keeps() {
+    let src = "object A {\n\
+               \x20   object B {\n\
+               \x20       object C {\n\
+               \x20           val ok = \"OK\"\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n\
+               \n\
+               fun box() = A.B.C.ok\n";
+    common::byte_diff_against_kotlinc("InnerNameFacadeChain", src, "InnerNameFacadeChainKt")
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|e| panic!("the facade is byte-identical to kotlinc: {e}"));
+}

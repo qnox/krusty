@@ -4514,6 +4514,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after every member, so the descriptor landed after the companion's marker constructor. The
   synthesized setter is now a debug-locals declaration, like a data-class member. Test:
   `tests/method_pool_order_e2e.rs::a_hoisted_companion_setter_interns_its_locals_with_its_body`.
+- **Every class interns its `InnerClasses` rows from one retained set.** kotlinc adds each enclosing
+  class of a nested class it references to the table, so a facade reading `A.B.C.ok` keeps the
+  `A$B` row, which sorts first, only because `A$B$C`'s row names it. The rows are interned row by
+  row (inner, outer, simple name), from a fixpoint over the table whether the class seeds them
+  after its metadata or when it is written; a single pass at write time dropped `A$B` and left `A`
+  and `B` to intern after the attribute names. Test:
+  `tests/inner_class_name_pool_order_e2e.rs::a_facade_interns_an_enclosing_row_its_nested_row_keeps`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the

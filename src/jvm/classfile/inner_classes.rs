@@ -75,32 +75,39 @@ impl ClassWriter {
         // Discover those rows before sorting; resolving them later from `finish` would intern their
         // names after every source row and recreate the very order mismatch this seed prevents.
         self.resolve_inner_classes();
-        let specs = self.inner_class_candidates.clone();
         // kotlinc interns PER ROW, in the attribute's own field order: the inner class, then the
         // outer class, then the simple name. Interning every row's classes first and every name
         // second matches only when no row's INNER class needs interning — true for a flat table
         // (`Foo$$serializer`/`Foo$Companion`, whose inners the class already references) and for a
         // single chain, but wrong as soon as an enclosing row's inner is not otherwise referenced:
         // `A$B$C$Companion` interns `Class(A$B)` at its own row, between two other rows' entries.
-        //
-        // Retention is still a FIXPOINT, and it has to be computed WITHOUT interning: a row is kept
-        // once its inner class is present, and seeding an enclosing row is what puts it there. So
-        // decide the set against a hypothetical pool first, then intern in row order.
+        self.intern_retained_inner_rows();
+    }
+
+    /// The registered rows the finished `InnerClasses` table keeps, in table order.
+    ///
+    /// Retention is a FIXPOINT, computed WITHOUT interning: a row is kept once its inner class is
+    /// present, and a kept row's outer is what makes an enclosing row present. kotlinc adds every
+    /// enclosing class of a referenced nested class to the table, so `A$B$C` keeps `A$B` even
+    /// when that row sorts first and nothing else names `A$B`.
+    fn retained_inner_rows(&self) -> Vec<InnerClassSpec> {
+        let specs = &self.inner_class_candidates;
         let mut retained = vec![false; specs.len()];
-        let mut seeded: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seeded: std::collections::HashSet<&str> = std::collections::HashSet::new();
         loop {
             let mut grew = false;
             for (index, spec) in specs.iter().enumerate() {
                 if retained[index] {
                     continue;
                 }
-                let present = self.cp.has_class(&spec.inner) || seeded.contains(&spec.inner);
+                let present =
+                    self.cp.has_class(&spec.inner) || seeded.contains(spec.inner.as_str());
                 if self.retains_inner_class_with_presence(spec, present) {
                     retained[index] = true;
                     grew = true;
-                    seeded.insert(spec.inner.clone());
+                    seeded.insert(&spec.inner);
                     if let Some(outer) = &spec.outer {
-                        seeded.insert(outer.clone());
+                        seeded.insert(outer);
                     }
                 }
             }
@@ -108,10 +115,17 @@ impl ClassWriter {
                 break;
             }
         }
-        for (spec, keep) in specs.iter().zip(&retained) {
-            if !keep {
-                continue;
-            }
+        specs
+            .iter()
+            .zip(retained)
+            .filter_map(|(spec, keep)| keep.then(|| spec.clone()))
+            .collect()
+    }
+
+    /// Intern each kept row's inner class, outer class and simple name, row by row. Both the
+    /// post-metadata seeding and the class write go through here, so they keep the same rows.
+    pub(super) fn intern_retained_inner_rows(&mut self) {
+        for spec in self.retained_inner_rows() {
             self.cp.class(&spec.inner);
             if let Some(outer) = &spec.outer {
                 self.cp.class(outer);
