@@ -2,7 +2,8 @@
 //! argument for a parameter of an inline function that wrote neither `crossinline` nor `noinline`.
 //! Every other lambda between the `return` and its target makes kotlinc report
 //! `'return' is prohibited here.` at the `return`. A labelled return to the lambda itself stays
-//! legal whatever the parameter wrote.
+//! legal whatever the parameter wrote. A function value's `invoke` is no inline function, whether
+//! the value is a parameter or a property, while an inline `invoke` operator inlines like any call.
 
 use super::common;
 use super::diagnostics_parity_support::{errors, ObservedError};
@@ -17,8 +18,16 @@ fun stored(f: () -> Int): Int = f()
 class Box(val v: Int) {
     inline fun mapped(crossinline f: (Int) -> Int): Int = f(v)
     inline fun passed(noinline f: (Int) -> Int): Int = f(v)
+    inline fun spliced(f: (Int) -> Int): Int = f(v)
 }
 inline fun Int.shifted(crossinline f: (Int) -> Int): Int = f(this)
+class Holder(val compute: (() -> Int) -> Int)
+class Runner {
+    inline operator fun invoke(f: () -> Int): Int = f()
+}
+class Tag
+inline operator fun Tag.invoke(f: () -> Int): Int = f()
+class Wrapper(val runner: Runner, val tag: Tag)
 ";
 
 /// The uses, from line 1 of their own file.
@@ -35,6 +44,12 @@ fun memberNoinline(): Int = Box(1).passed { return 6 }
 fun extensionCrossinline(): Int = 1.shifted { return 7 }
 fun namedCrossinline(): Int = 1.shifted(f = { return 8 })
 fun memberLabelled(): Int = Box(1).mapped { return@mapped 9 }
+fun throughFunctionValue(compute: (() -> Int) -> Int): Int = compute { return 10 }
+fun throughProperty(holder: Holder): Int = holder.compute { return 11 }
+fun throughInlineInvoke(runner: Runner): Int = runner { return 12 }
+fun throughInlineInvokeProperty(wrapper: Wrapper): Int = wrapper.runner { return 13 }
+fun throughExtensionInvokeProperty(wrapper: Wrapper): Int = wrapper.tag { return 14 }
+fun memberSpliced(): Int = Box(1).spliced { return 15 }
 ";
 
 fn prohibited(file: &str, line: usize, column: usize) -> ObservedError {
@@ -57,6 +72,8 @@ fn expected(file: &str) -> Vec<ObservedError> {
         (9, 45),
         (10, 47),
         (11, 47),
+        (13, 72),
+        (14, 61),
     ]
     .into_iter()
     .map(|(line, column)| prohibited(file, line, column))

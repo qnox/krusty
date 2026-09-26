@@ -240,6 +240,73 @@ impl Checker<'_> {
     }
 }
 
+impl super::CallLambdaShaping {
+    /// Whether the selected callee inlines the lambda for source argument `argument`: from the
+    /// selected member's shape, else the extension's, else the provider's expectation.
+    fn argument_inlining(&self, argument: usize) -> Option<bool> {
+        super::shaped_argument_inlining(self.module.as_ref(), self.extension.as_ref(), argument)
+            .or_else(|| {
+                self.provider
+                    .as_ref()
+                    .and_then(|expectations| expectations.get(argument))
+                    .and_then(Option::as_ref)
+                    .map(|expectation| expectation.inlined)
+            })
+    }
+}
+
+impl Checker<'_> {
+    /// Per argument of `receiver.name(args)` where `name` selects a member property rather than a
+    /// function, whether the `invoke` operator selected for the property's value inlines that
+    /// argument's lambda: the same member, member-extension, extension and provider selection as a
+    /// written `value.invoke(args)`. Published before the lambdas are checked, so their return
+    /// scopes see the selected operator's parameters. A function-typed value's `invoke` inlines
+    /// nothing.
+    pub(super) fn property_invoke_argument_inlining(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
+    ) -> Option<Vec<Option<bool>>> {
+        let (args, partial) = args_and_partial;
+        if !args
+            .iter()
+            .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
+        {
+            return None;
+        }
+        let selection = self.select_property_read(scope, receiver, name).ok()??;
+        let value = self.declared_function_semantic_type(selection.ty());
+        if matches!(value.non_null(), Ty::Fun(_)) {
+            return None;
+        }
+        let operator = super::CALLABLE_INVOKE_OPERATOR;
+        let (member, generic_member) =
+            self.module_member_lambda_plan(scope, call, value, operator, args, partial, None);
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let shaping = self.call_lambda_shaping(
+            scope,
+            call,
+            value,
+            operator,
+            args,
+            partial,
+            arg_names.as_deref(),
+            &[],
+            None,
+            member.as_ref(),
+            generic_member.as_ref(),
+        );
+        Some(
+            (0..args.len())
+                .map(|argument| shaping.argument_inlining(argument))
+                .collect(),
+        )
+    }
+}
+
 impl Checker<'_> {
     /// Report a `return@label` whose label denotes no enclosing lambda.
     ///

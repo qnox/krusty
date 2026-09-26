@@ -31,12 +31,10 @@ pub(super) fn functional_argument_expectation(
     param: Ty,
 ) -> Option<FunctionalArgumentExpectation> {
     let inlined = inline
-        && call_sig
-            .inline_modifiers
-            .get(index)
-            .copied()
-            .unwrap_or_default()
-            .runs_in_caller_frame();
+        && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
+            &call_sig.inline_modifiers,
+            index,
+        );
     let has_receiver = call_sig
         .lambda_receiver_params
         .get(index)

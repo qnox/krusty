@@ -40,6 +40,15 @@ impl InlineParameterModifier {
         matches!(self, InlineParameterModifier::None)
     }
 
+    /// Whether a lambda for `parameter` of an inline function with these per-parameter
+    /// `modifiers` runs in the caller's frame. A parameter the modifiers do not cover has no
+    /// published fact, so it is not assumed to inline.
+    pub fn runs_parameter_in_caller_frame(modifiers: &[Self], parameter: usize) -> bool {
+        modifiers
+            .get(parameter)
+            .is_some_and(|modifier| modifier.runs_in_caller_frame())
+    }
+
     /// Whether a local that a literal lambda for this parameter changes is `Ref`-boxed, as kotlinc's
     /// IR does. A `noinline` lambda is a closure. A `crossinline` one may be captured by an object
     /// or lambda the body builds, which keeps the `Ref` in its `$x$inlined` field; where the body

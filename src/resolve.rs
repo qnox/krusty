@@ -1257,12 +1257,10 @@ impl Signature {
     /// frame: the callable is inline and the parameter wrote neither `crossinline` nor `noinline`.
     pub fn inlines_lambda_for(&self, parameter: usize) -> bool {
         self.is_inline()
-            && self
-                .inline_modifiers
-                .get(parameter)
-                .copied()
-                .unwrap_or_default()
-                .runs_in_caller_frame()
+            && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
+                &self.inline_modifiers,
+                parameter,
+            )
     }
     #[inline]
     pub fn is_operator(&self) -> bool {
@@ -5958,7 +5956,6 @@ fn module_member_lambda_shape(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     trailing_lambda: bool,
-    is_inline: bool,
 ) -> Option<MemberLambdaShape> {
     let visible_indices = call_argument_parameter_indices(
         args.len(),
@@ -6044,14 +6041,11 @@ fn module_member_lambda_shape(
         inlined: indices
             .iter()
             .map(|&parameter| {
-                is_inline
-                    && member
-                        .call_sig
-                        .inline_modifiers
-                        .get(parameter)
-                        .copied()
-                        .unwrap_or_default()
-                        .runs_in_caller_frame()
+                member.inline.can_inline()
+                    && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
+                        &member.call_sig.inline_modifiers,
+                        parameter,
+                    )
             })
             .collect(),
     })
@@ -20364,15 +20358,33 @@ impl<'a> Checker<'a> {
                             .iter()
                             .filter(|function| function.is_extension())
                             .any(|function| function.flags.inline.can_inline()));
+                // No function takes the call, so `name` is a property whose value is invoked.
+                let property_invoke_inlining = (module_lambda_shape.is_none()
+                    && ext_lambda_shape.is_none()
+                    && receiver_callables.functions().is_empty())
+                .then(|| {
+                    self.property_invoke_argument_inlining(
+                        scope,
+                        call,
+                        rt,
+                        &name,
+                        (args, &generic_member_partial),
+                    )
+                })
+                .flatten();
                 let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
                     args.iter()
                         .enumerate()
                         .map(|(i, &a)| {
-                            if let Some(inlined) = shaped_argument_inlining(
-                                module_lambda_shape.as_ref(),
-                                ext_lambda_shape.as_ref(),
-                                i,
-                            ) {
+                            let inlined = match &property_invoke_inlining {
+                                Some(inlining) => inlining.get(i).copied().flatten(),
+                                None => shaped_argument_inlining(
+                                    module_lambda_shape.as_ref(),
+                                    ext_lambda_shape.as_ref(),
+                                    i,
+                                ),
+                            };
+                            if let Some(inlined) = inlined {
                                 c.argument_lambda_inlining.insert(a, inlined);
                             }
                             if matches!(c.file.expr(a), Expr::CallableRef { .. }) {
@@ -22265,7 +22277,6 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_names.as_deref(),
                                     self.file.call_has_trailing_lambda.contains(&call.0),
-                                    self.member_inline_body_available(&member),
                                 )
                             })
                     } else {
@@ -37839,7 +37850,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expr_depth: 0,
         allow_lambda_mutation: false,
         argument_lambda_inlining: HashMap::new(),
-        call_arguments: None,
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
@@ -40817,11 +40827,9 @@ struct Checker<'a> {
     allow_lambda_mutation: bool,
     /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
     /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
-    /// here is no call argument, so its body runs in a frame of its own. Recorded where an argument
+    /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument
     /// is checked against its parameter, and read when the lambda's return scope opens.
     argument_lambda_inlining: HashMap<ExprId, bool>,
-    /// Every expression the file passes as a call argument, collected on first use.
-    call_arguments: Option<std::collections::HashSet<ExprId>>,
     /// Enables symbolic generic substitution while inferring declaration signatures. Ordinary checking
     /// stays erased until the backend can emit every corresponding bridge and value-class shape.
     symbolic_signature_inference: bool,
@@ -42056,26 +42064,6 @@ impl<'a> Checker<'a> {
         );
         self.argument_lambda_inlining.insert(argument, inlined);
         self.with_lambda_mutation(inlined, f)
-    }
-
-    /// Whether `expression` is written as an argument of a call.
-    fn is_call_argument(&mut self, expression: ExprId) -> bool {
-        let file = self.file;
-        self.call_arguments
-            .get_or_insert_with(|| {
-                file.expr_arena
-                    .iter()
-                    .flat_map(|candidate| match candidate {
-                        Expr::Call { args, .. }
-                        | Expr::SafeCall {
-                            args: Some(args), ..
-                        } => args.as_slice(),
-                        _ => &[],
-                    })
-                    .copied()
-                    .collect()
-            })
-            .contains(&expression)
     }
 
     fn with_lambda_mutation<R>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -65586,7 +65574,6 @@ impl<'a> Checker<'a> {
                 args,
                 arg_names,
                 trailing_lambda,
-                self.member_inline_body_available(member),
             )
         });
         // A member normally supplies the call's lambda shape. A member that needs lambda-to-SAM
@@ -74555,13 +74542,10 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .or(implicit_label)
             .map(str::to_string);
-        // A lambda that is no call argument runs in a frame of its own. A call argument whose
-        // path has not recorded its selected parameter (a property's `invoke` operator, resolved
-        // only after its arguments) keeps the returns it had before parameters were recorded.
-        let inlined_argument = match self.argument_lambda_inlining.get(&e) {
-            Some(&inlined) => inlined,
-            None => self.is_call_argument(e),
-        };
+        // Only a lambda whose selected parameter inlines it runs in the caller's frame. Any other
+        // lambda (no call argument, or one no selected inline parameter took) has kotlinc's
+        // `InlineStatus.Unknown`, which does not allow a return to leave through it.
+        let inlined_argument = self.argument_lambda_inlining.get(&e) == Some(&true);
         let frame =
             self.lambda_returns
                 .enter_lambda(e, label.clone(), expected_return, inlined_argument);
