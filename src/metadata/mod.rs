@@ -12,12 +12,18 @@ pub mod module;
 pub mod protobuf;
 pub mod semantic;
 mod type_encoder;
+pub mod version_requirements;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags
 /// include the declaration's two-bit MEMBER_KIND after MODALITY, so property-specific bits must not be
 /// copied from the shorter Function/Class prefix. Keeping the raw schema facts here prevents the JVM
 /// decoder, class encoder, and package encoder from drifting into separate numeric interpretations.
 pub(crate) mod function_flags {
+    /// Visibility occupies bits 1-3; PRIVATE is 1.
+    pub const VISIBILITY_MASK: u64 = 0b1110;
+    pub const VISIBILITY_PRIVATE: u64 = 1 << 1;
+    pub const IS_INLINE: u64 = 1 << 10;
+    pub const IS_SUSPEND: u64 = 1 << 13;
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows
     /// `hasNonStableParameterNames` (bit 15).
     pub const RETURN_VALUE_STATUS_SHIFT: u32 = 16;

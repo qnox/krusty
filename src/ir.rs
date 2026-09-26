@@ -2536,6 +2536,9 @@ pub struct IrFile {
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
+    /// Function ids with a value parameter (context parameters excluded) or extension receiver of a
+    /// function type, as the checker classified the declaration.
+    pub function_typed_parameter_fns: std::collections::HashSet<u32>,
     /// Call expressions whose stable current-module target is semantically `inline`. Target
     /// realization may replace the stable [`Callee::Module`] edge with a physical call, so this
     /// expression-owned fact preserves inline-lambda ownership without asking the backend to recover
@@ -3026,6 +3029,8 @@ pub struct IrPackageFunction {
     pub inline: bool,
     pub operator: bool,
     pub infix: bool,
+    /// A value parameter (context parameters excluded) or the extension receiver has a function type.
+    pub has_function_typed_parameter: bool,
     pub contract: Option<crate::contracts::ResolvedContract>,
     pub type_params: Vec<IrPackageTypeParameter>,
     pub context_count: usize,
