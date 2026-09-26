@@ -9,6 +9,7 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
+mod unsigned_intrinsics;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use builtin_classifier_shapes::{
@@ -1849,20 +1850,34 @@ impl JvmLibraries {
                         pass_receiver: physical_params.len() == member.params.len() + 1,
                     };
                 }
-                if let Some(realization) = declaration.and_then(|declaration| {
-                    crate::libraries::builtin_member_realization::unsigned_range_construction(
-                        &crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
-                            owner: internal_name,
-                            name: &member.name,
-                            params: &member.params,
-                            ret: member.ret,
-                            is_property: false,
-                            is_operator: declaration.is_operator(),
-                            is_infix: declaration.is_infix(),
-                        },
-                    )
-                }) {
-                    member.realization = realization;
+                if let Some(declaration) = declaration {
+                    let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: internal_name,
+                        name: &member.name,
+                        params: &member.params,
+                        ret: member.ret,
+                        is_property: false,
+                        is_operator: declaration.is_operator(),
+                        is_infix: declaration.is_infix(),
+                    };
+                    let range =
+                        crate::libraries::builtin_member_realization::unsigned_range_construction(
+                            &facts,
+                        );
+                    let operation =
+                        crate::libraries::builtin_member_realization::unsigned_member_operation(
+                            &facts,
+                        );
+                    if let Some(realization) = range {
+                        member.realization = realization;
+                    }
+                    if let Some((element, operation)) = operation {
+                        unsigned_intrinsics::realize_jdk_unsigned_member(
+                            element,
+                            operation,
+                            &mut member,
+                        );
+                    }
                 }
                 // A concrete Kotlin interface declaration may have no body on the interface at
                 // all. Normalize that ABI at the provider boundary: semantic selection still sees
