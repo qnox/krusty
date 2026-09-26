@@ -329,8 +329,10 @@ fn a_final_member_of_an_open_class_keeps_its_machine_like_kotlinc() {
 
 #[test]
 fn an_overridable_member_resumes_in_its_own_body_under_an_override_elsewhere() {
-    // `Plain` inherits `Base.work`, whose continuation re-enters the static body after each real
-    // suspension; `Other` overrides it and is dispatched to through the same member.
+    // A control, not the re-entry hazard: `Plain` inherits `Base.work` and suspends in it, and
+    // `Other`'s override is dispatched to through the same member. The hazard itself, an override
+    // whose `super` call suspends in the base body, is
+    // `a_super_call_resumes_in_the_base_body_rather_than_the_override`.
     let src = "import kotlin.coroutines.*\n\
 class Done : Continuation<Unit> {\n\
   override val context: CoroutineContext = EmptyCoroutineContext\n\
@@ -362,4 +364,42 @@ fun box(): String {\n\
     return if (r == \"p3p\" && s == \"other4\") \"OK\" else \"F:$r:$s\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "TransformerOpenResume");
+}
+
+#[test]
+fn a_super_call_resumes_in_the_base_body_rather_than_the_override() {
+    // `Wrapped.work` calls `super.work`, which suspends inside `Base`'s body. Resuming must
+    // re-enter that body through the static `$suspendImpl`; re-entering through the virtual
+    // member would dispatch back to the override and run it a second time.
+    let src = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+var parked: Continuation<Unit>? = null\n\
+var entries = 0\n\
+suspend fun pause() = suspendCoroutine<Unit> { parked = it }\n\
+open class Base(val tag: String) {\n\
+    open suspend fun work(count: Int): String {\n\
+        pause()\n\
+        val first = tag + count\n\
+        pause()\n\
+        return first + tag\n\
+    }\n\
+}\n\
+class Wrapped : Base(\"w\") {\n\
+    override suspend fun work(count: Int): String {\n\
+        entries++\n\
+        return \"[\" + super.work(count) + \"]\"\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    var r = \"none\"\n\
+    val wrapped: Base = Wrapped()\n\
+    suspend { r = wrapped.work(3) }.startCoroutine(Done())\n\
+    parked!!.resume(Unit)\n\
+    parked!!.resume(Unit)\n\
+    return if (r == \"[w3w]\" && entries == 1) \"OK\" else \"F:$r:$entries\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "TransformerSuperResume");
 }

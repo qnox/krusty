@@ -652,8 +652,8 @@ impl BodyLowering<'_> {
                 physical_result,
                 source,
                 source_member,
+                suspend,
             } => {
-                let _ = result;
                 let checked = self.external_arguments(&call.arguments, &call.parameter_types)?;
                 let parameter_types = call
                     .parameter_types
@@ -710,6 +710,12 @@ impl BodyLowering<'_> {
                     dispatch_receiver: Some(dispatch_receiver),
                     args: arguments,
                 });
+                // A suspend super call keeps its checked suspension on the concrete expression, as
+                // any other selected suspend call does; JVM coroutine lowering appends the
+                // continuation and must not infer suspendness from the realized descriptor.
+                if *suspend {
+                    self.ir.suspend_calls.insert(call, result.get());
+                }
                 Ok(self.wrap_call_statements(statements, call))
             }
             FirCallTarget::Intrinsic {

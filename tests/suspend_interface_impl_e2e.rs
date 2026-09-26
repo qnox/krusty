@@ -125,9 +125,8 @@ fn normalize_pool_indices(section: &str) -> String {
 
 /// The behaviour, not only the shape: the default body still runs through the new indirection.
 ///
-/// The `super.onEvent(...)` call that is the ABI's whole reason for existing is NOT exercised here:
-/// krusty declines it today with "a super call to the suspend member is not supported yet", which
-/// this test discovered by failing closed. The static is the shape that call will need.
+/// The `super<I>.f()` call into an interface's suspend default is exercised in
+/// `suspend_super_calls_e2e.rs`.
 ///
 /// `expect_box_run` fails closed; an earlier version of this used a helper that returns `None` when
 /// the runner is unavailable, and it passed while running nothing.
