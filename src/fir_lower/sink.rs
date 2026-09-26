@@ -1561,13 +1561,7 @@ fn inline_parameter_modifiers(
                 .expect("published parameter-name count must address every parameter")
                 .flags();
             ordinal += 1;
-            if flags.materializes_its_lambda() {
-                Modifier::Noinline
-            } else if flags.is_crossinline() {
-                Modifier::Crossinline
-            } else {
-                Modifier::None
-            }
+            flags.inline_modifier()
         })
         .collect()
 }

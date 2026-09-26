@@ -1516,6 +1516,7 @@ mod tests {
             param_names: vec![],
             lambda_param_types: vec![],
             lambda_recv: vec![],
+            inline_modifiers: vec![],
             visibility: crate::types::Visibility::Public,
             context_count: 0,
             source_decl: None,

@@ -96,6 +96,21 @@ pub struct LambdaCallShape {
     pub inline: bool,
 }
 
+impl LambdaCallShape {
+    /// Whether the selected parameter of source argument `argument` inlines a lambda into the
+    /// caller's frame: the callable is inline and the parameter is neither `crossinline` nor
+    /// `noinline`.
+    pub fn inlines_argument(&self, argument: usize) -> bool {
+        self.inline
+            && !self
+                .boxes_captures
+                .as_ref()
+                .and_then(|boxes| boxes.get(argument))
+                .copied()
+                .unwrap_or(false)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
     owner: SymbolNamespace,

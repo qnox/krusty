@@ -20,6 +20,26 @@ pub enum InlineParameterModifier {
 }
 
 impl InlineParameterModifier {
+    /// The modifier a source parameter wrote. The parser keeps the two keywords apart; a parameter
+    /// that wrote both is `noinline`, as Kotlin metadata reads it.
+    pub const fn written(noinline: bool, crossinline: bool) -> Self {
+        if noinline {
+            InlineParameterModifier::Noinline
+        } else if crossinline {
+            InlineParameterModifier::Crossinline
+        } else {
+            InlineParameterModifier::None
+        }
+    }
+
+    /// Whether a lambda for this parameter of an inline function runs in the caller's own frame,
+    /// so that a `return` in it may leave the caller: kotlinc's `InlineStatus.returnAllowed`. A
+    /// `noinline` lambda is a function object and a `crossinline` one may run inside an object the
+    /// body builds, both outside the caller's frame.
+    pub const fn runs_in_caller_frame(self) -> bool {
+        matches!(self, InlineParameterModifier::None)
+    }
+
     /// Whether a local that a literal lambda for this parameter changes is `Ref`-boxed, as kotlinc's
     /// IR does. A `noinline` lambda is a closure. A `crossinline` one may be captured by an object
     /// or lambda the body builds, which keeps the `Ref` in its `$x$inlined` field; where the body

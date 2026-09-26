@@ -15,6 +15,9 @@ pub(super) struct FunctionalArgumentExpectation {
     pub(super) result: Option<Ty>,
     pub(super) callable_type: Option<Ty>,
     pub(super) sam_conversion: bool,
+    /// The selected parameter inlines a lambda into the caller's frame: the callable is inline and
+    /// the parameter is neither `crossinline` nor `noinline`.
+    pub(super) inlined: bool,
 }
 
 /// Derive the expected shape of a lambda argument from its selected candidate parameter. Kotlin
@@ -23,9 +26,17 @@ pub(super) struct FunctionalArgumentExpectation {
 pub(super) fn functional_argument_expectation(
     platform: &dyn SemanticPlatform,
     call_sig: &CallSig,
+    inline: bool,
     index: usize,
     param: Ty,
 ) -> Option<FunctionalArgumentExpectation> {
+    let inlined = inline
+        && call_sig
+            .inline_modifiers
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .runs_in_caller_frame();
     let has_receiver = call_sig
         .lambda_receiver_params
         .get(index)
@@ -56,6 +67,7 @@ pub(super) fn functional_argument_expectation(
                 result: Some(signature.ret),
                 callable_type: Some(Ty::Fun(signature)),
                 sam_conversion: false,
+                inlined,
             })
         }
         param if has_receiver => {
@@ -89,6 +101,7 @@ pub(super) fn functional_argument_expectation(
                 result: None,
                 callable_type: None,
                 sam_conversion: false,
+                inlined,
             })
         }
         param => crate::symbol_resolver::semantic_sam_signature(platform, param).map(|sam| {
@@ -106,6 +119,7 @@ pub(super) fn functional_argument_expectation(
                 result: Some(sam.ret),
                 callable_type: Some(callable_type),
                 sam_conversion: true,
+                inlined,
             }
         }),
     }

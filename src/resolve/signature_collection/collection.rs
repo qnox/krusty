@@ -812,6 +812,11 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .iter()
                             .map(|parameter| parameter.ty.fun_has_receiver())
                             .collect(),
+                        inline_modifiers: callable_header
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.inline_modifier)
+                            .collect(),
                         visibility: function_visibility,
                         context_count: callable_header.context_count,
                         source_decl: Some(d),
@@ -2736,6 +2741,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 },
                                 lambda_param_types: vec![Vec::new(); parameter_count],
                                 lambda_recv: vec![false; parameter_count],
+                                inline_modifiers: Vec::new(),
                                 visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
@@ -2809,6 +2815,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
+                                    inline_modifiers: Vec::new(),
                                     visibility: Visibility::Public,
                                     context_count: 0,
                                     source_decl: None,
@@ -2862,6 +2869,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .collect(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
+                                inline_modifiers: Vec::new(),
                                 visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
@@ -3080,6 +3088,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             param_names: member.param_names,
                             lambda_param_types: vec![],
                             lambda_recv: vec![],
+                            inline_modifiers: Vec::new(),
                             visibility: Visibility::Public,
                             context_count: 0,
                             source_decl: None,
@@ -3245,6 +3254,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         ty: parameter.ty.clone(),
                                         is_vararg: parameter.is_vararg,
                                         has_default: parameter.default.is_some(),
+                                        inline_modifier: crate::resolve::written_inline_modifier(
+                                            parameter,
+                                        ),
                                         annotations: parameter
                                             .annotations
                                             .iter()

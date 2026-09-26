@@ -120,6 +120,14 @@ impl ResolvedValueParameterFlags {
         self.0 & Self::CROSSINLINE != 0
     }
 
+    /// The `crossinline`/`noinline` modifier the declaration wrote on this parameter.
+    pub const fn inline_modifier(self) -> crate::types::InlineParameterModifier {
+        crate::types::InlineParameterModifier::written(
+            self.materializes_its_lambda(),
+            self.is_crossinline(),
+        )
+    }
+
     pub const fn with_context_kind(mut self, kind: crate::types::ContextParameterKind) -> Self {
         match kind {
             crate::types::ContextParameterKind::Anonymous => self.0 |= Self::ANONYMOUS_CONTEXT,
