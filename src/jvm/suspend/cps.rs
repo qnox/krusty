@@ -21,5 +21,6 @@ pub(crate) use inline_suspension::{
 };
 pub(crate) use liveness::LocalLiveness;
 pub(crate) use routing::{
-    EmitTimeMachines, SplicedSuspension, TransformedMachine, TransformedSuspension,
+    EmitTimeMachines, SplicedSuspension, SuspendLambdaCapture, SuspendLambdaClass,
+    SuspendLambdaMachine, TransformedMachine, TransformedSuspension,
 };

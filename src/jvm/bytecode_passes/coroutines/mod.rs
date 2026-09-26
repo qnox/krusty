@@ -6,9 +6,6 @@
 //! a suspend lambda's `invokeSuspend`, whose class is its own continuation.
 
 mod change_boxing;
-// The suspend-lambda mode lands ahead of the `SuspendLambda` class emission that will call it;
-// until then only the tests reach it.
-#[cfg(test)]
 mod lambda_mode;
 pub(crate) mod markers;
 mod redundant_locals;
@@ -20,7 +17,6 @@ mod tail_calls;
 mod transform;
 mod uninitialized_stores;
 
-#[cfg(test)]
 pub(crate) use lambda_mode::{transform_suspend_lambda, SuspendLambda};
 pub(crate) use transform::transform_named_function;
 
