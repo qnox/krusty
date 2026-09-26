@@ -1547,8 +1547,8 @@ fn inline_parameter_modifiers(
     index: &ResolvedModuleIndex,
     callable: crate::fir::CallableId,
     identities: &[crate::ir::IrParameterIdentity],
-) -> Vec<crate::ir::IrInlineParameterModifier> {
-    use crate::ir::IrInlineParameterModifier as Modifier;
+) -> Vec<crate::types::InlineParameterModifier> {
+    use crate::types::InlineParameterModifier as Modifier;
     let mut ordinal = 0;
     identities
         .iter()
@@ -1561,13 +1561,7 @@ fn inline_parameter_modifiers(
                 .expect("published parameter-name count must address every parameter")
                 .flags();
             ordinal += 1;
-            if flags.materializes_its_lambda() {
-                Modifier::Noinline
-            } else if flags.is_crossinline() {
-                Modifier::Crossinline
-            } else {
-                Modifier::None
-            }
+            flags.inline_modifier()
         })
         .collect()
 }

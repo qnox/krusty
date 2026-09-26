@@ -552,7 +552,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             },
             source_receiver: receiver,
             declared_params,
-            lambda_materialized: Box::new([]),
+            inline_modifiers: Box::new([]),
             context_count,
             contract: None,
             equality_bound: None,
@@ -726,6 +726,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let mut exact = Vec::with_capacity(parameters.len());
         let mut no_infer = Vec::with_capacity(parameters.len());
         let mut implicit_integer_coercion = Vec::with_capacity(parameters.len());
+        let mut inline_modifiers = Vec::with_capacity(parameters.len());
         let mut vararg_index = None;
         for ordinal in 0..parameters.len() {
             let ordinal_u32 = u32::try_from(ordinal).expect("too many callable parameters");
@@ -735,6 +736,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 exact.push(false);
                 no_infer.push(false);
                 implicit_integer_coercion.push(false);
+                inline_modifiers.push(crate::types::InlineParameterModifier::None);
                 continue;
             };
             names.push(
@@ -748,6 +750,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             exact.push(flags.is_exact());
             no_infer.push(flags.is_no_infer());
             implicit_integer_coercion.push(flags.has_implicit_integer_coercion());
+            inline_modifiers.push(flags.inline_modifier());
             if flags.is_vararg() {
                 vararg_index = Some(ordinal);
             }
@@ -800,6 +803,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         shape.exact_params = exact;
         shape.no_infer_params = no_infer;
         shape.implicit_integer_coercion = implicit_integer_coercion;
+        shape.inline_modifiers = inline_modifiers;
         let reified = self.index.callable(callable).is_some_and(|callable| {
             (0..)
                 .map_while(|ordinal| self.index.type_parameter(callable.declaration, ordinal))
