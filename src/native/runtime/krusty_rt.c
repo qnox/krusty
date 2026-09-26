@@ -1534,33 +1534,37 @@ typedef struct KNumber {
     kt_double real;
 } KNumber;
 
-static KNumber kt_number_of(KRef value) {
-    KNumber number = {0, 0, 0.0};
+/* Reads the box into `*number` and answers whether there was one. A `null` raises Kotlin's
+   `NullPointerException` and answers false with `*number` untouched: `kt_throw` comes back, and the
+   caller returns at once rather than converting anything, so no placeholder is ever computed into
+   an answer. */
+static kt_boolean kt_number_of(KRef value, KNumber *number) {
     if (value == NULL) {
-        /* A RETURN after the raise, for the reason the unboxes above have one: `kt_throw` comes
-           back, and the descriptor read below is a read through the null. The zero is never read. */
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
-        return number;
+        return false;
     }
     const KType *type = value->header.type;
+    number->is_real = 0;
+    number->integer = 0;
+    number->real = 0.0;
     if (type == &kt_type_byte) {
-        number.integer = value->as.byte_value;
+        number->integer = value->as.byte_value;
     } else if (type == &kt_type_short) {
-        number.integer = value->as.short_value;
+        number->integer = value->as.short_value;
     } else if (type == &kt_type_int) {
-        number.integer = value->as.int_value;
+        number->integer = value->as.int_value;
     } else if (type == &kt_type_long) {
-        number.integer = value->as.long_value;
+        number->integer = value->as.long_value;
     } else if (type == &kt_type_float) {
-        number.is_real = 1;
-        number.real = value->as.float_value;
+        number->is_real = 1;
+        number->real = value->as.float_value;
     } else if (type == &kt_type_double) {
-        number.is_real = 1;
-        number.real = value->as.double_value;
+        number->is_real = 1;
+        number->real = value->as.double_value;
     } else {
         KT_FAIL("krusty: a kotlin.Number member on a value that is not a number\n");
     }
-    return number;
+    return true;
 }
 
 /* Kotlin's floating-point to integer conversion: `NaN` is zero and everything outside the target's
@@ -1591,29 +1595,58 @@ static kt_int kt_saturate_int(kt_double value) {
     return (kt_int)value;
 }
 
+/* Each conversion returns the moment the box turns out to be `null`, with the exception pending;
+   the zero it returns then is the function's obligation to return something, not an answer, and
+   the caller finds the exception before it reads one. */
 kt_long kt_number_to_long(KRef value) {
-    KNumber number = kt_number_of(value);
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0;
+    }
     return number.is_real ? kt_saturate_long(number.real) : number.integer;
 }
 
 kt_int kt_number_to_int(KRef value) {
-    KNumber number = kt_number_of(value);
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0;
+    }
     return number.is_real ? kt_saturate_int(number.real) : (kt_int)number.integer;
 }
 
 /* `Double.toShort()` is `toInt().toShort()` in Kotlin, and a wider integer simply truncates —
-   the same answer either way, which is why both go through `toInt` here. */
-kt_short kt_number_to_short(KRef value) { return (kt_short)kt_number_to_int(value); }
+   the same answer either way, which is why both narrow what `toInt` would answer. They read the
+   box themselves rather than calling `kt_number_to_int`, so that a `null` stops them before any
+   narrowing. */
+kt_short kt_number_to_short(KRef value) {
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0;
+    }
+    return (kt_short)(number.is_real ? kt_saturate_int(number.real) : (kt_int)number.integer);
+}
 
-kt_byte kt_number_to_byte(KRef value) { return (kt_byte)kt_number_to_int(value); }
+kt_byte kt_number_to_byte(KRef value) {
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0;
+    }
+    return (kt_byte)(number.is_real ? kt_saturate_int(number.real) : (kt_int)number.integer);
+}
 
 kt_float kt_number_to_float(KRef value) {
-    KNumber number = kt_number_of(value);
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0.0f;
+    }
     return number.is_real ? (kt_float)number.real : (kt_float)number.integer;
 }
 
 kt_double kt_number_to_double(KRef value) {
-    KNumber number = kt_number_of(value);
+    KNumber number;
+    if (!kt_number_of(value, &number)) {
+        return 0.0;
+    }
     return number.is_real ? number.real : (kt_double)number.integer;
 }
 

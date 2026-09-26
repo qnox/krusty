@@ -4,9 +4,13 @@
    the exception around had changed. */
 #include "later_tiers.h"
 
+/* What the `toString` threw, so the exception pending afterwards is checked by identity. */
+static KRef thrown;
+
 static KRef throwing_to_string(KRef self) {
     (void)self;
-    kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+    thrown = kt_throwable_new(&kt_type_null_pointer_exception, NULL);
+    kt_throw(thrown);
     return NULL;
 }
 
@@ -23,11 +27,13 @@ static const KType throwing_type = {
 };
 
 void kt_program_entry(void) {
+    DRIVER_BEGIN();
     KRef builder = kt_string_builder_with_text(kt_string_utf8("kept", 4));
     KRef throwing = (KRef)kt_gc_allocate(&throwing_type, sizeof(KObjectHeader));
 
     (void)kt_string_builder_append_line(builder, throwing);
-    CHECK(kt_pending_exception() != NULL, "the toString exception did not propagate\n");
+    CHECK(thrown != NULL && kt_pending_exception() == thrown,
+          "the toString exception is not the one pending\n");
     kt_clear_pending();
     CHECK(text_is(builder, "kept", 4), "a failed appendLine changed the builder\n");
 

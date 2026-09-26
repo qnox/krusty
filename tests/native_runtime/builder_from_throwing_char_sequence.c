@@ -61,10 +61,10 @@ static KRef sequence(kt_int throwing_index) {
     return (KRef)made;
 }
 
-/* After one construction: no builder, the throwing call the last of `expected_calls` into the
-   program, and that call's exception pending. */
-static void expect_stopped_at(KRef builder, int expected_calls, kt_int throwing_index) {
-    CHECK(builder == NULL, "a builder was made from a sequence that threw\n");
+/* After one construction: the throwing call the last of `expected_calls` into the program, and
+   that call's exception, by identity, the one pending. What the construction returned is not looked
+   at: it comes back with the exception pending, and a caller reads nothing before it has looked. */
+static void expect_stopped_at(int expected_calls, kt_int throwing_index) {
     CHECK(calls == expected_calls && last_index == throwing_index,
           "the sequence was read on after it threw\n");
     CHECK(kt_pending_exception() != NULL && kt_pending_exception() == last_thrown,
@@ -76,10 +76,13 @@ static void expect_stopped_at(KRef builder, int expected_calls, kt_int throwing_
 }
 
 void kt_program_entry(void) {
+    DRIVER_BEGIN();
     /* `length` throws: it is the only call. */
-    expect_stopped_at(kt_string_builder_with_text(sequence(-1)), 1, -1);
+    (void)kt_string_builder_with_text(sequence(-1));
+    expect_stopped_at(1, -1);
     /* `get(1)` throws: `length`, `get(0)`, `get(1)`, and nothing after. */
-    expect_stopped_at(kt_string_builder_with_text(sequence(1)), 3, 1);
+    (void)kt_string_builder_with_text(sequence(1));
+    expect_stopped_at(3, 1);
 
     kt_sys_write(1, "OK\n", 3);
 }

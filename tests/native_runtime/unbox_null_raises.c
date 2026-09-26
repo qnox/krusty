@@ -7,30 +7,35 @@
    between them so each one is seen to raise its own. */
 #include "later_tiers.h"
 
+/* The exception pending after one call on `null`: exactly Kotlin's `NullPointerException`, with no
+   message, as `!!` raises it. The call's return value is not looked at: it comes back with the
+   exception pending, and a caller reads nothing before it has looked for one. */
 static void expect_null_pointer_exception(void) {
     KRef thrown = kt_pending_exception();
     CHECK(thrown != NULL, "unboxing null left no exception pending\n");
     CHECK(type_of(thrown) == &kt_type_null_pointer_exception,
           "unboxing null raised something other than a NullPointerException\n");
+    CHECK(kt_throwable_message(thrown) == NULL, "unboxing null raised with a message\n");
     kt_clear_pending();
 }
 
 void kt_program_entry(void) {
-    CHECK(kt_unbox_byte(NULL) == 0, "unbox_byte(null) answered a value\n");
+    DRIVER_BEGIN();
+    (void)kt_unbox_byte(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_short(NULL) == 0, "unbox_short(null) answered a value\n");
+    (void)kt_unbox_short(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_int(NULL) == 0, "unbox_int(null) answered a value\n");
+    (void)kt_unbox_int(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_long(NULL) == 0, "unbox_long(null) answered a value\n");
+    (void)kt_unbox_long(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_char(NULL) == 0, "unbox_char(null) answered a value\n");
+    (void)kt_unbox_char(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_boolean(NULL) == 0, "unbox_boolean(null) answered a value\n");
+    (void)kt_unbox_boolean(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_float(NULL) == 0.0f, "unbox_float(null) answered a value\n");
+    (void)kt_unbox_float(NULL);
     expect_null_pointer_exception();
-    CHECK(kt_unbox_double(NULL) == 0.0, "unbox_double(null) answered a value\n");
+    (void)kt_unbox_double(NULL);
     expect_null_pointer_exception();
 
     /* A box that is there still unboxes, and raises nothing. */

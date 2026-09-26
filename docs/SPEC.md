@@ -7549,6 +7549,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   program recorded in the driver. A descriptor that publishes no names, or a kind without the names
   it needs, is a fault in whatever emitted it and ends the program naming the descriptor.
   Tests: `tests/native_runtime_e2e.rs` (`class_names`, `class_names_unpublished`).
+- **A native runtime call that raises returns at once, and its return value is not an answer.**
+  Unboxing `null` and every `kotlin.Number` conversion of `null` raise Kotlin's
+  `NullPointerException` with no message and return immediately, before any conversion or
+  narrowing: `toByte` and `toShort` read the box themselves rather than narrowing what `toInt`
+  returned. The value such a call returns alongside a pending exception is the C function's
+  obligation to return something, never Kotlin's answer, so the drivers never read it: they discard
+  it and assert the exact exception pending — its type and missing message for a raise the runtime
+  makes, and the very object thrown for a raise the program's own override makes (a
+  `CharSequence`'s `length`/`get`, a builder append's `toString`, a `Pair` component, a `Result`'s
+  content, a `lazy` initializer).
+  Tests: `tests/native_runtime_e2e.rs` (`unbox_null_raises`, `number_conversion_null_raises`,
+  `builder_from_throwing_char_sequence`, `builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `pair_component_throws`, `result_to_string_throws`,
+  `lazy_initializer_throws`).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

@@ -1,7 +1,6 @@
 /* A `Pair` whose FIRST component's `equals`, `hashCode` or `toString` throws: the exception
    propagates from there, and the second component is never asked. When only the SECOND one throws,
-   its placeholder is not read either: `equals` does not answer the TRUE it returned, and `hashCode`
-   does not fold the placeholder into a hash. Each of the three members used
+   its exception is the one pending and nothing is asked after it. Each of the three members used
    to ask both components in one expression, so the second component's override ran after the first
    had already thrown -- program code Kotlin never reaches -- and `toString` went on to build text
    from the placeholder the aborted call returned.
@@ -10,7 +9,8 @@
    not read: `equals` a TRUE, so that reading it would carry on to the second component exactly as a
    genuine match would. Each call records which component it was and the exception it threw, which
    is how the driver proves the first component's call was the LAST call into the program and that
-   the exception pending afterwards is the very one it threw. */
+   the exception pending afterwards is the very one it threw. What a member returns alongside the
+   exception is never looked at: a caller reads nothing before it has looked for one. */
 #include "later_tiers.h"
 
 typedef struct Component {
@@ -90,6 +90,7 @@ static void expect_stopped_at(kt_int tag) {
 }
 
 void kt_program_entry(void) {
+    DRIVER_BEGIN();
     KRef first = component(1, 1);
     KRef second = component(2, 1);
     KRef pair = kt_pair_of(first, second);
@@ -102,9 +103,8 @@ void kt_program_entry(void) {
     (void)kt_hash_code(pair);
     expect_stopped_at(1);
 
-    KRef text = kt_to_string(pair);
+    (void)kt_to_string(pair);
     expect_stopped_at(1);
-    CHECK(text == NULL, "a pair whose component threw still rendered text\n");
 
     /* Only the SECOND component throws. The first answers equal, a hash and text, and the second's
        placeholder must still not become the answer. */
@@ -113,13 +113,13 @@ void kt_program_entry(void) {
     KRef late = kt_pair_of(calm, thrower);
     KRef late_again = kt_pair_of(calm, thrower);
 
-    CHECK(!kt_equals(late, late_again), "equals answered the second component's placeholder\n");
+    (void)kt_equals(late, late_again);
     expect_stopped_at(4);
 
-    CHECK(kt_hash_code(late) == 0, "hashCode folded the second component's placeholder\n");
+    (void)kt_hash_code(late);
     expect_stopped_at(4);
 
-    CHECK(kt_to_string(late) == NULL, "a pair whose second component threw rendered text\n");
+    (void)kt_to_string(late);
     expect_stopped_at(4);
 
     kt_sys_write(1, "OK\n", 3);

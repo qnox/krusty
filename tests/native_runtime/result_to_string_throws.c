@@ -44,9 +44,10 @@ static const KType throwing_type = {
     .vtable_length = 3,
 };
 
-/* After one rendering: no text, one call into the program, and that call's exception pending. */
-static void expect_no_text(KRef rendered) {
-    CHECK(rendered == NULL, "a Result whose content threw still rendered text\n");
+/* After one rendering: one call into the program, and that call's exception, by identity, the one
+   pending. What the rendering returned is not looked at: it comes back with the exception pending,
+   and a caller reads nothing before it has looked for one. */
+static void expect_stopped(void) {
     CHECK(calls == 1, "the content's toString was not asked exactly once\n");
     CHECK(kt_pending_exception() != NULL && kt_pending_exception() == last_thrown,
           "the content's exception is not the one pending\n");
@@ -56,11 +57,14 @@ static void expect_no_text(KRef rendered) {
 }
 
 void kt_program_entry(void) {
+    DRIVER_BEGIN();
     KRef throwing = (KRef)kt_gc_allocate(&throwing_type, sizeof(KObjectHeader));
 
     /* A success renders its value, a failure the exception it holds: the same object both times. */
-    expect_no_text(kt_result_to_string(kt_result_success(throwing)));
-    expect_no_text(kt_result_to_string(kt_result_failure(throwing)));
+    (void)kt_result_to_string(kt_result_success(throwing));
+    expect_stopped();
+    (void)kt_result_to_string(kt_result_failure(throwing));
+    expect_stopped();
 
     kt_sys_write(1, "OK\n", 3);
 }

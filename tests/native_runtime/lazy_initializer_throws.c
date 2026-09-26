@@ -5,13 +5,16 @@
 #include "later_tiers.h"
 
 static int invocations;
+/* What the first `invoke` threw, so the exception pending afterwards is checked by identity. */
+static KRef thrown;
 
 /* `Function0`'s `invoke`: throws the first time, answers a boxed 42 after that. */
 static KRef initializer_invoke(KRef self) {
     (void)self;
     invocations++;
     if (invocations == 1) {
-        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        thrown = kt_throwable_new(&kt_type_null_pointer_exception, NULL);
+        kt_throw(thrown);
         return NULL;
     }
     return kt_box_int(42);
@@ -30,10 +33,12 @@ static const KType initializer_type = {
 };
 
 void kt_program_entry(void) {
+    DRIVER_BEGIN();
     KRef lazy = kt_lazy_of((KRef)kt_gc_allocate(&initializer_type, sizeof(KObjectHeader)));
 
     (void)kt_lazy_value(lazy);
-    CHECK(kt_pending_exception() != NULL, "the initializer's exception did not propagate\n");
+    CHECK(thrown != NULL && kt_pending_exception() == thrown,
+          "the initializer's exception is not the one pending\n");
     CHECK(!kt_lazy_is_initialized(lazy), "a lazy whose initializer threw counts as initialized\n");
     kt_clear_pending();
 
