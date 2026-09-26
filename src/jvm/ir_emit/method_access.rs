@@ -2,7 +2,8 @@
 
 use crate::ir::IrFile;
 use crate::jvm::classfile::{
-    ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC, ACC_VARARGS,
+    ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC,
+    ACC_VARARGS,
 };
 
 use super::{is_high_arity_function, IrExpr, LambdaMode, LambdaModes};
@@ -140,4 +141,42 @@ pub(super) fn secondary_constructor_varargs(constructor: &crate::ir::IrSecondary
     } else {
         0
     }
+}
+
+/// The access word of a class's primary `<init>`.
+///
+/// An `object`'s constructor is private; a `@JvmInline value class`'s is private and synthetic
+/// (instances are created via `constructor-impl`/`box-impl`, never `new`); a class whose primary
+/// constructor takes a value-class-typed parameter is private (kotlinc routes construction through a
+/// synthetic `(…args, DefaultConstructorMarker)` accessor); a SEALED class's is private too, since
+/// subclasses construct through that public synthetic accessor. A `vararg` last parameter adds
+/// `ACC_VARARGS`.
+pub(super) fn primary_constructor_access(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    is_continuation: bool,
+    value_param_ctor: bool,
+) -> u16 {
+    let access = if is_continuation || class.is_anonymous_object {
+        // A continuation class's ctor is package-private (constructed only by its own file);
+        // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains
+        // true when a capture has value-class type: the enclosing class directly constructs the
+        // anonymous class, so treating that semantic capture like a declared value-class
+        // parameter would make the only reachable constructor private.
+        0
+    } else if class.is_value {
+        ACC_PRIVATE | ACC_SYNTHETIC
+    } else if class.is_singleton() || value_param_ctor || class.is_sealed {
+        ACC_PRIVATE
+    } else {
+        // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
+        // protected), and a declared PRIVATE one is ACC_PRIVATE: another class calls it
+        // through its `constructor_accessors` accessor.
+        match ir.ctor_visibilities.get(&class.fq_name_id()) {
+            Some(crate::types::Visibility::Protected) => ACC_PROTECTED,
+            Some(crate::types::Visibility::Private) => ACC_PRIVATE,
+            _ => ACC_PUBLIC,
+        }
+    };
+    access | primary_constructor_varargs(class)
 }

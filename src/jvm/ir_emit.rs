@@ -57,6 +57,7 @@ mod local_updates;
 mod member_schedule;
 mod metadata_policy;
 mod method_access;
+mod method_signatures;
 mod non_null_operands;
 mod object_static_initialization;
 mod operand_representation;
@@ -5399,6 +5400,15 @@ fn emit_class(
             }
         })
         .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
+    let value_param_ctor = ir.has_value_param_ctor(&fq_name);
+    let ctor_access =
+        method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
+    let ctor_signature = method_signatures::written_signature(
+        ctor_access,
+        false,
+        &primary_ctor_descriptor(c),
+        ctor_signature,
+    );
     // An anonymous object carries kotlinc's minimal record (see the metadata assembly below) and
     // the same debug tables, so it is seeded like any class with a computed record.
     let byte_parity = !is_coroutine_state_machine(c)
@@ -5924,40 +5934,8 @@ fn emit_class(
         }
         ctor.ensure_locals(max_slot);
         ctor.link();
-        // An `object`'s constructor is private; a `@JvmInline value class`'s is private too (instances are
-        // created via `constructor-impl`/`box-impl`, never `new`); a class whose primary ctor takes a
-        // value-class-typed parameter is private too (kotlinc routes construction through a synthetic
-        // `(…args, DefaultConstructorMarker)` accessor — emitted below); a `C$Companion`'s is
-        // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
-        // normal class's is public.
-        let value_param_ctor = ir.has_value_param_ctor(&fq_name);
-        // A SEALED class's primary ctor is private too — subclasses (and Java/reflection) construct
-        // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
-        let ctor_access = if is_continuation || c.is_anonymous_object {
-            // A continuation class's ctor is package-private (constructed only by its own file);
-            // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains
-            // true when a capture has value-class type: the enclosing class directly constructs the
-            // anonymous class, so treating that semantic capture like a declared value-class
-            // parameter would make the only reachable constructor private.
-            0x0000
-        } else if c.is_value {
-            // A value class is never constructed through `new` outside its own `box-impl`; kotlinc
-            // marks the private primary synthetic as well.
-            0x1002
-        } else if c.is_singleton() || value_param_ctor || c.is_sealed {
-            0x0002
-        } else {
-            // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
-            // protected), and a declared PRIVATE one is ACC_PRIVATE: another class calls it
-            // through its `constructor_accessors` accessor.
-            match ir.ctor_visibilities.get(&c.fq_name_id()) {
-                Some(crate::types::Visibility::Protected) => 0x0004,
-                Some(crate::types::Visibility::Private) => 0x0002,
-                _ => 0x0001,
-            }
-        };
         cw.add_method_sig(
-            ctor_access | method_access::primary_constructor_varargs(c),
+            ctor_access,
             "<init>",
             &ctor_desc,
             &ctor,
@@ -9674,9 +9652,11 @@ fn emit_method_inner_with_holder(
     // attribute exists for a source or Java caller, and nothing can name these methods to call
     // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
     // still have a source-visible generic contract.
-    let method_sig = (!ir.serialization_cache_methods.contains(&fid))
-        .then(|| method_signature(&signature_formatter, ir, fid, f))
-        .flatten();
+    // kotlinc maps a lambda body's signature without generics, like any `$lambda$` method.
+    let method_sig = (!ir.serialization_cache_methods.contains(&fid)
+        && !ir.lambda_origins.contains_key(&fid))
+    .then(|| method_signature(&signature_formatter, ir, fid, f))
+    .flatten();
     let reserved_sig = match holder_receiver {
         Some(receiver) => holder_method_signature(
             &signature_formatter,
@@ -9696,6 +9676,20 @@ fn emit_method_inner_with_holder(
             None => method_sig,
         },
     };
+    let access = method_access::declared_method_access(
+        ir,
+        fid,
+        owner,
+        instance,
+        holder_receiver.is_some(),
+        env.lambda_modes,
+    );
+    let reserved_sig = method_signatures::written_signature(
+        access,
+        method_signatures::keeps_signature_when_synthetic(ir, fid),
+        &reserved_desc,
+        reserved_sig,
+    );
     let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
@@ -10066,14 +10060,6 @@ fn emit_method_inner_with_holder(
     let _ = code.erase_markers();
     code.ensure_locals(e.frame.max());
     code.link();
-    let access = method_access::declared_method_access(
-        ir,
-        fid,
-        owner,
-        instance,
-        holder_receiver.is_some(),
-        env.lambda_modes,
-    );
     // A method with own type parameters (`fun <T> …`) → the tparam-based signature; otherwise a method
     // whose concrete param/return type is PARAMETERIZED (`getXs(): List<String>`, `copy(List<String>)`)
     // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/
@@ -10372,7 +10358,7 @@ fn method_parameterized_sig(
     }
     s.push(')');
     s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
-    Some(s)
+    (s != ir_method_desc(params, ret)).then_some(s)
 }
 
 /// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
