@@ -14,9 +14,11 @@ use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
 use crate::types::Visibility;
 
+mod annotation_strings;
 mod flags;
 mod nested_classifiers;
 
+use annotation_strings::HeaderAnnotationStringArena;
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
 use nested_classifiers::{
     bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
@@ -1191,6 +1193,10 @@ fn extract_file_stub_inventory(
                 .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
+                )
+                .with(
+                    DeclarationFlags::COMPANION_BLOCK_MEMBER,
+                    function.is_companion_block_member(),
                 ),
         }
     }
@@ -1336,7 +1342,11 @@ fn extract_file_stub_inventory(
                         .is_some_and(|setter| setter.body.is_some()),
                 )
                 .with(DeclarationFlags::HAS_INITIALIZER, property.init.is_some())
-                .with(DeclarationFlags::COMPANION, property.is_companion_extension),
+                .with(DeclarationFlags::COMPANION, property.is_companion_extension)
+                .with(
+                    DeclarationFlags::COMPANION_BLOCK_MEMBER,
+                    property.is_companion_block_member,
+                ),
         });
 
         if property.getter_declared {
@@ -3226,68 +3236,6 @@ impl StreamedHeaderModule {
             .iter()
             .filter(move |(candidate, _)| *candidate == source)
             .map(|(_, ty)| *ty)
-    }
-}
-
-/// Provider-neutral constant payload for declaration annotations needed during signature solving.
-/// The arena is deliberately generic: `@JvmName`, plugin annotations, and future signature-affecting
-/// annotations must not each invent a private copy of Pass-1 expression extraction.
-#[derive(Default)]
-struct HeaderAnnotationStringArena {
-    /// Entries are parallel to the declaration's annotation list. Empty argument slices preserve
-    /// ordinals without retaining annotation spellings or source ranges.
-    declarations: std::collections::HashMap<DeclarationId, Vec<Box<[Box<str>]>>>,
-}
-
-impl HeaderAnnotationStringArena {
-    fn add(
-        &mut self,
-        declaration: DeclarationId,
-        file: &File,
-        annotations: &[crate::ast::AnnotationRef],
-        source_arguments: &[Vec<crate::ast::ExprId>],
-    ) {
-        let arguments = annotations
-            .iter()
-            .zip(source_arguments)
-            .map(|(_, arguments)| {
-                arguments
-                    .iter()
-                    .filter_map(|argument| file.const_string_value(*argument))
-                    .filter_map(|value| value.as_str().map(|value| value.into()))
-                    .collect::<Vec<Box<str>>>()
-                    .into_boxed_slice()
-            })
-            .collect::<Vec<_>>();
-        if arguments.iter().any(|arguments| !arguments.is_empty()) {
-            self.declarations.insert(declaration, arguments);
-        }
-    }
-
-    fn arguments(&self, declaration: DeclarationId, annotation_ordinal: usize) -> &[Box<str>] {
-        self.declarations
-            .get(&declaration)
-            .and_then(|annotations| annotations.get(annotation_ordinal))
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.declarations
-            .values()
-            .map(|annotations| {
-                annotations.len() * std::mem::size_of::<Box<[Box<str>]>>()
-                    + annotations
-                        .iter()
-                        .flatten()
-                        .map(|argument| argument.len())
-                        .sum::<usize>()
-                    + annotations
-                        .iter()
-                        .map(|arguments| arguments.len() * std::mem::size_of::<Box<str>>())
-                        .sum::<usize>()
-            })
-            .sum()
     }
 }
 

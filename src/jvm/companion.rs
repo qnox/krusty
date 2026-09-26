@@ -271,6 +271,26 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         // hoisted companion property (the declaration belongs to the companion's metadata alone).
         // Emission finds the physical field through `IrStatic.owner`.
         ir.mark_jvm_companion_hoisted_static(index);
+        // The outer class's own static fields keep their names; a hoisted companion property that
+        // meets one (a same-named `companion { … }` property) takes the next free `$N` suffix, as
+        // kotlinc names it. Its accessors and bridges keep the property's name.
+        let owner = ir.classes[candidate.outer as usize].fq_name;
+        let descriptor = crate::jvm::names::type_descriptor(candidate.ty);
+        let occupied = |ir: &IrFile, name: &str| {
+            ir.statics.iter().enumerate().any(|(other, property)| {
+                other as u32 != index
+                    && property.owner == Some(owner)
+                    && ir.static_field_jvm_name(other as u32) == name
+                    && crate::jvm::names::type_descriptor(property.ty) == descriptor
+            })
+        };
+        if occupied(ir, &candidate.name) {
+            let physical = (1usize..)
+                .map(|suffix| format!("{}${suffix}", candidate.name))
+                .find(|physical| !occupied(ir, physical))
+                .expect("an unused JVM static field suffix always exists");
+            ir.set_jvm_static_field_name(index, physical);
+        }
         if candidate.is_jvm_field {
             ir.mark_jvm_field_static(index);
         }

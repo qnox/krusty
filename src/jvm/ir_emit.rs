@@ -32,6 +32,7 @@ mod call_operands;
 mod captured_storage;
 mod checked_facts;
 mod class_pool_seed;
+mod companion_blocks;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
@@ -1268,6 +1269,7 @@ fn build_class_metadata(
                     // backing field was MOVED onto the interface itself.
                     moved_from_interface_companion: companion_of_interface(ir, c)
                         && jvm_field_static_for(ir, c, property_index),
+                    companion: false,
                 },
             )
         })
@@ -1309,9 +1311,11 @@ fn build_class_metadata(
                 field_annotations: property_backing_field_annotations(c, &prop.name),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
                 moved_from_interface_companion: false,
+                companion: false,
             },
         ));
     }
+    companion_blocks::push_property_metadata(ir, c, &mut declared_props);
     declared_props.sort_by_key(|(line, _)| *line);
     let mut prop_source_orders: Vec<u32> = declared_props.iter().map(|(order, _)| *order).collect();
     let mut props: Vec<PropMeta> = declared_props
@@ -1366,6 +1370,7 @@ fn build_class_metadata(
             field_annotations: Vec::new(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
             moved_from_interface_companion: false,
+            companion: false,
         });
         prop_source_orders.push(
             ir.fn_source_order
@@ -3060,13 +3065,15 @@ fn emit_jvm_interface_companion_surface(
         }
     }
 
-    let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+    let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
         .statics
         .iter()
-        .filter(|s| {
+        .enumerate()
+        .filter(|(_, s)| {
             s.owner_matches(&fq_name)
                 && !(s.is_const && static_fields::const_value_idx_peek(ir, s.init))
         })
+        .map(|(index, s)| (index as u32, s))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
         cw.reserve_method_name("<clinit>");
@@ -3078,12 +3085,12 @@ fn emit_jvm_interface_companion_surface(
             &fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|property| property.init),
+            clinit_statics.iter().map(|(_, property)| property.init),
         );
         let mut clinit = CodeBuilder::new(0);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
-        for s in &clinit_statics {
+        for &(static_index, s) in &clinit_statics {
             let pc = clinit.bytes.len() as u16;
             if let Some(&line) = c
                 .companion_class
@@ -3094,7 +3101,7 @@ fn emit_jvm_interface_companion_surface(
                     clinit_lines.push((pc, line));
                 }
             }
-            emitter.emit_static_initializer_store(&fq_name, s, &mut clinit);
+            emitter.emit_static_initializer_store(&fq_name, static_index, &mut clinit);
         }
         clinit.ret_void();
         clinit.ensure_locals(emitter.frame.max());
@@ -4943,6 +4950,17 @@ fn emit_scheduled_member(
             }
             return;
         }
+        SourceOrderedMember::StaticProperty(static_index) => {
+            static_fields::emit_static_accessors(
+                ir,
+                fq_name,
+                cw,
+                env,
+                param_assertions,
+                static_index,
+            );
+            return;
+        }
         SourceOrderedMember::Function(fid)
             if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
         {
@@ -5514,91 +5532,7 @@ fn emit_class(
             version: metadata.v,
         });
     }
-    // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
-    // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
-    // DECLARATION order: common lowering groups declarations by shape, while kotlinc's field table
-    // follows the companion source order.
-    let mut owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.owner_matches(&fq_name))
-        .map(|(index, property)| (index as u32, property))
-        .collect();
-    owner_statics.sort_by_key(|(_, property)| property.line);
-    for (static_index, s) in owner_statics {
-        let desc = ir_type_desc(&s.ty);
-        // A `private const val`/`private val` on an object/companion keeps its declared visibility
-        // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
-        // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
-        // outside `<clinit>` is an IllegalAccessError.
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        // A HOISTED companion property's field is PRIVATE regardless of the property's declared
-        // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
-        // EXCEPT under `@JvmField`, where the PUBLIC field IS the property's whole JVM surface
-        // (kotlinc emits it public even for an `internal` declaration, with no accessors at all).
-        let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
-        let jvm_field = ir.is_jvm_field_static(static_index);
-        let acc = if (s.visibility.is_private() || hoisted) && !jvm_field {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
-        // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
-        // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
-        // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
-        // LATE adds: kotlinc's field-table visit runs after the methods, so a hoisted static's name
-        // first interns at its `access$…$cp` bridge and a folded const's name + `ConstantValue`
-        // land after the `<clinit>` window.
-        let fold = s.is_const && !s.is_var && !hoisted;
-        let cv = fold
-            .then(|| match ir.expr(s.init) {
-                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
-                    Some(c.clone())
-                }
-                _ => None,
-            })
-            .flatten();
-        // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
-        let synthetic = ir.is_compiler_generated_static(static_index);
-        let acc = if synthetic { acc | 0x1000 } else { acc };
-        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        let signature = property_jvm_signatures(&signature_formatter, &s.ty, None).field;
-        cw.add_field_late_sig(acc, &s.name, &desc, signature.as_deref(), cv, ann);
-        // A field carries its FIELD-targeted annotations as `RuntimeInvisibleAnnotations`, BEFORE
-        // the nullability entry — kotlinc's attribute order.
-        //
-        // They come from wherever the field's DECLARATION lives: a hoisted companion property
-        // records them on the COMPANION, while a static this class owns outright — one a compiler
-        // plugin generated, say — records them on the class itself. The companion path keeps its
-        // `@JvmField` condition, which is what that annotation has always meant there: it is the
-        // reason the field is the property's whole JVM surface.
-        if let Some(annotations) = c
-            .companion_class
-            .and_then(|companion| ir.class_id_by_name(companion))
-            .filter(|_| jvm_field)
-            .and_then(|companion| {
-                ir.classes[companion as usize]
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-            .or_else(|| {
-                c.field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-        {
-            cw.set_last_late_field_annotations(&annotations.annotations);
-        }
-    }
+    static_fields::emit_class_static_fields(ir, c, &fq_name, &signature_formatter, &mut cw);
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
     // properties — not parameters — so the descriptor covers only the leading parameter fields.
@@ -6062,117 +5996,17 @@ fn emit_class(
     }
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
-    // HOISTED companion properties: the private static field lives on THIS class, so the companion's
-    // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
-    // bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
-    for s in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| {
-            ir.is_jvm_companion_hoisted_static(*index as u32)
-                && !ir.is_jvm_field_static(*index as u32)
-                && s.owner_matches(&fq_name)
-        })
-        .map(|(_, s)| s)
-    {
-        let jt = jvm_declared_ty(&s.ty);
-        let desc = type_descriptor(jt);
-        // kotlinc visits the bridge's name before its body's field cluster.
-        let getter_bridge = format!("access${}$cp", property_getter_name(&s.name));
-        cw.reserve_method_name(&getter_bridge);
-        cw.seed_utf8(&format!("(){desc}"));
-        let mut g = CodeBuilder::new(0);
-        let fref = cw.fieldref(&fq_name, &s.name, &desc);
-        g.getstatic(fref, slot_words(jt) as i32);
-        emit_return(jt, &mut g);
-        g.ensure_locals(0);
-        g.link();
-        cw.add_method(
-            0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-            &getter_bridge,
-            &format!("(){desc}"),
-            &g,
+    static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
+    if !static_storage(ir, c) {
+        static_fields::emit_class_static_initializer(
+            ir,
+            c,
+            facade,
+            env,
+            &fq_name,
+            byte_parity,
+            &mut cw,
         );
-        if s.is_var {
-            let setter_bridge = format!("access${}$cp", property_setter_name(&s.name));
-            cw.reserve_method_name(&setter_bridge);
-            cw.seed_utf8(&format!("({desc})V"));
-            // The setter bridge's `<set-?>` LocalVariableTable strings intern at its method visit.
-            cw.seed_utf8("<set-?>");
-            cw.seed_utf8(&desc);
-            let words = slot_words(jt);
-            let mut st = CodeBuilder::new(words);
-            load(jt, 0, &mut st);
-            let fref = cw.fieldref(&fq_name, &s.name, &desc);
-            st.putstatic(fref, slot_words(jt) as i32);
-            st.ret_void();
-            st.ensure_locals(words);
-            st.link();
-            cw.add_method(0x1019, &setter_bridge, &format!("({desc})V"), &st);
-        }
-    }
-    // A class with a `companion object` gets its `<clinit>` LAST among the methods (kotlinc's
-    // order): the `Companion` instance store, then each non-const owner static's initializer (a
-    // hoisted companion property, or a companion `const val` whose initializer isn't a compile-time
-    // literal — the `ConstantValue` path covers only folded consts). One shared `<clinit>`.
-    {
-        let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
-            .statics
-            .iter()
-            .enumerate()
-            .filter(|s| {
-                s.1.owner_matches(&fq_name)
-                    && !(s.1.is_const && static_fields::const_value_idx_peek(ir, s.1.init))
-            })
-            .map(|(index, s)| (index as u32, s))
-            .collect();
-        if !static_storage(ir, c) && (c.companion_class.is_some() || !clinit_statics.is_empty()) {
-            // kotlinc visits `<clinit>` (name + descriptor) before its body's companion
-            // construction and hoisted-initializer constants.
-            cw.reserve_method_name("<clinit>");
-            cw.seed_utf8("()V");
-            let mut e = Emitter::new(
-                ir,
-                &mut cw,
-                env,
-                &fq_name,
-                facade,
-                Ty::Unit,
-                clinit_statics.iter().map(|(_, property)| property.init),
-            );
-            let mut clinit = CodeBuilder::new(0);
-            emit_companion_init(e.cw, &mut clinit, &fq_name, c);
-            // kotlinc's `<clinit>` LineNumberTable: one entry per hoisted-property store, at the
-            // store's pc, mapping to the property's declaration line in the COMPANION source. The
-            // `Companion` construction itself has no entry.
-            let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-            for (static_index, s) in &clinit_statics {
-                let pc = clinit.bytes.len() as u16;
-                // A hoisted companion property's line lives on the companion. A static a compiler
-                // plugin generated has no property to look up and carries its own.
-                let line = if ir.is_jvm_companion_hoisted_static(*static_index) {
-                    c.companion_class
-                        .as_ref()
-                        .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
-                        .copied()
-                        .unwrap_or(0)
-                } else {
-                    s.line
-                };
-                if line != 0 {
-                    clinit_lines.push((pc, line));
-                }
-                e.emit_static_initializer_store(&fq_name, s, &mut clinit);
-            }
-            clinit.ret_void();
-            clinit.ensure_locals(e.frame.max());
-            clinit.link();
-            e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-            if byte_parity && !clinit_lines.is_empty() {
-                e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
-            }
-        }
     }
     // A singleton object's JVM storage and initializer form one backend-owned responsibility.
     if static_storage(ir, c) {
@@ -6970,8 +6804,13 @@ fn emit_enum_class(
     // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
     // instance fields. Emitting it last also interned its name and descriptor late, so the class
     // differed in constant-pool order even where every member matched.
-    let owner_statics: Vec<&crate::ir::IrStatic> =
-        ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
+    let owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.owner_matches(&fq))
+        .map(|(index, s)| (index as u32, s))
+        .collect();
     // The `Companion` field LEADS the field table, but kotlinc interns its name and descriptor at
     // the field VISIT — late, not here. Emitting it eagerly put those strings at the head of the
     // constant pool and reordered nearly all of it.
@@ -7525,12 +7364,12 @@ fn emit_enum_class(
         // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
         // line marks — so pushing entries here is the only thing that reaches the attribute.
         let mut stepped_away = false;
-        for s in &owner_statics {
+        for &(static_index, s) in &owner_statics {
             if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
                 clinit_lines.push((clinit.bytes.len() as u16, s.line));
                 stepped_away = true;
             }
-            e.emit_static_initializer_store(&fq, s, &mut clinit);
+            e.emit_static_initializer_store(&fq, static_index, &mut clinit);
         }
         // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
         // line. An enum with no generated statics has a single-entry table, and adding a closing
@@ -11058,56 +10897,7 @@ impl<'a> Emitter<'a> {
                 index,
                 value,
             } => self.emit_set_field(e, receiver, class, index, value, code),
-            IrExpr::SetStatic { index, value } => {
-                let s = &self.ir.statics[index as usize];
-                let jt = jvm_declared_ty(&s.ty);
-                let name = s.name.clone();
-                let is_const = s.is_const;
-                let facade = self.facade.clone();
-                self.emit_value(value, code);
-                if self.diverges(value) {
-                    return;
-                }
-                // Within the facade write the field directly; from another class go through `setX()` —
-                // or, for a PRIVATE top-level property (no public setter), the `access$set<X>$p` bridge.
-                let private = self.ir.statics[index as usize].visibility.is_private();
-                // A static declaring an OWNER lives on that class (a companion property is a static
-                // field on the outer class). Within the owner write the (private) field directly;
-                // from another class — the companion's delegating setter — go through the owner's
-                // PUBLIC synthetic `access$set<X>$cp` bridge (kotlinc's hoisted-companion shape).
-                // A `@JvmField` static is a PUBLIC field with no bridges: every writer goes
-                // `putstatic` directly.
-                if let Some(owner) = self.ir.statics[index as usize].owner {
-                    let owner_name = owner.render();
-                    if self.owner == owner_name
-                        || !self.ir.is_jvm_companion_hoisted_static(index)
-                        || self.ir.is_jvm_field_static(index)
-                    {
-                        let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
-                        code.putstatic(fref, slot_words(jt) as i32);
-                    } else {
-                        let m = self.cw.methodref(
-                            &owner_name,
-                            &format!("access${}$cp", property_setter_name(&name)),
-                            &format!("({})V", type_descriptor(jt)),
-                        );
-                        code.invokestatic(m, slot_words(jt) as i32, 0);
-                    }
-                } else if self.owner == facade || is_const {
-                    let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
-                    code.putstatic(fref, slot_words(jt) as i32);
-                } else {
-                    let sname = if private {
-                        format!("access${}$p", property_setter_name(&name))
-                    } else {
-                        property_setter_name(&name)
-                    };
-                    let m =
-                        self.cw
-                            .methodref(&facade, &sname, &format!("({})V", type_descriptor(jt)));
-                    code.invokestatic(m, slot_words(jt) as i32, 0);
-                }
-            }
+            IrExpr::SetStatic { index, value } => self.emit_set_static(index, value, code),
             IrExpr::Checked(_) => {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }
@@ -12270,54 +12060,7 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
                 code.getfield(fref, slot_words(jt) as i32);
             }
-            IrExpr::GetStatic(i) => {
-                let s = &self.ir.statics[*i as usize];
-                let jt = jvm_declared_ty(&s.ty);
-                let name = s.name.clone();
-                let is_const = s.is_const;
-                let facade = self.facade.clone();
-                // A static declaring an OWNER lives on that class, not the facade. Within the owner
-                // read the (private) field directly; from any other class — the companion's
-                // delegating accessors — go through the owner's PUBLIC synthetic `access$get<X>$cp`
-                // bridge, kotlinc's hoisted-companion-property access shape. A `@JvmField` static
-                // is a PUBLIC field with no bridges: every reader goes `getstatic` directly.
-                if let Some(owner) = self.ir.statics[*i as usize].owner {
-                    let owner_name = owner.render();
-                    if self.owner == owner_name
-                        || !self.ir.is_jvm_companion_hoisted_static(*i)
-                        || self.ir.is_jvm_field_static(*i)
-                    {
-                        let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
-                        code.getstatic(fref, slot_words(jt) as i32);
-                    } else {
-                        let m = self.cw.methodref(
-                            &owner_name,
-                            &format!("access${}$cp", property_getter_name(&name)),
-                            &format!("(){}", type_descriptor(jt)),
-                        );
-                        code.invokestatic(m, 0, slot_words(jt) as i32);
-                    }
-                }
-                // Within the facade (or a `const val`, which is public) read the field directly; from
-                // another class a plain top-level property is private, so go through `getX()` — kotlinc's
-                // cross-file property-access compilation.
-                else if self.owner == facade || is_const {
-                    let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
-                    code.getstatic(fref, slot_words(jt) as i32);
-                } else {
-                    // A PRIVATE top-level property has no public getter; cross-class reads inside the
-                    // file go through kotlinc's `access$get<X>$p` bridge.
-                    let gname = if self.ir.statics[*i as usize].visibility.is_private() {
-                        format!("access${}$p", property_getter_name(&name))
-                    } else {
-                        property_getter_name(&name)
-                    };
-                    let m =
-                        self.cw
-                            .methodref(&facade, &gname, &format!("(){}", type_descriptor(jt)));
-                    code.invokestatic(m, 0, slot_words(jt) as i32);
-                }
-            }
+            IrExpr::GetStatic(i) => self.emit_get_static(*i, code),
             IrExpr::New {
                 internal,
                 args,
@@ -14781,27 +14524,6 @@ impl<'a> Emitter<'a> {
     /// into temps first, then load them, keeping the operand baseline empty across nested branches.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         self.emit_operands_adapted(None, ops, code, |_, _, _| {});
-    }
-
-    /// Emit one checked static initializer through its declared JVM storage boundary. Facade,
-    /// class/object, interface, and enum `<clinit>` paths share this operation so boxing and carrier
-    /// selection cannot diverge by owner shape.
-    fn emit_static_initializer_store(
-        &mut self,
-        owner: &str,
-        field: &crate::ir::IrStatic,
-        code: &mut CodeBuilder,
-    ) {
-        self.emit_value(field.init, code);
-        if self.diverges(field.init) {
-            return;
-        }
-        let physical = jvm_declared_ty(&field.ty);
-        self.adapt_physical_operand_for(field.init, self.value_ty(field.init), physical, code);
-        let reference = self
-            .cw
-            .fieldref(owner, &field.name, &type_descriptor(physical));
-        code.putstatic(reference, slot_words(physical) as i32);
     }
 
     /// Frame-safe operand sequencing with one representation adapter applied immediately after each

@@ -382,6 +382,8 @@ mod codegen_host_e2e;
 mod collection_members_e2e;
 #[path = "collection_special_member_stub_e2e.rs"]
 mod collection_special_member_stub_e2e;
+#[path = "companion_block_members_e2e.rs"]
+mod companion_block_members_e2e;
 #[path = "companion_const_e2e.rs"]
 mod companion_const_e2e;
 #[path = "companion_cross_file_property_e2e.rs"]

@@ -73,7 +73,11 @@ pub(super) fn set_accessor_parameter_identities(
         .iter()
         .map(super::resolved_parameter_identity)
         .collect::<Vec<_>>();
-    if property_header.extension_receiver.is_some() {
+    // A companion extension's classifier receiver is a scope qualifier, not an accessor parameter.
+    let companion = index
+        .declaration_header(property)
+        .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION));
+    if property_header.extension_receiver.is_some() && !companion {
         let source_name = index
             .declaration_name(property)
             .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
@@ -543,6 +547,7 @@ fn materialize_top_level_property(
             realizations,
         );
     }
+    let companion_block_owner = companion_block_owner(index, property_id, &property, ir)?;
     let has_storage = property.initializer.is_some()
         || property.flags.has(DeclarationFlags::LATEINIT)
         || property.flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD);
@@ -571,7 +576,7 @@ fn materialize_top_level_property(
             init,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),
-            owner: None,
+            owner: companion_block_owner.map(|class| ir.classes[class as usize].fq_name_id()),
             visibility: property.visibility,
             setter_jvm_name: None,
             erased_declared_ty: None,
@@ -579,6 +584,9 @@ fn materialize_top_level_property(
             line: 0,
             source_order,
         });
+        if companion_block_owner.is_some() {
+            ir.companion_blocks.mark_storage(storage_index);
+        }
         let getter = property.getter.map(|body| {
             add_accessor_function(
                 ir,
@@ -611,6 +619,22 @@ fn materialize_top_level_property(
         }
         if let Some(setter) = setter {
             set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+        }
+        if let Some(owner) = companion_block_owner {
+            place_companion_block_accessors(ir, owner, getter.into_iter().chain(setter));
+            record_companion_block_property(
+                index,
+                ir,
+                owner,
+                property_id,
+                &property,
+                CompanionBlockRealization {
+                    storage: Some(storage_index),
+                    getter,
+                    setter,
+                    source_order,
+                },
+            );
         }
         realizations.insert(
             property_id,
@@ -688,6 +712,22 @@ fn materialize_top_level_property(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, declaration, true, setter, ir)?;
     }
+    if let Some(owner) = companion_block_owner {
+        place_companion_block_accessors(ir, owner, std::iter::once(getter).chain(setter));
+        record_companion_block_property(
+            index,
+            ir,
+            owner,
+            property_id,
+            &property,
+            CompanionBlockRealization {
+                storage: None,
+                getter: Some(getter),
+                setter,
+                source_order,
+            },
+        );
+    }
     realizations.insert(
         property_id,
         IrLocalPropertyLayout::TopLevelAccessor {
@@ -698,6 +738,78 @@ fn materialize_top_level_property(
         },
     );
     Ok(())
+}
+
+/// The class whose `companion { … }` block declared this top-level-shaped property, if any: the
+/// same-file class its [`super::companion_blocks::static_placement`] names.
+fn companion_block_owner(
+    index: &ResolvedModuleIndex,
+    property_id: crate::fir::PropertyId,
+    property: &IrCheckedProperty,
+    ir: &IrFile,
+) -> Result<Option<crate::ir::ClassId>, FirFileLoweringFailure> {
+    let failure = FirFileLoweringFailure::MissingProperty(property.declaration);
+    let receiver = index
+        .property(property_id)
+        .and_then(|shape| shape.extension_receiver)
+        .map(|receiver| receiver.get());
+    let placement =
+        super::companion_blocks::static_placement(property.flags, receiver, failure.clone())?;
+    super::companion_blocks::declaring_class_in_file(ir, placement, failure)
+}
+
+/// A companion-block property's accessors are static methods of its class, like its functions.
+fn place_companion_block_accessors(
+    ir: &mut IrFile,
+    owner: crate::ir::ClassId,
+    accessors: impl Iterator<Item = FunId>,
+) {
+    for accessor in accessors {
+        ir.classes[owner as usize].methods.push(accessor);
+        ir.companion_blocks.place_function(accessor, owner);
+    }
+}
+
+/// Where a `companion { … }` block property was realized on its class: its static storage (absent
+/// for an accessor-only property), its generated accessors, and its source position.
+struct CompanionBlockRealization {
+    storage: Option<u32>,
+    getter: Option<FunId>,
+    setter: Option<FunId>,
+    source_order: u32,
+}
+
+fn record_companion_block_property(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    owner: crate::ir::ClassId,
+    property_id: crate::fir::PropertyId,
+    property: &IrCheckedProperty,
+    realization: CompanionBlockRealization,
+) {
+    let CompanionBlockRealization {
+        storage,
+        getter,
+        setter,
+        source_order,
+    } = realization;
+    let class = ir.classes[owner as usize].fq_name_id();
+    let has_constant = index.compile_time_constant(property.declaration).is_some()
+        || ir.companion_blocks.has_constant_initializer(property_id);
+    ir.companion_blocks
+        .record_property(crate::ir::IrCompanionBlockProperty {
+            class,
+            name: property.name.clone(),
+            ty: property.ty,
+            is_var: property.flags.has(DeclarationFlags::MUTABLE),
+            is_const: property.flags.has(DeclarationFlags::CONST),
+            has_constant,
+            visibility: property.visibility,
+            storage,
+            getter,
+            setter,
+            source_order,
+        });
 }
 
 pub(super) fn stamp_generated_property_nodes(
@@ -1583,7 +1695,13 @@ pub(super) fn accept_property_body(
             .property(property_id)
             .is_some_and(|property| !property.mutable)
         && super::constant_folding::is_metadata_constant(ir.expr(value));
-    if has_constant_initializer {
+    let companion_block_member = index
+        .declaration_header(property_declaration)
+        .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
+    if has_constant_initializer && companion_block_member {
+        // Recorded on its classifier's property record instead of the package's.
+        ir.companion_blocks.mark_constant_initializer(property_id);
+    } else if has_constant_initializer {
         let package_property = ir
             .package_properties
             .iter_mut()
