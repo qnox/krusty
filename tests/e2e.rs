@@ -566,6 +566,8 @@ mod diagnostics_receiver_reference_cases_e2e;
 mod diagnostics_type_inference_cases_e2e;
 #[path = "discarded_when_e2e.rs"]
 mod discarded_when_e2e;
+#[path = "discarded_when_value_e2e.rs"]
+mod discarded_when_value_e2e;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
 #[path = "diverging_lambda_e2e.rs"]

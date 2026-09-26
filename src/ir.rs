@@ -2471,9 +2471,9 @@ pub struct IrFile {
     /// `String` types only, where logical = physical representation — by the suspend pass's operand
     /// snapshot typing (`hoisted_value_ty`) for external callees.
     pub logical_types: std::collections::HashMap<u32, Ty>,
-    /// Checked exhaustive `when` expressions without a written `else`, keyed by common-IR identity.
-    /// The value is their final semantic result type. Backends use this to preserve value flow and
-    /// emit the mandatory no-match failure path without re-running exhaustiveness analysis.
+    /// Checked `when`/`if` result types by common-IR identity, as fir2ir types them (`Unit` when not
+    /// exhaustive down an `else if` chain). Backends use this to preserve value flow and emit the
+    /// mandatory no-match failure path without re-running exhaustiveness analysis.
     pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
     /// Source binding reads and the checked binding's reassignment contract. The expression key is
     /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.

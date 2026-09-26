@@ -47,6 +47,8 @@ mod suspend_conversions;
 mod tailrec;
 mod type_operations;
 mod when_expressions;
+#[cfg(test)]
+mod when_result_type_tests;
 
 pub use error::*;
 pub use sink::*;
@@ -216,18 +218,8 @@ pub(crate) fn lower_body_with_context(
         })
         .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
     let mut roots = Vec::new();
-    for (root_index, root) in body.roots().iter().copied().enumerate() {
-        let is_implicit_result = body.has_implicit_return()
-            && root_index + 1 == body.roots().len()
-            && matches!(
-                body.statement(root).map(|statement| &statement.kind),
-                Some(crate::fir::FirStatementKind::Expression(_))
-            );
-        let lowered = if is_implicit_result {
-            lowering.statement(root)?
-        } else {
-            lowering.consumed_statement(root)?
-        };
+    for root in body.roots().iter().copied() {
+        let lowered = lowering.statement(root)?;
         // A destructuring declaration lowers to several declarations in the surrounding lexical
         // scope. `IrExpr::Block` deliberately scopes its locals, so retaining the wrapper would
         // make the component locals disappear before the following source statement. Flatten only

@@ -1080,15 +1080,22 @@ impl BodyLowering<'_> {
                 then_conversion,
                 else_branch,
                 else_conversion,
+                deeply_exhaustive,
             } => {
                 let condition = self.expression(*condition)?;
                 let then_branch =
                     self.expression_with_conversion(*then_branch, *then_conversion)?;
                 let else_branch =
                     self.expression_with_conversion(*else_branch, *else_conversion)?;
-                self.ir.add_expr(IrExpr::When {
+                let conditional = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(condition), then_branch), (None, else_branch)],
-                })
+                });
+                // The checker decided whether fir2ir types this `if` by its checked result; a
+                // `Unit` one is a statement, whatever its branches' values.
+                if expression.ty.get() == Ty::Unit || !*deeply_exhaustive {
+                    self.ir.exhaustive_whens.insert(conditional, Ty::Unit);
+                }
+                conditional
             }
             FirExprKind::Try {
                 body,
@@ -1125,13 +1132,17 @@ impl BodyLowering<'_> {
                     result: expression.ty.get(),
                 })
             }
-            FirExprKind::When { subject, branches } => {
-                self.when_expression(*subject, branches, expression.ty.get())?
+            FirExprKind::When {
+                subject,
+                branches,
+                deeply_exhaustive,
+            } => {
+                self.when_expression(*subject, branches, expression.ty.get(), *deeply_exhaustive)?
             }
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
                 for statement in statements.iter().copied() {
-                    let lowered = self.consumed_statement(statement)?;
+                    let lowered = self.statement(statement)?;
                     if matches!(
                         self.body
                             .statement(statement)

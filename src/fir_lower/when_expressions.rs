@@ -19,6 +19,7 @@ impl BodyLowering<'_> {
         subject: Option<FirExprId>,
         branches: &[FirWhenBranch],
         result_ty: Ty,
+        deeply_exhaustive: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let mut prefix = Vec::new();
         let subject = subject
@@ -86,9 +87,15 @@ impl BodyLowering<'_> {
             branches: lowered_branches,
         });
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
-        // Keep the checker's result for every exhaustive `when`. A no-else Unit-valued expression
-        // remains the one genuinely non-exhaustive statement form.
-        if has_else || result_ty != Ty::Unit {
+        // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever
+        // its result, `Unit` included), is exhaustive; the checker also decided whether fir2ir types
+        // it by its checked result.
+        if has_else || deeply_exhaustive {
+            let result_ty = if deeply_exhaustive {
+                result_ty
+            } else {
+                Ty::Unit
+            };
             self.ir.exhaustive_whens.insert(when, result_ty);
         }
         if prefix.is_empty() {
