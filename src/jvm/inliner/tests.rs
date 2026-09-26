@@ -55,7 +55,7 @@ fn inline_plain(
     parameters: &Parameters,
     inline_only: bool,
     frame_base: u16,
-    reified_arguments: &crate::jvm::inline::ReifiedArguments,
+    reified_arguments: &crate::jvm::reified_arguments::ReifiedArguments,
 ) -> Result<MethodNode, InlineError> {
     inline(
         callee,
