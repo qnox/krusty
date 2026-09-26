@@ -325,15 +325,10 @@ fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function
     };
 }
 
-/// Whether a structural reference's adapter can become the carrier's own `invoke`. The remaining
-/// shapes keep the synthesized dispatching `invoke`: `FunctionN` arities past the numbered
-/// interfaces and field captures of a local function.
+/// Whether a structural reference's adapter can become the carrier's own `invoke`. A local
+/// function's field captures keep the synthesized dispatching `invoke`.
 fn own_invoke_realizable(ir: &IrFile, reference: &crate::ir::IrCallableReference) -> bool {
-    let Ty::Fun(function_type) = reference.function_type.non_null() else {
-        return false;
-    };
     reference.captures.is_empty()
-        && function_type.params.len() <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY
         && ir
             .functions
             .get(reference.adapter as usize)
@@ -414,9 +409,15 @@ fn realize_own_invoke(
     let parameters = function_type.params.clone();
     // A suspend `invoke` keeps its declared result: the suspend lowering that follows appends the
     // continuation and returns the result as an object, boxed as a coroutine boxes it. An unsigned
-    // result stays its carrier, which the bridge boxes, as a value class does.
+    // result stays its carrier, which the bridge boxes, as a value class does. Past the numbered
+    // interfaces no generic `R` is overridden, so the result stays scalar too.
+    let high_arity = parameters.len() > crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     let result = match function_type.ret {
-        ret if ret.is_jvm_scalar() && !function_type.suspend && !ret.is_unsigned() => {
+        ret if ret.is_jvm_scalar()
+            && !function_type.suspend
+            && !ret.is_unsigned()
+            && !high_arity =>
+        {
             Ty::nullable(ret)
         }
         ret => ret,
@@ -606,7 +607,7 @@ mod tests {
                 ("ordinary", true),
                 ("captured", false),
                 ("suspend", true),
-                ("high arity", false),
+                ("high arity", true),
                 ("value class", true),
             ]
         );
