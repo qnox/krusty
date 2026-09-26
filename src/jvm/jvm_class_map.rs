@@ -14,7 +14,7 @@
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
 use crate::name_tree::FxHashMap;
-use crate::types::TypeName;
+use crate::types::{CollectionKind, MappedCollection, TypeName};
 
 /// JVM realization of a semantic intrinsic companion. Kotlinc's `CompanionObjectMapping` consists
 /// of every primitive owner plus `String` and `Enum`; derive the primitive portion from the shared
@@ -412,6 +412,9 @@ struct ErasureGroup {
     jvm_name: &'static str,
     scope: BuiltinScopeProvenance,
     maps_java_source_to_kotlin: bool,
+    /// For a collection group, which Kotlin collection it maps and the index into `kotlin_names`
+    /// where the mutable face's spellings begin (the read-only face's spellings come first).
+    collection: Option<(CollectionKind, usize)>,
 }
 
 impl ErasureGroup {
@@ -425,6 +428,22 @@ impl ErasureGroup {
             jvm_name,
             scope,
             maps_java_source_to_kotlin: true,
+            collection: None,
+        }
+    }
+
+    const fn collection(
+        kotlin_names: &'static [&'static str],
+        mutable_from: usize,
+        jvm_name: &'static str,
+        kind: CollectionKind,
+    ) -> Self {
+        Self {
+            kotlin_names,
+            jvm_name,
+            scope: BuiltinScopeProvenance::KotlinDeclaration,
+            maps_java_source_to_kotlin: true,
+            collection: Some((kind, mutable_from)),
         }
     }
 
@@ -438,6 +457,7 @@ impl ErasureGroup {
             jvm_name,
             scope,
             maps_java_source_to_kotlin: false,
+            collection: None,
         }
     }
 }
@@ -496,62 +516,70 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         NOTHING_JVM,
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &[
             "kotlin/collections/Iterable",
             "kotlin/collections/MutableIterable",
         ],
+        1,
         "java/lang/Iterable",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::Iterable,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &[
             "kotlin/collections/Iterator",
             "kotlin/collections/MutableIterator",
         ],
+        1,
         "java/util/Iterator",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::Iterator,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &[
             "kotlin/collections/ListIterator",
             "kotlin/collections/MutableListIterator",
         ],
+        1,
         "java/util/ListIterator",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::ListIterator,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &[
             "kotlin/collections/Collection",
             "kotlin/collections/MutableCollection",
         ],
+        1,
         "java/util/Collection",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::Collection,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &["kotlin/collections/List", "kotlin/collections/MutableList"],
+        1,
         "java/util/List",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::List,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &["kotlin/collections/Set", "kotlin/collections/MutableSet"],
+        1,
         "java/util/Set",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::Set,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &["kotlin/collections/Map", "kotlin/collections/MutableMap"],
+        1,
         "java/util/Map",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::Map,
     ),
-    ErasureGroup::mapped(
+    ErasureGroup::collection(
         &[
             "kotlin/collections/Map.Entry",
             "kotlin/collections/Map$Entry",
             "kotlin/collections/MutableMap.MutableEntry",
             "kotlin/collections/MutableMap$MutableEntry",
         ],
+        2,
         "java/util/Map$Entry",
-        BuiltinScopeProvenance::KotlinDeclaration,
+        CollectionKind::MapEntry,
     ),
 ];
 
@@ -575,6 +603,8 @@ struct BuiltinIds {
     /// Read-only collection faces win for erasure groups with mutable siblings, matching the frontend
     /// identity already used for a raw JVM collection return.
     metadata_owner: FxHashMap<TypeName, TypeName>,
+    /// Each Kotlin collection spelling → the collection it names and which face it is.
+    mapped_collection: FxHashMap<TypeName, MappedCollection>,
 }
 
 fn builtin_ids() -> &'static BuiltinIds {
@@ -590,13 +620,24 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
         let mut metadata_owner = FxHashMap::default();
+        let mut mapped_collection = FxHashMap::default();
         for (group, mapping) in ERASURE_GROUPS.iter().enumerate() {
             let ErasureGroup {
                 kotlin_names,
                 jvm_name,
                 scope,
+                collection,
                 ..
             } = mapping;
+            if let Some((kind, mutable_from)) = collection {
+                for (index, kotlin_name) in kotlin_names.iter().enumerate() {
+                    let face = MappedCollection {
+                        kind: *kind,
+                        mutable: index >= *mutable_from,
+                    };
+                    mapped_collection.insert(tn(kotlin_name), face);
+                }
+            }
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
             let mut declarations = kotlin_names
@@ -667,8 +708,16 @@ fn builtin_ids() -> &'static BuiltinIds {
             wrapper_prim,
             with_members,
             metadata_owner,
+            mapped_collection,
         }
     })
+}
+
+/// The Kotlin collection a classifier names and which face of it, when it is one of the collection
+/// builtins mapped onto a JVM collection interface. Keyed by the Kotlin declaration's identity, so
+/// the platform interface itself (`java/util/List`) is not a collection face.
+pub(crate) fn mapped_collection(internal: TypeName) -> Option<MappedCollection> {
+    builtin_ids().mapped_collection.get(&internal).copied()
 }
 
 /// Compare a semantic Kotlin/internal class name with a JVM-erased internal name without rendering the
@@ -800,11 +849,38 @@ mod tests {
         is_kotlin_collection_type_name, is_mapped_collection_face,
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope, platform_flexible_upper_bound,
-        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, wrapper_internal,
-        wrapper_to_kotlin_prim_name,
+        mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
+        platform_flexible_upper_bound, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
+        wrapper_internal, wrapper_to_kotlin_prim_name,
     };
-    use crate::types::{type_name, Ty};
+    use crate::types::{type_name, CollectionKind, MappedCollection, Ty};
+
+    /// Each collection group maps its read-only spellings to the read-only face and the rest to
+    /// the mutable one; the platform interface is not a Kotlin collection face.
+    #[test]
+    fn collection_groups_publish_both_faces() {
+        let faces = [
+            "kotlin/collections/Iterable",
+            "kotlin/collections/MutableIterable",
+            "kotlin/collections/Map$Entry",
+            "kotlin/collections/MutableMap$MutableEntry",
+            "java/util/Map$Entry",
+            "kotlin/String",
+        ]
+        .map(|name| mapped_collection(type_name(name)));
+        let face = |kind, mutable| Some(MappedCollection { kind, mutable });
+        assert_eq!(
+            faces,
+            [
+                face(CollectionKind::Iterable, false),
+                face(CollectionKind::Iterable, true),
+                face(CollectionKind::MapEntry, false),
+                face(CollectionKind::MapEntry, true),
+                None,
+                None,
+            ]
+        );
+    }
 
     #[test]
     fn primitive_wrapper_table_is_single_source() {

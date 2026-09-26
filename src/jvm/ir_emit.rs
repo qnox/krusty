@@ -84,6 +84,7 @@ use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::FinallyRegion;
+mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_fields;
@@ -3325,6 +3326,7 @@ fn new_classifier_writer(
     } else {
         recorded.and_then(|signature| jvm_class_signature(&formatter, signature))
     };
+    let signature = collection_markers::with_markers(signature, ir, c);
     let internal = c.fq_name();
     // kotlinc (ASM) visits `(name, signature, superName)`, so the signature VALUE interns between
     // the two class names — it must reach the writer's constructor, not only `set_signature`.
@@ -5379,9 +5381,7 @@ fn emit_class(
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
     // ahead of the pool seeding below.
-    for itf in c.interfaces.iter_rendered() {
-        cw.add_interface(&itf);
-    }
+    collection_markers::add_interfaces(&mut cw, ir, c);
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
@@ -7315,9 +7315,7 @@ fn emit_interface_class(
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let mut cw = new_classifier_writer(ir, c, "java/lang/Object", env, opts);
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400); // [PUBLIC |] INTERFACE | ABSTRACT
-    for itf in c.interfaces.iter_rendered() {
-        cw.add_interface(&itf);
-    }
+    collection_markers::add_interfaces(&mut cw, ir, c);
     register_sealed_subtypes(
         &mut cw,
         ir,
@@ -7670,9 +7668,7 @@ fn emit_enum_class(
     env.inner_classes.register(&mut cw);
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
-    for itf in c.interfaces.iter_rendered() {
-        cw.add_interface(&itf);
-    }
+    collection_markers::add_interfaces(&mut cw, ir, c);
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
@@ -10729,7 +10725,6 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &crate::jvm::reified_arguments::ReifiedArguments,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -11036,15 +11031,9 @@ impl<'a> Emitter<'a> {
         }
         // Probe at offset 0. Switch padding and absolute handler/external-transfer offsets require a
         // second splice at the method's real byte offset; relative branches do not.
-        let Some(probe) = crate::jvm::inline::splice_unified(
-            body,
-            descriptor,
-            base,
-            &lam_splices,
-            0,
-            self.cw,
-            reified,
-        ) else {
+        let Some(probe) =
+            crate::jvm::inline::splice_unified(body, descriptor, base, &lam_splices, 0, self.cw)
+        else {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
@@ -11090,7 +11079,7 @@ impl<'a> Emitter<'a> {
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
-                body.max_stack + lam_max_stack + probe.stack_growth,
+                body.max_stack + lam_max_stack,
                 top_local,
                 arg_words,
                 ret_words,
@@ -11109,7 +11098,6 @@ impl<'a> Emitter<'a> {
             &lam_splices,
             splice_start,
             self.cw,
-            reified,
         ) else {
             crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
@@ -11122,7 +11110,7 @@ impl<'a> Emitter<'a> {
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
-            body.max_stack + lam_max_stack + bs.stack_growth,
+            body.max_stack + lam_max_stack,
             top_local,
             arg_words,
             ret_words,
@@ -11651,12 +11639,19 @@ impl<'a> Emitter<'a> {
                     &body,
                     base,
                     code,
-                    reified,
                 );
             }
             // A literal lambda used as a value needs kotlinc's anonymous-object regeneration
             // before MethodNode can own it. Keep only that still-unmigrated shape on the byte
             // bridge; no-lambda calls never fall back to it.
+            if let Err(reason) = bytecode_inline_call::check_byte_splice_body(
+                inline_call.target.name,
+                inline_call.target.splice_desc,
+                inline_call.body,
+            ) {
+                self.run.set_inline_bail(reason);
+                return true;
+            }
             return self
                 .try_inline_materialized_lambda_body(&inline_call, code)
                 .is_some();
@@ -13860,8 +13855,12 @@ impl<'a> Emitter<'a> {
                         "resolve",
                         "emit static {owner}.{name}{descriptor} inline={inline:?}"
                     );
-                    let reified =
-                        crate::jvm::reified_operations::splice_arguments(self.ir, e, &self.facade);
+                    let reified = crate::jvm::reified_operations::splice_arguments(
+                        self.ir,
+                        e,
+                        &self.facade,
+                        &|ty| self.rendered_inlined_cast_target(ty),
+                    );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
@@ -14265,7 +14264,7 @@ impl<'a> Emitter<'a> {
                 op,
                 arg,
                 type_operand,
-            } => self.emit_type_operation(*op, *arg, *type_operand, code),
+            } => self.emit_type_operation(e, *op, *arg, *type_operand, code),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
@@ -14432,8 +14431,7 @@ impl<'a> Emitter<'a> {
                 } else {
                     code.instance_of(ci);
                     if *negated {
-                        code.push_int(1, self.cw);
-                        code.ixor();
+                        self.emit_negated_instance_result(code);
                     }
                 }
             }

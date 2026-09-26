@@ -62,6 +62,7 @@ pub mod source_map;
 pub mod suspend;
 pub(crate) mod suspend_interface_impls;
 mod top_level_properties;
+mod type_intrinsics;
 mod type_of;
 mod value_class_declarations;
 pub mod value_classes;

@@ -20,14 +20,11 @@ mod debug_lines;
 mod frame_layout;
 mod invoke_receiver;
 mod local_compaction;
-mod reified_operands;
 mod scalar_adapters;
 mod splice_result;
-use super::reified_arguments::ReifiedArguments;
 use continuation_flow::caller_continuation_reachable;
 pub(super) use frame_layout::spliced_frame;
 use local_compaction::LocalCompaction;
-use reified_operands::{apply_repoints, reify_markers, ReifiedRepoint};
 use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
 pub use splice_result::SpliceResult;
 
@@ -548,19 +545,6 @@ pub fn stored_local(insn: &Insn) -> Option<u16> {
     }
 }
 
-/// Overwrite the 2-byte constant-pool operand of a pool-referencing instruction with `idx`.
-fn set_pool_operand(insn: &mut Insn, idx: u16) {
-    if let Insn::Plain { op, operands } = insn {
-        if let Some((off, 2)) = pool_operand(*op) {
-            let o = off - 1;
-            if operands.len() > o + 1 {
-                operands[o] = (idx >> 8) as u8;
-                operands[o + 1] = (idx & 0xff) as u8;
-            }
-        }
-    }
-}
-
 /// Whether a method body is a **reified `inline`** function — its bytecode calls
 /// `Intrinsics.reifiedOperationMarker`, which the compiler must inline away (a direct call to such a
 /// method throws `UnsupportedOperationException` at runtime). This recognizes the must-inline case
@@ -581,8 +565,8 @@ fn is_reified_inline(body: &MethodCode) -> bool {
 /// decoding it a second time (splicing is hot enough that a redundant decode is worth avoiding).
 ///
 /// The two markers that matter here:
-/// * `reifiedOperationMarker` — the reified type-parameter directive, NOP'd and repointed at the
-///   concrete type by [`reify_markers`].
+/// * `reifiedOperationMarker` — the reified type-parameter directive, which only the MethodNode
+///   inliner specializes; a body carrying one is never spliced.
 /// * `needClassReification` — kotlinc's "this body materializes a class (an anonymous object, a
 ///   default lambda) whose shape depends on the reified type parameter, so emit a fresh copy of that
 ///   class per call site". krusty splices INSTRUCTIONS and does not regenerate a dependency's
@@ -1594,19 +1578,11 @@ pub(super) fn splice_unified(
     lambdas: &[LambdaSplice],
     start_offset: usize,
     cw: &mut ClassWriter,
-    reified: &ReifiedArguments,
 ) -> Option<SpliceResult> {
-    // A `reifiedOperationMarker` body specializes its reified type parameter at the call site. Without
-    // the call's reified type arguments (`reified` empty) it can't be specialized — the marker THROWS at
-    // runtime — so skip (the caller falls back / drops the file, never miscompiles). With them, the
-    // markers are NOP'd and each following type-bearing op repointed at the concrete type below.
-    crate::trace_compiler!(
-        "splice",
-        "splice_unified reified_inline={} reified_map_len={}",
-        is_reified_inline(body),
-        reified.classes.len()
-    );
-    if is_reified_inline(body) && reified.is_empty() {
+    // A `reifiedOperationMarker` body is specialized only by the MethodNode inliner. Its callers
+    // fail a reified body cleanly before choosing this splice, so it never arrives here.
+    if is_reified_inline(body) {
+        crate::trace_compiler!("splice", "reified inline body reached the byte splice");
         return None;
     }
     let offsets_of_param = param_offsets(descriptor)?;
@@ -1620,14 +1596,6 @@ pub(super) fn splice_unified(
         crate::trace_compiler!("splice", "body requires class reification — not spliceable");
         return None;
     }
-    // NOP the reified markers now (before relocation) and remember which instructions to repoint; the
-    // concrete `Class` pool ref is minted + applied AFTER relocation (so `relocate_insns` doesn't remap
-    // it back to the erased placeholder).
-    let reified_targets: Vec<ReifiedRepoint> = if reified.is_empty() {
-        Vec::new()
-    } else {
-        reify_markers(&mut insns, &body.source_cp, reified)?
-    };
     // `assert` is a codegen INTRINSIC, not a normal inline: kotlinc guards it on a synthetic per-class
     // `$assertionsDisabled` field (or elides it per `-Xassertions`/`ASSERTIONS_MODE`), and when disabled
     // does NOT even evaluate the argument. Splicing its library body (which reads `kotlin/_Assertions.
@@ -1856,7 +1824,6 @@ pub(super) fn splice_unified(
         }
     }
     relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
-    let (type_of_edits, stack_growth) = apply_repoints(&reified_targets, reified, &mut insns, cw)?;
     // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
     // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
@@ -1886,11 +1853,6 @@ pub(super) fn splice_unified(
             repl: Vec::new(),
         }); // drop the trailing return → fall through
     }
-    edits.extend(
-        type_of_edits
-            .into_iter()
-            .map(|(at, repl)| Edit { at, len: 1, repl }),
-    );
     edits.sort_by_key(|e| e.at);
     // Reject overlapping edits (shouldn't happen for the shapes above).
     for w in edits.windows(2) {
@@ -2200,7 +2162,6 @@ pub(super) fn splice_unified(
         external_branches,
         locals: relocated_locals,
         lines: relocated_lines,
-        stack_growth,
     })
 }
 
@@ -2562,16 +2523,7 @@ mod tests {
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let out = splice_unified(
-            &body,
-            "(I)I",
-            1,
-            &[],
-            0,
-            &mut cw,
-            &ReifiedArguments::default(),
-        )
-        .expect("splice");
+        let out = splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).expect("splice");
         assert!(!out.needs_relayout);
     }
 

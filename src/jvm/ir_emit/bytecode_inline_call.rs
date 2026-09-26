@@ -26,6 +26,11 @@ pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
 
+/// The clean failure of a reified inline body whose call shape only the byte splice handles: only
+/// the MethodNode inliner specializes reified type parameters.
+pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
+    "a reified inline body in a call shape only the byte splice handles";
+
 /// How the call site supplies one parameter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Supply {
@@ -35,6 +40,25 @@ enum Supply {
     InPlace,
     /// Read from the caller local the argument lives in.
     CallerLocal,
+}
+
+/// The clean failure of an inline callee whose code the MethodNode reader rejects.
+pub(super) const UNREADABLE_INLINE_BODY: &str =
+    "an inline callee's code cannot be read as a method node";
+
+/// Refuse the byte splice for a reified inline body: only the MethodNode inliner specializes its
+/// reified type parameters. A body that cannot be read is refused too, never spliced unchecked.
+pub(super) fn check_byte_splice_body(
+    name: &str,
+    descriptor: &str,
+    body: &crate::jvm::classreader::MethodCode,
+) -> Result<(), &'static str> {
+    let callee =
+        MethodNode::read(ACC_STATIC, name, descriptor, body).map_err(|_| UNREADABLE_INLINE_BODY)?;
+    if inliner::has_reified_markers(&callee) {
+        return Err(REIFIED_BODY_ON_BYTE_SPLICE);
+    }
+    Ok(())
 }
 
 impl Emitter<'_> {
@@ -53,7 +77,7 @@ impl Emitter<'_> {
             args,
             leading_non_argument_operands,
             body,
-            reified,
+            ..
         } = *call;
         let physical = parse_descriptor_params(target.splice_desc)?;
         if physical.len() != args.len() {
@@ -76,15 +100,8 @@ impl Emitter<'_> {
             .collect::<Vec<_>>();
         let base = self.inline_splice_base(self.frame.aligned_call_operand_base(&parameters));
         let frame = crate::jvm::inline::spliced_frame(body, target.splice_desc, &[], base)?;
-        let probe = crate::jvm::inline::splice_unified(
-            body,
-            target.splice_desc,
-            base,
-            &[],
-            0,
-            self.cw,
-            reified,
-        )?;
+        let probe =
+            crate::jvm::inline::splice_unified(body, target.splice_desc, base, &[], 0, self.cw)?;
         if (!probe.handlers.is_empty() || !probe.external_branches.is_empty())
             && code.stack_height() != 0
         {
@@ -109,7 +126,6 @@ impl Emitter<'_> {
                 &[],
                 splice_start,
                 self.cw,
-                reified,
             )?
         } else {
             probe
@@ -123,7 +139,7 @@ impl Emitter<'_> {
         code.splice_inline(
             &rewritten.bytes,
             &rewritten.external_branches,
-            body.max_stack + rewritten.stack_growth,
+            body.max_stack,
             frame.top_local,
             argument_words,
             result_words,
@@ -895,5 +911,67 @@ fn var_words(op: u8) -> u16 {
         2
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::classreader::{MethodCode, C};
+
+    /// A static `()V` body over a pool that names `Intrinsics.reifiedOperationMarker(ILjava/lang/String;)V`
+    /// at index 6 and the string `T` at index 8.
+    fn body(code: Vec<u8>) -> MethodCode {
+        MethodCode {
+            max_stack: 2,
+            max_locals: 0,
+            code,
+            source_cp: vec![
+                C::Other,
+                C::Utf8("kotlin/jvm/internal/Intrinsics".to_string()),
+                C::Class(1),
+                C::Utf8("reifiedOperationMarker".to_string()),
+                C::Utf8("(ILjava/lang/String;)V".to_string()),
+                C::NameAndType(3, 4),
+                C::Methodref(2, 5),
+                C::Utf8("T".to_string()),
+                C::String(7),
+            ]
+            .into(),
+            stackmap: None,
+            handlers: Vec::new(),
+            locals: Vec::new(),
+            lines: Vec::new(),
+            source_file: None,
+            defining_class: "Test".to_string(),
+            dependency_source_map: None,
+            bootstrap_methods: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_plain_body_may_take_the_byte_splice() {
+        let plain = body(vec![0xb1]);
+        assert_eq!(check_byte_splice_body("plain", "()V", &plain), Ok(()));
+    }
+
+    /// `iconst_1; ldc "T"; invokestatic reifiedOperationMarker; return`.
+    #[test]
+    fn a_reified_body_never_reaches_the_byte_splice() {
+        let reified = body(vec![0x04, 0x12, 8, 0xb8, 0, 6, 0xb1]);
+        assert_eq!(
+            check_byte_splice_body("reified", "()V", &reified),
+            Err(REIFIED_BODY_ON_BYTE_SPLICE)
+        );
+    }
+
+    /// A `bipush` cut off before its operand: the reader's failure is the refusal, not a pass.
+    #[test]
+    fn an_unreadable_body_never_reaches_the_byte_splice() {
+        let truncated = body(vec![0x10]);
+        assert_eq!(
+            check_byte_splice_body("truncated", "()V", &truncated),
+            Err(UNREADABLE_INLINE_BODY)
+        );
     }
 }

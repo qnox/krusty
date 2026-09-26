@@ -103,6 +103,10 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
         SymbolSource::classifier(self, classifier)
             .and_then(|shape| shape.value_underlying_property.clone())
     }
+
+    fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {
+        SymbolSource::classifier(self, classifier)?.classifier_role()
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +265,45 @@ mod tests {
 
         drop(libraries);
         std::fs::remove_dir_all(fixture.directory).expect("remove classpath directory");
+    }
+
+    /// The provider publishes a classifier's type-check role on its record: the collection face
+    /// from its builtin class map and a function classifier's arity from its declared signature.
+    #[test]
+    fn classifier_roles_come_from_the_provider_records() {
+        let stdlib = crate::toolchain::stdlib_jar().expect("Kotlin stdlib is provisioned");
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )))
+        .expect("initialize JVM libraries");
+        let collection = |kind, mutable| {
+            Some(crate::types::ClassifierRole::MappedCollection(
+                crate::types::MappedCollection { kind, mutable },
+            ))
+        };
+        let roles = [
+            "kotlin/Function2",
+            "kotlin/coroutines/SuspendFunction1",
+            "kotlin/reflect/KFunction1",
+            "kotlin/collections/MutableList",
+            "kotlin/collections/List",
+            "kotlin/collections/MutableMap.MutableEntry",
+            "java/util/List",
+        ]
+        .map(|name| {
+            crate::types::ClassifierFactSource::classifier_role(&libraries, type_name(name))
+        });
+        assert_eq!(
+            roles,
+            [
+                Some(crate::types::ClassifierRole::FunctionOfArity(2)),
+                None,
+                None,
+                collection(crate::types::CollectionKind::List, true),
+                collection(crate::types::CollectionKind::List, false),
+                collection(crate::types::CollectionKind::MapEntry, true),
+                None,
+            ]
+        );
     }
 }

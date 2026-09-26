@@ -4,7 +4,9 @@ use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
 use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
+use super::reified_type_checks::{self, ReifiedTarget};
 use super::InlineError;
+use crate::ir::TypeCheckRole;
 
 const INVOKESTATIC: u8 = 0xb8;
 const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
@@ -13,8 +15,11 @@ const MARKER_DESCRIPTOR: &str = "(ILjava/lang/String;)V";
 enum Repoint {
     Class {
         instruction: usize,
+        mode: i32,
         class: String,
         nullable: bool,
+        intrinsic: Option<TypeCheckRole>,
+        rendered: String,
     },
     Forwarded {
         name_instruction: usize,
@@ -33,13 +38,86 @@ struct Marker {
     repoint: Repoint,
 }
 
+/// Whether `node` calls `Intrinsics.reifiedOperationMarker`: its reified type parameters must be
+/// specialized for the call site, which only this inliner does.
+pub(in crate::jvm) fn has_reified_markers(node: &MethodNode) -> bool {
+    node.nodes.iter().any(|entry| {
+        matches!(
+            entry,
+            Node::Insn(Insn::Method { owner, name, .. })
+                if owner == INTRINSICS && name == "reifiedOperationMarker"
+        )
+    })
+}
+
 /// Specialize every exact `reifiedOperationMarker` before ordinary inliner transforms inspect the
 /// stack. Planning is all-or-nothing: malformed or unbound markers leave `node` untouched.
 pub(super) fn specialize(
     node: &mut MethodNode,
     arguments: &ReifiedArguments,
 ) -> Result<(), InlineError> {
+    let markers = plan(node, arguments)?;
+
+    // Replacements that change the node count are applied last to first, so every recorded index
+    // still names its node when its turn comes.
+    let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
+    for marker in &markers {
+        match &marker.repoint {
+            Repoint::Class {
+                instruction,
+                mode,
+                class,
+                nullable,
+                intrinsic,
+                rendered,
+            } => {
+                set_type_operand(&mut node.nodes[*instruction], class)?;
+                erase_marker(node, marker);
+                let target = ReifiedTarget {
+                    class,
+                    nullable: *nullable,
+                    intrinsic: *intrinsic,
+                    rendered,
+                };
+                let stub = node.nodes[*instruction].clone();
+                if let Some(nodes) = reified_type_checks::expand(node, *mode, &stub, &target) {
+                    replacements.push((*instruction, nodes));
+                }
+            }
+            Repoint::Forwarded {
+                name_instruction,
+                name,
+            } => {
+                node.nodes[*name_instruction] =
+                    Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
+            }
+            Repoint::TypeOf {
+                placeholder,
+                argument,
+            } => {
+                erase_marker(node, marker);
+                let realization = arguments
+                    .type_of
+                    .get(argument)
+                    .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
+                replacements.push((
+                    *placeholder,
+                    realization.iter().flat_map(type_of_nodes).collect(),
+                ));
+            }
+        }
+    }
+    replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (at, nodes) in replacements {
+        node.nodes.splice(at..=at, nodes);
+    }
+    Ok(())
+}
+
+/// Every marker of `node` and what `arguments` make of it.
+fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, InlineError> {
     let mut markers = Vec::new();
+
     for (call, entry) in node.nodes.iter().enumerate() {
         let Node::Insn(Insn::Method {
             op,
@@ -85,10 +163,18 @@ pub(super) fn specialize(
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
                 .ok_or(InlineError::MalformedReifiedMarker)?;
             match arguments.classes.get(argument.trim_end_matches('?')) {
-                Some(ReifiedArgument::Class { internal, nullable }) => Repoint::Class {
+                Some(ReifiedArgument::Class {
+                    internal,
+                    nullable,
+                    intrinsic,
+                    rendered,
+                }) => Repoint::Class {
                     instruction: target,
+                    mode,
                     class: internal.clone(),
                     nullable: *nullable || argument.ends_with('?'),
+                    intrinsic: *intrinsic,
+                    rendered: rendered.clone(),
                 },
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
@@ -111,88 +197,13 @@ pub(super) fn specialize(
             repoint,
         });
     }
-
-    // Replacements that change the node count are applied last to first, so every recorded index
-    // still names its node when its turn comes.
-    let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
-    for marker in &markers {
-        match &marker.repoint {
-            Repoint::Class {
-                instruction,
-                class,
-                nullable,
-            } => {
-                set_type_operand(&mut node.nodes[*instruction], class)?;
-                erase_marker(node, marker);
-                if *nullable && is_instance_of(&node.nodes[*instruction]) {
-                    let check = nullable_instance_check(node, class);
-                    replacements.push((*instruction, check));
-                }
-            }
-            Repoint::Forwarded {
-                name_instruction,
-                name,
-            } => {
-                node.nodes[*name_instruction] =
-                    Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
-            }
-            Repoint::TypeOf {
-                placeholder,
-                argument,
-            } => {
-                erase_marker(node, marker);
-                let realization = arguments
-                    .type_of
-                    .get(argument)
-                    .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
-                replacements.push((
-                    *placeholder,
-                    realization.iter().flat_map(type_of_nodes).collect(),
-                ));
-            }
-        }
-    }
-    replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    for (at, nodes) in replacements {
-        node.nodes.splice(at..=at, nodes);
-    }
-    Ok(())
+    Ok(markers)
 }
 
 fn erase_marker(node: &mut MethodNode, marker: &Marker) {
     for at in [marker.operation, marker.name, marker.call] {
         node.nodes[at] = Node::Insn(Insn::Op(0x00));
     }
-}
-
-fn is_instance_of(node: &Node) -> bool {
-    matches!(node, Node::Insn(Insn::Type { op: 0xc1, .. }))
-}
-
-/// kotlinc's `generateIsCheck` for a nullable type: `null` is an instance, so it is accepted
-/// before the `instanceof` sees it.
-fn nullable_instance_check(node: &mut MethodNode, class: &str) -> Vec<Node> {
-    let null = node.new_label();
-    let end = node.new_label();
-    vec![
-        Node::Insn(Insn::Op(0x59)),
-        Node::Insn(Insn::Jump {
-            op: 0xc6,
-            target: null,
-        }),
-        Node::Insn(Insn::Type {
-            op: 0xc1,
-            class: class.to_owned(),
-        }),
-        Node::Insn(Insn::Jump {
-            op: 0xa7,
-            target: end,
-        }),
-        Node::Label(null),
-        Node::Insn(Insn::Op(0x57)),
-        Node::Insn(Insn::Op(0x04)),
-        Node::Label(end),
-    ]
 }
 
 fn pushed_int(node: Option<&Node>) -> Option<i32> {
@@ -358,6 +369,8 @@ mod tests {
                 ReifiedArgument::Class {
                     internal: "java/lang/String".to_owned(),
                     nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
                 },
             )]),
             ..Default::default()
@@ -389,6 +402,8 @@ mod tests {
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
                         nullable,
+                        intrinsic: None,
+                        rendered: String::new(),
                     },
                 )]),
                 ..Default::default()
@@ -428,6 +443,14 @@ mod tests {
                 "{marker_name} with a nullable={nullable} argument"
             );
         }
+    }
+
+    #[test]
+    fn a_marker_call_makes_a_reified_body() {
+        let mut node = MethodNode::new(0x0008, "t", "()V");
+        assert!(!has_reified_markers(&node));
+        node.nodes = marker("T", 3);
+        assert!(has_reified_markers(&node));
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod classifier_kind;
+mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 pub(crate) mod function_classifiers;
@@ -2739,6 +2740,10 @@ pub struct LibraryType {
     /// non-annotation type. A Java `@interface` can never target a Kotlin PROPERTY, which is the
     /// distinction this carries and a raw target-name list would not.
     pub annotation_targets: Option<crate::types::AnnotationTargets>,
+    /// The collection classifier this declaration is one face of, as the platform's builtin class
+    /// map pairs them. Published by the provider that owns that map; `None` for every other
+    /// classifier.
+    pub mapped_collection: Option<crate::types::MappedCollection>,
 }
 
 impl std::ops::Deref for LibraryType {
@@ -2834,6 +2839,7 @@ impl LibraryType {
             annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
+            mapped_collection: None,
         }
     }
 
@@ -3331,6 +3337,7 @@ mod tests {
             annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
+            mapped_collection: None,
         };
         f(&mut t);
         t

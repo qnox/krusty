@@ -574,6 +574,9 @@ pub fn same(a: TypeName, b: TypeName) -> bool {
 
 pub mod wk;
 
+mod classifier_roles;
+pub use classifier_roles::{ClassifierRole, CollectionKind, MappedCollection};
+
 /// Intern a `Ty` to a canonical `&'static Ty` so a wrapped inner type (a `Nullable`/`TyParam` bound)
 /// compares by value — the derived `Eq`/`Hash` follow the reference, so equal inner types must share
 /// one pointer.
@@ -2241,6 +2244,12 @@ pub trait ClassifierFactSource {
     /// underlying type so a representation backend never has to reopen metadata or inspect a
     /// classfile to recover it.
     fn classifier_value_property(&self, _classifier: TypeName) -> Option<String> {
+        None
+    }
+
+    /// The role the classifier's declaration plays in type checks and casts, as its provider
+    /// published it. `None` for an ordinary classifier and for one the provider does not know.
+    fn classifier_role(&self, _classifier: TypeName) -> Option<ClassifierRole> {
         None
     }
 }
