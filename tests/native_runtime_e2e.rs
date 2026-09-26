@@ -124,19 +124,39 @@ fn build_and_run(driver: &str) -> Option<Output> {
     Some(Command::new(&executable).output().expect("run the driver"))
 }
 
-/// Run `driver`; the process must exit 0 and its stdout must end in `OK`. Returns the output for a
-/// driver whose test checks more than that. `None` when the host cannot run drivers at all.
-fn run_driver(driver: &str) -> Option<Output> {
+/// Run `driver`, which must succeed EXACTLY: exit status 0, stdout exactly `OK\n`, and nothing on
+/// stderr. A driver checks what it checks and says `OK` once; any other output means it printed
+/// something it should not have, which a looser test would let through.
+fn run_driver(driver: &str) {
+    let Some(output) = build_and_run(driver) else {
+        return;
+    };
+    assert!(
+        output.status.success() && output.stdout == b"OK\n" && output.stderr.is_empty(),
+        "{driver}: expected status 0, stdout \"OK\\n\" and an empty stderr, got {}\n\
+         stdout (first 200 bytes): {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(200)]),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run `driver`, which writes a payload and then `OK\n`: it must exit 0 with nothing on stderr and
+/// stdout ending in `OK\n`. Returns the payload before that `OK\n` for the test to check EXACTLY;
+/// only a driver whose output is itself the subject uses this. `None` when the host cannot run
+/// drivers at all.
+fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
     let output = build_and_run(driver)?;
     let stdout = &output.stdout;
     assert!(
-        output.status.success() && stdout.ends_with(b"OK\n"),
-        "{driver}: {}\nstdout (last 200 bytes): {:?}\nstderr: {}",
+        output.status.success() && stdout.ends_with(b"OK\n") && output.stderr.is_empty(),
+        "{driver}: expected status 0, stdout ending in \"OK\\n\" and an empty stderr, got {}\n\
+         stdout (last 200 bytes): {:?}\nstderr: {}",
         output.status,
         String::from_utf8_lossy(&stdout[stdout.len().saturating_sub(200)..]),
         String::from_utf8_lossy(&output.stderr)
     );
-    Some(output)
+    Some(stdout[..stdout.len() - b"OK\n".len()].to_vec())
 }
 
 /// Run `driver`, which must end the way the runtime ends a program it cannot continue
@@ -162,10 +182,9 @@ fn a_program_that_returns_ends_with_status_zero() {
 
 #[test]
 fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
-    let Some(output) = run_driver("write_nonblocking_stdout") else {
+    let Some(payload) = run_payload_driver("write_nonblocking_stdout") else {
         return;
     };
-    let payload = &output.stdout[..output.stdout.len() - "OK\n".len()];
     assert_eq!(payload.len(), 1 << 20, "every byte of the payload arrives");
     assert!(
         payload
