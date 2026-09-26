@@ -218,21 +218,6 @@ impl BodyLowering<'_> {
             );
         }
         let crate::fir::FirCallableReferenceTarget::Module(target) = target else {
-            if reflective {
-                let dispatch_receiver = self.receiver(dispatch_receiver)?;
-                let extension_receiver = self.receiver(extension_receiver)?;
-                return Ok(self.ir.add_expr(IrExpr::Checked(
-                    IrCheckedOperation::CallableReference {
-                        target,
-                        binding,
-                        dispatch_receiver,
-                        extension_receiver,
-                        function_type: reference_ty,
-                        substitutions: lower_substitutions(substitutions),
-                        adaptation: adaptation.cloned().map(Box::new),
-                    },
-                )));
-            }
             return self.checked_external_callable_reference(
                 target,
                 binding,

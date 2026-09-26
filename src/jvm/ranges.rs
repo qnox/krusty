@@ -143,7 +143,6 @@ pub(super) fn realize(
                 | IrCheckedOperation::PropertyWrite { .. }
                 | IrCheckedOperation::ExternalPropertyRead { .. }
                 | IrCheckedOperation::ExternalPropertyWrite { .. }
-                | IrCheckedOperation::CallableReference { .. }
                 | IrCheckedOperation::PropertyReference { .. },
             )
             // The backend pass above realized every counted loop.

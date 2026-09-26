@@ -55,7 +55,12 @@ pub(super) fn emit_reference_invoke_bridge(
         code.aload(1 + index as u16);
         if parameter.is_jvm_scalar() {
             let semantic = fr.param_tys.get(index).copied().unwrap_or(*parameter);
-            unbox_prim(cw, &mut code, semantic_scalar_adapter(semantic, *parameter));
+            unbox_prim_from(
+                cw,
+                &mut code,
+                Ty::obj("java/lang/Object"),
+                semantic_scalar_adapter(semantic, *parameter),
+            );
         } else if let Some(internal) = checkcast_internal(*parameter) {
             let class_ref = cw.class_ref(&internal);
             code.checkcast(class_ref);

@@ -6,9 +6,8 @@
 //! overload.
 
 use super::classpath::{Classpath, ExternalCallableKind};
-use crate::fir::{ExternalCallableId, FirCallableReferenceBinding, FirCallableReferenceTarget};
-use crate::ir::{FrDispatch, FuncRef, IrCheckedOperation, IrClass, IrExpr, IrFile, IrFunction};
-use crate::libraries::MemberRealization;
+use crate::fir::ExternalCallableId;
+use crate::ir::{FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
 use crate::types::{type_name, Ty};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,6 +53,71 @@ pub(super) fn reference_class_name(
         .unwrap_or_else(|| type_name(&format!("{current_facade}$fir${kind}${}", ir.classes.len())))
 }
 
+/// What a carrier reflects for a dependency target: kotlinc names the declaration's physical
+/// owner and JVM signature, except that a member is owned by the classifier it was referenced on.
+/// A top-level or extension function is flagged top-level, as its owner is a file facade. A package
+/// builtin the compiler implements has no facade: kotlinc reflects it on `Intrinsics.Kotlin`, not
+/// top-level, with the JVM signature its declaration maps to.
+fn external_reflection(
+    classpath: &Classpath,
+    declaration: ExternalCallableId,
+    receiver: Option<Ty>,
+) -> Result<
+    (Option<crate::types::TypeName>, String, bool, Option<String>),
+    FunctionReferenceRealizationTarget,
+> {
+    let realization = classpath
+        .external_callable(declaration)
+        .ok_or(FunctionReferenceRealizationTarget::External(declaration))?;
+    let callable = realization.callable;
+    let name = callable
+        .reflection_name
+        .clone()
+        .unwrap_or_else(|| callable.name.clone());
+    let descriptor = if callable.descriptor.is_empty() {
+        // A compiler-implemented declaration has no JVM method; its signature is the one its
+        // declaration maps to.
+        if callable.compiler_intrinsic.is_none() {
+            return Err(FunctionReferenceRealizationTarget::External(declaration));
+        }
+        let parameters = callable
+            .physical_params
+            .iter()
+            .map(super::ir_emit::ir_ty_to_jvm)
+            .collect::<Vec<_>>();
+        crate::jvm::names::method_descriptor(
+            &parameters,
+            super::ir_emit::ir_ty_to_jvm(&callable.physical_ret),
+        )
+    } else {
+        callable.descriptor.clone()
+    };
+    let owner = callable.owner.render();
+    let (owner_class, physical_name, top_level) = match realization.kind {
+        ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+            if callable.descriptor.is_empty() =>
+        {
+            (
+                Some(crate::types::wk::kotlin_intrinsics_reflection_owner()),
+                callable.name.as_str(),
+                false,
+            )
+        }
+        ExternalCallableKind::TopLevel | ExternalCallableKind::Extension => {
+            (Some(callable.owner), callable.name.as_str(), true)
+        }
+        ExternalCallableKind::Member => (
+            receiver.and_then(Ty::kotlin_class_internal),
+            crate::jvm::names::mapped_builtin_virtual_name(&owner, &callable.name, &descriptor),
+            false,
+        ),
+        // A selected function reference names a function, never a constructor or a field.
+        _ => return Err(FunctionReferenceRealizationTarget::External(declaration)),
+    };
+    let signature = format!("{physical_name}{descriptor}");
+    Ok((owner_class, name, top_level, Some(signature)))
+}
+
 /// The scope the reference at `expression` is written in, which its class is enclosed by.
 pub(super) fn reference_enclosure(
     ir: &IrFile,
@@ -67,6 +131,7 @@ pub(super) fn reference_enclosure(
 
 fn realize_adapter_reference(
     ir: &mut IrFile,
+    classpath: &Classpath,
     current_facade: &str,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
@@ -100,10 +165,13 @@ fn realize_adapter_reference(
         ir.private_methods.remove(&reference.adapter);
         ir.synthetic_methods.insert(reference.adapter);
     }
+    // Converting an ordinary function to a `suspend` function type adapts it even when nothing
+    // else about the call changes.
+    let suspend_conversion = function_type.suspend && !reference.declaration_suspend;
     let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
         adapted_flags(adaptation, reference.declaration_result)
-    });
-    let (owner_class, name, top_level) = match reference.target {
+    }) | (i32::from(suspend_conversion) << 1);
+    let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
                 .referenced_module_callables
@@ -113,22 +181,21 @@ fn realize_adapter_reference(
                 declaration.owner,
                 declaration.name.to_string(),
                 declaration.owner.is_none(),
+                None,
             )
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
-            (Some(classifier), "<init>".to_string(), false)
+            (Some(classifier), "<init>".to_string(), false, None)
         }
         crate::ir::IrCallableReferenceTarget::Local { owner, name } => {
-            (owner, name.into(), owner.is_none())
+            (owner, name.into(), owner.is_none(), None)
         }
-        // Only the native backend builds one of these: on the JVM a reflective dependency
-        // reference keeps its checked node, so that this realization never has to invent an owner
-        // spelling for a declaration the provider owns.
-        crate::ir::IrCallableReferenceTarget::External { declaration } => {
-            return Err(FunctionReferenceRealizationTarget::External(declaration))
-        }
+        crate::ir::IrCallableReferenceTarget::External {
+            declaration,
+            receiver,
+        } => external_reflection(classpath, declaration, receiver)?,
     };
-    let adapted = reference.adaptation.is_some();
+    let adapted = reference.adaptation.is_some() || suspend_conversion;
     let bound = reference.bound_receiver.is_some();
     let continuation = Ty::obj("kotlin/coroutines/Continuation");
     let mut invoke_parameters = function_type.params.clone();
@@ -189,6 +256,7 @@ fn realize_adapter_reference(
         staticbound_recv_unbox: None,
         invoke: None,
         function_type: reference.function_type.non_null(),
+        reflection_signature,
     });
     let class = ir.add_class(class);
     if own_invoke {
@@ -425,73 +493,6 @@ fn realize_own_invoke(
     reference.invoke = Some(adapter);
 }
 
-/// Materialize the physical target for an exact provider-selected member intrinsic that has no JVM
-/// method to reference. The generated static helper is an implementation detail of this backend;
-/// the surrounding `FuncRef` continues to describe the original Kotlin declaration for reflection
-/// and equality.
-fn intrinsic_member_adapter(
-    ir: &mut IrFile,
-    realization: MemberRealization,
-    receiver: Ty,
-    parameters: &[Ty],
-    result: Ty,
-) -> Option<(crate::ir::FunId, String)> {
-    let receiver_value = ir.add_expr(IrExpr::GetValue(0));
-    let arguments = parameters
-        .iter()
-        .enumerate()
-        .map(|(parameter, _)| ir.add_expr(IrExpr::GetValue(parameter as u32 + 1)))
-        .collect::<Vec<_>>();
-    let value = match realization {
-        MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::StringPlus)
-            if arguments.len() == 1 =>
-        {
-            ir.add_expr(IrExpr::Call {
-                callee: crate::ir::Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::StringPlus,
-                    ret: result,
-                },
-                dispatch_receiver: Some(receiver_value),
-                args: arguments,
-            })
-        }
-        MemberRealization::Intrinsic(intrinsic) => {
-            let operation = super::builtin_member_operations::operation(
-                ir,
-                intrinsic,
-                super::builtin_member_operations::BuiltinMemberOperands {
-                    receiver: receiver_value,
-                    receiver_ty: receiver,
-                    arguments: &arguments,
-                    parameters,
-                    result,
-                },
-            )?;
-            ir.add_expr(operation)
-        }
-        _ => return None,
-    };
-    let returned = ir.add_expr(IrExpr::Return(Some(value)));
-    let body = ir.add_expr(IrExpr::Block {
-        stmts: vec![returned],
-        value: None,
-    });
-    let name = format!("$fir$intrinsic$fnref${}", ir.functions.len());
-    let function = ir.add_fun(IrFunction {
-        name: name.clone(),
-        params: std::iter::once(receiver)
-            .chain(parameters.iter().copied())
-            .collect(),
-        ret: result,
-        body: Some(body),
-        is_static: true,
-        dispatch_receiver: None,
-        param_checks: Vec::new(),
-    });
-    ir.private_methods.insert(function);
-    Some((function, name))
-}
-
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
@@ -519,274 +520,21 @@ pub(super) fn realize(
     }
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
-        if let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() {
-            let adapter_owner = adapter_owners.get(&reference.adapter).copied();
-            let sole = adapter_uses.get(&reference.adapter) == Some(&1);
-            let own_invoke = sole && own_invoke_realizable(ir, classifiers, &reference);
-            realize_adapter_reference(
-                ir,
-                current_facade,
-                raw,
-                adapter_owner,
-                own_invoke,
-                reference,
-            )?;
-            continue;
-        }
-        let IrExpr::Checked(IrCheckedOperation::CallableReference {
-            target,
-            binding,
-            dispatch_receiver,
-            extension_receiver,
-            function_type,
-            substitutions: _,
-            adaptation,
-        }) = ir.exprs[raw].clone()
-        else {
+        let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
         };
-        if adaptation.is_some() || dispatch_receiver.is_some() && extension_receiver.is_some() {
-            return Err(FunctionReferenceRealizationTarget::Invalid);
-        }
-        let FirCallableReferenceTarget::External {
-            declaration,
-            receiver,
-            extension_receiver: target_is_extension,
-            parameters,
-            result,
-            ..
-        } = target
-        else {
-            return Err(FunctionReferenceRealizationTarget::Invalid);
-        };
-        let realization = classpath
-            .external_callable(declaration)
-            .ok_or(FunctionReferenceRealizationTarget::External(declaration))?;
-        let callable = realization.callable;
-        let Ty::Fun(reference) = function_type.non_null() else {
-            return Err(FunctionReferenceRealizationTarget::Invalid);
-        };
-        if reference.ret != result.get() || callable.suspend != reference.suspend {
-            return Err(FunctionReferenceRealizationTarget::External(declaration));
-        }
-
-        let capture = dispatch_receiver.or(extension_receiver);
-        let receiver_ty = receiver.map(crate::fir::ResolvedTy::get);
-        let semantic_parameters = parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect::<Vec<_>>();
-        let mut local_target = None;
-        let mut call_owner = Some(callable.owner);
-        let mut call_name = callable.name.clone();
-        let mut call_interface = callable.owner_is_interface;
-        let (bound, dispatch, owner_class, flags, target_parameters, reference_receiver) =
-            match (realization.kind, target_is_extension, binding) {
-                (ExternalCallableKind::TopLevel, false, FirCallableReferenceBinding::Static) => {
-                    if receiver_ty.is_some() || capture.is_some() {
-                        return Err(FunctionReferenceRealizationTarget::Invalid);
-                    }
-                    (
-                        false,
-                        FrDispatch::Static,
-                        Some(callable.owner),
-                        1,
-                        callable.physical_params.clone(),
-                        false,
-                    )
-                }
-                (ExternalCallableKind::Member, false, FirCallableReferenceBinding::Bound) => {
-                    if dispatch_receiver.is_none() || extension_receiver.is_some() {
-                        return Err(FunctionReferenceRealizationTarget::Invalid);
-                    }
-                    if callable.member_realization == MemberRealization::Dispatch {
-                        (
-                            true,
-                            FrDispatch::VirtualBound,
-                            receiver_ty.and_then(Ty::kotlin_class_internal),
-                            0,
-                            callable.physical_params.clone(),
-                            false,
-                        )
-                    } else {
-                        let receiver =
-                            receiver_ty.ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-                        let (target, name) = intrinsic_member_adapter(
-                            ir,
-                            callable.member_realization,
-                            receiver,
-                            &semantic_parameters,
-                            result.get(),
-                        )
-                        .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-                        local_target = Some(target);
-                        call_owner = None;
-                        call_name = name;
-                        call_interface = false;
-                        (
-                            true,
-                            FrDispatch::StaticBound,
-                            receiver.kotlin_class_internal(),
-                            0,
-                            std::iter::once(receiver)
-                                .chain(semantic_parameters.iter().copied())
-                                .collect(),
-                            false,
-                        )
-                    }
-                }
-                (ExternalCallableKind::Member, false, FirCallableReferenceBinding::Unbound) => {
-                    let receiver_ty =
-                        receiver_ty.ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-                    if capture.is_some() || reference.params.first().copied() != Some(receiver_ty) {
-                        return Err(FunctionReferenceRealizationTarget::Invalid);
-                    }
-                    if callable.member_realization == MemberRealization::Dispatch {
-                        let mut target = Vec::with_capacity(callable.physical_params.len() + 1);
-                        target.push(receiver_ty);
-                        target.extend(callable.physical_params.iter().copied());
-                        (
-                            false,
-                            FrDispatch::VirtualUnbound,
-                            receiver_ty.kotlin_class_internal(),
-                            0,
-                            target,
-                            true,
-                        )
-                    } else {
-                        let (target, name) = intrinsic_member_adapter(
-                            ir,
-                            callable.member_realization,
-                            receiver_ty,
-                            &semantic_parameters,
-                            result.get(),
-                        )
-                        .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-                        local_target = Some(target);
-                        call_owner = None;
-                        call_name = name;
-                        call_interface = false;
-                        (
-                            false,
-                            FrDispatch::Static,
-                            receiver_ty.kotlin_class_internal(),
-                            0,
-                            std::iter::once(receiver_ty)
-                                .chain(semantic_parameters.iter().copied())
-                                .collect(),
-                            true,
-                        )
-                    }
-                }
-                (ExternalCallableKind::Extension, true, FirCallableReferenceBinding::Bound) => {
-                    if extension_receiver.is_none() || dispatch_receiver.is_some() {
-                        return Err(FunctionReferenceRealizationTarget::Invalid);
-                    }
-                    (
-                        true,
-                        FrDispatch::StaticBound,
-                        receiver_ty.and_then(Ty::kotlin_class_internal),
-                        1,
-                        callable.physical_params.clone(),
-                        false,
-                    )
-                }
-                (ExternalCallableKind::Extension, true, FirCallableReferenceBinding::Unbound) => {
-                    let receiver_ty =
-                        receiver_ty.ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-                    if capture.is_some() || reference.params.first().copied() != Some(receiver_ty) {
-                        return Err(FunctionReferenceRealizationTarget::Invalid);
-                    }
-                    (
-                        false,
-                        FrDispatch::Static,
-                        receiver_ty.kotlin_class_internal(),
-                        1,
-                        callable.physical_params.clone(),
-                        true,
-                    )
-                }
-                _ => return Err(FunctionReferenceRealizationTarget::Invalid),
-            };
-
-        if parameters.len() + usize::from(reference_receiver) != reference.params.len()
-            || matches!(dispatch, FrDispatch::StaticBound) && target_parameters.is_empty()
-        {
-            return Err(FunctionReferenceRealizationTarget::External(declaration));
-        }
-        let mut invoke_parameters = reference.params.clone();
-        let mut invoke_result = reference.ret;
-        let target_result = callable.physical_ret;
-        if reference.suspend {
-            let continuation = Ty::obj("kotlin/coroutines/Continuation");
-            // The function carrier realizes suspend calling convention from the semantic reference,
-            // so its `invoke` gains the continuation here. The provider's physical callable already
-            // includes its continuation parameter and erased result; extending that descriptor again
-            // would emit a call with one more parameter than the operand vector can supply.
-            invoke_parameters.push(continuation);
-            invoke_result = Ty::obj("kotlin/Any");
-        }
-        let arity = u8::try_from(reference.params.len())
-            .map_err(|_| FunctionReferenceRealizationTarget::External(declaration))?;
-        let internal = reference_class_name(ir, current_facade, raw, "function");
-        let mut class = IrClass::synthetic(internal);
-        class.enclosure = reference_enclosure(ir, raw);
-        class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
-        class.func_ref = Some(FuncRef {
-            adapted: false,
-            bound,
-            field_capture_count: 0,
-            arity,
-            is_suspend: reference.suspend,
-            module_target: None,
-            local_target,
-            owner_class,
-            fn_name: callable
-                .reflection_name
-                .clone()
-                .unwrap_or_else(|| callable.name.clone()),
-            flags,
-            dispatch,
-            call_owner,
-            call_name,
-            reflection_name: None,
-            reflection_receiver_parameter: false,
-            // The selected provider realization above supplies physical call parameters, while
-            // callable-reference reflection identifies the Kotlin declaration. Preserve its
-            // semantic signature separately so the value-class pass mangles the reflected JVM
-            // signature from `Marker`, not from its already-erased `String` carrier.
-            reflection_target_ret_ty: Some(result.get()),
-            reflection_target_param_tys: Some(semantic_parameters),
-            call_interface,
-            param_tys: invoke_parameters,
-            ret_ty: invoke_result,
-            target_param_tys: target_parameters,
-            target_ret_ty: target_result,
-            unbox_params: vec![None; arity as usize],
-            unbox_param_nullable: vec![false; arity as usize],
-            box_ret: None,
-            staticbound_recv_unbox: None,
-            invoke: None,
-            function_type: function_type.non_null(),
-        });
-        let class = ir.add_class(class);
-        let carrier = match capture {
-            Some(capture) => IrExpr::New {
-                internal,
-                args: vec![capture],
-                ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
-                ctor_desc: None,
-                external_target: None,
-                defaults: Box::new([]),
-                default_prefix_count: 0,
-            },
-            None => IrExpr::StaticInstance {
-                owner: class,
-                ty: class,
-                field: "INSTANCE",
-            },
-        };
-        install_carrier(ir, raw, carrier, function_type);
+        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
+        let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+        let own_invoke = sole && own_invoke_realizable(ir, classifiers, &reference);
+        realize_adapter_reference(
+            ir,
+            classpath,
+            current_facade,
+            raw,
+            adapter_owner,
+            own_invoke,
+            reference,
+        )?;
     }
     Ok(())
 }
@@ -801,7 +549,7 @@ mod tests {
         let Ty::Fun(signature) = function_type.non_null() else {
             unreachable!("test function type")
         };
-        let adapter = ir.add_fun(IrFunction {
+        let adapter = ir.add_fun(crate::ir::IrFunction {
             name: "selected".to_string(),
             params: signature.params.clone(),
             ret: signature.ret,

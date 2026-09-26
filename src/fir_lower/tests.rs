@@ -1146,6 +1146,7 @@ fn external_unbound_reference_trusts_the_checked_receiver_widening() {
                 extension_receiver: true,
                 parameters: Box::new([]),
                 result: resolved(Ty::Boolean),
+                suspend: false,
             },
             function_type: resolved(function_type),
             reflective: false,
@@ -1164,14 +1165,23 @@ fn external_unbound_reference_trusts_the_checked_receiver_widening() {
 
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    let IrExpr::CallableReference(reference) = ir.expr(lowered.roots[0]) else {
+        panic!("an external reference lowers to a callable reference");
+    };
     assert!(matches!(
-        ir.expr(lowered.roots[0]),
-        IrExpr::Lambda {
-            arity: 1,
-            captures,
-            ..
-        } if captures.is_empty()
+        reference.target,
+        crate::ir::IrCallableReferenceTarget::External {
+            declaration: target,
+            receiver: Some(receiver),
+        } if target == declaration && receiver == Ty::nullable(Ty::String)
     ));
+    assert!(reference.captures.is_empty() && reference.bound_receiver.is_none());
+    // The adapter takes the function type's `String`; the declaration's `String?` receiver accepts
+    // it as checked, with no cast of its own.
+    assert_eq!(
+        ir.functions[reference.adapter as usize].params,
+        [Ty::String]
+    );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {

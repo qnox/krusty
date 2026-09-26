@@ -105,13 +105,10 @@ impl BodyFirChecker<'_> {
             } else {
                 self.reference_to_external(
                     expression,
-                    reference.target.external_identity,
-                    reference.target.external_default_provider,
-                    reference.target.compiler_intrinsic,
-                    None,
-                    false,
-                    &reference.target.params,
-                    reference.target.ret,
+                    ExternalReferenceDeclaration::callable(
+                        &reference.target,
+                        &reference.target.params,
+                    ),
                     FirCallableReferenceBinding::Static,
                     None,
                     None,
@@ -217,13 +214,7 @@ impl BodyFirChecker<'_> {
             } else {
                 self.reference_to_external(
                     expression,
-                    target.external_identity,
-                    target.external_default_provider,
-                    target.compiler_intrinsic,
-                    None,
-                    false,
-                    &target.params,
-                    target.ret,
+                    ExternalReferenceDeclaration::callable(&target, &target.params),
                     FirCallableReferenceBinding::Static,
                     None,
                     None,
@@ -619,13 +610,10 @@ impl BodyFirChecker<'_> {
                 } else {
                     self.reference_to_external(
                         expression,
-                        member.external_identity,
-                        member.external_default_provider,
-                        None,
-                        Some(receiver_ty),
-                        false,
-                        &member.params,
-                        member.ret,
+                        ExternalReferenceDeclaration {
+                            receiver: Some(receiver_ty),
+                            ..ExternalReferenceDeclaration::member(&member)
+                        },
                         binding,
                         dispatch_receiver,
                         None,
@@ -677,13 +665,11 @@ impl BodyFirChecker<'_> {
                     };
                     self.reference_to_external(
                         expression,
-                        callable.external_identity,
-                        callable.external_default_provider,
-                        callable.compiler_intrinsic,
-                        receiver_ty,
-                        extension_target,
-                        parameters,
-                        callable.ret,
+                        ExternalReferenceDeclaration {
+                            receiver: receiver_ty,
+                            extension_receiver_target: extension_target,
+                            ..ExternalReferenceDeclaration::callable(&callable, parameters)
+                        },
                         binding,
                         None,
                         extension_receiver,
@@ -744,13 +730,7 @@ impl BodyFirChecker<'_> {
                 } else {
                     self.reference_to_external(
                         expression,
-                        member.external_identity,
-                        member.external_default_provider,
-                        None,
-                        None,
-                        false,
-                        &member.params,
-                        member.ret,
+                        ExternalReferenceDeclaration::member(&member),
                         FirCallableReferenceBinding::Static,
                         None,
                         None,
@@ -1006,22 +986,25 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reference_to_external(
         &self,
         expression: ExprId,
-        declaration: Option<ExternalCallableId>,
-        default_provider: Option<ExternalCallableId>,
-        compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-        receiver: Option<Ty>,
-        extension_receiver_target: bool,
-        parameters: &[Ty],
-        result: Ty,
+        target: ExternalReferenceDeclaration<'_>,
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
         adaptation: Option<FirReferenceAdaptation>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ExternalReferenceDeclaration {
+            declaration,
+            default_provider,
+            compiler_intrinsic,
+            receiver,
+            extension_receiver_target,
+            parameters,
+            result,
+            suspend,
+        } = target;
         let span = self.file.expr_span(expression);
         let declaration = declaration
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
@@ -1100,6 +1083,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver: extension_receiver_target,
                 parameters: parameters.into_boxed_slice(),
                 result: resolved(result)?,
+                suspend,
             },
             function_type: self.reference_function_type(expression)?,
             reflective: self.reference_is_reflective(expression),
@@ -1433,4 +1417,47 @@ struct SelectedPropertyView<'a> {
     property_type: Ty,
     getter_name: &'a str,
     setter_name: Option<&'a str>,
+}
+
+/// The selected dependency declaration a callable reference names, as the provider normalized it.
+struct ExternalReferenceDeclaration<'a> {
+    declaration: Option<ExternalCallableId>,
+    default_provider: Option<ExternalCallableId>,
+    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
+    /// The receiver type a member or extension is referenced on.
+    receiver: Option<Ty>,
+    extension_receiver_target: bool,
+    parameters: &'a [Ty],
+    result: Ty,
+    /// The declaration itself is `suspend`, as opposed to a reference suspend-converted to a
+    /// `suspend` function type.
+    suspend: bool,
+}
+
+impl<'a> ExternalReferenceDeclaration<'a> {
+    fn callable(callable: &crate::libraries::LibraryCallable, parameters: &'a [Ty]) -> Self {
+        Self {
+            declaration: callable.external_identity,
+            default_provider: callable.external_default_provider,
+            compiler_intrinsic: callable.compiler_intrinsic,
+            receiver: None,
+            extension_receiver_target: false,
+            parameters,
+            result: callable.ret,
+            suspend: callable.suspend,
+        }
+    }
+
+    fn member(member: &'a crate::libraries::LibraryMember) -> Self {
+        Self {
+            declaration: member.external_identity,
+            default_provider: member.external_default_provider,
+            compiler_intrinsic: None,
+            receiver: None,
+            extension_receiver_target: false,
+            parameters: &member.params,
+            result: member.ret,
+            suspend: member.suspend(),
+        }
+    }
 }

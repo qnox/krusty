@@ -993,6 +993,9 @@ pub enum FirCallableReferenceTarget {
         extension_receiver: bool,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
+        /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
+        /// function is not.
+        suspend: bool,
     },
     Classifier {
         classifier: crate::types::TypeName,
