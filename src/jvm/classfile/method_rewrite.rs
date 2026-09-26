@@ -12,7 +12,9 @@
 //!
 //! A rewrite edits no frame: the class carries the frames the rewritten body implies, computed when
 //! the class is written (see [`super::stack_maps`]). The rewritten body is only kept if those frames
-//! can be computed; otherwise the method is written exactly as emitted. A constant the rewritten
+//! can be computed; otherwise the method is written as emitted, less the local variables whose range
+//! holds no instruction, which kotlinc's `prepareForEmitting` drops from every method it writes (a
+//! rewritten body loses them in its final dead-code step). A constant the rewritten
 //! body names that the pool lacks (a `Ref` element's descriptor, an unboxing call) is interned and
 //! the body laid out again. Where each of the method's constants lands in the pool, and which of
 //! its emitted constants no longer belong there, is settled once the class is serialized (see
@@ -156,6 +158,18 @@ impl MethodInfo {
         self.lvt = rewritten.lvt;
         self.implicit_void_return_pc = rewritten.implicit_void_return_pc;
     }
+
+    /// Drop every local variable whose range holds no instruction, as kotlinc's
+    /// `prepareForEmitting` does for every method it writes. A rewritten body has had them dropped
+    /// by its final dead-code step; this is that step for a method written as emitted.
+    fn drop_empty_locals(&mut self) {
+        let code_len = self.code.as_ref().map_or(0, Vec::len);
+        self.lvt.retain(|&(_, _, _, start, len)| {
+            let start = usize::from(start.unwrap_or(0));
+            let end = len.map_or(code_len, |len| start + usize::from(len));
+            start < end.min(code_len)
+        });
+    }
 }
 
 impl ClassWriter {
@@ -166,6 +180,7 @@ impl ClassWriter {
         let mut previous_end = 0;
         for index in 0..self.methods.len() {
             let Some(mut source) = self.methods[index].rewrite_source.take() else {
+                self.methods[index].drop_empty_locals();
                 continue;
             };
             let added_after = previous_end;
@@ -180,6 +195,7 @@ impl ClassWriter {
                 None => self.rewrite_interning(index, &source).0,
             };
             let Some(rewritten) = rewritten else {
+                self.methods[index].drop_empty_locals();
                 continue;
             };
             self.methods[index].take_rewritten(rewritten);
@@ -289,23 +305,35 @@ impl ClassWriter {
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
         let bytes = method.code.as_ref()?;
-        if bytes.is_empty() || source.builder.bytes != *bytes {
-            return None;
-        }
-        let FinishedNode {
-            node,
-            implicit_return,
-        } = self.finished_node(method, source, bytes, pool)?;
-        // The builder's labels and branch fixups name offsets of the emitted bytes, so the node must
-        // lay out exactly as emitted.
-        if pool.missed() || node.assemble(pool).ok()?.code != *bytes {
-            return None;
-        }
         let identity = MethodIdentity {
             access: source.access,
             name: &source.name,
             desc: &source.desc,
         };
+        if bytes.is_empty() || source.builder.bytes != *bytes {
+            self.trace_as_emitted(identity, format_args!("its body is not the builder's"));
+            return None;
+        }
+        let Some(FinishedNode {
+            node,
+            implicit_return,
+        }) = self.finished_node(method, source, bytes, pool)
+        else {
+            self.trace_as_emitted(identity, format_args!("its body does not read back"));
+            return None;
+        };
+        // The builder's labels and branch fixups name offsets of the emitted bytes, so the node must
+        // lay out exactly as emitted.
+        if pool.missed() {
+            return None;
+        }
+        if node.assemble(pool).ok().map(|laid| laid.code).as_ref() != Some(bytes) {
+            self.trace_as_emitted(
+                identity,
+                format_args!("its body does not lay out as emitted"),
+            );
+            return None;
+        }
         self.optimized(method, identity, node, implicit_return, pool)
     }
 
@@ -334,6 +362,10 @@ impl ClassWriter {
             });
         }
         if !Self::append_param_verif_types(source.desc, &mut entry) {
+            self.trace_as_emitted(
+                source,
+                format_args!("its descriptor names a parameter type the verifier lacks"),
+            );
             return None;
         }
         let entry = expand_slots(&entry);
@@ -344,17 +376,31 @@ impl ClassWriter {
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,
-            Outcome::Unchanged | Outcome::Declined => return None,
+            Outcome::Unchanged => return None,
+            Outcome::Declined => {
+                self.trace_as_emitted(source, format_args!("a pass declined the body"));
+                return None;
+            }
         };
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
         // A layout that wanted a constant is only laid out to learn every constant it wants.
-        let assembled = node.assemble(pool).ok()?;
+        let assembled = match node.assemble(pool) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                self.trace_as_emitted(
+                    source,
+                    format_args!("the optimized body fails to lay out: {error:?}"),
+                );
+                return None;
+            }
+        };
         if assembled
             .exception_table
             .iter()
             .any(|&(start, end, _, _)| start >= end)
         {
+            self.trace_as_emitted(source, format_args!("a protected range lays out empty"));
             return None;
         }
         // Each kept local keeps its pool entries, and a bound it left open stays open: a missing
@@ -362,9 +408,9 @@ impl ClassWriter {
         let kept_locals = method
             .lvt
             .iter()
-            .enumerate()
-            .filter(|&(at, _)| !removed_locals.get(at).copied().unwrap_or(false))
-            .map(|(_, entry)| entry);
+            .zip(&removed_locals)
+            .filter(|&(_, &removed)| !removed)
+            .map(|(entry, _)| entry);
         // A local whose type a rewrite changed (a `Ref` become its element) names its new
         // descriptor, which the pool must hold like every constant the body uses.
         let lvt: Vec<LvtEntry> = kept_locals
@@ -384,27 +430,30 @@ impl ClassWriter {
         if pool.missed() {
             return None;
         }
-        if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
-            // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
-            // does not own debug-local deletion, so preserve the original method instead.
-            return None;
-        }
         let implicit_void_return_pc = match implicit_return {
-            Some(label) => Some(assembled.offset_of(label)?),
+            Some(label) => match assembled.offset_of(label) {
+                Some(pc) => Some(pc),
+                None => {
+                    self.trace_as_emitted(source, format_args!("its implicit return is gone"));
+                    return None;
+                }
+            },
             None => None,
         };
 
         // The class carries the frames the rewritten body implies. A body they cannot be computed
         // for is written as emitted.
-        self.compute_frames(&stack_maps::Body {
+        if let Err(decline) = self.compute_frames(&stack_maps::Body {
             access: source.access,
             name: source.name,
             descriptor: source.desc,
             code: &assembled.code,
             exceptions: &assembled.exception_table,
             labels: stack_maps::table_labels(&assembled.line_numbers, &lvt, assembled.code.len()),
-        })
-        .ok()?;
+        }) {
+            self.trace_as_emitted(source, format_args!("no frames: {decline:?}"));
+            return None;
+        }
         Some(Rewritten {
             code: assembled.code,
             exceptions: assembled.exception_table,
@@ -412,6 +461,17 @@ impl ClassWriter {
             lvt,
             implicit_void_return_pc,
         })
+    }
+
+    /// Trace why the rewrite of `source` keeps the method as emitted.
+    fn trace_as_emitted(&self, source: MethodIdentity<'_>, why: std::fmt::Arguments<'_>) {
+        crate::trace_compiler!(
+            "bytecode",
+            "{}.{}{} is written as emitted: {why}",
+            self.internal_name,
+            source.name,
+            source.desc
+        );
     }
 }
 
@@ -467,6 +527,66 @@ mod tests {
         writer.rewrite_methods();
         assert_eq!(writer.methods[0].code.as_deref(), Some(&fresh.code[..]));
         assert_eq!(writer.methods[0].lnt, remembered_line);
+    }
+
+    /// `static int t4(boolean x) { if (x) { int unused = 5; } return 1; }`, with `unused`'s range
+    /// opening after its store and closing at the block's end: an empty range.
+    fn writer_with_empty_local() -> ClassWriter {
+        let mut writer = ClassWriter::new("T", "java/lang/Object");
+        let mut code = CodeBuilder::new(1);
+        let closed = code.new_label();
+        code.iload(0);
+        code.ifeq(closed);
+        code.push_int(5, &mut writer);
+        code.istore(1);
+        let opened = u16::try_from(code.bytes.len()).expect("a short body");
+        code.bind(closed);
+        code.push_int(1, &mut writer);
+        code.ireturn();
+        code.link();
+        code.add_local_entry(0, None, 0, "x", "Z");
+        code.add_local_entry(opened, Some(0), 1, "unused", "I");
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "t4", "(Z)I", &code);
+        writer
+    }
+
+    fn local_names(writer: &ClassWriter, method: &MethodInfo) -> Vec<String> {
+        method
+            .lvt
+            .iter()
+            .map(|&(name, ..)| writer.cp.utf8_at(name).expect("a name").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_local_with_an_empty_range_goes_when_the_method_is_rewritten() {
+        // The store opens a named local, so it is no temporary and stays; the entry goes with
+        // kotlinc's final dead-code step instead of keeping the method as emitted.
+        let mut writer = writer_with_empty_local();
+        let emitted = writer.methods[0].code.clone().expect("a body");
+        assert_eq!(local_names(&writer, &writer.methods[0]), ["x", "unused"]);
+        writer.rewrite_methods();
+        let method = &writer.methods[0];
+        assert_eq!(emitted, [0x1a, 0x99, 0x00, 0x05, 0x08, 0x3c, 0x04, 0xac]);
+        assert_eq!(method.code.as_deref(), Some(&emitted[..]));
+        assert_eq!(local_names(&writer, method), ["x"]);
+        let &(_, _, slot, start, len) = &method.lvt[0];
+        assert_eq!((slot, start, len), (0, Some(0), None));
+    }
+
+    #[test]
+    fn a_method_written_as_emitted_drops_its_empty_locals() {
+        // A method no rewrite reads (a coroutine transform's, for one) is written as it holds, but
+        // its empty locals go as kotlinc's `prepareForEmitting` drops them from every method.
+        let mut writer = writer_with_empty_local();
+        writer.methods[0].rewrite_source = None;
+        writer.rewrite_methods();
+        let method = &writer.methods[0];
+        assert_eq!(
+            method.code.as_deref(),
+            Some(&[0x1a, 0x99, 0x00, 0x05, 0x08, 0x3c, 0x04, 0xac][..])
+        );
+        assert_eq!(local_names(&writer, method), ["x"]);
     }
 
     #[test]
