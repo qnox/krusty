@@ -144,7 +144,10 @@ pub(super) fn emit_func_ref_class(
             mapped_builtin_virtual_name(&call_owner, reflection_name, &signature_desc)
         }
     };
-    let signature = format!("{signature_name}{signature_desc}");
+    let signature = fr
+        .reflection_signature
+        .clone()
+        .unwrap_or_else(|| format!("{signature_name}{signature_desc}"));
 
     let call_desc = if matches!(fr.dispatch, FrDispatch::SuspendConvert) {
         // The delegated call is the wrapped value's ERASED `Function{n}.invoke` — `n` erased Object
@@ -191,7 +194,7 @@ pub(super) fn emit_func_ref_class(
         if fr.bound {
             ctor.aload(slot);
         }
-        ctor.ldc_class(&owner_class, &mut cw);
+        push_reflection_owner(&mut ctor, &mut cw, fr.owner_class, &owner_class);
         ctor.push_string(&fr.fn_name, &mut cw);
         ctor.push_string(&signature, &mut cw);
         ctor.push_int(fr.flags, &mut cw);
@@ -221,7 +224,7 @@ pub(super) fn emit_func_ref_class(
         ctor.aload(0);
         ctor.push_int(physical_arity as i32, &mut cw);
         ctor.aload(1);
-        ctor.ldc_class(&owner_class, &mut cw);
+        push_reflection_owner(&mut ctor, &mut cw, fr.owner_class, &owner_class);
         ctor.push_string(&fr.fn_name, &mut cw);
         ctor.push_string(&signature, &mut cw);
         ctor.push_int(fr.flags, &mut cw);
@@ -249,7 +252,7 @@ pub(super) fn emit_func_ref_class(
         let mut ctor = CodeBuilder::new(1);
         ctor.aload(0);
         ctor.push_int(physical_arity as i32, &mut cw);
-        ctor.ldc_class(&owner_class, &mut cw);
+        push_reflection_owner(&mut ctor, &mut cw, fr.owner_class, &owner_class);
         ctor.push_string(&fr.fn_name, &mut cw);
         ctor.push_string(&signature, &mut cw);
         ctor.push_int(fr.flags, &mut cw);
@@ -494,4 +497,33 @@ pub(super) fn emit_func_ref_class(
         add_singleton_instance_field(&mut cw, &fq);
     }
     finish_local_synthetic_class(cw)
+}
+
+/// Push the `Class` a carrier reflects its declaration's owner as, the way kotlinc's
+/// `FunctionReferenceLowering` does: a primitive's `TYPE` for a member of a signed scalar
+/// classifier, and the compiler's own `Intrinsics.Kotlin` symbol (a final nested class to kotlinc,
+/// whatever the class file says) for a package builtin; otherwise the owner's mapped class.
+fn push_reflection_owner(
+    code: &mut CodeBuilder,
+    cw: &mut ClassWriter,
+    owner: Option<crate::types::TypeName>,
+    mapped: &str,
+) {
+    let scalar = owner
+        .map(|owner| Ty::Obj(owner, Default::default()).canonical_semantic())
+        .filter(|ty| ty.is_jvm_scalar() && !ty.is_unsigned());
+    if let Some(wrapper) = scalar.and_then(crate::jvm::jvm_class_map::wrapper_internal) {
+        let field = cw.fieldref(wrapper, "TYPE", "Ljava/lang/Class;");
+        code.getstatic(field, 1);
+        return;
+    }
+    if owner == Some(crate::types::wk::kotlin_intrinsics_reflection_owner()) {
+        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+            inner: mapped.to_string(),
+            outer: Some(crate::types::wk::kotlin_jvm_intrinsics().render()),
+            name: Some(crate::types::wk::KOTLIN_INTRINSICS_REFLECTION_OWNER.to_string()),
+            access: 0x0019,
+        });
+    }
+    code.ldc_class(mapped, cw);
 }

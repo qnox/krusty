@@ -8,9 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fir::{
-    CallableId, FirCallableReferenceTarget, FirConstructorTarget, FirPropertyReferenceTarget,
-    FirPropertyTarget, FirReferenceAdaptation, FirTypeParameterRef, FirTypeSubstitution,
-    ResolvedTy,
+    CallableId, FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation,
+    FirTypeParameterRef, FirTypeSubstitution, ResolvedTy,
 };
 use crate::ir::{
     Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst,
@@ -746,6 +745,13 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
     match expression {
         IrExpr::Checked(operation) => specialize_checked_operation(operation, bindings),
         IrExpr::CallableReference(reference) => {
+            if let crate::ir::IrCallableReferenceTarget::External {
+                receiver: Some(receiver),
+                ..
+            } = &mut reference.target
+            {
+                specialize_ty(receiver, bindings);
+            }
             specialize_ty(&mut reference.function_type, bindings);
             specialize_tys(&mut reference.declaration_parameters, bindings);
             specialize_ty(&mut reference.declaration_result, bindings);
@@ -1053,76 +1059,6 @@ fn specialize_reference_adaptation(
     specialize_resolved_ty(&mut adaptation.result_type, bindings);
 }
 
-fn specialize_constructor_target(
-    target: &mut FirConstructorTarget,
-    bindings: &HashMap<String, Ty>,
-) {
-    if let FirConstructorTarget::External {
-        parameters,
-        annotation,
-        ..
-    } = target
-    {
-        specialize_resolved_tys(parameters, bindings);
-        if let Some(annotation) = annotation {
-            for (_, ty) in &mut annotation.members {
-                specialize_resolved_ty(ty, bindings);
-            }
-        }
-    }
-}
-
-fn specialize_callable_reference_target(
-    target: &mut FirCallableReferenceTarget,
-    bindings: &HashMap<String, Ty>,
-) {
-    match target {
-        FirCallableReferenceTarget::Module(_) => {}
-        FirCallableReferenceTarget::ArrayFactory {
-            array_type,
-            element_type,
-            parameters,
-            ..
-        } => {
-            specialize_resolved_ty(array_type, bindings);
-            specialize_resolved_ty(element_type, bindings);
-            specialize_resolved_tys(parameters, bindings);
-        }
-        FirCallableReferenceTarget::Constructor {
-            target,
-            outer,
-            parameters,
-            result,
-            ..
-        } => {
-            specialize_constructor_target(target, bindings);
-            if let Some(outer) = outer {
-                specialize_resolved_ty(outer, bindings);
-            }
-            specialize_resolved_tys(parameters, bindings);
-            specialize_resolved_ty(result, bindings);
-        }
-        FirCallableReferenceTarget::External {
-            receiver,
-            parameters,
-            result,
-            ..
-        } => {
-            if let Some(receiver) = receiver {
-                specialize_resolved_ty(receiver, bindings);
-            }
-            specialize_resolved_tys(parameters, bindings);
-            specialize_resolved_ty(result, bindings);
-        }
-        FirCallableReferenceTarget::Classifier {
-            parameters, result, ..
-        } => {
-            specialize_resolved_tys(parameters, bindings);
-            specialize_resolved_ty(result, bindings);
-        }
-    }
-}
-
 fn specialize_property_target(target: &mut FirPropertyTarget, bindings: &HashMap<String, Ty>) {
     if let FirPropertyTarget::External {
         receiver,
@@ -1247,20 +1183,6 @@ fn specialize_checked_operation(
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. } => {}
-        IrCheckedOperation::CallableReference {
-            target,
-            function_type,
-            substitutions,
-            adaptation,
-            ..
-        } => {
-            specialize_callable_reference_target(target, bindings);
-            specialize_ty(function_type, bindings);
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-            specialize_reference_adaptation(adaptation, bindings);
-        }
         IrCheckedOperation::PropertyReference {
             target,
             substitutions,

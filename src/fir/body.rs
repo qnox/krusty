@@ -926,9 +926,17 @@ pub enum FirCallableReferenceTarget {
         declaration: ExternalCallableId,
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
+        /// The provider's declared extension receiver before call-site substitution, exactly as an
+        /// ordinary external call records it.
+        declared_receiver: Option<ResolvedTy>,
         extension_receiver: bool,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
+        /// The provider's declared result before call-site substitution.
+        declared_result: Option<ResolvedTy>,
+        /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
+        /// function is not.
+        suspend: bool,
     },
     Classifier {
         classifier: crate::types::TypeName,

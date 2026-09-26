@@ -182,12 +182,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 source.map_operands(&mut map);
                 *body = map(*body);
             }
-            IrCheckedOperation::CallableReference {
-                dispatch_receiver,
-                extension_receiver,
-                ..
-            }
-            | IrCheckedOperation::PropertyReference {
+            IrCheckedOperation::PropertyReference {
                 dispatch_receiver,
                 extension_receiver,
                 ..

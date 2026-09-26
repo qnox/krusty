@@ -1361,6 +1361,8 @@ mod declaration_debug_lines_e2e;
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
+#[path = "library_function_reference_class_e2e.rs"]
+mod library_function_reference_class_e2e;
 #[path = "loop_backedge_narrowing_e2e.rs"]
 mod loop_backedge_narrowing_e2e;
 #[path = "nested_data_class_tostring_recipe_e2e.rs"]

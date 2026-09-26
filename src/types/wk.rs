@@ -29,6 +29,7 @@ names! {
     kotlin_enum => "kotlin/Enum",
     uint => "kotlin/UInt",
     ulong => "kotlin/ULong",
+    kotlin_jvm_intrinsics => "kotlin/jvm/internal/Intrinsics",
     int_range => "kotlin/ranges/IntRange",
     long_range => "kotlin/ranges/LongRange",
     char_range => "kotlin/ranges/CharRange",
@@ -39,6 +40,16 @@ names! {
     char_progression => "kotlin/ranges/CharProgression",
     uint_progression => "kotlin/ranges/UIntProgression",
     ulong_progression => "kotlin/ranges/ULongProgression",
+}
+
+/// The nested class of `Intrinsics` kotlinc's callable-reference reflection names as the owner of a
+/// package builtin the compiler implements, which has no file facade.
+pub const KOTLIN_INTRINSICS_REFLECTION_OWNER: &str = "Kotlin";
+
+/// `Intrinsics.Kotlin`: see [`KOTLIN_INTRINSICS_REFLECTION_OWNER`].
+pub fn kotlin_intrinsics_reflection_owner() -> TypeName {
+    static S: OnceLock<TypeName> = OnceLock::new();
+    *S.get_or_init(|| kotlin_jvm_intrinsics().nested_child(KOTLIN_INTRINSICS_REFLECTION_OWNER))
 }
 
 /// How kotlinc's `ForLoopsLowering` treats a `kotlin.ranges` progression class. Its constructors
