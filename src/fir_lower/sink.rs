@@ -1547,8 +1547,8 @@ fn inline_parameter_modifiers(
     index: &ResolvedModuleIndex,
     callable: crate::fir::CallableId,
     identities: &[crate::ir::IrParameterIdentity],
-) -> Vec<crate::ir::IrInlineParameterModifier> {
-    use crate::ir::IrInlineParameterModifier as Modifier;
+) -> Vec<crate::types::InlineParameterModifier> {
+    use crate::types::InlineParameterModifier as Modifier;
     let mut ordinal = 0;
     identities
         .iter()

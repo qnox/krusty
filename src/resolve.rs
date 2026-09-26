@@ -6051,7 +6051,7 @@ fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
         lambda_receivers: selected(&sig.lambda_receivers, parameters),
         lambda_receiver_params: selected(&sig.lambda_receiver_params, parameters),
         lambda_context_counts: selected(&sig.lambda_context_counts, parameters),
-        lambda_materialized: selected(&sig.lambda_materialized, parameters),
+        inline_modifiers: selected(&sig.inline_modifiers, parameters),
         platform_nullable_params: selected(&sig.platform_nullable_params, parameters),
         required: crate::libraries::required_arity(parameters.len(), &param_defaults),
         param_defaults,
@@ -22105,12 +22105,11 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_context_counts: Option<Vec<usize>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.context_counts.clone());
-                // Per-param `crossinline`/`noinline`: such a lambda argument is MATERIALIZED (a real
-                // closure, e.g. the `Continuation(ctx){…}` factory's `resumeWith`), so a mutable local it
-                // captures must be `Ref`-boxed — DON'T treat it as an inline splice.
-                let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_lambda_shape
+                // Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is
+                // `Ref`-boxed (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
+                let toplevel_lambda_boxes_captures: Option<Vec<bool>> = toplevel_lambda_shape
                     .as_ref()
-                    .and_then(|shape| shape.materialized.clone());
+                    .and_then(|shape| shape.boxes_captures.clone());
                 // Functional-interface adaptation must be selected before a lambda receives its
                 // first expected type. Query the same federated top-level candidate set used for
                 // final resolution; declaration origin never participates in this decision.
@@ -22317,8 +22316,8 @@ impl<'a> Checker<'a> {
                     .and_then(|shape| shape.expected_types.clone());
                 let this_member_lambda_inline =
                     implicit_library_ext_lambda_shape.is_some_and(|shape| shape.inline);
-                let this_member_lambda_materialized =
-                    implicit_library_ext_lambda_shape.and_then(|shape| shape.materialized.clone());
+                let this_member_lambda_boxes_captures = implicit_library_ext_lambda_shape
+                    .and_then(|shape| shape.boxes_captures.clone());
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
@@ -22588,9 +22587,9 @@ impl<'a> Checker<'a> {
                                 .copied()
                                 .flatten();
                             let inline = this_member_lambda_inline
-                                && !this_member_lambda_materialized
+                                && !this_member_lambda_boxes_captures
                                     .as_ref()
-                                    .and_then(|materialized| materialized.get(i))
+                                    .and_then(|boxes| boxes.get(i))
                                     .copied()
                                     .unwrap_or(false);
                             if let Some(Ty::Fun(signature)) = this_member_lambda_expected
@@ -22723,8 +22722,8 @@ impl<'a> Checker<'a> {
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            // crossinline/noinline materializes a closure; other inline lambdas splice.
-                            let materialized = toplevel_lambda_materialized
+                            // A crossinline/noinline lambda Ref-boxes the locals it changes.
+                            let boxes_captures = toplevel_lambda_boxes_captures
                                 .as_ref()
                                 .and_then(|m| m.get(i))
                                 .copied()
@@ -22775,7 +22774,7 @@ impl<'a> Checker<'a> {
                                     .push(PostponedCallConstraints::for_formals(postponed_formals));
                             }
                             let checked = self.with_lambda_mutation(
-                                    toplevel_inline && !materialized,
+                                    toplevel_inline && !boxes_captures,
                                     |c| {
                                         if let Some(Ty::Fun(signature)) = expected_type {
                                             if toplevel_lambda_fixed_expected
@@ -27701,7 +27700,7 @@ mod tests {
             vec![false],
             vec![Some(Ty::String)],
             vec![true],
-            vec![false],
+            vec![crate::types::InlineParameterModifier::None],
             None,
         );
 
@@ -46550,16 +46549,15 @@ impl<'a> Checker<'a> {
                 })
                 .collect(),
         );
-        shape.materialized = Some(
+        shape.boxes_captures = Some(
             argument_map
                 .iter()
                 .map(|&parameter| {
                     overload
                         .call_sig
-                        .lambda_materialized
+                        .inline_modifiers
                         .get(parameter)
-                        .copied()
-                        .unwrap_or(false)
+                        .is_some_and(|inlining| inlining.boxes_captures())
                 })
                 .collect(),
         );
@@ -46586,7 +46584,7 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .is_some_and(|items| items.iter().any(|count| *count > 0))
             || shape
-                .materialized
+                .boxes_captures
                 .as_ref()
                 .is_some_and(|items| items.iter().any(|item| *item)))
         .then_some(shape)
@@ -49083,7 +49081,7 @@ impl<'a> Checker<'a> {
     }
     /// Commit inline-lambda capture semantics from one already-selected callable. Candidate probing may
     /// contextually type a lambda, but only selection may decide whether that lambda is spliced or
-    /// materialized (`crossinline`/`noinline`). The checker-owned slot map supplies the exact parameter
+    /// boxes its captures (`crossinline`/`noinline`). The checker-owned slot map supplies the exact parameter
     /// for named/default/trailing-lambda calls, so lowering never reconstructs this decision from syntax.
     fn mark_selected_inline_lambdas(
         &mut self,
@@ -49102,10 +49100,9 @@ impl<'a> Checker<'a> {
         for (parameter, argument) in slots.into_iter().enumerate() {
             let Some(argument) = argument else { continue };
             if call_sig
-                .lambda_materialized
+                .inline_modifiers
                 .get(parameter)
-                .copied()
-                .unwrap_or(false)
+                .is_some_and(|inlining| inlining.boxes_captures())
                 || !matches!(self.file.expr(argument), Expr::Lambda { .. })
             {
                 continue;
@@ -65542,7 +65539,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|count| *count > 0)
                         .then_some(plan.context_counts),
-                    materialized: None,
+                    boxes_captures: None,
                     inline: false,
                 });
         let extension = extension.or_else(|| {
@@ -65586,7 +65583,7 @@ impl<'a> Checker<'a> {
                 fixed_expected_types: None,
                 receivers: None,
                 context_counts: None,
-                materialized: None,
+                boxes_captures: None,
                 inline: false,
             })
         });

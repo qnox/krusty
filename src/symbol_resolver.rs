@@ -91,7 +91,7 @@ pub struct LambdaCallShape {
     pub fixed_expected_types: Option<Vec<Option<Ty>>>,
     pub receivers: Option<Vec<Option<Ty>>>,
     pub context_counts: Option<Vec<usize>>,
-    pub materialized: Option<Vec<bool>>,
+    pub boxes_captures: Option<Vec<bool>>,
     /// The selected callable permits its non-materialized lambda arguments to be spliced.
     pub inline: bool,
 }
@@ -8449,7 +8449,7 @@ mod tests {
             origin: Origin::Library,
             source_receiver: None,
             declared_params: None,
-            lambda_materialized: Box::new([]),
+            inline_modifiers: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,

@@ -4,6 +4,7 @@
 
 mod interning;
 pub use crate::context_parameters::ContextParameterKind;
+pub use crate::inline_parameter_modifier::InlineParameterModifier;
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 use std::collections::HashMap;

@@ -552,7 +552,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             },
             source_receiver: receiver,
             declared_params,
-            lambda_materialized: Box::new([]),
+            inline_modifiers: Box::new([]),
             context_count,
             contract: None,
             equality_bound: None,
