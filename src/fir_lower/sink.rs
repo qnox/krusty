@@ -1416,7 +1416,7 @@ impl<'a> CommonIrBodySink<'a> {
             self.ir.unlooped_tailrec.insert(function);
         }
         let body = if let Some(frame) = frame {
-            finish_tailrec_body(self.ir, roots, frame, origin)
+            finish_tailrec_body(self.ir, roots, frame, lowered.implicit_return, origin)
                 .map_err(FirFileLoweringFailure::Body)?
         } else {
             finish_callable_body(

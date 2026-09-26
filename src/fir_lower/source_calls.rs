@@ -1362,7 +1362,6 @@ impl BodyLowering<'_> {
         let direct = (extension_receiver.is_none()
             || (extension_receiver_mode == SameFileExtensionReceiverMode::DirectWhenOrdered
                 && arguments.is_empty()))
-            && !declaration_flags.has(crate::fir::DeclarationFlags::TAILREC)
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
             && arguments_follow_parameter_order(arguments, None);
         let bindings = substitutions

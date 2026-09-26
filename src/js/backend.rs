@@ -149,8 +149,11 @@ mod tests {
     fn js_backend_emits_checked_block_expression() {
         let (outputs, diags) = compile_js_sources(&[(
             "Main",
-            "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
-             fun box(): Int = C().f(3)",
+            "class C {\n\
+                 tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1)\n\
+                 fun g(a: Int, b: Int): Int = a - b\n\
+             }\n\
+             fun box(): Int = C().g(b = C().f(3), a = 1)",
         )]);
 
         assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
@@ -158,15 +161,38 @@ mod tests {
         let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
         // What this test is about: a call whose receiver and arguments are spilled into
         // temporaries is a checked BLOCK expression, and emitting one as a VALUE needs the
-        // block-expression path rather than the statement one. `box()`'s `C().f(3)` is that shape.
-        assert!(source.contains("return v0.f(v1);"), "{source}");
+        // block-expression path rather than the statement one. `box()`'s named arguments, written
+        // out of order, are that shape.
+        assert!(source.contains("return v0.g(v2, v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
-        // `f`'s own body used to be the marker above, as a `return v2.f(v3);` — it is a loop now,
-        // because a member `tailrec` whose self-call dispatches on `this` is the same frame and
-        // steps (docs/SPEC.md, "What `tailrec` loops is a FRAME"). Asserted rather than dropped:
-        // this backend renders the rewrite's output directly, so it is the cheapest place to see
-        // that the member rewrite reaches every backend and not only the JVM one.
+        // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps
+        // (docs/SPEC.md, "What `tailrec` loops is a FRAME"). The step sits in a branch of the
+        // returned `if`, so the `return` moves into the branches and the `continue` stays a
+        // statement of the loop. Asserted here because this backend renders the rewrite's output
+        // directly, so it is the cheapest place to see that the rewrite reaches every backend.
         assert!(source.contains("continue $tailrec;"), "{source}");
+    }
+
+    /// `a ?: b ?: f(x - 1)` coerces the inner elvis and coerces that again, so the loop step sits
+    /// under a coercion around a `when`. The `return` moves through the coercion into the arms, so
+    /// the `continue` is a statement of the loop and never an expression.
+    #[test]
+    fn js_backend_moves_a_return_through_an_elvis_coercion() {
+        let (outputs, diags) = compile_js_sources(&[(
+            "Main",
+            "tailrec fun chained(x: Int): Int? {\n\
+                 if (x < 0) return null\n\
+                 if (x == 0) return 7\n\
+                 return chained(-1) ?: chained(-2) ?: chained(x - 1)\n\
+             }",
+        )]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
+        assert_eq!(
+            source,
+            "function chained(v0) {\n  $tailrec:\n  do {\n    if ((v0 < 0)) {\n      return null;\n    }\n    else {\n    }\n    if ((v0 === 0)) {\n      return 7;\n    }\n    else {\n    }\n    let v1 = chained(-1);\n    if ((v1 === null)) {\n      let v2 = chained(-2);\n      if ((v2 === null)) {\n        let v3 = (v0 - 1);\n        v0 = v3;\n        continue $tailrec;\n      }\n      else {\n        return v2;\n      }\n    }\n    else {\n      return v1;\n    }\n    break $tailrec;\n  } while (true);\n}\n"
+        );
     }
 
     #[test]

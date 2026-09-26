@@ -190,6 +190,7 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                 emit_stmt(ir, *v, depth, inst, out);
             }
         }
+        IrExpr::Return(Some(v)) if jumps(ir, *v) => emit_return(ir, *v, depth, inst, out),
         IrExpr::Return(v) => {
             indent(depth, out);
             match v {
@@ -311,6 +312,68 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             indent(depth, out);
             out.push_str(&emit_expr_node(ir, other, inst));
             out.push_str(";\n");
+        }
+    }
+}
+
+/// Whether `e` holds a `break` or `continue` outside any lambda: a value JavaScript cannot compute
+/// as an expression, since a jump cannot leave an expression's function.
+fn jumps(ir: &IrFile, e: u32) -> bool {
+    match ir.expr(e) {
+        IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
+        IrExpr::Lambda { .. } => false,
+        _ => {
+            let mut found = false;
+            crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
+                found = found || jumps(ir, child);
+            });
+            found
+        }
+    }
+}
+
+/// `return <e>` where `e` jumps on some path: the `return` moves into each branch and after each
+/// block's statements, so every jump stays a statement of the enclosing loop. A path that ends in
+/// a jump returns nothing.
+fn emit_return(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
+    match ir.expr(e) {
+        IrExpr::When { branches } => {
+            for (index, (cond, body)) in branches.iter().enumerate() {
+                indent(depth, out);
+                match cond {
+                    Some(c) => {
+                        let kw = if index == 0 { "if" } else { "else if" };
+                        out.push_str(&format!("{kw} ({}) {{\n", emit_expr(ir, *c, inst)));
+                    }
+                    None => out.push_str("else {\n"),
+                }
+                emit_return(ir, *body, depth + 1, inst, out);
+                indent(depth, out);
+                out.push_str("}\n");
+            }
+        }
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } => {
+            for &statement in stmts {
+                emit_stmt(ir, statement, depth, inst, out);
+            }
+            emit_return(ir, *value, depth, inst, out);
+        }
+        IrExpr::Block { value: None, .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => {
+            emit_stmt(ir, e, depth, inst, out)
+        }
+        // A cast is the value itself here (see the `TypeOp` expression), so the `return` moves
+        // through it like through a block's value: an elvis arm's coercion can hold the jump.
+        IrExpr::TypeOp { op, arg, .. }
+            if !matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) =>
+        {
+            emit_return(ir, *arg, depth, inst, out)
+        }
+        _ => {
+            indent(depth, out);
+            out.push_str(&format!("return {};\n", emit_expr(ir, e, inst)));
         }
     }
 }
