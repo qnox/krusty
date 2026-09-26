@@ -245,17 +245,12 @@ pub(crate) fn propagate(method: &mut MethodNode, owner: &str) -> Result<bool, An
         return Ok(false);
     }
     let mut interpreter = HazardsTracking::new(method.nodes.len());
-    // The frames, and the instructions marked untouchable, are the same in any visiting order; the
-    // index order only spares revisiting the rest of the method after every joining branch.
     let frames = analyze_with(
         method,
         owner,
         &mut interpreter,
         &mut PlainFrames,
-        AnalyzerOptions {
-            in_index_order: true,
-            ..AnalyzerOptions::default()
-        },
+        AnalyzerOptions::default(),
     )?;
     let mut run = Run {
         nodes: &method.nodes,

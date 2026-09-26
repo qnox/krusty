@@ -28,6 +28,7 @@ use super::header::{
 use super::identities::ExternalCallableId;
 use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
+use super::retained_bodies::InlineBodyStore;
 use super::signature::ResolvedTy;
 
 /// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
@@ -2900,21 +2901,6 @@ impl FirBody {
     }
 }
 
-/// Persistent checked bodies required by call-site inlining. The only insertion path checks the
-/// resolved declaration header and rejects every ordinary body.
-#[derive(Debug, Default)]
-pub struct InlineBodyStore {
-    bodies: std::collections::BTreeMap<CallableId, FirBody>,
-}
-
-/// Checked signature expressions retained from Pass 1 until their owning source is lowered. Unlike
-/// an ordinary body, a default is callable signature payload: callers and the generated default ABI
-/// need it even when the declaration body is reparsed later.
-#[derive(Debug, Default)]
-pub struct DefaultArgumentStore {
-    bodies: std::collections::BTreeMap<CallableId, FirBody>,
-}
-
 /// Callable facts published by signature finalization. Construction is crate-private so syntax
 /// alone cannot claim that a declaration is semantically inline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2964,158 +2950,6 @@ impl ResolvedCallableHeader {
 
     pub const fn is_inline(self) -> bool {
         self.inline
-    }
-}
-
-impl InlineBodyStore {
-    pub fn insert(&mut self, callable: ResolvedCallableHeader, body: FirBody) {
-        assert!(
-            callable.is_inline(),
-            "only semantically inline declarations may enter InlineBodyStore"
-        );
-        assert_eq!(
-            body.owner(),
-            BodyOwnerId::from_raw(callable.declaration.raw()),
-            "inline FIR must belong to the inserted declaration"
-        );
-        crate::trace_compiler!(
-            "fir",
-            "retain signature defaults callable={:?} declaration={:?} count={}",
-            callable.id,
-            callable.declaration,
-            body.default_values().len(),
-        );
-        assert!(
-            self.bodies.insert(callable.id, body).is_none(),
-            "an inline callable body may be inserted only once"
-        );
-    }
-
-    pub fn get(&self, callable: CallableId) -> Option<&FirBody> {
-        self.bodies.get(&callable)
-    }
-
-    pub(crate) fn attach_nested_declaration_body(&mut self, callable: CallableId, body: FirBody) {
-        self.bodies
-            .get_mut(&callable)
-            .expect("an inline root must be retained before its nested declarations")
-            .attach_inline_nested_declaration_body(body);
-    }
-
-    pub(crate) fn retained_bodies_for_source<'a>(
-        &'a self,
-        index: &'a super::signature::ResolvedModuleIndex,
-        source: SourceFileId,
-    ) -> impl Iterator<Item = &'a FirBody> + 'a {
-        self.bodies.values().filter(move |body| {
-            index
-                .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
-                .is_some_and(|anchor| anchor.source == source)
-        })
-    }
-
-    /// Clone the retained bodies for one source into a consuming lowering unit. The originals remain
-    /// available for call-site inlining throughout Pass 2; only inline FIR is allowed to pay this
-    /// retention/copy cost.
-    pub fn bodies_for_source(
-        &self,
-        index: &super::signature::ResolvedModuleIndex,
-        source: SourceFileId,
-    ) -> Vec<(CallableId, FirBody)> {
-        self.bodies
-            .iter()
-            .filter_map(|(callable, body)| {
-                index
-                    .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
-                    .is_some_and(|anchor| anchor.source == source)
-                    .then(|| (*callable, body.clone()))
-            })
-            .collect()
-    }
-
-    pub fn len(&self) -> usize {
-        self.bodies.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bodies.is_empty()
-    }
-
-    pub fn storage_payload_bytes(&self) -> usize {
-        self.bodies
-            .values()
-            .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
-            .sum()
-    }
-}
-
-impl DefaultArgumentStore {
-    pub fn insert(&mut self, callable: ResolvedCallableHeader, body: FirBody) {
-        assert!(
-            body.is_default_fragment(),
-            "only checked defaults enter the store"
-        );
-        assert!(
-            !body.default_values().is_empty(),
-            "a default fragment is nonempty"
-        );
-        assert_eq!(
-            body.owner(),
-            BodyOwnerId::from_raw(callable.declaration.raw()),
-            "checked defaults must belong to their surviving callable"
-        );
-        assert!(
-            self.bodies.insert(callable.id, body).is_none(),
-            "a callable's checked defaults may be inserted only once"
-        );
-    }
-
-    pub fn take_for_source(
-        &mut self,
-        index: &super::signature::ResolvedModuleIndex,
-        source: SourceFileId,
-    ) -> Vec<(CallableId, FirBody)> {
-        let selected = self
-            .bodies
-            .iter()
-            .filter_map(|(callable, body)| {
-                index
-                    .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
-                    .is_some_and(|anchor| anchor.source == source)
-                    .then_some(*callable)
-            })
-            .collect::<Vec<_>>();
-        selected
-            .into_iter()
-            .filter_map(|callable| self.bodies.remove(&callable).map(|body| (callable, body)))
-            .collect()
-    }
-
-    pub(crate) fn retained_bodies_for_source<'a>(
-        &'a self,
-        index: &'a super::signature::ResolvedModuleIndex,
-        source: SourceFileId,
-    ) -> impl Iterator<Item = &'a FirBody> + 'a {
-        self.bodies.values().filter(move |body| {
-            index
-                .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
-                .is_some_and(|anchor| anchor.source == source)
-        })
-    }
-
-    pub fn len(&self) -> usize {
-        self.bodies.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bodies.is_empty()
-    }
-
-    pub fn storage_payload_bytes(&self) -> usize {
-        self.bodies
-            .values()
-            .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
-            .sum()
     }
 }
 

@@ -711,3 +711,70 @@ fun box(): String {
         "cross_file_inline_member_nested_lambda",
     );
 }
+
+/// kotlinc inlines every call of an inline member, whichever class declares it. A reified member
+/// cannot run as an ordinary method at all: its emitted body throws, so only a spliced call works
+/// (`reified/method.kt`, `typeErasure/funWithReifiedTypeParameterInsideClass.kt`).
+#[test]
+fn reified_inline_member_called_from_another_file_is_spliced() {
+    const LIB: &str = "class Probe(val value: Any?) {\n\
+                       \x20   inline fun <reified T> holds(): Boolean = value is T\n\
+                       \x20   inner class Inner { inline fun <reified T> holds(x: Any?): Boolean = x is T }\n\
+                       }\n\
+                       class Other\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   if (!Probe(Other()).holds<Other>()) return \"fail: holds\"\n\
+                        \x20   if (Probe(Probe(null)).holds<Other>()) return \"fail: rejects\"\n\
+                        \x20   if (!Probe(null).Inner().holds<Other?>(null)) return \"fail: inner\"\n\
+                        \x20   return \"OK\"\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_reified_inline_member",
+    );
+}
+
+/// The same-file form: a call from another class of the file is spliced too, and a private member
+/// the spliced body reads is reached through the declaring class's synthetic accessor.
+#[test]
+fn inline_member_of_another_class_in_the_same_file_is_spliced() {
+    const SRC: &str = "class Probe(private val value: Any?) {\n\
+                       \x20   private inline fun <reified T> holds(): Boolean = value is T\n\
+                       \x20   class Reader { fun read(p: Probe): Boolean = p.holds<Other>() }\n\
+                       \x20   inline fun <reified T> matches(): Boolean = holds<T>()\n\
+                       }\n\
+                       class Other\n\
+                       fun box(): String {\n\
+                       \x20   if (!Probe.Reader().read(Probe(Other()))) return \"fail: reader\"\n\
+                       \x20   if (Probe(null).matches<Other>()) return \"fail: matches\"\n\
+                       \x20   return \"OK\"\n\
+                       }\n";
+    common::expect_box_ok_with_stdlib(SRC, "same_file_reified_inline_member");
+}
+
+/// An omitted argument of a spliced inline member takes the declaration's default inside the
+/// expansion: evaluated after the supplied arguments, over the parameters before it and the
+/// receiver. A reified member has no ordinary method to fall back on.
+#[test]
+fn reified_inline_member_with_an_omitted_default_is_spliced() {
+    const LIB: &str = "var trace = \"\"\n\
+                       fun note(s: String, n: Int): Int { trace += s; return n }\n\
+                       class Probe(val value: Any?, val base: Int) {\n\
+                       \x20   inline fun <reified T> holds(first: Int, bonus: Int = first + base + note(\"d\", 1)): Int =\n\
+                       \x20       if (value is T) bonus else -bonus\n\
+                       }\n\
+                       class Other\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val hit = Probe(Other(), 10).holds<Other>(note(\"ab\", 2))\n\
+                        \x20   if (hit != 13) return \"fail: hit $hit\"\n\
+                        \x20   val miss = Probe(null, 1).holds<Other>(first = 4)\n\
+                        \x20   if (miss != -6) return \"fail: miss $miss\"\n\
+                        \x20   val given = Probe(Other(), 0).holds<Other>(1, 7)\n\
+                        \x20   if (given != 7) return \"fail: given $given\"\n\
+                        \x20   return if (trace == \"abdd\") \"OK\" else \"fail: trace $trace\"\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_reified_inline_member_default",
+    );
+}

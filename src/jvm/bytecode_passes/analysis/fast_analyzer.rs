@@ -24,7 +24,7 @@ pub(crate) struct AnalyzerError {
 const ACC_STATIC: u16 = 0x0008;
 
 /// The variations of kotlinc's `FastAnalyzer` its analyzers choose between.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct AnalyzerOptions {
     /// `pruneExceptionEdges`: only stores, `iinc` and the first node of a protected range reach a
     /// handler.
@@ -33,12 +33,24 @@ pub(crate) struct AnalyzerOptions {
     pub fast_handlers: bool,
     /// `useFastMergeControlFlowEdge`: a node keeps the first frame that reaches it.
     pub fast_merge: bool,
-    /// Take the queued node with the lowest index next instead of the last one queued. Without
-    /// `fast_merge` the frames an analysis reaches do not depend on the order it visits nodes in,
-    /// only how often it revisits them: last-in-first-out walks the rest of a method again after
-    /// every branch that joins it, which a method with hundreds of branches (a large data class's
-    /// `copy$default`) cannot afford with values as large as instruction sets.
+    /// Take the queued node with the lowest index next instead of the last one queued; on by
+    /// default. Without `fast_merge` the frames an analysis reaches do not depend on the order it
+    /// visits nodes in, only how often it revisits them: last-in-first-out walks the rest of a
+    /// method again after every branch that joins it, and after every node whose frame widens a
+    /// handler that covers much of the method. A large data class's `copy$default`, or a
+    /// suspend lambda that inlines many calls with `try` blocks, cannot afford that.
     pub in_index_order: bool,
+}
+
+impl Default for AnalyzerOptions {
+    fn default() -> Self {
+        AnalyzerOptions {
+            prune_exception_edges: false,
+            fast_handlers: false,
+            fast_merge: false,
+            in_index_order: true,
+        }
+    }
 }
 
 /// How a frame executes one instruction: ASM's `Frame.execute` unless an analysis's own frame

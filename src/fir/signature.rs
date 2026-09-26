@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use crate::name_tree::FxHashMap;
 use crate::types::{Ty, TypeName, Visibility};
 
-use super::body::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::header::{
     next_id, CallableId, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
@@ -13,6 +12,7 @@ use super::header::{
     StableDeclarationAnchor, TypeParameterId,
 };
 use super::ResolvedParameterIdentity;
+use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 
 mod selections;
 pub use selections::*;

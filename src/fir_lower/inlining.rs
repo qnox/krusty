@@ -54,6 +54,9 @@ enum InlineOperandPlan {
     Reuse(u32),
     /// Copy the argument into a local belonging to this expansion.
     Copy,
+    /// The call omits this argument: the declaration's checked default initializes the local,
+    /// after every supplied argument, over the parameters before it.
+    Default,
 }
 
 impl InlineOperand {
@@ -75,11 +78,97 @@ impl InlineOperand {
 }
 
 impl BodyLowering<'_> {
+    /// Declare an omitted parameter's local, initialized by a copy of the declaration's checked
+    /// default. The copy reads the expansion's parameter locals and moves its own locals above the
+    /// current temporaries. A default that reads a spliced lambda parameter has no value to read.
+    fn inline_default_declaration(
+        &mut self,
+        default: ExprId,
+        operand_slots: &[Option<u32>],
+        slot: u32,
+        ty: Ty,
+        (bindings, reified_bindings): (&HashMap<String, Ty>, &HashMap<String, Ty>),
+    ) -> Option<ExprId> {
+        const SPLICED: u32 = u32::MAX;
+        let formal_slots = operand_slots
+            .iter()
+            .map(|slot| slot.unwrap_or(SPLICED))
+            .collect::<Vec<_>>();
+        let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
+        for &copied in cloned.values() {
+            specialize_expression_facts(self.ir, copied, bindings);
+            specialize_types(self.ir.exprs.get_mut(copied as usize)?, bindings);
+            specialize_dependency_substitutions(
+                self.ir.exprs.get_mut(copied as usize)?,
+                reified_bindings,
+            );
+        }
+        let locals = super::source_calls::rehome_inline_body_values(
+            self.ir,
+            copy,
+            &formal_slots,
+            self.next_temporary,
+        )?;
+        self.next_temporary = self.next_temporary.checked_add(locals)?;
+        if cloned
+            .values()
+            .any(|copied| value_indices(self.ir.expr(*copied)).contains(&SPLICED))
+        {
+            return None;
+        }
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: slot,
+            ty: stored_value_ty(ty),
+            init: Some(copy),
+            named: true,
+        });
+        self.ir.call_operand_bindings.insert(declaration);
+        Some(declaration)
+    }
+
+    /// Copy an omitted parameter's default lambda for splicing. Its captures read the expansion's
+    /// parameter locals; its body keeps its own numbering.
+    fn inline_default_lambda(
+        &mut self,
+        default: ExprId,
+        operand_slots: &[Option<u32>],
+        (bindings, reified_bindings): (&HashMap<String, Ty>, &HashMap<String, Ty>),
+    ) -> Option<ExprId> {
+        const SPLICED: u32 = u32::MAX;
+        let formal_slots = operand_slots
+            .iter()
+            .map(|slot| slot.unwrap_or(SPLICED))
+            .collect::<Vec<_>>();
+        let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
+        for &copied in cloned.values() {
+            specialize_expression_facts(self.ir, copied, bindings);
+            specialize_types(self.ir.exprs.get_mut(copied as usize)?, bindings);
+            specialize_dependency_substitutions(
+                self.ir.exprs.get_mut(copied as usize)?,
+                reified_bindings,
+            );
+        }
+        let IrExpr::Lambda { captures, .. } = self.ir.expr(copy).clone() else {
+            return None;
+        };
+        for capture in captures {
+            if super::source_calls::rehome_inline_body_values(self.ir, capture, &formal_slots, 0)?
+                != 0
+            {
+                return None;
+            }
+            if value_indices(self.ir.expr(capture)).contains(&SPLICED) {
+                return None;
+            }
+        }
+        Some(copy)
+    }
+
     pub(super) fn inline_same_file_call(
         &mut self,
         target: CallableId,
         function: crate::ir::FunId,
-        operands: &[ExprId],
+        operands: &[Option<ExprId>],
         inline_lambdas: &[Option<ExprId>],
         substitutions: &[FirTypeSubstitution],
     ) -> Option<ExprId> {
@@ -128,8 +217,34 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         let operands = operands
             .iter()
-            .map(|operand| self.specialized_inline_operand(*operand, &bindings))
+            .map(|operand| {
+                operand.map(|operand| self.specialized_inline_operand(operand, &bindings))
+            })
             .collect::<Vec<_>>();
+        let defaults = if operands.iter().any(Option::is_none) {
+            if self.ir.param_defaults_stub_only(function) {
+                return None;
+            }
+            // The declaration's defaults are numbered like its parameters, without the dispatch
+            // receiver the operands lead with.
+            let receiver_offset =
+                operands.len() - self.ir.functions[function as usize].params.len();
+            let declared = self.ir.param_defaults(function)?;
+            operands
+                .iter()
+                .enumerate()
+                .map(|(index, operand)| match operand {
+                    Some(_) => Some(None),
+                    None => declared
+                        .get(index.checked_sub(receiver_offset)?)
+                        .copied()
+                        .flatten()
+                        .map(Some),
+                })
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            vec![None; operands.len()]
+        };
         // Preserve the source name and semantic role/depth of every local this expansion
         // materializes. Target-specific decoration is deferred until debug-info emission.
         let mut parameter_names: Vec<InlineOperand> = Vec::new();
@@ -196,6 +311,28 @@ impl BodyLowering<'_> {
         // A parameter with no name or no published role to align against is a broken contract
         // between this expansion and the callable's published header, not a shape to fall back on:
         // either answer silently erases something — the parameter's identity, or the splice.
+        //
+        // An omitted function-typed parameter whose default is a lambda literal is expanded like
+        // a literal argument, as kotlinc inlines a default lambda; any other omitted parameter is
+        // a local its default initializes.
+        let default_lambdas = defaults
+            .iter()
+            .enumerate()
+            .filter(|&(index, default)| {
+                default.is_some_and(|default| {
+                    matches!(
+                        self.ir.expr(default),
+                        IrExpr::Lambda {
+                            inline_body: Some(_),
+                            ..
+                        }
+                    )
+                }) && parameter_names
+                    .get(index)
+                    .is_some_and(InlineOperand::is_spliced)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
         let mut plans = Vec::with_capacity(operands.len());
         for (index, ((operand, lambda), ty)) in operands
             .iter()
@@ -203,6 +340,14 @@ impl BodyLowering<'_> {
             .zip(&operand_types)
             .enumerate()
         {
+            let Some(operand) = operand else {
+                plans.push(if default_lambdas.contains(&index) {
+                    InlineOperandPlan::Splice
+                } else {
+                    InlineOperandPlan::Default
+                });
+                continue;
+            };
             plans.push(match (self.ir.expr(*operand), lambda) {
                 (IrExpr::GetValue(_), None)
                     if matches!(ty.non_null(), crate::types::Ty::Fun(_))
@@ -226,6 +371,7 @@ impl BodyLowering<'_> {
             });
         }
         let mut operand_declarations = Vec::new();
+        let mut defaulted = Vec::new();
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
@@ -234,12 +380,18 @@ impl BodyLowering<'_> {
             .map(|(index, ((plan, operand), ty))| match plan {
                 InlineOperandPlan::Splice => None,
                 InlineOperandPlan::Reuse(slot) => Some(slot),
+                InlineOperandPlan::Default => {
+                    let slot = self.allocate_temporary();
+                    defaulted.push((index, slot));
+                    Some(slot)
+                }
                 InlineOperandPlan::Copy => {
+                    let operand = operand.expect("a copied operand is supplied");
                     let slot = self.allocate_temporary();
                     let declaration = self.ir.add_expr(IrExpr::Variable {
                         index: slot,
                         ty: stored_value_ty(*ty),
-                        init: Some(*operand),
+                        init: Some(operand),
                         named: true,
                     });
                     self.ir.call_operand_bindings.insert(declaration);
@@ -257,6 +409,40 @@ impl BodyLowering<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        let mut inline_lambdas = inline_lambdas.to_vec();
+        let mut default_lambda_implementations = Vec::new();
+        for &index in &default_lambdas {
+            let lambda = self.inline_default_lambda(
+                defaults[index]?,
+                &operand_slots,
+                (&bindings, &reified_bindings),
+            )?;
+            let IrExpr::Lambda { impl_fn, .. } = *self.ir.expr(lambda) else {
+                return None;
+            };
+            default_lambda_implementations.push(impl_fn);
+            inline_lambdas[index] = Some(lambda);
+        }
+        for (index, slot) in defaulted {
+            let default = defaults[index]?;
+            let declaration = self.inline_default_declaration(
+                default,
+                &operand_slots,
+                slot,
+                operand_types[index],
+                (&bindings, &reified_bindings),
+            )?;
+            if let Some(parameter) = parameter_names.get(index) {
+                if let Some(source_name) = parameter.source_name.clone() {
+                    self.ir.value_names.insert(declaration, source_name);
+                }
+                self.ir.set_debug_local_provenance(
+                    declaration,
+                    IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
+                );
+            }
+            operand_declarations.push(declaration);
+        }
         crate::trace_compiler!(
             "lower",
             "inline target={target:?} substitutions={substitutions:?} bindings={bindings:?}"
@@ -423,8 +609,29 @@ impl BodyLowering<'_> {
                 )
             })
             .collect::<Vec<_>>();
+        // A default lambda's implementation stays a method of the declaration's default stub,
+        // which the expansion's splice must not consume.
+        let default_lambda_methods = default_lambda_implementations
+            .iter()
+            .map(|&function| {
+                (
+                    function,
+                    self.ir
+                        .functions
+                        .get(function as usize)
+                        .and_then(|f| f.body),
+                    self.ir.inline_only_fns.contains(&function),
+                )
+            })
+            .collect::<Vec<_>>();
         for invocation in inline_invocations {
             self.splice_inline_lambda_invocation(invocation)?;
+        }
+        for (function, body, inline_only) in default_lambda_methods {
+            self.ir.functions.get_mut(function as usize)?.body = body;
+            if !inline_only {
+                self.ir.inline_only_fns.remove(&function);
+            }
         }
 
         // An expansion whose ONLY return is its tail needs neither a result local nor the loop that
@@ -565,7 +772,9 @@ impl BodyLowering<'_> {
         else {
             return None;
         };
-        if args.len() != arity as usize {
+        // A suspend lambda's arity counts the continuation its invocation passes implicitly.
+        let suspend = self.ir.suspend_funs.contains(&impl_fn);
+        if args.len() + usize::from(suspend) != arity as usize {
             return None;
         }
         let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
@@ -662,6 +871,8 @@ impl BodyLowering<'_> {
             stmts: declarations,
             value: Some(body),
         };
+        // The spliced body's own calls are the suspension points now, not the invocation.
+        self.ir.suspend_calls.remove(&invocation);
         Some(())
     }
 }

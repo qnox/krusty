@@ -34,6 +34,9 @@ pub enum FirLoweringFailure {
     /// selects `kotlin.ranges` members, which are.
     UnsupportedProgressionMember,
     MissingCallable(CallableId),
+    /// A same-module inline call whose checked template could not be expanded at this call site.
+    /// kotlinc always inlines it, so there is no ordinary call to lower instead.
+    InlineExpansionDeclined(CallableId),
     UnsupportedCallableReference(CallableId),
     UnsupportedExternalCallableReference(crate::fir::ExternalCallableId),
     UnsupportedClassifierCallableReference(crate::types::TypeName),

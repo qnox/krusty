@@ -74,3 +74,29 @@ fun box(): String {
         "OK"
     );
 }
+
+/// A spliced inline member from another file describes its class's type parameter with that class
+/// as the container, although the calling file declares no such class.
+#[test]
+fn type_of_in_foreign_inline_member_names_its_declaring_class() {
+    const LIB: &str = r#"
+package lib
+import kotlin.reflect.KType
+import kotlin.reflect.typeOf
+class Holder<T : CharSequence>(val value: T) {
+    inline fun described(): KType = typeOf<Array<T>>()
+}
+"#;
+    const MAIN: &str = r#"
+import kotlin.reflect.KTypeParameter
+fun box(): String {
+    val type = lib.Holder("x").described()
+    val parameter = type.arguments.first().type!!.classifier as KTypeParameter
+    return if (type.toString() == "kotlin.Array<T>" && parameter.upperBounds.toString() == "[kotlin.CharSequence]") "OK" else "fail: $type ${parameter.upperBounds}"
+}
+"#;
+    assert_eq!(
+        run(&[("lib.kt", LIB), ("main.kt", MAIN)]).expect("cross-file member typeOf"),
+        "OK"
+    );
+}

@@ -442,7 +442,7 @@ impl BodyLowering<'_> {
             substitutions,
         );
         self.next_temporary = enclosing_temporary;
-        let Some(call) = call else {
+        let Some(call) = call.transpose()? else {
             return Ok(None);
         };
         let body = self.callable_reference_adapter_body(call, signature_result, reference.ret);
@@ -579,15 +579,18 @@ impl BodyLowering<'_> {
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
                 let arguments = self.arguments(*target, &call.arguments, &parameter_types)?;
-                if let Some(call) = self.same_file_call(
-                    *target,
-                    dispatch_receiver,
-                    extension_receiver,
-                    SameFileExtensionReceiverMode::Materialized,
-                    &arguments,
-                    &parameter_types,
-                    &call.substitutions,
-                ) {
+                if let Some(call) = self
+                    .same_file_call(
+                        *target,
+                        dispatch_receiver,
+                        extension_receiver,
+                        SameFileExtensionReceiverMode::Materialized,
+                        &arguments,
+                        &parameter_types,
+                        &call.substitutions,
+                    )
+                    .transpose()?
+                {
                     return Ok(call);
                 }
                 let operation = IrCheckedOperation::Call {

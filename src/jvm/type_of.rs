@@ -149,8 +149,12 @@ impl<'a> TypeParameters<'a> {
                 );
             }
         }
-        for (classifier, signature) in ir.class_signatures() {
-            for parameter in &signature.type_params {
+        let classes = ir.foreign_template_classifiers().chain(
+            ir.class_signatures()
+                .map(|(classifier, signature)| (classifier, signature.type_params.as_slice())),
+        );
+        for (classifier, type_params) in classes {
+            for parameter in type_params {
                 declarations.insert(
                     parameter.semantic_name.as_str(),
                     (parameter, Container::Class(classifier)),

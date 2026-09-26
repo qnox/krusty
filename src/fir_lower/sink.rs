@@ -11,7 +11,10 @@ use super::{
     },
     data_classes::finalize_data_classes,
     finish_callable_body,
-    generics::{attach_callable_generic_facts, attach_classifier_generic_facts},
+    generics::{
+        attach_callable_generic_facts, attach_classifier_generic_facts,
+        classifier_own_type_parameters,
+    },
     initialization::{accept_non_callable_body, finalize_enum_entries},
     interface_delegation::{
         finalize_interface_delegations, predeclare_interface_delegation_fields,
@@ -265,8 +268,10 @@ impl<'a> CommonIrBodySink<'a> {
             .bodies_for_source(index, self.source)
             .into_iter()
             .map(|(callable, _)| callable)
+            .chain(bodies.default_dependencies_for_source(index, self.source))
             .collect::<Vec<_>>();
         callables.sort_unstable_by_key(|callable| callable.raw());
+        callables.dedup();
         let mut visiting = std::collections::HashSet::new();
         for callable in callables {
             self.accept_inline_payload_tree(index, bodies, callable, &mut visiting)?;
@@ -327,6 +332,10 @@ impl<'a> CommonIrBodySink<'a> {
         self.predeclare_inline_payload(index, declaration, &body)?;
         let mut dependencies = std::collections::HashSet::new();
         body.collect_referenced_module_callables(&mut dependencies);
+        let defaults = bodies.defaults(callable).cloned();
+        if let Some(defaults) = &defaults {
+            defaults.collect_referenced_module_callables(&mut dependencies);
+        }
         let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
         dependencies.sort_unstable_by_key(|dependency| dependency.raw());
         for dependency in dependencies {
@@ -351,6 +360,17 @@ impl<'a> CommonIrBodySink<'a> {
                 );
                 return Err(error);
             }
+        }
+        // The template's checked defaults, which an omitted argument expands from, follow its body:
+        // a default may itself call the template. A template from another source has no other
+        // way to get them, since its own source consumed them first.
+        let defaults_attached = self
+            .ir
+            .checked_callable_functions
+            .get(&callable)
+            .is_some_and(|function| self.ir.has_param_defaults(*function));
+        if let Some(defaults) = defaults.filter(|_| !defaults_attached) {
+            self.accept_body(index, defaults.owner(), defaults)?;
         }
         self.materialized_inline_callables.insert(callable);
         Ok(())
@@ -535,6 +555,18 @@ impl<'a> CommonIrBodySink<'a> {
             let source = super::module_declarations::source(index, declaration)?;
             self.ir.record_foreign_template_source(function, source);
         }
+        // A member template's body may describe its classifiers' type parameters at run time.
+        let mut classifier = index.enclosing_classifier(declaration);
+        while let Some(header) = classifier {
+            self.ir.record_foreign_template_classifier(
+                header.classifier,
+                classifier_own_type_parameters(index, header.declaration),
+            );
+            classifier = index
+                .declaration_header(header.declaration)
+                .and_then(|owner| owner.owner)
+                .and_then(|owner| index.enclosing_classifier(owner));
+        }
         if callable.shape.extension_receiver.is_some() && !companion_associated {
             self.ir.extension_receiver_fns.insert(function);
         }
@@ -565,6 +597,10 @@ impl<'a> CommonIrBodySink<'a> {
         bodies: &mut crate::fir::DefaultArgumentStore,
     ) -> Result<(), FirFileLoweringFailure> {
         for (callable, body) in bodies.take_for_source(index, self.source) {
+            // A materialized inline template has already consumed its defaults.
+            if self.materialized_inline_callables.contains(&callable) {
+                continue;
+            }
             let declaration = DeclarationId::from_raw(body.owner().raw());
             if index
                 .callable_for_declaration(declaration)
