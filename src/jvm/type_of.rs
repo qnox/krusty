@@ -203,19 +203,7 @@ fn k_type_descriptor(arguments: &[&str]) -> String {
 /// Mutable Kotlin collection classifiers, which share a JVM class with their read-only face and
 /// are told apart only by `Reflection.mutableCollectionType`.
 fn is_mutable_collection(name: TypeName) -> bool {
-    [
-        "kotlin/collections/MutableIterator",
-        "kotlin/collections/MutableIterable",
-        "kotlin/collections/MutableCollection",
-        "kotlin/collections/MutableList",
-        "kotlin/collections/MutableListIterator",
-        "kotlin/collections/MutableSet",
-        "kotlin/collections/MutableMap",
-        "kotlin/collections/MutableMap.MutableEntry",
-        "kotlin/collections/MutableMap$MutableEntry",
-    ]
-    .into_iter()
-    .any(|candidate| name.matches(candidate))
+    super::type_intrinsics::mutable_collection(name).is_some()
 }
 
 /// The class instance kotlinc's `generateClassInstance(wrapPrimitives = false)` pushes for a

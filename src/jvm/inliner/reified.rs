@@ -4,7 +4,9 @@ use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
 use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
+use super::reified_type_checks::{self, ReifiedTarget};
 use super::InlineError;
+use crate::jvm::type_intrinsics::TypeIntrinsic;
 
 const INVOKESTATIC: u8 = 0xb8;
 const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
@@ -13,8 +15,11 @@ const MARKER_DESCRIPTOR: &str = "(ILjava/lang/String;)V";
 enum Repoint {
     Class {
         instruction: usize,
+        mode: i32,
         class: String,
         nullable: bool,
+        intrinsic: Option<TypeIntrinsic>,
+        rendered: String,
     },
     Forwarded {
         name_instruction: usize,
@@ -85,10 +90,18 @@ pub(super) fn specialize(
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
                 .ok_or(InlineError::MalformedReifiedMarker)?;
             match arguments.classes.get(argument.trim_end_matches('?')) {
-                Some(ReifiedArgument::Class { internal, nullable }) => Repoint::Class {
+                Some(ReifiedArgument::Class {
+                    internal,
+                    nullable,
+                    intrinsic,
+                    rendered,
+                }) => Repoint::Class {
                     instruction: target,
+                    mode,
                     class: internal.clone(),
                     nullable: *nullable || argument.ends_with('?'),
+                    intrinsic: *intrinsic,
+                    rendered: rendered.clone(),
                 },
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
@@ -119,14 +132,23 @@ pub(super) fn specialize(
         match &marker.repoint {
             Repoint::Class {
                 instruction,
+                mode,
                 class,
                 nullable,
+                intrinsic,
+                rendered,
             } => {
                 set_type_operand(&mut node.nodes[*instruction], class)?;
                 erase_marker(node, marker);
-                if *nullable && is_instance_of(&node.nodes[*instruction]) {
-                    let check = nullable_instance_check(node, class);
-                    replacements.push((*instruction, check));
+                let target = ReifiedTarget {
+                    class,
+                    nullable: *nullable,
+                    intrinsic: *intrinsic,
+                    rendered,
+                };
+                let stub = node.nodes[*instruction].clone();
+                if let Some(nodes) = reified_type_checks::expand(node, *mode, &stub, &target) {
+                    replacements.push((*instruction, nodes));
                 }
             }
             Repoint::Forwarded {
@@ -163,36 +185,6 @@ fn erase_marker(node: &mut MethodNode, marker: &Marker) {
     for at in [marker.operation, marker.name, marker.call] {
         node.nodes[at] = Node::Insn(Insn::Op(0x00));
     }
-}
-
-fn is_instance_of(node: &Node) -> bool {
-    matches!(node, Node::Insn(Insn::Type { op: 0xc1, .. }))
-}
-
-/// kotlinc's `generateIsCheck` for a nullable type: `null` is an instance, so it is accepted
-/// before the `instanceof` sees it.
-fn nullable_instance_check(node: &mut MethodNode, class: &str) -> Vec<Node> {
-    let null = node.new_label();
-    let end = node.new_label();
-    vec![
-        Node::Insn(Insn::Op(0x59)),
-        Node::Insn(Insn::Jump {
-            op: 0xc6,
-            target: null,
-        }),
-        Node::Insn(Insn::Type {
-            op: 0xc1,
-            class: class.to_owned(),
-        }),
-        Node::Insn(Insn::Jump {
-            op: 0xa7,
-            target: end,
-        }),
-        Node::Label(null),
-        Node::Insn(Insn::Op(0x57)),
-        Node::Insn(Insn::Op(0x04)),
-        Node::Label(end),
-    ]
 }
 
 fn pushed_int(node: Option<&Node>) -> Option<i32> {
@@ -358,6 +350,8 @@ mod tests {
                 ReifiedArgument::Class {
                     internal: "java/lang/String".to_owned(),
                     nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
                 },
             )]),
             ..Default::default()
@@ -389,6 +383,8 @@ mod tests {
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
                         nullable,
+                        intrinsic: None,
+                        rendered: String::new(),
                     },
                 )]),
                 ..Default::default()

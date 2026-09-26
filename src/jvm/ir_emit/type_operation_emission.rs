@@ -5,6 +5,7 @@
 
 use crate::ir::{ExprId, IrBindingStability, IrExpr, IrTypeOp};
 use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::type_intrinsics::{IntrinsicCall, TypeIntrinsic};
 use crate::types::{stored_value_ty, Ty};
 
 use super::{
@@ -15,6 +16,7 @@ use super::{
 impl Emitter<'_> {
     pub(super) fn emit_type_operation(
         &mut self,
+        expression: ExprId,
         op: IrTypeOp,
         arg: ExprId,
         type_operand: Ty,
@@ -57,10 +59,9 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                self.emit_nullable_instance_check(&internal, code);
+                self.emit_nullable_instance_check(&internal, type_operand, code);
                 if op == IrTypeOp::NotInstanceOf {
-                    code.push_int(1, self.cw);
-                    code.ixor();
+                    self.emit_negated_instance_result(code);
                 }
             }
             IrTypeOp::InstanceOf => {
@@ -71,8 +72,7 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                let class = self.cw.class_ref(&internal);
-                code.instance_of(class);
+                self.emit_instance_check(&internal, type_operand, code);
             }
             IrTypeOp::NotInstanceOf => {
                 if physical_arg.is_jvm_scalar() {
@@ -82,10 +82,8 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                let class = self.cw.class_ref(&internal);
-                code.instance_of(class);
-                code.push_int(1, self.cw);
-                code.ixor();
+                self.emit_instance_check(&internal, type_operand, code);
+                self.emit_negated_instance_result(code);
             }
             IrTypeOp::Cast => {
                 // kotlinc writes a `checkcast` for every cast and then deletes the ones whose
@@ -98,6 +96,12 @@ impl Emitter<'_> {
                         code,
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
+                }
+                // Only a written `as` asks `TypeIntrinsics`; a compiler-inserted narrowing (an
+                // `as?` after its `is`) is kotlinc's implicit cast, a plain `checkcast`.
+                if let Some(intrinsic) = self.written_cast_intrinsic(expression, type_operand) {
+                    self.emit_intrinsic_cast(&internal, intrinsic, code);
+                    return;
                 }
                 let redundant = if physical_arg.is_jvm_scalar() {
                     semantic_arg.non_null().boxed_ref().is_some_and(|source| {
@@ -113,6 +117,7 @@ impl Emitter<'_> {
             }
             IrTypeOp::CastNonNull => {
                 self.emit_non_null_cast(
+                    expression,
                     arg,
                     type_operand,
                     jvm_ty,
@@ -132,13 +137,17 @@ impl Emitter<'_> {
     /// `is T?` for a type the checker could not expand into `x == null || x is T`: a reified type
     /// argument substituted with a nullable type. kotlinc's `generateIsCheck` accepts `null`
     /// before the `instanceof` itself.
-    pub(super) fn emit_nullable_instance_check(&mut self, internal: &str, code: &mut CodeBuilder) {
+    pub(super) fn emit_nullable_instance_check(
+        &mut self,
+        internal: &str,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) {
         let null = code.new_label();
         let end = code.new_label();
         code.dup();
         code.ifnull(null);
-        let class = self.cw.class_ref(internal);
-        code.instance_of(class);
+        self.emit_instance_check(internal, type_operand, code);
         code.goto(end);
         code.bind(null);
         code.pop();
@@ -146,8 +155,73 @@ impl Emitter<'_> {
         code.bind(end);
     }
 
+    /// kotlinc's `TypeIntrinsics.instanceOf`: an `instanceof`, or the `TypeIntrinsics` check that
+    /// replaces it for a mutable collection or a function type. Leaves an `int` 0/1.
+    pub(super) fn emit_instance_check(
+        &mut self,
+        internal: &str,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        match TypeIntrinsic::of(type_operand) {
+            Some(intrinsic) => self.emit_type_intrinsic_call(&intrinsic.instance_check(), code),
+            None => {
+                let class = self.cw.class_ref(internal);
+                code.instance_of(class);
+            }
+        }
+    }
+
+    /// A value `!is`: kotlinc negates the 0/1 instance result with a branch, not an `ixor`.
+    pub(super) fn emit_negated_instance_result(&mut self, code: &mut CodeBuilder) {
+        let instance = code.new_label();
+        let end = code.new_label();
+        code.ifne(instance);
+        code.push_int(1, self.cw);
+        code.goto(end);
+        code.bind(instance);
+        code.push_int(0, self.cw);
+        code.bind(end);
+    }
+
+    /// The `TypeIntrinsics` cast a written `as` of `expression` to `type_operand` needs, if any.
+    fn written_cast_intrinsic(
+        &self,
+        expression: ExprId,
+        type_operand: Ty,
+    ) -> Option<TypeIntrinsic> {
+        TypeIntrinsic::of(type_operand).filter(|_| self.ir.written_casts.contains(&expression))
+    }
+
+    /// kotlinc's `TypeIntrinsics.checkcast` for a non-safe cast to a mutable collection or a
+    /// function type.
+    fn emit_intrinsic_cast(
+        &mut self,
+        internal: &str,
+        intrinsic: TypeIntrinsic,
+        code: &mut CodeBuilder,
+    ) {
+        let (call, checkcast) = intrinsic.cast();
+        self.emit_type_intrinsic_call(&call, code);
+        if checkcast {
+            let class = self.cw.class_ref(internal);
+            code.checkcast(class);
+        }
+    }
+
+    fn emit_type_intrinsic_call(&mut self, call: &IntrinsicCall, code: &mut CodeBuilder) {
+        if let Some(arity) = call.arity {
+            code.push_int(i32::from(arity), self.cw);
+        }
+        let method = self
+            .cw
+            .methodref(call.owner(), &call.name, &call.descriptor);
+        code.invokestatic(method, if call.arity.is_some() { 2 } else { 1 }, 1);
+    }
+
     fn emit_non_null_cast(
         &mut self,
+        expression: ExprId,
         arg: ExprId,
         type_operand: Ty,
         jvm_ty: Ty,
@@ -210,7 +284,9 @@ impl Emitter<'_> {
         // kotlinc writes a `checkcast` for every cast and then deletes the ones whose operand
         // already has exactly the target's JVM type; a cast to `java/lang/Object` from anything
         // narrower stays.
-        if physical_internal.as_deref() != Some(internal) {
+        if let Some(intrinsic) = self.written_cast_intrinsic(expression, type_operand) {
+            self.emit_intrinsic_cast(internal, intrinsic, code);
+        } else if physical_internal.as_deref() != Some(internal) {
             let class = self.cw.class_ref(internal);
             code.checkcast(class);
         }
@@ -228,9 +304,19 @@ impl Emitter<'_> {
     /// A cast target as kotlinc's IR renderer spells it in
     /// `null cannot be cast to non-null type …`.
     fn rendered_cast_target(&self, ty: Ty) -> String {
+        self.rendered_cast_type(ty, RootPackage::Unqualified)
+    }
+
+    /// A reified cast target as kotlinc's inliner spells it in the same message, where a class in
+    /// the root package reads `<root>.Token`.
+    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
+        self.rendered_cast_type(ty, RootPackage::Qualified)
+    }
+
+    fn rendered_cast_type(&self, ty: Ty, root: RootPackage) -> String {
         let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
             let rendered: Vec<String> = arguments
-                .map(|argument| self.rendered_cast_target(argument))
+                .map(|argument| self.rendered_cast_type(argument, root))
                 .collect();
             if rendered.is_empty() {
                 String::new()
@@ -245,14 +331,19 @@ impl Emitter<'_> {
             Ty::Error => "<error>".to_string(),
             Ty::Pending => "<pending>".to_string(),
             Ty::Obj(name, types) => format!(
-                "{}{}",
+                "{}{}{}",
+                if root == RootPackage::Qualified && name.package_matches("") {
+                    "<root>."
+                } else {
+                    ""
+                },
                 name.render().replace(['/', '$'], "."),
                 arguments(&mut types.iter().copied())
             ),
-            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_target(*inner)),
-            Ty::PlatformNullable(inner) => self.rendered_cast_target(*inner),
-            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_target(*inner)),
-            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_target(*inner)),
+            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_type(*inner, root)),
+            Ty::PlatformNullable(inner) => self.rendered_cast_type(*inner, root),
+            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_type(*inner, root)),
+            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_type(*inner, root)),
             Ty::StarProjection(_) => "*".to_string(),
             Ty::TyParam(name, _) => self.rendered_type_parameter(name),
             Ty::Fun(signature) => format!(
@@ -397,4 +488,11 @@ impl Emitter<'_> {
         self.emit_value(operand, code);
         (physical, semantic)
     }
+}
+
+/// Whether a cast message qualifies a root-package class with `<root>.`, as kotlinc's inliner does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootPackage {
+    Unqualified,
+    Qualified,
 }

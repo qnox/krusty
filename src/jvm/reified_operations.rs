@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::reified_arguments::ReifiedArgument;
+use super::type_intrinsics::TypeIntrinsic;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
@@ -54,7 +55,14 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
 /// that a reified type-bearing instruction materializes. A substitution that is itself a reified
 /// type parameter of a declaration in this file has no class yet: that declaration is a reified
 /// inline body, so the callee's marker is forwarded under the declaration's own parameter name.
-pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String, ReifiedArgument> {
+///
+/// `render` spells a type as kotlinc does in `null cannot be cast to non-null type …`, which a
+/// non-null reified `as` throws.
+pub(super) fn splice_type_map(
+    ir: &IrFile,
+    expression: ExprId,
+    render: &dyn Fn(Ty) -> String,
+) -> HashMap<String, ReifiedArgument> {
     let Some(substitutions) = ir.reified_call_subst.get(&expression) else {
         return HashMap::new();
     };
@@ -75,16 +83,31 @@ pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String
         .iter()
         .filter_map(|(name, ty)| {
             let argument = forwarded(*ty).or_else(|| {
-                let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
-                let internal = super::jvm_class_map::to_jvm_internal(&internal);
                 Some(ReifiedArgument::Class {
-                    internal: internal.to_owned(),
+                    internal: reified_class_internal(*ty)?,
                     nullable: ty.is_nullable(),
+                    intrinsic: TypeIntrinsic::of(*ty),
+                    rendered: render(ty.non_null()),
                 })
             })?;
             Some((name.clone(), argument))
         })
         .collect()
+}
+
+/// The JVM class a reified argument's type-bearing instruction names: a function type's
+/// `FunctionN`, an array's descriptor, otherwise the stored classifier's mapped class.
+fn reified_class_internal(ty: Ty) -> Option<String> {
+    let value = ty.non_null();
+    if let Ty::Fun(signature) = value {
+        return (!signature.suspend)
+            .then(|| super::names::function_interface_internal_name(signature.params.len()));
+    }
+    if value.is_array() {
+        return Some(super::names::instanceof_internal_name(value));
+    }
+    let internal = stored_value_ty(ty).kotlin_class_internal()?.render();
+    Some(super::jvm_class_map::to_jvm_internal(&internal).to_owned())
 }
 
 /// Everything a splice of the call `expression` needs to specialize its dependency's reified
@@ -94,8 +117,9 @@ pub(super) fn splice_arguments(
     ir: &IrFile,
     expression: ExprId,
     facade: &str,
+    render: &dyn Fn(Ty) -> String,
 ) -> super::reified_arguments::ReifiedArguments {
-    let classes = splice_type_map(ir, expression);
+    let classes = splice_type_map(ir, expression, render);
     let mut type_of = HashMap::new();
     if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
         let parameters = super::type_of::TypeParameters::new(ir, facade);
@@ -223,13 +247,15 @@ mod tests {
         );
 
         assert_eq!(
-            splice_type_map(&ir, expression),
+            splice_type_map(&ir, expression, &|_| String::new()),
             HashMap::from([
                 (
                     "T".to_owned(),
                     ReifiedArgument::Class {
                         internal: "kotlin/Unit".to_owned(),
                         nullable: false,
+                        intrinsic: None,
+                        rendered: String::new(),
                     }
                 ),
                 (
@@ -237,6 +263,8 @@ mod tests {
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
                         nullable: false,
+                        intrinsic: None,
+                        rendered: String::new(),
                     }
                 ),
             ])
@@ -259,7 +287,7 @@ mod tests {
         );
 
         assert_eq!(
-            splice_type_map(&ir, expression),
+            splice_type_map(&ir, expression, &|_| String::new()),
             HashMap::from([
                 (
                     "R".to_owned(),

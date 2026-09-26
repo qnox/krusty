@@ -2481,6 +2481,11 @@ pub struct IrFile {
     /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
     /// the same generic `when` written by hand must remain distinguishable.
     pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
+    /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
+    /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function
+    /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
+    /// rather than the checked cast a written `as` needs.
+    pub written_casts: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.

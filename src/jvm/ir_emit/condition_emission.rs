@@ -158,6 +158,7 @@ impl Emitter<'_> {
                     (
                         *to,
                         *arg,
+                        *type_operand,
                         crate::jvm::names::instanceof_internal_name(jvm_ty),
                     )
                 })
@@ -167,7 +168,7 @@ impl Emitter<'_> {
         } else {
             None
         };
-        if let Some((to, arg, internal)) = inst_fuse {
+        if let Some((to, arg, type_operand, internal)) = inst_fuse {
             let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
             // `instanceof` takes a REFERENCE. A scalar operand is boxed first, exactly as the
             // unfused emit above does it — `if (n is Number)` where `n` is an `Int` reached here
@@ -179,8 +180,7 @@ impl Emitter<'_> {
                     semantic_scalar_adapter(semantic_arg, physical_arg),
                 );
             }
-            let ci = self.cw.class_ref(&internal);
-            code.instance_of(ci);
+            self.emit_instance_check(&internal, type_operand, code);
             // Stack holds 1 iff `arg instanceof T`. The condition is true on `instanceof` for `InstanceOf`
             // and on `!instanceof` for `NotInstanceOf`; jump when the condition equals `jump_when_true`.
             let jump_on_instance = if matches!(to, IrTypeOp::InstanceOf) {

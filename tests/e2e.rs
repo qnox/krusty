@@ -1978,3 +1978,6 @@ mod unsigned_arrays_e2e;
 
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
+
+#[path = "type_intrinsics_e2e.rs"]
+mod type_intrinsics_e2e;

@@ -552,11 +552,15 @@ impl BodyLowering<'_> {
                         operand,
                         target.get(),
                     ),
-                    FirTypeOperation::Cast => self.ir.add_expr(IrExpr::TypeOp {
-                        op: lower_type_operation(*operation, target.get()),
-                        arg: operand,
-                        type_operand: target.get(),
-                    }),
+                    FirTypeOperation::Cast => {
+                        let cast = self.ir.add_expr(IrExpr::TypeOp {
+                            op: lower_type_operation(*operation, target.get()),
+                            arg: operand,
+                            type_operand: target.get(),
+                        });
+                        self.ir.written_casts.insert(cast);
+                        cast
+                    }
                 }
             }
             FirExprKind::ImplicitConversion { value, conversion } => {
