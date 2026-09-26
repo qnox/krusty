@@ -21,6 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::super::analysis::opcode;
 use super::super::opcodes::*;
+use super::super::redundant_checkcasts::is_reified_marker;
 use super::nullability::Placements;
 use super::{is_throw_intrinsic, Check};
 use crate::jvm::method_node::{Constant, Insn, LabelId, MethodNode, Node};
@@ -92,12 +93,6 @@ fn int_constant(insn: &Insn) -> Option<i32> {
         Insn::Ldc(Constant::Int(value)) => Some(*value),
         _ => None,
     }
-}
-
-/// Whether `insn` is `Intrinsics.reifiedOperationMarker`.
-pub(super) fn is_reified_marker(insn: &Insn) -> bool {
-    matches!(insn, Insn::Method { op: INVOKESTATIC, owner, name, .. }
-        if owner == "kotlin/jvm/internal/Intrinsics" && name == "reifiedOperationMarker")
 }
 
 /// The operation kind of the reified-operation marker right before the node at `at`

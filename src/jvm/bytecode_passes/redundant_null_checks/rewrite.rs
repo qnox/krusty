@@ -13,7 +13,8 @@
 use super::super::analysis::opcode;
 use super::super::descriptors;
 use super::super::opcodes::*;
-use super::assumptions::{is_reified_marker, Listing};
+use super::super::redundant_checkcasts::is_reified_marker;
+use super::assumptions::Listing;
 use super::nullability::{NullValue, Nullability};
 use super::Check;
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
