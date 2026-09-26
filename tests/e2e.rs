@@ -1084,14 +1084,28 @@ mod member_property_inference_e2e;
 mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_array_signature_e2e.rs"]
 mod metadata_array_signature_e2e;
+#[path = "metadata_captured_type_parameters_e2e.rs"]
+mod metadata_captured_type_parameters_e2e;
+#[path = "metadata_enum_entry_classes_e2e.rs"]
+mod metadata_enum_entry_classes_e2e;
+#[path = "metadata_enum_supertypes_e2e.rs"]
+mod metadata_enum_supertypes_e2e;
 #[path = "metadata_field_presence_e2e.rs"]
 mod metadata_field_presence_e2e;
+#[path = "metadata_function_flags_e2e.rs"]
+mod metadata_function_flags_e2e;
+#[path = "metadata_inline_parameter_modifiers_e2e.rs"]
+mod metadata_inline_parameter_modifiers_e2e;
 #[path = "metadata_jvm_field_e2e.rs"]
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
 #[path = "metadata_local_classes_e2e.rs"]
 mod metadata_local_classes_e2e;
+#[path = "metadata_member_order_e2e.rs"]
+mod metadata_member_order_e2e;
+#[path = "metadata_parameter_defaults_e2e.rs"]
+mod metadata_parameter_defaults_e2e;
 #[path = "metadata_property_flags_e2e.rs"]
 mod metadata_property_flags_e2e;
 #[path = "metadata_reader_e2e.rs"]
@@ -1100,6 +1114,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_synthetic_classes_e2e.rs"]
+mod metadata_synthetic_classes_e2e;
 #[path = "metadata_type_reference_e2e.rs"]
 mod metadata_type_reference_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
@@ -1979,8 +1995,6 @@ mod local_class_naming_e2e;
 mod unboxing_coercion_e2e;
 
 mod serializer_metadata_class_id_e2e;
-#[path = "common/kotlin_metadata.rs"]
-mod serializer_metadata_test_support;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]

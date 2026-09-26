@@ -145,6 +145,7 @@ pub(super) fn publish(
                     inline: header.flags.has(DeclarationFlags::INLINE),
                     operator: header.flags.has(DeclarationFlags::OPERATOR),
                     infix: header.flags.has(DeclarationFlags::INFIX),
+                    tailrec: header.flags.has(DeclarationFlags::TAILREC),
                     has_function_typed_parameter: index.has_function_typed_parameter(callable.id),
                     contract: index.contract(declaration).cloned(),
                     type_params: type_parameters(index, declaration),

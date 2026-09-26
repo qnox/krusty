@@ -56,6 +56,7 @@ mod inline_call;
 mod interface_compatibility;
 mod local_updates;
 mod member_schedule;
+mod metadata_member_order;
 mod metadata_policy;
 mod method_access;
 mod method_signatures;
@@ -94,7 +95,7 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
-use super::metadata_flags::{class_metadata_flags, function_flags};
+use super::metadata_flags::{class_metadata_flags, declared_value_parameters, function_flags};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -112,8 +113,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    is_continuation_class, is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL,
-    SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
+    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use scalar_coercion::{
@@ -785,24 +786,6 @@ fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> 
     field_nullability_kind(ir, fq_name, name, t) == 1
 }
 
-/// Field indices a class `init_body` assigns a compile-time literal — a BODY property such as
-/// `val y: Int = 2`. kotlinc sets `Property.hasConstant` for exactly these.
-fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
-    let mut out = std::collections::HashSet::new();
-    let Some(body) = c.init_body else { return out };
-    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
-        return out;
-    };
-    for &s in stmts {
-        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if matches!(ir.expr(*value), IrExpr::Const(_)) {
-                out.insert(*index);
-            }
-        }
-    }
-    out
-}
-
 /// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
 /// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
 /// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
@@ -874,9 +857,8 @@ fn build_class_metadata(
     opts: &EmitOptions,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
-        build_class, ClassMemberOrder, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS,
-        EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
-        SEALED_CTOR_FLAGS,
+        build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
+        FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
     };
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
@@ -1106,7 +1088,6 @@ fn build_class_metadata(
     // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
     let names_local =
         |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
-    let const_fields = init_body_constant_fields(ir, c);
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
@@ -1215,12 +1196,13 @@ fn build_class_metadata(
                     // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
                     // HAS_CONSTANT flag exactly like an instance-field one.
                     has_constant: backing.is_some_and(|(index, field)| {
-                        field.is_final()
-                            && index >= c.ctor_param_count
-                            && const_fields.contains(&index)
-                    }) || hoisted_static_for(ir, c, property_index).is_some_and(
-                        |s| !s.is_var && static_fields::const_value_idx_peek(ir, s.init),
-                    ),
+                        field.is_final() && index >= c.ctor_param_count
+                    }) && property
+                        .initializer
+                        .is_some_and(|init| static_fields::const_value_idx_peek(ir, init))
+                        || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
+                            !s.is_var && static_fields::const_value_idx_peek(ir, s.init)
+                        }),
                     is_const: false,
                     modifiers: property.modifiers,
                     setter_is_private: property.setter_is_private,
@@ -1677,18 +1659,16 @@ fn build_class_metadata(
                     .take(member_context_count)
                     .map(crate::jvm::parameter_names::metadata_context_kind)
                     .collect();
-                // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
-                // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
-                let param_defaults: Vec<bool> = ir
-                    .param_defaults(fid)
-                    .map(|ds| {
-                        ds.iter()
-                            .enumerate()
-                            .filter(|(i, _)| receiver_index != Some(*i))
-                            .map(|(_, d)| d.is_some())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // Per-parameter declaration facts. Only the defaults the declaration writes itself
+                // count; an override's inherited defaults stay with the declaration it overrides.
+                let defaults = ir.declared_param_defaults(fid).into_iter().flat_map(|ds| {
+                    let own = ds
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| receiver_index != Some(*i));
+                    own.map(|(_, d)| d.is_some())
+                });
+                let param_modifiers = declared_value_parameters(ir, fid, defaults);
                 // Recorded exactly when a reader cannot rebuild the physical descriptor from the
                 // declared types (kotlinc's `requiresFunctionSignature`).
                 let physical = crate::jvm::names::method_descriptor(&f.params, f.ret);
@@ -1726,7 +1706,7 @@ fn build_class_metadata(
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     has_function_typed_parameter: ir.function_typed_parameter_fns.contains(&fid),
                     params_have_defaults: false,
-                    param_defaults,
+                    param_modifiers,
                     vararg_index,
                     context_count: member_context_count,
                     context_parameter_kinds,
@@ -1773,6 +1753,8 @@ fn build_class_metadata(
             .collect::<Vec<_>>()
     };
     let class_ty = Ty::obj(&c.fq_name());
+    let declared_method_list = declared_methods();
+    let declared_method_count = declared_method_list.len();
     let inferred_methods: Vec<FnMeta> = if c.is_data {
         let mut m = Vec::new();
         for (i, property) in data_component_properties.iter().enumerate() {
@@ -1800,7 +1782,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1839,7 +1821,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: true,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
                 annotations: Vec::new(),
@@ -1865,7 +1847,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1892,7 +1874,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1919,7 +1901,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
@@ -1928,13 +1910,15 @@ fn build_class_metadata(
                 no_infer_params: Vec::new(),
             });
         }
-        m.extend(declared_methods());
-        m
+        // kotlinc visits the source declarations first, then the members the compiler generates.
+        let mut methods = declared_method_list;
+        methods.extend(m);
+        methods
     } else if c.is_value {
         // A value class's Kotlin-visible overrides. Each dispatches to a differently-named static
         // `-impl` taking the erased underlying, so each records a `JvmMethodSignature` (name + desc).
         let u = desc(c.fields[0].ty);
-        let mut methods = vec![
+        let methods = vec![
             FnMeta {
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
@@ -1949,7 +1933,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
@@ -1971,7 +1955,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
@@ -1993,7 +1977,7 @@ fn build_class_metadata(
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,
-                param_defaults: Vec::new(),
+                param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),
@@ -2002,10 +1986,11 @@ fn build_class_metadata(
                 no_infer_params: Vec::new(),
             },
         ];
-        methods.extend(declared_methods());
-        methods
+        let mut declared = declared_method_list;
+        declared.extend(methods);
+        declared
     } else {
-        declared_methods()
+        declared_method_list
     };
     let mut methods = match generated_publication.map(|publication| publication.metadata_scope) {
         Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive) => Vec::new(),
@@ -2029,76 +2014,15 @@ fn build_class_metadata(
             decl_order: alias.source_order as usize,
         })
         .collect::<Vec<_>>();
-    let member_order = if c.is_data || c.is_value {
-        Vec::new()
-    } else {
-        let mut ordered = Vec::with_capacity(props.len() + methods.len() + type_aliases.len());
-        ordered.extend(
-            prop_source_orders
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
-        );
-        if !matches!(
-            generated_publication.map(|publication| publication.metadata_scope),
-            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
-        ) {
-            ordered.extend(
-                declared_fids
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(index, fid)| {
-                        (
-                            ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                            ClassMemberOrder::Function(index),
-                        )
-                    }),
-            );
-        }
-        let generated_order_base = if matches!(
-            generated_publication.map(|publication| publication.metadata_scope),
-            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
-        ) {
-            0
-        } else {
-            ordered
-                .iter()
-                .map(|(order, _)| *order)
-                .chain(
-                    type_aliases
-                        .iter()
-                        .map(|alias| u32::try_from(alias.decl_order).unwrap_or(u32::MAX)),
-                )
-                .filter(|order| *order != u32::MAX)
-                .max()
-                .map_or(0, |order| order.saturating_add(1))
-        };
-        if let Some(publication) = generated_publication {
-            ordered.extend(
-                publication
-                    .functions
-                    .iter()
-                    .filter(|member| member.metadata.is_some())
-                    .enumerate()
-                    .map(|(index, _)| {
-                        (
-                            generated_order_base.saturating_add(index as u32),
-                            ClassMemberOrder::Function(inferred_method_count + index),
-                        )
-                    }),
-            );
-        }
-        ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
-            (
-                u32::try_from(alias.decl_order).unwrap_or(u32::MAX),
-                ClassMemberOrder::TypeAlias(index),
-            )
-        }));
-        ordered.sort_by_key(|(order, _)| *order);
-        ordered.into_iter().map(|(_, member)| member).collect()
-    };
+    let member_order = metadata_member_order::member_order(
+        ir,
+        c,
+        &prop_source_orders,
+        &declared_fids,
+        declared_method_count..inferred_method_count,
+        generated_publication,
+        &type_aliases,
+    );
     // A value class's primary constructor is realized as the static `constructor-impl` returning the
     // erased underlying, not `<init>`; its `@Metadata` signature records that.
     let vc_ctor_desc = c
@@ -2249,7 +2173,7 @@ fn build_class_metadata(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: &c.captured_type_params,
+            captured_type_params: super::local_classifiers::captured_type_parameters(c),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
@@ -2268,14 +2192,14 @@ fn build_class_metadata(
             ctor_param_defaults: &ctor_param_defaults,
             inline_underlying,
             ctor_sig_name: c.is_value.then_some("constructor-impl"),
-            // An interface has no constructor at all, whatever the IR records.
             // An interface has no constructor; a class with ONLY secondary constructors emits no
             // primary record either (its `Class.constructor` entries are the secondaries below).
             // Every other class keeps its (possibly implicit) primary record — an `enum class`
             // without a declared constructor still records the implicit private `(String, I)` one.
-            // An anonymous object's constructor is not a declaration a reader can call.
+            // An anonymous object's constructor (an enum entry body's too) is not callable.
             emit_primary_ctor: !c.is_interface
                 && !c.is_anonymous_object
+                && c.enum_entry_of.is_none()
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
             // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the
@@ -2309,6 +2233,7 @@ fn build_class_metadata(
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
             local_classifiers: &local_classifiers,
+            enum_entry_bodies: &super::local_classifiers::enum_entry_bodies(ir),
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -2357,8 +2282,7 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// value class but the transitive check independently admits it, a mentioning class publishes a type
 /// a downstream compiler reads as an ordinary box.
 fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    !(c.enum_entry_of.is_some()
-        || c.prop_ref.is_some()
+    !(c.prop_ref.is_some()
         || c.func_ref.is_some()
         // A published secondary constructor is described from its recorded semantic parameter
         // identities. A malformed publication contract would advertise the wrong parameter list,

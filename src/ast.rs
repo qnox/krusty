@@ -603,6 +603,9 @@ pub struct Param {
     /// function-typed exactly like the spliced one beside it. `crossinline` is not this: it only
     /// forbids a non-local return, and such a parameter is still spliced.
     pub is_materialized_lambda: bool,
+    /// `true` when the parameter wrote `crossinline`: still spliced, but barred from a non-local
+    /// return. Only declaration metadata records it.
+    pub is_crossinline: bool,
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
     /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,
