@@ -18,6 +18,23 @@ pub(super) enum ModuleRealizationTarget {
 }
 
 fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<PropertyAccess> {
+    let (owner, is_static) = jvm_field_storage(property, stems)?;
+    Some(PropertyAccess::Field {
+        owner: owner.render(),
+        name: property.name.clone(),
+        descriptor: crate::jvm::names::type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(
+            &property.ty,
+        )),
+        is_static,
+    })
+}
+
+/// The class and staticness of the field a module property is realized as, when `@JvmField`
+/// makes its storage the declaration's JVM surface.
+pub(super) fn jvm_field_storage(
+    property: &IrModuleProperty,
+    stems: &[String],
+) -> Option<(TypeName, bool)> {
     if !crate::jvm::property_realizations::jvm_field_eligible(
         &property.annotations,
         property.visibility,
@@ -37,14 +54,7 @@ fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<Pro
     } else {
         (facade_for(property.source, stems)?, true)
     };
-    Some(PropertyAccess::Field {
-        owner: owner.render(),
-        name: property.name.clone(),
-        descriptor: crate::jvm::names::type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(
-            &property.ty,
-        )),
-        is_static,
-    })
+    Some((owner, is_static))
 }
 
 pub(super) fn owner_is_jvm_interface(property: &IrModuleProperty) -> bool {

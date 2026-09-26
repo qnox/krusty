@@ -174,9 +174,13 @@ pub(super) fn realize(
         ) {
             (Some(descriptor), _, _) => {
                 *descriptor = erase_descriptor(descriptor, callable_under);
+                realization.physical_setter_value = realization
+                    .physical_setter_value
+                    .map(|physical| erase(&physical, callable_under));
             }
             (None, true, Some(carrier)) => {
                 reference.setter_descriptor = Some(format!("({})V", desc(&carrier)));
+                realization.physical_setter_value = Some(carrier);
             }
             (None, _, _) => {}
         }
@@ -302,11 +306,10 @@ pub(super) fn realize(
                 }
             }
             *setter = mangled;
-            reference.setter_descriptor = Some(format!(
-                "({}{})V",
-                desc(&carrier),
-                desc(&erase(&value, callable_under))
-            ));
+            let physical_value = erase(&value, callable_under);
+            reference.setter_descriptor =
+                Some(format!("({}{})V", desc(&carrier), desc(&physical_value)));
+            realization.physical_setter_value = Some(physical_value);
         }
         // A PRIVATE member keeps its accessor private, as kotlinc does, and the reference reaches
         // it through the synthetic bridge beside it: `access$getXx-impl(I)I`, not the declaration.
@@ -409,6 +412,9 @@ mod tests {
                 getter_function: Some(accessor),
                 setter_function: None,
                 physical_getter_ret: None,
+                physical_setter_value: None,
+                getter_field: None,
+                setter_field: None,
                 declares_value_class_storage: false,
                 accessor_names_are_physical: false,
                 boxed_value_class: None,

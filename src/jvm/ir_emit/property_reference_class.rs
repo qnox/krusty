@@ -50,7 +50,7 @@ struct PropertyCallTarget<'a> {
     boxed_value_class: Option<TypeName>,
     /// The receiver is a value class's boxed object while the accessor takes its carrier.
     unboxed_receiver_value_class: Option<TypeName>,
-    field_access: Option<&'a crate::jvm::inline::PropertyAccess>,
+    field_access: Option<&'a crate::jvm::property_references::PropertyFieldAccess>,
 }
 
 struct PropertyReferenceTarget {
@@ -62,8 +62,8 @@ struct PropertyReferenceTarget {
     getter_params: Vec<Ty>,
     getter_ret: Ty,
     signature: String,
-    getter_field: Option<crate::jvm::inline::PropertyAccess>,
-    setter_field: Option<crate::jvm::inline::PropertyAccess>,
+    getter_field: Option<crate::jvm::property_references::PropertyFieldAccess>,
+    setter_field: Option<crate::jvm::property_references::PropertyFieldAccess>,
     boxed_value_class: Option<TypeName>,
     unboxed_receiver_value_class: Option<TypeName>,
 }
@@ -73,7 +73,6 @@ impl PropertyReferenceTarget {
         property: &crate::ir::PropRef,
         realization: &crate::jvm::property_references::PropertyReferenceRealization,
         facade: &str,
-        bodies: &dyn MethodBodies,
     ) -> Self {
         let semantic_owner = property.owner().expect("property reference owner");
         let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
@@ -88,14 +87,6 @@ impl PropertyReferenceTarget {
                 crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
             });
         let facade = property.ext_facade_or_facade(facade);
-        let getter_field = (facade.is_none() && array_owner.is_none())
-            .then(|| bodies.property_read_access(&semantic_owner, &property.prop_name))
-            .flatten()
-            .filter(|access| matches!(access, crate::jvm::inline::PropertyAccess::Field { .. }));
-        let setter_field = (property.mutable && facade.is_none() && array_owner.is_none())
-            .then(|| bodies.property_write_access(&semantic_owner, &property.prop_name))
-            .flatten()
-            .filter(|access| matches!(access, crate::jvm::inline::PropertyAccess::Field { .. }));
         let getter_descriptor = property_getter_descriptor(property, facade.is_some());
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
             .expect("validated property getter descriptor");
@@ -108,8 +99,8 @@ impl PropertyReferenceTarget {
             getter_descriptor,
             getter_params,
             getter_ret: ir_ty_to_jvm(&getter_ret),
-            getter_field,
-            setter_field,
+            getter_field: realization.getter_field.clone(),
+            setter_field: realization.setter_field.clone(),
             boxed_value_class: realization.boxed_value_class,
             unboxed_receiver_value_class: realization.unboxed_receiver_value_class,
         }
@@ -197,21 +188,15 @@ fn emit_property_reference_constructor(
 
 impl PropertyCallTarget<'_> {
     fn emit_get(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, ret: Ty) {
-        if let Some(crate::jvm::inline::PropertyAccess::Field {
-            owner,
-            name,
-            descriptor,
-            is_static,
-        }) = self.field_access
-        {
-            let physical = ty_from_field_descriptor(descriptor);
-            if *is_static {
+        if let Some(access) = self.field_access {
+            let physical = ir_ty_to_jvm(&access.ty);
+            let owner = access.owner.render();
+            let field = cw.fieldref(&owner, &access.name, &type_descriptor(physical));
+            if access.is_static {
                 code.pop();
-                let field = cw.fieldref(owner, name, descriptor);
                 code.getstatic(field, slot_words(physical) as i32);
             } else {
-                emit_object_as(cw, code, Ty::obj(owner));
-                let field = cw.fieldref(owner, name, descriptor);
+                emit_object_as(cw, code, Ty::obj_name(access.owner));
                 code.getfield(field, slot_words(physical) as i32);
             }
             return;
@@ -256,23 +241,18 @@ impl PropertyCallTarget<'_> {
     }
 
     fn emit_set(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, value_local: u16) {
-        if let Some(crate::jvm::inline::PropertyAccess::Field {
-            owner,
-            name,
-            descriptor,
-            is_static,
-        }) = self.field_access
-        {
-            let physical = ty_from_field_descriptor(descriptor);
-            if *is_static {
+        if let Some(access) = self.field_access {
+            let physical = ir_ty_to_jvm(&access.ty);
+            if access.is_static {
                 code.pop();
             } else {
-                emit_object_as(cw, code, Ty::obj(owner));
+                emit_object_as(cw, code, Ty::obj_name(access.owner));
             }
             code.aload(value_local);
             self.emit_property_value(cw, code, physical);
-            let field = cw.fieldref(owner, name, descriptor);
-            if *is_static {
+            let owner = access.owner.render();
+            let field = cw.fieldref(&owner, &access.name, &type_descriptor(physical));
+            if access.is_static {
                 code.putstatic(field, slot_words(physical) as i32);
             } else {
                 code.putfield(field, slot_words(physical) as i32);
@@ -373,7 +353,7 @@ pub(super) fn emit_prop_ref_class(
     let superclass = c.superclass();
     let mut cw = property_reference_writer(ir, c, facade, env, opts);
 
-    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
+    let target = PropertyReferenceTarget::new(pr, realization, facade);
     emit_property_reference_constructor(&mut cw, &fq, &superclass, pr, &target, false);
 
     seed_method_header(&mut cw, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
@@ -458,7 +438,7 @@ fn emit_bound_prop_ref_class(
         .property_reference_realizations
         .get(c.fq_name_id())
         .expect("a synthesized property reference must retain its JVM realization");
-    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
+    let target = PropertyReferenceTarget::new(pr, realization, facade);
     emit_property_reference_constructor(&mut cw, &fq, &superclass, pr, &target, true);
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
@@ -539,10 +519,16 @@ fn emit_toplevel_prop_ref_class(
         (Some(descriptor), true) => descriptor.clone(),
         _ => format!("(){prop_desc}"),
     };
-    let getter_jvm = getter_desc
-        .rsplit_once(')')
-        .map(|(_, ret)| ty_from_field_descriptor(ret))
-        .unwrap_or(prop_jvm);
+    // The accessor returns the carrier the realization recorded beside that descriptor.
+    let getter_jvm = if carrier {
+        ir_ty_to_jvm(
+            &realization
+                .physical_getter_ret
+                .expect("a carrier-realized getter records its physical return"),
+        )
+    } else {
+        prop_jvm
+    };
     let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
@@ -604,11 +590,15 @@ fn emit_toplevel_prop_ref_class(
             (Some(descriptor), true) => descriptor.clone(),
             _ => format!("({prop_desc})V"),
         };
-        let setter_jvm = setter_desc
-            .strip_prefix('(')
-            .and_then(|rest| rest.split_once(')'))
-            .map(|(parameter, _)| ty_from_field_descriptor(parameter))
-            .unwrap_or(prop_jvm);
+        let setter_jvm = if carrier {
+            ir_ty_to_jvm(
+                &realization
+                    .physical_setter_value
+                    .expect("a carrier-realized setter records its physical value type"),
+            )
+        } else {
+            prop_jvm
+        };
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;)V");
         let mut set = CodeBuilder::new(2);
         set.aload(1);

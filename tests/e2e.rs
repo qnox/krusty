@@ -1413,6 +1413,8 @@ mod property_infer_member_e2e;
 mod property_initializer_newline_e2e;
 #[path = "property_reference_class_e2e.rs"]
 mod property_reference_class_e2e;
+#[path = "property_reference_dependency_e2e.rs"]
+mod property_reference_dependency_e2e;
 #[path = "property_serializer_decode_e2e.rs"]
 mod property_serializer_decode_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]

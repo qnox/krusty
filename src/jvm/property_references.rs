@@ -3,7 +3,8 @@
 mod realization;
 
 pub(crate) use realization::{
-    PropertyAccessorRole, PropertyReferenceRealization, PropertyReferenceRealizations,
+    PropertyAccessorRole, PropertyFieldAccess, PropertyReferenceRealization,
+    PropertyReferenceRealizations,
 };
 
 use super::classpath::{Classpath, ExternalCallableKind, ExternalCallableRealization};
@@ -353,6 +354,9 @@ fn classifier_property(
             getter_function: None,
             setter_function: None,
             physical_getter_ret: None,
+            physical_setter_value: None,
+            getter_field: None,
+            setter_field: None,
             declares_value_class_storage: false,
             accessor_names_are_physical: false,
             boxed_value_class: None,
@@ -424,6 +428,63 @@ fn external_property(
             return Err(failure);
         }
     };
+    // kotlinc calls a member through the class the reference names it on, where it is that
+    // class's own (possibly inherited) member: `Sub::level` calls `Sub.getLevel()`, not the
+    // declaring `Tank`'s. An interface member keeps its declaring owner, whose kind the selection
+    // recorded; the referenced class's kind is not.
+    let call_owner = if ext_facade.is_none() && !static_dispatch && !callable.owner_is_interface {
+        owner
+    } else {
+        callable.owner
+    };
+    // A field-backed declaration is read and written as the field its accessors ARE, from the
+    // same selected realization: the field an owner and spelling would find may belong to another
+    // declaration.
+    let field_access = |realization: &ExternalCallableRealization, ty: Ty| {
+        let is_static = match realization.kind {
+            ExternalCallableKind::InstanceFieldRead | ExternalCallableKind::InstanceFieldWrite => {
+                false
+            }
+            ExternalCallableKind::StaticFieldRead | ExternalCallableKind::StaticFieldWrite => true,
+            ExternalCallableKind::TopLevel
+            | ExternalCallableKind::Extension
+            | ExternalCallableKind::Member
+            | ExternalCallableKind::Constructor => return None,
+        };
+        Some(PropertyFieldAccess {
+            owner: if is_static {
+                realization.callable.owner
+            } else {
+                call_owner
+            },
+            name: realization.callable.name.clone(),
+            ty,
+            is_static,
+        })
+    };
+    let physical_setter_value = setter
+        .as_ref()
+        .map(|(_, setter)| {
+            setter
+                .callable
+                .physical_params
+                .last()
+                .copied()
+                .ok_or(failure)
+        })
+        .transpose()?;
+    let getter_field = field_access(&getter.1, callable.physical_ret);
+    let setter_field = setter
+        .as_ref()
+        .zip(physical_setter_value)
+        .and_then(|((_, setter), value)| field_access(setter, value));
+    // A field has no accessor to name, so the reflected signature names the getter the property
+    // would have: `getStamp()`, never the field's own spelling.
+    let getter_name = if field_realization {
+        crate::names::property_getter_name(&name)
+    } else {
+        callable.name.clone()
+    };
     // The provider decoded this declaration edge from the metadata's stable string-table
     // identities and attached it to the exact external property selected by FIR. Do not compare
     // either the source spelling or the accessor spelling here.
@@ -431,9 +492,9 @@ fn external_property(
     Ok((
         PropRef {
             owner_internal: Some(owner),
-            call_owner_internal: Some(callable.owner),
+            call_owner_internal: Some(call_owner),
             prop_name: name.to_string(),
-            getter_name: callable.name.clone(),
+            getter_name: getter_name.clone(),
             getter_descriptor: Some(descriptor),
             setter_name: setter
                 .as_ref()
@@ -453,7 +514,7 @@ fn external_property(
             ext_facade,
         },
         PropertyReferenceRealization {
-            declared_getter_name: callable.name.clone(),
+            declared_getter_name: getter_name,
             declared_setter_name: setter
                 .as_ref()
                 .map(|(_, setter)| setter.callable.name.clone()),
@@ -471,6 +532,9 @@ fn external_property(
             getter_function: None,
             setter_function: None,
             physical_getter_ret: Some(callable.physical_ret),
+            physical_setter_value,
+            getter_field,
+            setter_field,
             declares_value_class_storage,
             accessor_names_are_physical: true,
             boxed_value_class: None,
@@ -579,6 +643,19 @@ fn module_property(
             crate::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
         })
     };
+    // `@JvmField` makes the declaration's storage its JVM surface; the field is the one its own
+    // identity realizes, never one found by owner and spelling.
+    let field = (!access_bridge)
+        .then(|| super::module_calls::jvm_field_storage(property, stems))
+        .flatten()
+        .map(|(owner, is_static)| PropertyFieldAccess {
+            owner,
+            name: name.to_string(),
+            ty: super::ir_emit::ir_ty_to_jvm(&property.ty),
+            is_static,
+        });
+    let getter_field = field.clone();
+    let setter_field = reference_mutable.then_some(field).flatten();
     let setter_descriptor = if access_bridge && reference_mutable {
         Some(crate::jvm::names::method_descriptor(
             &[Ty::obj_name(owner), property.ty],
@@ -591,6 +668,7 @@ fn module_property(
     } else {
         None
     };
+    let physical_setter_value = setter_descriptor.is_some().then_some(property.ty);
     Ok((
         PropRef {
             owner_internal: Some(owner),
@@ -654,6 +732,9 @@ fn module_property(
             // The accessor's physical return is the property's own type: this module writes no
             // descriptor of its own for one, and the synthesized ones above are built from it.
             physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),
+            physical_setter_value,
+            getter_field,
+            setter_field,
             declares_value_class_storage: declared.value_class_storage,
             accessor_names_are_physical: false,
             boxed_value_class: None,
