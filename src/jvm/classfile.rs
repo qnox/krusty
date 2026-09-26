@@ -2889,7 +2889,7 @@ impl ClassWriter {
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
         }
-        pool_layout::relayout(out, &relaid)
+        pool_layout::relayout(out, &relaid, self.unnamed_entries())
     }
 }
 

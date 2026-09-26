@@ -7,7 +7,10 @@
 //! one a pass introduced interned its constants late, behind the method's other entries. Once the
 //! class is serialized, the pool is laid out again:
 //!
-//! - an entry nothing in the class names any more is dropped;
+//! - an entry nothing in the class names any more is dropped, unless the class is a copy
+//!   ([`Unnamed::Kept`]): ASM's writer keeps what each visit of the copied class interned, such as
+//!   the original's `EnclosingMethod` a regenerated inline object replaces. Even then, an entry
+//!   a rewritten method interned and nothing names after the rewrite goes;
 //! - the entries of a rewritten method ([`RelaidMethod`]) that only rewritten code names are
 //!   placed where the method's constants began, in the order ASM's `MethodWriter` interns the
 //!   rewritten body: catch types, then each instruction's operands, then the local-variable
@@ -37,6 +40,16 @@ pub(super) struct RelaidMethod {
     pub(super) interned: Range<u16>,
 }
 
+/// What becomes of an entry nothing in the class names and no rewrite interned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Unnamed {
+    /// A class krusty emits: kotlinc's writer interns a constant only when it writes the code or
+    /// attribute that names it, so the entry goes.
+    Dropped,
+    /// A class copied from a compiled one: every visit interned its constants, and they stay.
+    Kept,
+}
+
 /// Why a pool is kept as interned.
 #[derive(Debug, PartialEq, Eq)]
 enum Kept {
@@ -47,8 +60,8 @@ enum Kept {
 }
 
 /// `class` with its pool laid out again (see the module documentation).
-pub(super) fn relayout(class: Vec<u8>, relaid: &[RelaidMethod]) -> Vec<u8> {
-    match relaid_class(&class, relaid) {
+pub(super) fn relayout(class: Vec<u8>, relaid: &[RelaidMethod], unnamed: Unnamed) -> Vec<u8> {
+    match relaid_class(&class, relaid, unnamed) {
         Ok(Some(laid_out)) => laid_out,
         Ok(None) => class,
         Err(kept) => {
@@ -59,9 +72,13 @@ pub(super) fn relayout(class: Vec<u8>, relaid: &[RelaidMethod]) -> Vec<u8> {
 }
 
 /// `class` with its pool laid out again, or `None` when the layout is the one it has.
-fn relaid_class(class: &[u8], relaid: &[RelaidMethod]) -> Result<Option<Vec<u8>>, Kept> {
+fn relaid_class(
+    class: &[u8],
+    relaid: &[RelaidMethod],
+    unnamed: Unnamed,
+) -> Result<Option<Vec<u8>>, Kept> {
     let read = index_slots::read(class).map_err(Kept::Unread)?;
-    let order = Layout::of(&read, relaid).order();
+    let order = Layout::of(&read, relaid, unnamed).order();
     let unchanged = order
         .iter()
         .map(|&index| usize::from(index))
@@ -75,7 +92,8 @@ fn relaid_class(class: &[u8], relaid: &[RelaidMethod]) -> Result<Option<Vec<u8>>
 /// What the class names, and where each rewritten method's constants go.
 struct Layout<'a> {
     read: &'a ClassSlots,
-    /// Entries some index in the class reaches.
+    /// Entries that stay: those some index in the class reaches, in a copied class those no
+    /// rewrite interned, and what they name.
     kept: Vec<bool>,
     /// Kept entries that only rewritten code reaches and that a rewritten method interned: they
     /// are placed by the code that names them.
@@ -86,7 +104,7 @@ struct Layout<'a> {
 }
 
 impl<'a> Layout<'a> {
-    fn of(read: &'a ClassSlots, relaid: &[RelaidMethod]) -> Self {
+    fn of(read: &'a ClassSlots, relaid: &[RelaidMethod], unnamed: Unnamed) -> Self {
         let count = read.entries.len();
         let mut kept = vec![false; count];
         let mut fixed = vec![false; count];
@@ -113,6 +131,15 @@ impl<'a> Layout<'a> {
             match rewritten {
                 Some((at, part)) => parts[at][part_order(part)].push(slot.index),
                 None => reach(read, slot.index, &mut fixed),
+            }
+        }
+        if unnamed == Unnamed::Kept {
+            let unowned: Vec<u16> = (1..count)
+                .filter(|&index| read.entries[index].is_some() && !owned[index])
+                .map(|index| index as u16)
+                .collect();
+            for index in unowned {
+                reach(read, index, &mut kept);
             }
         }
         let movable: Vec<bool> = (0..count)

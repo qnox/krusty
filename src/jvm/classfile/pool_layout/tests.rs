@@ -113,7 +113,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
         added: before_g + 1..after_g + 1,
         interned: after_g + 1..after_g + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid)
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
         .expect("the class reads")
         .expect("the pool changes");
     let mut expected = emitted.to_vec();
@@ -187,7 +187,7 @@ fn a_class_with_an_attribute_the_reader_does_not_know_is_not_read() {
         Some(Unread::UnknownAttribute("Cxde".to_string()))
     );
     // The unreferenced integer stays: nothing in the class was renumbered.
-    assert_eq!(relayout(class.clone(), &[]), class);
+    assert_eq!(relayout(class.clone(), &[], Unnamed::Dropped), class);
 }
 
 #[test]
@@ -199,5 +199,18 @@ fn an_entry_nothing_names_is_dropped() {
     });
     let class = writer.finish();
     let padded = with_integers(&class, 2);
-    assert_eq!(relayout(padded, &[]), class);
+    assert_eq!(relayout(padded, &[], Unnamed::Dropped), class);
+}
+
+/// A copied class keeps what its visits interned, named or not.
+#[test]
+fn a_copied_class_keeps_an_entry_nothing_names() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    add_static(&mut writer, "f", "()Ljava/lang/Object;", |code, _| {
+        code.aconst_null();
+        code.areturn();
+    });
+    let class = writer.finish();
+    let padded = with_integers(&class, 2);
+    assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept), padded);
 }

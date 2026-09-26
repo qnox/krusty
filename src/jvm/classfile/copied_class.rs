@@ -3,7 +3,9 @@
 //! visits it, rather than in the order kotlinc's `ClassCodegen` writes a class of its own.
 
 use super::constant_pool_queries::PoolLookup;
+use super::inner_classes::InnerClassTable;
 use super::method_rewrite::MethodIdentity;
+use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
 use crate::jvm::class_node::{Annotation, ClassMethod, ElementValue, FieldNode};
 use crate::jvm::method_node::{AssembleError, Constant};
@@ -23,6 +25,15 @@ pub(crate) enum CopyError {
 const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExtension;";
 
 impl ClassWriter {
+    /// What the pool relayout does with an entry nothing names: a copied class, whose table keeps
+    /// the rows as they were visited, keeps what its visits interned.
+    pub(super) fn unnamed_entries(&self) -> Unnamed {
+        match self.inner_class_table {
+            InnerClassTable::Visited => Unnamed::Kept,
+            InnerClassTable::Referenced => Unnamed::Dropped,
+        }
+    }
+
     /// Intern a `CONSTANT_NameAndType` (and its two names) where a visit introduces it.
     pub(crate) fn seed_name_and_type(&mut self, name: &str, desc: &str) {
         self.cp.name_and_type(name, desc);
