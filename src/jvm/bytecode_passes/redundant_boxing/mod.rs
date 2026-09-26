@@ -11,7 +11,7 @@ mod values;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use recognizers::{is_boxing, is_iterator_call, ValueClasses};
+pub(crate) use recognizers::{is_boxing, is_iterator_call, is_primitive_boxing_insn, ValueClasses};
 pub(crate) use rewrite::eliminate;
 pub(crate) use values::progression_iterator;
 

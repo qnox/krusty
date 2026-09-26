@@ -4606,9 +4606,36 @@ shadow with no output change.
   `substituteIntForGeneric`) are now written as emitted: the fold lets RedundantBoxing unbox a local
   whose new descriptor is not in the constant pool, which the rewrite only looks up (5f). The
   ForLoopsLowering port can leave the `first > last` guard of constant bounds to this pass.
-- ☐ 5e–5i, 6. The rest of kotlinc's transformer order: the missing passes (PopBackwardPropagation
-  and the mid-pipeline DeadCode), the first three passes in kotlinc's order, no all-or-nothing
-  rewrite, and the mandatory steps.
+- ✅ 5e. PopBackwardPropagation and the mid-pipeline DeadCode (`bytecode_passes/pop_backward/`,
+  `dead_code::eliminate`): kotlinc's `PopBackwardPropagationTransformer` with its
+  `HazardsTrackingInterpreter` (ASM's `SourceInterpreter`, where every operand consumed other than
+  by `pop`/`pop2`/`return` marks its pushers untouchable). In instruction order a `pop` whose
+  pushers include an untouchable one, or which fused with them would be longer (a pure push counts
+  -1, a primitive `valueOf` or conversion 0, anything else +1), marks its pushers, and `pop2` and
+  the `dup_x`/`dup2_x` forms mark the values they reach; then every other `pop` becomes a `nop` and
+  each pusher does the pop itself: a load, constant or `Unit.INSTANCE` becomes a `nop`, a boxing or
+  conversion the `pop`/`pop2` of its input, anything else gets a `pop`/`pop2` after it. The
+  dead-code transformer then runs before the `goto` and `nop` steps, as in kotlinc; it keeps the
+  local variables (`prepareForEmitting` drops the empty ones only after the final run), and the slot
+  renumbering it would do is left to the one after the final run, which numbers the slots the same.
+  In the 2.4.20 box corpus 642 of the 25,396 classes krusty writes change against 5d (without
+  `JvmInlineKt`), in 598 box files and 652 methods, with 808 instructions fewer: 14 methods become
+  identical to kotlinc's instructions and none stops being so; box files byte-identical to kotlinc
+  go from 364 to 366 (`kt2711`, `kt56215`). No method grows or is written as emitted, and every
+  method's frames still match the computed ones (`framecheck`). Box pass/fail is unchanged. Most of
+  the changed methods are inlined results used as statements, which differ from kotlinc's only by
+  the inliner's `$i$f$` marker locals. The mid-pipeline dead-code step alone accounts for 53 of the
+  classes (50 box files, 57 methods, 77 instructions): a `goto` over code an earlier pass made
+  unreachable (a folded constant or null test) is removed as redundant once that code is gone,
+  leaving kotlinc's `nop` for its line; 12 of those methods become identical to kotlinc's. In
+  `tcbInEliminatedCondition` the same step leaves one `nop` fewer than kotlinc, whose inlined body
+  has other line numbers and the `$i$f$` locals as debug-range bounds. Where krusty now pops less
+  than kotlinc the input already differed: krusty emits a discarded constant where kotlinc reads a
+  field (`primitiveEqBoxed*`, `boxedEqPrimitive*`), or pops a value kotlinc stores to a temporary
+  (`kt238`) or duplicates (`kt45991`). kotlinc's `canBeOptimizedUsingSourceInterpreter` size gate is
+  not ported (5h).
+- ☐ 5f–5i, 6. The rest of kotlinc's transformer order: the first three passes in kotlinc's order, no
+  all-or-nothing rewrite, and the mandatory steps.
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

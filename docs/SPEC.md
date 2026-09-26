@@ -7204,6 +7204,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every protected range and local variable left with no instruction even when nothing is dead at
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
+- **A discarded value whose pushers are all loads or constants is not pushed, as kotlinc's
+  `PopBackwardPropagationTransformer` does, and dead code goes before the `goto` and `nop` steps.**
+  The pass runs after StackPeephole (step `PopBackwardPropagation`,
+  `bytecode_passes/pop_backward/`). Its analysis gives every value the set of instructions that can
+  have pushed it; an instruction that consumes a value other than by `pop`, `pop2` or a return marks
+  those pushers untouchable. In instruction order, a `pop` with an untouchable pusher, or one that
+  fused with its pushers would be longer (a load, `aconst_null`…`ldc` or `getstatic
+  kotlin/Unit.INSTANCE` counts -1, a primitive `valueOf` or `i2l`…`i2s` 0, anything else +1; a
+  positive sum is longer), marks all its pushers, and `pop2`, `dup_x1`, `dup_x2`, `dup2_x1` and
+  `dup2_x2` mark the values they reach. Every other `pop` becomes a `nop`, and each of its pushers
+  not already rewritten does the pop itself: a pure push becomes a `nop`, a `valueOf` or conversion
+  becomes the `pop`/`pop2` of its own input, and anything else gets a `pop`/`pop2` after it. A
+  `pop2` is never removed, so a discarded `if` of `Long`s keeps its loads, as in kotlinc. The
+  dead-code transformer then runs (step `DeadCode`), keeping the local variables for the `nop` step;
+  only the final run drops the empty ones. Nothing that runs changes: only values nobody used stop
+  being pushed, and a call keeps its own `pop`. A discarded inline `if (c) a else b` of `Int`s is
+  `iload c; ifeq L; L: return` (apart from kotlinc's `$i$f$` marker local), a discarded boxed one
+  the same, and a discarded `if (c) a else ext()` keeps only the call and its `pop` behind a negated
+  jump. Tests: the unit tests beside the pass and in `dead_code` and `pipeline`, and
+  `tests/pop_backward_e2e.rs` (instructions against kotlinc, and the samples at run time).
 
 ## 8. Success criteria for the PoC
 

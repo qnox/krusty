@@ -1375,6 +1375,8 @@ mod platform_classifier_identity_e2e;
 mod platform_map_index_assign_e2e;
 #[path = "plugins_e2e.rs"]
 mod plugins_e2e;
+#[path = "pop_backward_e2e.rs"]
+mod pop_backward_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
 mod postponed_bound_inference_e2e;
 #[path = "postponed_constructor_applicability_e2e.rs"]
