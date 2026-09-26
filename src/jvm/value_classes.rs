@@ -1586,7 +1586,27 @@ pub(crate) fn lower_value_classes(
             .map(|(name, _, _)| name.clone())
             .unwrap_or_else(|| mangle_call_once(&fr.call_name));
         let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
-        let mangled_reflection_name = mangle_reflection_once(reflection_base);
+        // A value-class member is reflected as its static implementation over the carrier:
+        // `name-impl`, or its hash-mangled name, taking the receiver first.
+        let value_class_member = fr
+            .owner_class
+            .filter(|owner| callable_under.contains_key(owner) && fr.fn_name != "<init>")
+            .filter(|_| !reflection_base.ends_with("-impl"));
+        let mangled_reflection_name = match value_class_member {
+            Some(owner) => {
+                if let Some(parameters) = &mut fr.reflection_target_param_tys {
+                    parameters.insert(0, Ty::obj_name(owner));
+                }
+                vc_member_impl_name(
+                    reflection_base,
+                    &target_decl_params,
+                    &target_decl_ret,
+                    &callable_under,
+                    fr_suspend,
+                )
+            }
+            None => mangle_reflection_once(reflection_base),
+        };
         fr.reflection_name =
             (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
         fr.call_name = mangled_call_name;

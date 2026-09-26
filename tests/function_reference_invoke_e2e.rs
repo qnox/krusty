@@ -326,19 +326,16 @@ fn retained_dispatching_reference_shapes_run() {
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
-        "@JvmInline value class Token(val raw: String)\n\
-         fun wide({high_parameters}): Int = p0 + p22\n\
-         fun unwrap(token: Token): String = token.raw\n\
+        "fun wide({high_parameters}): Int = p0 + p22\n\
          fun shapes(): String {{\n\
          \x20   val prefix = \"K\"\n\
          \x20   fun local(value: String): String = prefix + value\n\
          \x20   val captured: (String) -> String = ::local\n\
          \x20   val high: ({high_function_parameters}) -> Int = ::wide\n\
-         \x20   val valueClass: (Token) -> String = ::unwrap\n\
-         \x20   arrayOf<Any>(captured, high, valueClass)\n\
-         \x20   return captured(\"!\") + high({}) + valueClass(Token(\"v\"))\n\
+         \x20   arrayOf<Any>(captured, high)\n\
+         \x20   return captured(\"!\") + high({})\n\
          }}\n\
-         fun box(): String = if (shapes() == \"K!22v\") \"OK\" else \"fail: \" + shapes()\n",
+         fun box(): String = if (shapes() == \"K!22\") \"OK\" else \"fail: \" + shapes()\n",
         (0..23)
             .map(|ordinal| ordinal.to_string())
             .collect::<Vec<_>>()
@@ -394,19 +391,6 @@ fn retained_dispatching_reference_shapes_run() {
             vec![
                 ("<init>", 0, "()V"),
                 ("invoke", 0x0001, "([Ljava/lang/Object;)Ljava/lang/Object;"),
-                ("<clinit>", 0x0008, "()V"),
-            ],
-        ),
-        (
-            "ReferenceInvokeRetainedRunKt$shapes$valueClass$1",
-            vec![(
-                "INSTANCE",
-                0x0019,
-                "LReferenceInvokeRetainedRunKt$shapes$valueClass$1;",
-            )],
-            vec![
-                ("<init>", 0, "()V"),
-                ("invoke", 0x0001, "(Ljava/lang/Object;)Ljava/lang/Object;"),
                 ("<clinit>", 0x0008, "()V"),
             ],
         ),
@@ -507,6 +491,89 @@ fn suspend_reference_carriers_declare_kotlincs_typed_invoke() {
             "SuspendReferenceInvokeKt$carriers$bound$1",
             "SuspendReferenceInvokeKt$carriers$unbound$1",
             "SuspendReferenceInvokeKt$carriers$boundExtension$1",
+        ],
+    });
+}
+
+const VALUE_CLASS_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+@JvmInline
+value class Tag(val text: String) {
+    fun mark(): String = text + "#"
+}
+
+@JvmInline
+value class Num(val raw: Int)
+
+@JvmInline
+value class Crate(val item: Any)
+
+fun Tag.shout(): String = text + "!"
+fun makeTag(text: String): Tag = Tag(text)
+fun bump(num: Num): Num = Num(num.raw + 1)
+fun widen(value: UInt): Long = 7L
+fun maybe(tag: Tag?): String = if (tag == null) "none" else tag.text
+fun pack(item: Any): Crate = Crate(item)
+fun unsign(value: Int): UInt = 9u
+
+fun carriers(tag: Tag): Held {
+    val extension = Tag::shout
+    val made = ::makeTag
+    val bumped = ::bump
+    val widened = ::widen
+    val member = Tag::mark
+    val boundMember = tag::mark
+    val boundExtension = tag::shout
+    val nullable = ::maybe
+    val packed = ::pack
+    val unsigned = ::unsign
+    return Held(
+        extension, made, bumped, widened, member, boundMember, boundExtension, nullable, packed,
+        unsigned,
+    )
+}
+
+@Suppress("UNCHECKED_CAST")
+fun box(): String {
+    val tag = Tag("t")
+    val all = carriers(tag).all
+    if ((all[0] as (Tag) -> String)(tag) != "t!") return "extension"
+    if ((all[1] as (String) -> Tag)("m") != Tag("m")) return "made"
+    if ((all[2] as (Num) -> Num)(Num(1)) != Num(2)) return "bumped"
+    if ((all[3] as (UInt) -> Long)(3u) != 7L) return "widened"
+    if ((all[4] as (Tag) -> String)(tag) != "t#") return "member"
+    if ((all[5] as () -> String)() != "t#") return "bound member"
+    if ((all[6] as () -> String)() != "t!") return "bound extension"
+    val nullable = all[7] as (Tag?) -> String
+    if (nullable(null) != "none") return "nullable null"
+    if (nullable(tag) != "t") return "nullable value"
+    if ((all[8] as (Any) -> Crate)("c") != Crate("c")) return "packed"
+    if ((all[9] as (Int) -> UInt)(1) != 9u) return "unsigned"
+    return "OK"
+}
+"##;
+
+/// A reference whose signature mentions a value class gets kotlinc's typed `invoke`, mangled over
+/// the carriers it takes and returns, and a bridge that unboxes each value-class argument (keeping
+/// a null one null) and boxes a value-class or unsigned result, even where the mangled invoke
+/// erases to the bridge's own descriptor. A value-class member is reflected as its static
+/// implementation over the carrier.
+#[test]
+fn value_class_reference_carriers_declare_kotlincs_mangled_invoke() {
+    assert_carriers_match_and_run(&Fixture {
+        source: VALUE_CLASS_SOURCE,
+        stem: "ValueClassReferenceInvoke",
+        carriers: &[
+            "ValueClassReferenceInvokeKt$carriers$extension$1",
+            "ValueClassReferenceInvokeKt$carriers$made$1",
+            "ValueClassReferenceInvokeKt$carriers$bumped$1",
+            "ValueClassReferenceInvokeKt$carriers$widened$1",
+            "ValueClassReferenceInvokeKt$carriers$member$1",
+            "ValueClassReferenceInvokeKt$carriers$boundMember$1",
+            "ValueClassReferenceInvokeKt$carriers$boundExtension$1",
+            "ValueClassReferenceInvokeKt$carriers$nullable$1",
+            "ValueClassReferenceInvokeKt$carriers$packed$1",
+            "ValueClassReferenceInvokeKt$carriers$unsigned$1",
         ],
     });
 }
