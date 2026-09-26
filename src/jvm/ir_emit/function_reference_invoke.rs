@@ -28,8 +28,9 @@ pub(super) fn reference_constructor_locals(
 }
 
 /// The erased `FunctionN.invoke(Object…)Object` bridge to a carrier's own specialized `invoke`:
-/// each argument is cast or unboxed to the specialized parameter, and the result is returned as
-/// an object (`Unit` for a `void` specialization). Flagged, lined and tabled as kotlinc's bridge.
+/// each argument is cast or unboxed to the specialized parameter (a value class through its
+/// `unbox-impl`), and the result is returned as an object (`Unit` for a `void` specialization, a
+/// value class through its `box-impl`). Flagged, lined and tabled as kotlinc's bridge.
 pub(super) fn emit_reference_invoke_bridge(
     ir: &IrFile,
     cw: &mut ClassWriter,
@@ -44,7 +45,8 @@ pub(super) fn emit_reference_invoke_bridge(
     let specialized = method_descriptor(&parameters, result);
     let erased = jvm_function_invoke_descriptor(arity);
     // A specialization that already erases to `FunctionN.invoke` is that method; nothing bridges.
-    if specialized == erased {
+    // A mangled one over an `Any`-backed value class keeps the erased descriptor under its own name.
+    if function.name == "invoke" && specialized == erased {
         return;
     }
     cw.seed_utf8("invoke");
@@ -53,7 +55,15 @@ pub(super) fn emit_reference_invoke_bridge(
     code.aload(0);
     for (index, parameter) in parameters.iter().enumerate() {
         code.aload(1 + index as u16);
-        if parameter.is_jvm_scalar() {
+        if let Some(value_class) = fr.unbox_params.get(index).copied().flatten() {
+            emit_value_class_unbox_adapter(
+                cw,
+                &mut code,
+                value_class,
+                *parameter,
+                fr.unbox_param_nullable.get(index).copied().unwrap_or(false),
+            );
+        } else if parameter.is_jvm_scalar() {
             let semantic = fr.param_tys.get(index).copied().unwrap_or(*parameter);
             unbox_prim_from(
                 cw,
@@ -77,11 +87,18 @@ pub(super) fn emit_reference_invoke_bridge(
     if matches!(result, Ty::Unit | Ty::Nothing) {
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         code.getstatic(unit, 1);
+    } else if let Some(value_class) = fr.box_ret {
+        let value_class = value_class.render();
+        let box_impl = cw.methodref(
+            &value_class,
+            "box-impl",
+            &format!("({})L{value_class};", type_descriptor(result)),
+        );
+        code.invokestatic(box_impl, slot_words(result) as i32, 1);
     } else if result.is_jvm_scalar() {
         box_prim_free(cw, &mut code, semantic_scalar_adapter(fr.ret_ty, result));
     }
     code.areturn();
-    finish_code::<0x1041>(cw, "invoke", &erased, &mut code, 1 + u16::from(arity));
     let this_desc = format!("L{class};");
     let mut locals = vec![("this".to_string(), this_desc, 0u16)];
     for index in 0..arity as u16 {
@@ -94,6 +111,10 @@ pub(super) fn emit_reference_invoke_bridge(
             index + 1,
         ));
     }
+    // The table's names intern after the code and ahead of its stack-map frames, as a writer
+    // visits them.
+    cw.reserve_method_lvt(&locals);
+    finish_code::<0x1041>(cw, "invoke", &erased, &mut code, 1 + u16::from(arity));
     let line = ir
         .fn_decl_lines
         .get(&invoke)
