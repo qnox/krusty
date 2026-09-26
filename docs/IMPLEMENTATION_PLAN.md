@@ -4711,7 +4711,18 @@ shadow with no output change.
   kotlinc emits it, but kotlinc's later steps erase it and krusty's do not yet); box files
   byte-identical to kotlinc go from 446 to 447 (`casts/asSafeFail`) with none lost, and box
   pass/fail is unchanged (`tests/discarded_when_value_e2e.rs`).
-- ☐ 5h, 6. The rest of kotlinc's transformer order: the mandatory steps.
+- ☐ 5h. The rest of kotlinc's transformer order: the mandatory steps.
+- ◐ 6. `LineNumberTable` marks the way kotlinc's `ExpressionCodegen`/`LineNumberMapper` place them.
+  A survey of the 5i corpus (per method, comparing instructions and line tables separately) found
+  4,664 methods whose instructions match kotlinc's and whose line tables do not, and 347 box files
+  that differ from kotlinc's only in line tables.
+  - ✅ 6a. A `for` loop's generated control carries the loop's line (`ir_emit/loop_emission.rs`,
+    `debug_lines::mark_loop_control`): kotlinc builds the update, the exit test and a `do…while`
+    shape's bottom condition at the loop's offsets, so after the body the `for` line is marked
+    again at their first instruction. The `While` emission moved out of `ir_emit.rs` into its own
+    module. In the 2.4.20 box corpus box files byte-identical to kotlinc go from 458 to 580 (122
+    gained, none lost; the 5i head measures 458 with the reference cache as it now stands), and box
+    pass/fail is unchanged (`tests/loop_control_lines_e2e.rs`).
 
 ## Phase — multiple reference versions (2.4.0, 2.4.10, 2.4.20)  ◐
 - ✅ `kotlin-versions` lists 2.4.20; it is the headline version, box conformance runs per version.

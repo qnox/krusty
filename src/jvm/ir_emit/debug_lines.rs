@@ -47,6 +47,21 @@ pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder)
     }
 }
 
+/// Mark a loop's own line at control lowering generated for it: a `for` loop's update and exit
+/// test, and the bottom condition of its `do…while` shape.
+///
+/// kotlinc's `ForLoopsLowering` builds that control at the loop's offsets, and its codegen marks it
+/// like any other expression, so after the body the loop's line comes back at the first instruction
+/// of the update (`line 7: 74` after the body's `line 8`). `None` — a loop emitted with no statement
+/// line in effect — marks nothing, as a node without offsets does in kotlinc.
+pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) {
+    if let Some(line) = loop_line {
+        if line != 0 {
+            code.mark_line(line);
+        }
+    }
+}
+
 /// Mark the line a block's own emission marks first.
 ///
 /// A `finally` is emitted twice: inline on the normal path, and again in the catch-all handler. The
