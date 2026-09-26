@@ -1,24 +1,13 @@
-//! Reified-operation marker recognition and concrete type-operand rewriting.
+//! The raw-byte splicer's adapter for reified operations: marker recognition and concrete
+//! type-operand rewriting, over the neutral [`ReifiedArguments`] contract. Anything it cannot rewrite
+//! in place (a nullable `instanceof`) declines the whole splice to the symbolic inliner.
 
 use super::relocation::narrowest_ldc;
-use super::{methodref_target, set_pool_operand, utf8, Insn};
+use super::{invoked_method, set_pool_operand, utf8, Insn};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
+use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::type_of::TYPE_OF_MARKER;
-use std::collections::HashMap;
-
-/// Reified arguments at one inline call site, in the forms dependency markers consume.
-#[derive(Clone, Debug, Default)]
-pub(in crate::jvm) struct ReifiedArguments {
-    pub(in crate::jvm) classes: HashMap<String, ReifiedArgument>,
-    pub(in crate::jvm) type_of: HashMap<String, Vec<crate::jvm::type_of::TypeOfInsn>>,
-}
-
-impl ReifiedArguments {
-    pub(super) fn is_empty(&self) -> bool {
-        self.classes.is_empty() && self.type_of.is_empty()
-    }
-}
 
 /// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
 /// `instanceof`, `multianewarray`.
@@ -76,17 +65,6 @@ pub(super) fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
     true
 }
 
-/// The call-site value of one reified type parameter of a spliced body.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::jvm) enum ReifiedArgument {
-    /// A concrete JVM class (internal name): the marker is erased and its type-bearing op repointed.
-    Class(String),
-    /// A reified type parameter of the HOST (its source name, and whether the argument is `T?`). The
-    /// host is itself a reified inline body, so the marker stays, renamed to the host's parameter,
-    /// and the type-bearing op keeps its erased placeholder until the host's own caller reifies it.
-    Forwarded { name: String, nullable: bool },
-}
-
 /// One post-relocation rewrite of a reified marker site, keyed by instruction index.
 pub(super) enum ReifiedRepoint {
     /// Point the type-bearing op (`anewarray`/`checkcast`/…/`ldc class`) at this concrete class.
@@ -138,6 +116,30 @@ pub(super) fn apply_repoints(
     Some((edits, stack_growth))
 }
 
+/// `invokestatic kotlin/jvm/internal/Intrinsics.reifiedOperationMarker(ILjava/lang/String;)V`,
+/// exactly: opcode, owner, name, descriptor and a class (not interface) method reference. Another
+/// overload or owner is an ordinary call.
+fn is_marker_call(insn: &Insn, src_cp: &[C]) -> bool {
+    let Insn::Plain { op: 0xb8, operands } = insn else {
+        return false;
+    };
+    let class_method = matches!(
+        operands.as_slice(),
+        [high, low] if matches!(
+            src_cp.get(usize::from(u16::from(*high) << 8 | u16::from(*low))),
+            Some(C::Methodref(..))
+        )
+    );
+    class_method
+        && invoked_method(insn, src_cp)
+            == Some((
+                "kotlin/jvm/internal/Intrinsics",
+                "reifiedOperationMarker",
+                "(ILjava/lang/String;)V",
+                false,
+            ))
+}
+
 /// The marker's operation kind, pushed by the instruction two before the call.
 fn marker_operation(insn: &Insn) -> Option<i32> {
     match insn {
@@ -164,16 +166,13 @@ fn marker_operation(insn: &Insn) -> Option<i32> {
 pub(super) fn reify_markers(
     insns: &mut [Insn],
     src_cp: &[C],
-    reified: &super::ReifiedArguments,
+    reified: &ReifiedArguments,
 ) -> Option<Vec<ReifiedRepoint>> {
     // Plan every marker FIRST, bailing on any malformed one, so a partial NOP is never left behind
     // when we decide to skip.
     let mut plan: Vec<(usize, ReifiedRepoint)> = Vec::new();
     for i in 0..insns.len() {
-        let is_marker = matches!(&insns[i], Insn::Plain { op: 0xb8, operands } if operands.len() == 2
-            && methodref_target(src_cp, (operands[0] as u16) << 8 | operands[1] as u16)
-                == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker")));
-        if !is_marker {
+        if !is_marker_call(&insns[i], src_cp) {
             continue;
         }
         if i < 2 {
@@ -203,7 +202,16 @@ pub(super) fn reify_markers(
         }
         let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
         let repoint = match reified.classes.get(marker.trim_end_matches('?'))? {
-            ReifiedArgument::Class(class) => ReifiedRepoint::Class(j, class.clone()),
+            // A nullable `instanceof` becomes kotlinc's null-accepting sequence, which needs new
+            // branches; only the symbolic inliner inserts those.
+            ReifiedArgument::Class { nullable, .. }
+                if (*nullable || marker.ends_with('?'))
+                    && matches!(insns[j], Insn::Plain { op: 0xc1, .. }) =>
+            {
+                crate::trace_compiler!("splice", "nullable reified instanceof is not spliceable");
+                return None;
+            }
+            ReifiedArgument::Class { internal, .. } => ReifiedRepoint::Class(j, internal.clone()),
             ReifiedArgument::Forwarded { name, nullable } => {
                 let nullable = *nullable || marker.ends_with('?');
                 ReifiedRepoint::Marker(i - 1, format!("{name}{}", if nullable { "?" } else { "" }))
@@ -232,12 +240,11 @@ pub(super) fn reify_markers(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        reify_markers, set_reified_operand, ReifiedArgument, ReifiedArguments, ReifiedRepoint,
-    };
+    use super::{reify_markers, set_reified_operand, ReifiedRepoint};
     use crate::jvm::classfile::ClassWriter;
     use crate::jvm::classreader::C;
     use crate::jvm::inline::Insn;
+    use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
     use std::collections::HashMap;
 
     fn array_marker() -> (Vec<C>, Vec<Insn>) {
@@ -281,7 +288,10 @@ mod tests {
         let arguments = ReifiedArguments {
             classes: HashMap::from([(
                 "T".to_owned(),
-                ReifiedArgument::Class("java/lang/String".to_owned()),
+                ReifiedArgument::Class {
+                    internal: "java/lang/String".to_owned(),
+                    nullable: false,
+                },
             )]),
             ..Default::default()
         };
@@ -343,6 +353,49 @@ mod tests {
         let original = instructions.clone();
 
         assert!(reify_markers(&mut instructions, &pool, &ReifiedArguments::default()).is_none());
+        assert_eq!(instructions, original);
+    }
+
+    /// A nullable `instanceof` needs kotlinc's null-accepting branches, which only the symbolic
+    /// inliner inserts. The adapter declines the WHOLE body: the array marker before it, which it
+    /// could rewrite, is left exactly as it was.
+    #[test]
+    fn a_nullable_instance_check_declines_the_whole_body_unchanged() {
+        let (pool, mut instructions) = array_marker();
+        let marker = instructions[..3].to_vec();
+        instructions.extend(marker);
+        instructions.push(Insn::Plain {
+            op: 0xc1,
+            operands: vec![0, 10],
+        });
+        let original = instructions.clone();
+        let arguments = ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "java/lang/String".to_owned(),
+                    nullable: true,
+                },
+            )]),
+            ..Default::default()
+        };
+
+        assert!(reify_markers(&mut instructions, &pool, &arguments).is_none());
+        assert_eq!(instructions, original);
+    }
+
+    /// Only the exact `reifiedOperationMarker(ILjava/lang/String;)V` is the compiler's marker. The
+    /// same name with another descriptor is an ordinary call: nothing to specialize, nothing
+    /// declined — where the real marker, unbound, would decline.
+    #[test]
+    fn another_overload_of_the_marker_name_is_an_ordinary_call() {
+        let (mut pool, mut instructions) = array_marker();
+        pool[4] = C::Utf8("(ILjava/lang/Object;)V".into());
+        let original = instructions.clone();
+
+        let repoints = reify_markers(&mut instructions, &pool, &ReifiedArguments::default())
+            .expect("an ordinary call needs no reified argument");
+        assert!(repoints.is_empty());
         assert_eq!(instructions, original);
     }
 

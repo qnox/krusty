@@ -4,13 +4,12 @@ use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget,
     FirReferenceAdaptation,
 };
-use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction};
+use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn materialize_property_function_reference(
         &mut self,
         target: &FirPropertyReferenceTarget,
@@ -116,6 +115,23 @@ impl BodyLowering<'_> {
             None
         };
         let selected_receiver = captured_receiver.or(unbound_receiver);
+        // A specialized reference reads the property through its declaration's accessors, which
+        // are compiled against the declared receiver and result: the specialized receiver crosses
+        // into the declared one, and the declared result back out, as a source read's do.
+        let declared = match target {
+            FirPropertyReferenceTarget::SpecializedModule {
+                declared_receiver,
+                declared_property_type,
+                ..
+            } => Some((*declared_receiver, *declared_property_type)),
+            _ => None,
+        };
+        let selected_receiver = match (selected_receiver, declared, receiver_type) {
+            (Some(value), Some((Some(declared), _)), Some(selected)) if target_is_extension => {
+                Some(self.coerce_to_declared(value, selected.get(), declared.get()))
+            }
+            (receiver, ..) => receiver,
+        };
         let (dispatch_receiver, extension_receiver) = if target_is_extension {
             (None, selected_receiver)
         } else {
@@ -175,6 +191,14 @@ impl BodyLowering<'_> {
                 )
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
             }
+        };
+        let read = match declared {
+            Some((_, declared)) if declared != property_type => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: read,
+                type_operand: property_type.get(),
+            }),
+            _ => read,
         };
         let body = self.callable_reference_adapter_body(read, property_type.get(), reference.ret);
         let mut parameters = capture_types;

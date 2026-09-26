@@ -149,7 +149,10 @@ impl Emitter<'_> {
             type_operand,
         } = self.ir.expr(cond)
         {
-            if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) {
+            // A nullable target materializes its null-accepting check as a value.
+            if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
+                && !type_operand.is_nullable()
+            {
                 let jvm_ty = ir_ty_to_jvm(type_operand);
                 (!jvm_ty.is_jvm_scalar()).then(|| {
                     (

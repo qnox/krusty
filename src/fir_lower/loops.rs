@@ -409,8 +409,14 @@ impl BodyLowering<'_> {
         } = contract;
         // The checked iterable is the receiver of exactly one selected `iterator()` call. Keep that
         // direct semantic operand instead of introducing state that does not exist in the source.
+        let iterable_ty = self
+            .body
+            .expr(iterable)
+            .ok_or(FirLoweringFailure::MissingExpression(iterable))?
+            .ty
+            .get();
         let iterable_value = self.expression(iterable)?;
-        let iterator_value = self.iterator_call(iterator, iterable_value)?;
+        let iterator_value = self.iterator_call(iterator, iterable_value, iterable_ty)?;
         let iterator_slot = self.allocate_temporary();
         let iterator_declaration = self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
@@ -420,9 +426,9 @@ impl BodyLowering<'_> {
         });
 
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let condition = self.iterator_call(has_next, iterator_read)?;
+        let condition = self.iterator_call(has_next, iterator_read, iterator_ty.get())?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let element = self.iterator_call(next, iterator_read)?;
+        let element = self.iterator_call(next, iterator_read, iterator_ty.get())?;
         let (_, variable_declaration) =
             self.loop_variable_declaration(variable.raw(), variable_ty.get(), element);
         let body = self.expression(body)?;
@@ -447,6 +453,7 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirIteratorCall,
         receiver: ExprId,
+        receiver_ty: crate::types::Ty,
     ) -> Result<ExprId, FirLoweringFailure> {
         let context_parameter_types = call
             .context_arguments
@@ -468,6 +475,8 @@ impl BodyLowering<'_> {
                 })
             })
             .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+        let receiver =
+            self.lowered_with_conversion(receiver, receiver_ty, call.receiver_conversion)?;
         let (dispatch_receiver, extension_receiver) = match &call.receiver {
             FirIteratorReceiver::Dispatch => (Some(receiver), None),
             FirIteratorReceiver::Extension => (None, Some(receiver)),
