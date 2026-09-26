@@ -129,25 +129,36 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
         .values()
         .copied()
         .collect::<std::collections::HashSet<_>>();
+    let class_chain = |declaration: DeclId, class: &ClassDecl| Chain {
+        owner: Some(declaration),
+        counter_owner: format!("class:{}", class.name),
+        segments: Vec::new(),
+        enclosing_function: None,
+    };
+    // A `companion { … }` member is hoisted to file level, but the classifier that declared its
+    // block stays its lexical owner: what its body declares is named in that class's chain.
+    let mut block_chains = HashMap::new();
+    for &declaration in &file.decls {
+        if let Decl::Class(class) = file.decl(declaration) {
+            for &member in &class.companion_block_members {
+                block_chains.insert(member, class_chain(declaration, class));
+            }
+        }
+    }
     for &declaration in &file.decls {
         if anonymous.contains(&declaration) || file.is_local_declaration(declaration) {
             continue;
         }
+        let chain = block_chains.get(&declaration).unwrap_or(&file_chain);
         match file.decl(declaration) {
             Decl::Fun(function) => inventor.function(
                 function,
-                &file_chain,
+                chain,
                 Some(AnonymousEnclosingFunction::TopLevel(declaration)),
             ),
-            Decl::Property(property) => inventor.property(property, &file_chain),
+            Decl::Property(property) => inventor.property(property, chain),
             Decl::Class(class) => {
-                let chain = Chain {
-                    owner: Some(declaration),
-                    counter_owner: format!("class:{}", class.name),
-                    segments: Vec::new(),
-                    enclosing_function: None,
-                };
-                inventor.class_body(declaration, class, &chain, false);
+                inventor.class_body(declaration, class, &class_chain(declaration, class), false);
             }
         }
     }
