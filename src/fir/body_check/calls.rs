@@ -2871,7 +2871,11 @@ impl BodyFirChecker<'_> {
             .non_null()
             .obj_internal()
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        if target.physical_params.len() != parameters.len() {
+        // The declaration's physical parameters derive the descriptor only for a source
+        // declaration, which publishes none, and must then be parallel to the call's parameters.
+        // A provider-described declaration keeps its own ABI shape (a dependency suspend member
+        // ends with the classfile's CPS continuation), which the target consumes as published.
+        if target.descriptor.is_empty() && target.physical_params.len() != parameters.len() {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         }
         let declaration_parameters = target
@@ -2904,6 +2908,7 @@ impl BodyFirChecker<'_> {
                     .and_then(|declaration| self.index.callable_for_declaration(declaration))
                     .map(|callable| callable.id),
                 source_member: target.source_member.clone(),
+                suspend: target.suspend,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,

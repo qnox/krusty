@@ -7932,26 +7932,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   immediately followed by `:` for the name parse (a genuine modifier never precedes a colon) — which also
   handles an annotated modifier-keyword name (`@Anno open: Int`). (`build840_jj1_param_soft_keyword_e2e`)
 
-- **A `super` call to a `suspend` member is refused by the CHECKER, at the `super` keyword.**
-  Threading a continuation through a NON-VIRTUAL dispatch and resuming back into it is not modeled
-  (the corpus's `coroutines/suspendFunctionAsCoroutine/superCall*`), and the project's rule for a
-  construct it does not model is to decline the source. Emitting it anyway produced
-  `invokespecial A.f:()Ljava/lang/String;` — the SOURCE descriptor, fixed when `module_calls`
-  realized the super call — against a declaration that is
-  `A.f:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`, so the class could not link
-  (`NoSuchMethodError: 'java.lang.String A.suspendHere()'`): an unlinkable artifact emitted with no
-  diagnostic. The refusal belongs to the phase that SELECTED the target and has its suspend shape
-  in hand. A backend guard has to rediscover that fact from a realization which no longer names it,
-  and can then only recognize the call shapes reaching one particular node: the identical source
-  with its superclass in a SIBLING FILE or in a DEPENDENCY has no same-file predeclaration to
-  recover from, and an `@Outer`-labeled ENCLOSING dispatch is wrapped in a generated bridge that is
-  not itself recorded as suspend — all three compiled and emitted the unlinkable call. One check,
-  where `ResolvedSuperCall` is built, covers every spelling and every origin. A `super` call to an
-  ORDINARY member and an ordinary virtual suspend call are both untouched: the rule keys on the
-  TARGET being suspend, not on the dispatch being non-virtual. Test:
-  `tests/suspend_super_call_refusal_e2e.rs`, which asserts the complete ordered ledger with
-  positions for the direct, parameterized, typed, labeled-enclosing, sibling-file and dependency
-  spellings, plus both negative controls.
+- **A `super` call to a `suspend` member on the current instance is a suspension point.** The
+  checker records on `ResolvedSuperCall` that the selected declaration suspends, FIR carries it on
+  the super target, and common lowering records the call in `suspend_calls` like any other selected
+  suspend call. JVM coroutine lowering then appends the continuation and turns the realized
+  `invokespecial`'s descriptor into its CPS form (`A.f:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`),
+  so the base body runs non-virtually and, when it suspends, resumes in its own `$suspendImpl`
+  rather than dispatching back to the override. The resolver copies the selected declaration's
+  physical shape as its provider published it: a dependency suspend member's physical parameters
+  end with the classfile's CPS continuation beside a provider-owned logical descriptor, which the
+  JVM backend consumes as published, and only a source declaration's parameters derive a descriptor.
+  Declaration in the same file, a sibling file or a dependency (an interface default method, or the
+  receiver-first `$DefaultImpls` static under `-jvm-default=disable`), reached through a class or an
+  interface (`super<I>.f()`), all run, and the override's instructions match kotlinc's.
+  Tests: `tests/suspend_super_calls_e2e.rs`, and
+  `a_super_call_resumes_in_the_base_body_rather_than_the_override` in
+  `tests/suspend_bytecode_transformer_e2e.rs`, which fails under virtual re-entry.
+
+- **A `super` call to a `suspend` member on an ENCLOSING instance is refused by the CHECKER.**
+  `super<Base>@Outer.f()` from an inner class reaches the outer instance through a generated
+  nonvirtual bridge on the outer class, and that bridge is not a suspend function: it neither passes
+  a continuation nor names the CPS descriptor, and emitting it kept the unlinkable
+  `invokespecial Base.f:()Ljava/lang/String;` with no diagnostic. The refusal sits where
+  `ResolvedSuperCall` is built, which has both the suspend shape and the selected receiver in hand,
+  and keys on the target being suspend AND the receiver not being the current instance. Test:
+  `tests/suspend_super_call_refusal_e2e.rs`, which asserts the complete ordered ledger with its
+  position, plus a super call to an ordinary member and a virtual suspend call as controls.
 
 - **A bridge method unboxes its RETURN value, and that adapter is not the ordinary unbox cast.** A
   bridge exists because a supertype's erased signature differs from the override's, and `emit_bridges`

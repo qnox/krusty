@@ -109,7 +109,7 @@ pub(super) fn emit_enum_entry_subclass(
             env,
         },
     );
-    let markers = property_annotation_marker_fids(ir, c);
+    let markers = member_schedule::property_annotation_marker_fids(ir, c);
     for &fid in &c.methods {
         if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
             continue; // already emitted beside its property's accessors

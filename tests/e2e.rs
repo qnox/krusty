@@ -1728,6 +1728,8 @@ mod suspend_single_operand_hoist_e2e;
 mod suspend_spill_slot_reuse_e2e;
 #[path = "suspend_super_call_refusal_e2e.rs"]
 mod suspend_super_call_refusal_e2e;
+#[path = "suspend_super_calls_e2e.rs"]
+mod suspend_super_calls_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]

@@ -149,12 +149,18 @@ pub(super) fn request_transform(
     );
 }
 
-/// The class a member function's continuation captures as `this$0`, by internal name.
+/// The class a member function's continuation captures as `this$0`, by internal name: a member's
+/// own, or, for the `$suspendImpl` a member's body moved to, the receiver it takes first.
 fn dispatch_receiver(ir: &IrFile, fid: u32) -> Option<String> {
     let function = &ir.functions[fid as usize];
     function
         .dispatch_receiver
         .filter(|_| !function.is_static)
+        .or_else(|| {
+            ir.jvm_suspend_impl_bodies
+                .get(&fid)
+                .map(|(owner, _)| *owner)
+        })
         .map(|owner| owner.render())
 }
 
