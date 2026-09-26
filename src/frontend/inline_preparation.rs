@@ -671,7 +671,7 @@ pub(super) fn streaming(
 
 fn finish(
     mut index: crate::fir::ResolvedModuleIndex,
-    inline_bodies: crate::fir::InlineBodyStore,
+    mut inline_bodies: crate::fir::InlineBodyStore,
     sources: crate::fir::SourceMap,
     default_arguments: crate::fir::DefaultArgumentStore,
     unexpected: UnexpectedOrdinaryInlineBody,
@@ -680,6 +680,7 @@ fn finish(
         unexpected.0, 0,
         "Pass 1 may retain only semantically inline checked bodies"
     );
+    inline_bodies.retain_defaults(&default_arguments);
     index.release_source_coordinates();
     assert!(
         !index.retains_source_coordinates(),

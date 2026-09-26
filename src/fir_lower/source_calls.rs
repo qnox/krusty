@@ -14,7 +14,7 @@ use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
 use super::inline_body::ExternalInlineCallRequest;
-use super::BodyLowering;
+use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
 enum CheckedArgumentPolicy<'a> {
@@ -1335,7 +1335,7 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
-    ) -> Option<ExprId> {
+    ) -> Option<Result<ExprId, FirLoweringFailure>> {
         let callable = self.index.callable(target)?;
         let declaration = self.index.declaration_anchor(callable.declaration)?;
         if declaration.kind != DeclarationKind::Function {
@@ -1486,79 +1486,50 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
-        // A member called from the same lexical classifier needs no target access bridge: cloning its
-        // retained checked template preserves the exact `this` operand and lets literal lambda
-        // arguments splice in common IR. Value-class, singleton, and companion members are physically
-        // reshaped by target backends, so they also consume the checked template while the semantic
-        // source receiver is still explicit. An arbitrary cross-class member still needs the
-        // declaration-owned private-access and generic-receiver adaptation path.
-        let enclosing_classifier = self.index.enclosing_classifier(callable.declaration);
-        let common_member_inline = dispatch_receiver.is_none()
-            || enclosing_classifier.is_some_and(|classifier| {
-                self.body.lexical_class_owner() == Some(classifier.declaration)
-                    || self
-                        .index
-                        .declaration_header(classifier.declaration)
-                        .is_some_and(|header| {
-                            header.flags.has(crate::fir::DeclarationFlags::VALUE)
-                                || header.flags.has(crate::fir::DeclarationFlags::SINGLETON)
-                                || header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                        })
-            });
-        // A lambda containing a checked return through an enclosing callable boundary has no
-        // independently executable JVM shape: its apparent lambda result can differ from the
-        // enclosing function's return value. It must be spliced while that lexical return target is
-        // still present, even when the inline member belongs to another ordinary class.
-        let has_nonlocal_inline_return = inline_lambdas.iter().flatten().any(|lambda| {
-            let IrExpr::Lambda {
-                inline_body: Some(body),
-                ..
-            } = self.ir.expr(*lambda)
-            else {
-                return false;
-            };
-            !super::inline_returns::reachable_checked_returns(self.ir, *body).is_empty()
-        });
+        // kotlinc inlines every call of a same-module inline function, whichever class declares
+        // it: the checked template is cloned here with its receiver as an explicit operand, and a
+        // target backend adds the synthetic accessors its private member uses need.
         crate::trace_compiler!(
             "lower",
-            "same-file call target={target:?} inline={} function={function:?} common_member_inline={common_member_inline} defaults={has_defaults} nonlocal={has_nonlocal_inline_return} substitutions={substitutions:?}"
+            "same-file call target={target:?} inline={} function={function:?} defaults={has_defaults} substitutions={substitutions:?}"
             , callable.is_inline()
         );
-        if callable.is_inline()
-            && (common_member_inline || has_nonlocal_inline_return)
-            && !has_defaults
-        {
-            if let Some(function) = function {
-                let mut operands =
-                    Vec::with_capacity(slots.len() + usize::from(dispatch_receiver.is_some()));
-                let mut inlined_lambda_operands = Vec::with_capacity(
-                    inline_lambdas.len() + usize::from(dispatch_receiver.is_some()),
-                );
-                if let Some(receiver) = dispatch_receiver {
-                    operands.push(receiver);
-                    inlined_lambda_operands.push(None);
-                }
-                operands.extend(slots.iter().copied().collect::<Option<Vec<_>>>()?);
-                inlined_lambda_operands.extend(inline_lambdas.iter().copied());
-                if let Some(inlined) = self.inline_same_file_call(
-                    target,
-                    function,
-                    &operands,
-                    &inlined_lambda_operands,
-                    substitutions,
-                ) {
-                    let expanded = if statements.is_empty() {
-                        inlined
-                    } else {
-                        self.ir.add_expr(IrExpr::Block {
-                            stmts: statements,
-                            value: Some(inlined),
-                        })
-                    };
-                    self.ir.inline_regions.insert(expanded);
-                    return Some(expanded);
-                }
+        // A call that takes its defaults from an overridden declaration dispatches through that
+        // declaration's default stub, as kotlinc's does, so it expands nothing here.
+        if callable.is_inline() && inherited_default_provider.is_none() {
+            let declined = FirLoweringFailure::InlineExpansionDeclined(target);
+            let Some(function) = function else {
+                return Some(Err(declined));
+            };
+            let mut operands =
+                Vec::with_capacity(slots.len() + usize::from(dispatch_receiver.is_some()));
+            let mut inlined_lambda_operands =
+                Vec::with_capacity(inline_lambdas.len() + usize::from(dispatch_receiver.is_some()));
+            if let Some(receiver) = dispatch_receiver {
+                operands.push(Some(receiver));
+                inlined_lambda_operands.push(None);
             }
+            operands.extend(slots.iter().copied());
+            inlined_lambda_operands.extend(inline_lambdas.iter().copied());
+            let Some(inlined) = self.inline_same_file_call(
+                target,
+                function,
+                &operands,
+                &inlined_lambda_operands,
+                substitutions,
+            ) else {
+                return Some(Err(declined));
+            };
+            let expanded = if statements.is_empty() {
+                inlined
+            } else {
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: statements,
+                    value: Some(inlined),
+                })
+            };
+            self.ir.inline_regions.insert(expanded);
+            return Some(Ok(expanded));
         }
         let physical_function =
             function.filter(|function| !self.ir.foreign_inline_templates.contains(function));
@@ -1707,14 +1678,14 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(call, signature.result.get());
         }
-        Some(if statements.is_empty() {
+        Some(Ok(if statements.is_empty() {
             call
         } else {
             self.ir.add_expr(IrExpr::Block {
                 stmts: statements,
                 value: Some(call),
             })
-        })
+        }))
     }
 
     /// Consume the checker's parameter mapping once for all ordinary source calls. This is the

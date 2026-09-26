@@ -28,7 +28,6 @@ callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorOfImplicitKFunctionType.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/local/closureWithSideEffect.kt
 callableReference/function/local/extensionWithClosure.kt
 callableReference/genericConstructorReference.kt
@@ -91,12 +90,10 @@ coroutines/inlineClasses/resumeWithException/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/inlineSuspendFunction.kt
-coroutines/inlineSuspendLambdaNonLocalReturn.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
-coroutines/stackUnwinding/inlineSuspendFunction.kt
 coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
@@ -179,7 +176,6 @@ initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
-inline/typeSubstitutionInFakeOverride.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
@@ -250,7 +246,6 @@ innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-kclass/kclass1.kt
 lateinit/innerIsInitialized.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
@@ -306,11 +301,9 @@ reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
 reified/extensionLambda.kt
-reified/extensionMethod.kt
 reified/innerObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
-reified/method.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
 safeCall/parenthesizedSafeCallsAndOperators.kt
@@ -333,11 +326,6 @@ strings/kt47917.kt
 super/kt4982.kt
 syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
-typeErasure/funWithReifiedTypeParameterInsideClass.kt
-typeErasure/funWithReifiedTypeParameterInsideInnerClass.kt
-typeErasure/funWithReifiedTypeParameterInsideNestedClass.kt
-typeErasure/outerClassWithTypeParameterAndInlineFunctionWithReifiedTypeParameter.kt
-typeErasure/outerClassWithTypeParameterWithUpperBoundAndInlineFunctionWithReifiedTypeParameterWithTwoUpperBounds.kt
 unit/kt56723.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
