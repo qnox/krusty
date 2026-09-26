@@ -13,11 +13,10 @@
 //! everywhere.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
+use krusty::frontend::SourceInput;
 use krusty::jvm::classpath::Classpath;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::source::SourceInput;
 
 /// Returns (diagnostics, emitted-through-the-whole-pipeline). Lowering may legitimately bail
 /// (`None`) past the depth guard — the promise under test is "degrade, never crash".
@@ -92,15 +91,9 @@ fn deep_inferred_return_chain_preinfers_on_two_mib_stack() {
     // 2 MiB regression stack too (it used to run the checker recursion unwrapped on that thread).
     let chain = vec!["true"; 400].join(" && ");
     let src = format!("fun deep() = {chain}\n");
-    let es = on_regression_stack(move || {
-        let mut d = DiagSink::new();
-        let toks = lex(&src, &mut d);
-        let files = vec![parse(&src, &toks, &mut d)];
-        let mut syms = collect_signatures(&files, &mut d);
-        check_file(&files[0], &mut syms, &mut d);
-        d.diags.iter().map(|x| x.msg.clone()).collect::<Vec<_>>()
-    });
+    let (es, emitted) = compile_on_regression_stack(src);
     assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(emitted, "the inferred deep signature must emit");
 }
 
 #[test]

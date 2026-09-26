@@ -28,6 +28,119 @@ mod tests {
     }
 
     #[test]
+    fn full_file_checker_is_not_an_index_free_public_api() {
+        let frontend =
+            fs::read_to_string(source_path("src/frontend.rs")).expect("read frontend facade");
+        for legacy in [
+            "check_file,",
+            "check_file_at,",
+            "check_file_in_source_set,",
+            "collect_signatures,",
+            "collect_signatures_with_cp,",
+        ] {
+            assert!(
+                !frontend.contains(legacy),
+                "frontend must expose indexed analysis, not the legacy `{legacy}` entry"
+            );
+        }
+
+        let resolver = fs::read_to_string(source_path("src/resolve.rs"))
+            .expect("read resolver implementation");
+        for legacy in [
+            "pub fn check_file(",
+            "pub fn check_file_at(",
+            "pub fn check_file_in_source_set(",
+            "pub use signature_collection::{collect_signatures",
+        ] {
+            assert!(
+                !resolver.contains(legacy),
+                "the full-file checker must not publish the index-free `{legacy}` boundary"
+            );
+        }
+        for entry in [
+            "check_preinferred_inline_declarations_at_with_index",
+            "check_selected_declarations_in_pass_two",
+            "check_signature_default_declarations_at_with_index",
+        ] {
+            let start = resolver
+                .find(&format!("fn {entry}("))
+                .unwrap_or_else(|| panic!("missing indexed checker entry `{entry}`"));
+            let tail = &resolver[start..];
+            let end = tail
+                .find(") -> TypeInfo {")
+                .unwrap_or_else(|| panic!("unterminated checker entry `{entry}`"));
+            assert!(
+                tail[..end].contains("&crate::fir::ResolvedModuleIndex"),
+                "`{entry}` must require ResolvedModuleIndex"
+            );
+        }
+        let signature_collection =
+            fs::read_to_string(source_path("src/resolve/signature_collection/mod.rs"))
+                .expect("read signature collection facade");
+        for legacy in [
+            "pub fn collect_signatures(",
+            "pub fn collect_signatures_with_cp(",
+        ] {
+            assert!(
+                !signature_collection.contains(legacy),
+                "signature collection must not publish the legacy `{legacy}` boundary"
+            );
+        }
+
+        assert!(
+            resolver.contains("production body checking requires ResolvedModuleIndex"),
+            "the private implementation must fail closed when production body checking has no index"
+        );
+
+        let inspection = fs::read_to_string(source_path("src/resolve/inspection_analysis.rs"))
+            .expect("read inspection checker entry");
+        let inspection_entry = inspection
+            .find("fn check_preinferred_file_in_source_set_with_index(")
+            .expect("missing indexed inspection checker entry");
+        let inspection_tail = &inspection[inspection_entry..];
+        let inspection_signature_end = inspection_tail
+            .find(") -> TypeInfo {")
+            .expect("unterminated indexed inspection checker entry");
+        assert!(
+            inspection_tail[..inspection_signature_end]
+                .contains("index: &crate::fir::ResolvedModuleIndex"),
+            "the inspection checker entry must require ResolvedModuleIndex"
+        );
+        assert!(
+            inspection_tail.contains("Some(index),"),
+            "the inspection checker entry must pass its ResolvedModuleIndex to the checker"
+        );
+
+        // Signature collection still owns bounded pre-finalization capture and annotation checks.
+        // Nothing outside the resolver may acquire an index-free body-check entry point again.
+        for root in ["src", "tests", "crates"] {
+            for path in rust_files_under(root) {
+                if path.ends_with("src/resolve.rs")
+                    || path.ends_with("src/resolve/checked_annotation_publication.rs")
+                    || path.ends_with("src/resolve/checker_test_support.rs")
+                    || path.ends_with("src/resolve/inspection_analysis.rs")
+                    || path.ends_with("src/architecture.rs")
+                {
+                    continue;
+                }
+                let text = fs::read_to_string(&path).expect("read checker caller");
+                for legacy in [
+                    "frontend::check_file",
+                    "frontend::{check_file",
+                    "resolve::check_file(",
+                    "check_file_at_impl_mode(",
+                ] {
+                    assert!(
+                        !text.contains(legacy),
+                        "{} must enter through indexed frontend analysis, not `{legacy}`",
+                        path.display(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn parser_uses_only_syntax_layer_dependencies() {
         // `wide_stack` is cross-layer stack-growth infrastructure, not a semantic dependency: the
         // parser's expression recursion is depth-bounded like the checker's and lowering's, and

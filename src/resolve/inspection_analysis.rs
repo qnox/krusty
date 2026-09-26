@@ -11,8 +11,8 @@ use crate::ast::{DeclId, ExprId, File};
 use crate::diag::DiagSink;
 
 use super::{
-    check_file_at_impl_mode_with_index, AnonymousObjectCapture, CallableReferenceTarget,
-    CaptureDiscovery, ExprLowering, ResolvedCall, SourceFragmentMode, SymbolTable, TypeInfo,
+    check_file_at_impl_mode, AnonymousObjectCapture, CallableReferenceTarget, CaptureDiscovery,
+    ExprLowering, ResolvedCall, SourceFragmentMode, SymbolTable, TypeInfo,
 };
 
 impl ResolvedCall {
@@ -146,7 +146,7 @@ pub(crate) fn check_preinferred_file_in_source_set_with_index(
             index,
         )
         .expect("retained inspection syntax must match the finalized declaration inventory");
-        let mut checked = check_file_at_impl_mode_with_index(
+        let mut checked = check_file_at_impl_mode(
             file,
             file_index,
             Some(files),

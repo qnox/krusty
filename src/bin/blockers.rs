@@ -1,24 +1,11 @@
 //! Bucket first-error failures by the source line at the error span.
 use krusty::diag::{line_col, DiagSink};
-use krusty::frontend::{check_file, collect_signatures};
-use krusty::lexer::lex;
-use krusty::parser::parse;
+use krusty::frontend::analyze_source_standalone;
 use std::collections::HashMap;
 
 fn first_error(src: &str) -> Option<(String, u32)> {
     let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    if d.has_errors() {
-        let e = &d.diags[0];
-        return Some((e.msg.clone(), e.span.lo));
-    }
-    let mut syms = collect_signatures(&files, &mut d);
-    if d.has_errors() {
-        let e = &d.diags[0];
-        return Some((e.msg.clone(), e.span.lo));
-    }
-    check_file(&files[0], &mut syms, &mut d);
+    let _ = analyze_source_standalone(src, &mut d);
     if d.has_errors() {
         let e = &d.diags[0];
         return Some((e.msg.clone(), e.span.lo));
