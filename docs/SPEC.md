@@ -4533,6 +4533,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after its metadata or when it is written; a single pass at write time dropped `A$B` and left `A`
   and `B` to intern after the attribute names. Test:
   `tests/inner_class_name_pool_order_e2e.rs::a_facade_interns_an_enclosing_row_its_nested_row_keeps`.
+- **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
+  writes `EnclosingMethod` ahead of the `InnerClasses` table, so the enclosing class and method
+  come before the local class's own simple name in the pool. The post-metadata row seeding interns
+  the enclosing refs first, as the class write already did. Test:
+  `tests/inner_class_name_pool_order_e2e.rs::a_local_class_interns_its_enclosing_method_before_its_own_row`.
 - **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
   interface's inherited members supertype by supertype in the order they are written, at every
   level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`

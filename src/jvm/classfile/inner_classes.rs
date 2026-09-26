@@ -71,6 +71,9 @@ impl ClassWriter {
     /// first and left the two entries transposed in the pool — the class then matched kotlinc in
     /// every other respect while still differing byte-wise.
     pub(in crate::jvm) fn seed_inner_class_names(&mut self) {
+        // kotlinc writes `EnclosingMethod` before `InnerClasses`, so a local class's enclosing
+        // refs precede its own row's simple name.
+        self.intern_enclosing_method_refs();
         // A referenced dependency nest may not be among the source file's registered candidates.
         // Discover those rows before sorting; resolving them later from `finish` would intern their
         // names after every source row and recreate the very order mismatch this seed prevents.
@@ -82,6 +85,18 @@ impl ClassWriter {
         // single chain, but wrong as soon as an enclosing row's inner is not otherwise referenced:
         // `A$B$C$Companion` interns `Class(A$B)` at its own row, between two other rows' entries.
         self.intern_retained_inner_rows();
+    }
+
+    /// Intern the `EnclosingMethod` refs (owner class, method NameAndType). kotlinc visits that
+    /// attribute before the `InnerClasses` table; the attribute NAME interns later, with the other
+    /// attribute names.
+    pub(super) fn intern_enclosing_method_refs(&mut self) {
+        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
+            self.cp.class(&owner);
+            if !method.is_empty() {
+                self.cp.name_and_type(&method, &desc);
+            }
+        }
     }
 
     /// The registered rows the finished `InnerClasses` table keeps, in table order.

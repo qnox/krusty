@@ -2279,15 +2279,7 @@ impl ClassWriter {
         // kotlinc's field visit precedes every class-attribute window.
         self.intern_late_fields();
         self.resolve_inner_classes();
-        // The `EnclosingMethod` refs (owner Class, method NameAndType) intern BEFORE the
-        // `InnerClasses` entries' refs — kotlinc's attribute visit order on an anonymous class.
-        // (The attribute NAME interns later, with the other attribute names.)
-        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
-            self.cp.class(&owner);
-            if !method.is_empty() {
-                self.cp.name_and_type(&method, &desc);
-            }
-        }
+        self.intern_enclosing_method_refs();
         // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
         // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
         // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
