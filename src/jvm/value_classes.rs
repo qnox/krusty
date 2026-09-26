@@ -25,10 +25,12 @@ mod equality;
 mod interface_entries;
 mod member_names;
 mod module_members;
+mod operand_nullness;
 mod operation_relocation;
 mod property_references;
 mod representation;
 mod result_tail_boxing;
+mod substitution_coercions;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
@@ -38,6 +40,7 @@ use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
+use operand_nullness::{operand_nonnull, operand_null_only};
 use operation_relocation::clone_below_representation_wrapper;
 pub(crate) use representation::{
     boxed_value_class_names, boxed_value_class_terminal_underlying, boxed_value_class_underlying,
@@ -2930,6 +2933,11 @@ pub(crate) fn lower_value_classes(
                 underlying,
             }) => {
                 ir.record_erased_value_construction(id, owner, underlying);
+                // The construction becomes a static `constructor-impl` call over the same checked
+                // declaration parameters. A generic `T` parameter consumes its argument as a box.
+                if let Some(parameters) = ir.construction_declared_params.remove(&id) {
+                    ir.call_declared_params.insert(id, parameters);
+                }
                 Some(expr)
             }
             Some(Rw::VcCtorDefault { owner, u }) => {
@@ -4107,6 +4115,7 @@ pub(crate) fn lower_value_classes(
         + 1;
     let mut unique_ops = HashSet::new();
     ops.retain(|operation| unique_ops.insert(*operation));
+    substitution_coercions::drop_rebox_round_trips(&mut ops, ir);
     // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
     // recorded for that exact call. A suspend function returning the same box hands that value
     // back as it is (see `restore_boxed_suspension_tails`).
@@ -4832,75 +4841,6 @@ fn vc_underlying_nullable(t: &Ty, under: &Under) -> bool {
         }
     }
     false
-}
-
-/// Whether the value the expr at `id` produces is statically NON-NULL — so boxing it (`box-impl`) can't
-/// hit the value class's non-null ctor check. A construction/`!!`/non-nullable slot or return qualifies.
-fn operand_nonnull(
-    exprs: &[IrExpr],
-    rets: &[Ty],
-    fields: &[Vec<Ty>],
-    slots: &HashMap<u32, Ty>,
-    id: ExprId,
-) -> bool {
-    let non_null_ty = |t: &Ty| matches!(t, Ty::Obj(..));
-    match &exprs[id as usize] {
-        IrExpr::New { .. } => true,
-        // A read of a non-nullable field yields a non-null value (a `val a: X` data-class property is
-        // never null — box it with the plain `box-impl`, no null guard).
-        IrExpr::GetField { class, index, .. } => fields
-            .get(*class as usize)
-            .and_then(|fs| fs.get(*index as usize))
-            .is_some_and(non_null_ty),
-        // The same read as a property: its declared type is what says whether the value can be null.
-        IrExpr::PropertyRead { ty, .. } => non_null_ty(ty),
-        IrExpr::NotNullAssert { .. } => true,
-        // A successful cast to a non-null reference has a non-null result; `CastNonNull` states the
-        // same contract directly. This matters for a non-null generic value class whose unboxed
-        // carrier itself may contain null (`Ag<T>(null)` is still not a null `Ag<T>`).
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            type_operand,
-            ..
-        } => non_null_ty(type_operand),
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::CastNonNull,
-            ..
-        } => true,
-        IrExpr::Call {
-            callee: Callee::Static { name, .. },
-            ..
-        } if name == "constructor-impl" || name == "box-impl" => true,
-        IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
-            .get(
-                callee
-                    .source_function()
-                    .expect("guarded same-file function call") as usize,
-            )
-            .is_some_and(non_null_ty),
-        IrExpr::GetValue(i) => slots.get(i).is_some_and(non_null_ty),
-        IrExpr::Block { value: Some(v), .. } => operand_nonnull(exprs, rets, fields, slots, *v),
-        _ => false,
-    }
-}
-
-/// Whether a checked value has Kotlin's null-only bottom type. This is representation evidence,
-/// not data-flow inference: it follows only common-IR-transparent wrappers and declared slot/call
-/// result types already fixed by the frontend.
-fn operand_null_only(exprs: &[IrExpr], rets: &[Ty], slots: &HashMap<u32, Ty>, id: ExprId) -> bool {
-    let null_only_ty = |ty: &Ty| *ty == Ty::Null || ty.non_null() == Ty::Nothing;
-    match &exprs[id as usize] {
-        IrExpr::Const(crate::ir::IrConst::Null) => true,
-        IrExpr::GetValue(slot) => slots.get(slot).is_some_and(null_only_ty),
-        IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
-            .get(callee.source_function().expect("guarded source function") as usize)
-            .is_some_and(null_only_ty),
-        IrExpr::TypeOp { arg, .. } => operand_null_only(exprs, rets, slots, *arg),
-        IrExpr::Block {
-            value: Some(value), ..
-        } => operand_null_only(exprs, rets, slots, *value),
-        _ => false,
-    }
 }
 
 /// Semantic element type of an array-valued expression before value-class erasure. Generated array
