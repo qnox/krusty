@@ -171,6 +171,18 @@ fn realize_adapter_reference(
     let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
         adapted_flags(adaptation, reference.declaration_result)
     }) | (i32::from(suspend_conversion) << 1);
+    let reflected = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Module(_)
+        | crate::ir::IrCallableReferenceTarget::Local { .. } => {
+            crate::ir::ReflectedCallable::Source
+        }
+        crate::ir::IrCallableReferenceTarget::Constructor { .. } => {
+            crate::ir::ReflectedCallable::Constructor
+        }
+        crate::ir::IrCallableReferenceTarget::External { .. } => {
+            crate::ir::ReflectedCallable::Physical
+        }
+    };
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -257,6 +269,8 @@ fn realize_adapter_reference(
         invoke: None,
         function_type: reference.function_type.non_null(),
         reflection_signature,
+        reflected,
+        invoke_renamed: false,
     });
     let class = ir.add_class(class);
     if own_invoke {
@@ -313,38 +327,17 @@ fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function
 
 /// Whether a structural reference's adapter can become the carrier's own `invoke`. The remaining
 /// shapes keep the synthesized dispatching `invoke`: `FunctionN` arities past the numbered
-/// interfaces, field captures of a local function, and value-class signatures (their bridge boxes
-/// through `box-impl`).
-fn own_invoke_realizable(
-    ir: &IrFile,
-    classifiers: &dyn crate::types::ClassifierFactSource,
-    reference: &crate::ir::IrCallableReference,
-) -> bool {
+/// interfaces and field captures of a local function.
+fn own_invoke_realizable(ir: &IrFile, reference: &crate::ir::IrCallableReference) -> bool {
     let Ty::Fun(function_type) = reference.function_type.non_null() else {
         return false;
     };
-    // A value class declared in another file of the module, or in a dependency, is not in this
-    // file's IR; the checked classifier facts answer for it.
-    let value_class = |ty: &Ty| {
-        let ty = ty.non_null();
-        ty.is_unsigned()
-            || ty.obj_internal().is_some_and(|internal| {
-                ir.is_value_class_name(internal)
-                    || classifiers.classifier_value_underlying(internal).is_some()
-            })
-    };
     reference.captures.is_empty()
         && function_type.params.len() <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY
-        && !function_type.params.iter().any(value_class)
-        && !value_class(&function_type.ret)
         && ir
             .functions
             .get(reference.adapter as usize)
-            .is_some_and(|adapter| {
-                adapter.body.is_some()
-                    && !adapter.params.iter().any(value_class)
-                    && !value_class(&adapter.ret)
-            })
+            .is_some_and(|adapter| adapter.body.is_some())
 }
 
 /// Turn the reference's generated adapter into the carrier's specialized `invoke`, the method
@@ -420,9 +413,12 @@ fn realize_own_invoke(
     }
     let parameters = function_type.params.clone();
     // A suspend `invoke` keeps its declared result: the suspend lowering that follows appends the
-    // continuation and returns the result as an object, boxed as a coroutine boxes it.
+    // continuation and returns the result as an object, boxed as a coroutine boxes it. An unsigned
+    // result stays its carrier, which the bridge boxes, as a value class does.
     let result = match function_type.ret {
-        ret if ret.is_jvm_scalar() && !function_type.suspend => Ty::nullable(ret),
+        ret if ret.is_jvm_scalar() && !function_type.suspend && !ret.is_unsigned() => {
+            Ty::nullable(ret)
+        }
         ret => ret,
     };
     // The adapter returns the `FunctionN` result value; the specialized `invoke` returns its own
@@ -500,7 +496,6 @@ fn realize_own_invoke(
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
-    classifiers: &dyn crate::types::ClassifierFactSource,
     current_facade: &str,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
@@ -529,7 +524,7 @@ pub(super) fn realize(
         };
         let adapter_owner = adapter_owners.get(&reference.adapter).copied();
         let sole = adapter_uses.get(&reference.adapter) == Some(&1);
-        let own_invoke = sole && own_invoke_realizable(ir, classifiers, &reference);
+        let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
             ir,
             classpath,
@@ -577,7 +572,7 @@ mod tests {
             declaration_suspend,
             adaptation: None,
         };
-        own_invoke_realizable(&ir, &crate::libraries::EmptySymbolSource, &reference)
+        own_invoke_realizable(&ir, &reference)
     }
 
     #[test]
@@ -612,7 +607,7 @@ mod tests {
                 ("captured", false),
                 ("suspend", true),
                 ("high arity", false),
-                ("value class", false),
+                ("value class", true),
             ]
         );
     }
