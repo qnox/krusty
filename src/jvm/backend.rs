@@ -1113,7 +1113,11 @@ pub fn facade_package_metadata_from_ir(
                     .map(|annotations| annotations.applications().cloned().collect())
                     .unwrap_or_default(),
                 receiver: declaration.receiver,
-                param_defaults: declaration.param_defaults.clone(),
+                param_modifiers: super::metadata_flags::declared_value_parameters(
+                    ir,
+                    declaration.function,
+                    declaration.param_defaults.iter().copied(),
+                ),
                 suspend: declaration.suspend,
                 jvm_desc,
                 jvm_name,
@@ -1121,6 +1125,7 @@ pub fn facade_package_metadata_from_ir(
                 has_function_typed_parameter: declaration.has_function_typed_parameter,
                 operator: declaration.operator,
                 infix: declaration.infix,
+                tailrec: declaration.tailrec,
                 contract: declaration
                     .contract
                     .as_ref()
