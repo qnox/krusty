@@ -18,33 +18,68 @@ impl BodyFirChecker<'_> {
         iterable_source: ExprId,
         iterable: FirExprId,
     ) -> Result<Option<FirLoopHeader>, BodyCheckFailure> {
-        let Some(counter) = FirRangeCounterKind::of(variable_ty.get()).filter(|counter| {
-            matches!(
-                counter,
-                FirRangeCounterKind::Int | FirRangeCounterKind::Long | FirRangeCounterKind::Char
-            )
-        }) else {
+        let Some(counter) = FirRangeCounterKind::of(variable_ty.get()) else {
             return Ok(None);
         };
         let Some(source) = self.progression_source(iterable_source, iterable)? else {
             return Ok(None);
         };
+        let class = match &source {
+            FirProgressionSource::Value { progression, .. } => Some(progression.ty),
+            _ => self
+                .body
+                .expr(iterable)
+                .map(|expression| expression.ty.get().non_null()),
+        };
+        let Some(class) = class else {
+            return Ok(None);
+        };
         let progression = match &source {
             FirProgressionSource::Value { progression, .. } => Some(progression.counter),
-            _ => match self.body.expr(iterable) {
-                Some(expression) => self
-                    .progression_class(expression.ty.get().non_null(), iterable_source)?
-                    .map(|progression| progression.counter),
-                None => None,
-            },
+            _ => self
+                .progression_class(class, iterable_source)?
+                .map(|progression| progression.counter),
         };
-        Ok(
-            (progression == Some(counter)).then_some(FirLoopHeader::Progression {
-                variable,
-                counter,
-                source,
-            }),
-        )
+        if progression != Some(counter) {
+            return Ok(None);
+        }
+        Ok(Some(FirLoopHeader::Progression {
+            variable,
+            counter,
+            source,
+            unsigned_compare: self.unsigned_loop_compare(class, counter, iterable_source)?,
+        }))
+    }
+
+    /// The comparison resolution selected for a counted loop over `class` when its counter is
+    /// unsigned. An unsigned loop without one is a missing stable target.
+    pub(super) fn unsigned_loop_compare(
+        &self,
+        class: Ty,
+        counter: FirRangeCounterKind,
+        source: ExprId,
+    ) -> Result<Option<FirRuntimeFunction>, BodyCheckFailure> {
+        if !matches!(
+            counter,
+            FirRangeCounterKind::UInt | FirRangeCounterKind::ULong
+        ) {
+            return Ok(None);
+        }
+        let function = self
+            .info
+            .progression_plan(class)
+            .and_then(|plan| plan.compare.as_ref())
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(source),
+                    BodyCheckFailureKind::MissingStableCallTarget,
+                )
+            })?;
+        Ok(Some(FirRuntimeFunction {
+            function: function.function,
+            parameters: function.parameters.clone(),
+            result: function.result,
+        }))
     }
 
     fn progression_source(
@@ -96,7 +131,17 @@ impl BodyFirChecker<'_> {
                 .filter(FirProgressionSource::has_inclusive_last))
         };
         Ok(match (intrinsic, argument) {
-            (CompilerIntrinsic::RangeDownTo | CompilerIntrinsic::RangeUntil, Some(end)) => {
+            // A `UByte`/`UShort` bound widens to its unsigned counter by zero extension, which a
+            // bound coercion does not express; such a builder is iterated instead.
+            (CompilerIntrinsic::RangeDownTo | CompilerIntrinsic::RangeUntil, Some(end))
+                if self
+                    .body
+                    .expr(receiver)
+                    .zip(self.body.expr(end))
+                    .is_some_and(|(start, end)| {
+                        Ty::range_counter_type_for(start.ty.get(), end.ty.get()).is_some()
+                    }) =>
+            {
                 Some(FirProgressionSource::Literal {
                     operation: if intrinsic == CompilerIntrinsic::RangeDownTo {
                         FirRangeOperation::DownTo
