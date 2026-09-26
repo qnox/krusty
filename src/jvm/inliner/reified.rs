@@ -1,7 +1,7 @@
 //! Reified marker specialization over the symbolic method tree.
 
-use crate::jvm::inline::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
+use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
 use super::InlineError;

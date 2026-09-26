@@ -11315,7 +11315,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
-        reified: &crate::jvm::inline::ReifiedArguments,
+        reified: &crate::jvm::reified_arguments::ReifiedArguments,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -12109,7 +12109,7 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         leading_non_argument_operands: usize,
         code: &mut CodeBuilder,
-        reified: &crate::jvm::inline::ReifiedArguments,
+        reified: &crate::jvm::reified_arguments::ReifiedArguments,
     ) -> bool {
         let InlineStaticTarget {
             owner,

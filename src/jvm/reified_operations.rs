@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::inline::ReifiedArgument;
+use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
@@ -94,7 +94,7 @@ pub(super) fn splice_arguments(
     ir: &IrFile,
     expression: ExprId,
     facade: &str,
-) -> super::inline::ReifiedArguments {
+) -> super::reified_arguments::ReifiedArguments {
     let classes = splice_type_map(ir, expression);
     let mut type_of = HashMap::new();
     if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
@@ -108,7 +108,7 @@ pub(super) fn splice_arguments(
             }
         }
     }
-    super::inline::ReifiedArguments { classes, type_of }
+    super::reified_arguments::ReifiedArguments { classes, type_of }
 }
 
 fn realize_expression_dag(
