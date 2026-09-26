@@ -181,6 +181,16 @@ fn a_collection_started_during_a_collection_fails() {
     );
 }
 
+#[test]
+fn a_double_or_float_renders_as_the_jvm_renders_it() {
+    run_driver("fp_render_known_answers");
+}
+
+#[test]
+fn a_floating_remainder_is_exact_and_a_nan_comes_back_quiet() {
+    run_driver("fp_remainder_known_answers");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
@@ -226,7 +236,8 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+            "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -266,14 +277,15 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` failed compiling `krusty_gc.c` for \
+            "native runtime: `{}` failed compiling `krusty_fp.c` for \
              `x86_64-unknown-linux-gnu` (exit status: 1)\n",
             compiler.display()
         )
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
-        "cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+        "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
