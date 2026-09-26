@@ -11,6 +11,8 @@ pub mod klib_ir;
 pub mod module;
 pub mod protobuf;
 pub mod semantic;
+mod value_parameter_flags;
+pub use value_parameter_flags::DeclaredValueParameter;
 mod type_encoder;
 pub mod version_requirements;
 
