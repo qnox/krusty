@@ -401,7 +401,8 @@ fn realize_own_invoke(
         crate::ir::shift_value_indices(ir, body, 0, 1);
     }
     // kotlinc attributes the whole body to the reference's line, entered where the call's own
-    // operands begin: at each parameter read, or at a constructed object's `new`.
+    // operands begin: at each parameter read, or at a constructed object's `new`. Every other node
+    // enters it only at its dispatch, so a bound receiver's read stays ahead of the line.
     if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
         // The bridge maps its whole body to the same line.
         ir.fn_decl_lines.insert(adapter, line);
@@ -414,6 +415,9 @@ fn realize_own_invoke(
             };
             if marks {
                 ir.expr_source_lines.insert(current, line);
+            } else {
+                ir.expr_source_lines.remove(&current);
+                ir.mark_dispatch_line(current, line);
             }
         }
     }

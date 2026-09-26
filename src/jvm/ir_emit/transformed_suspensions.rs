@@ -33,7 +33,7 @@ impl Emitter<'_> {
     /// Mark where a call's own invoke starts: its line and, for a suspension point, the markers
     /// kotlinc's codegen writes right before the invoke, after the arguments.
     pub(super) fn mark_call_start(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        debug_lines::mark_expression_start(self.ir, e, code);
+        debug_lines::mark_dispatch(self.ir, e, code);
         let Some(result) = self.transformed_result(e) else {
             return;
         };
