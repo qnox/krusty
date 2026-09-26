@@ -103,13 +103,28 @@ fn is_optimizable(insn: &Insn) -> bool {
 }
 
 /// Nullability frames retained across the method. This is a hard ceiling, not a heuristic: without
-/// it a legal 65,535-byte method with 65,535 local slots could allocate billions of analysis cells.
+/// it a legal 65,535-byte method with 65,535 local slots, or as deep an operand stack, could
+/// allocate billions of analysis cells.
 const ANALYSIS_CELL_LIMIT: usize = 50 * 1024 * 1024;
 
-fn analysis_within_limit(nodes: usize, locals: usize) -> bool {
+/// Operand-stack slots an assumption adds on top of the method's own `max_stack`: its
+/// `aload; AS_NOT_NULL; astore` (or `aconst_null; astore`) holds one value above what the method
+/// holds where it is placed.
+const ASSUMPTION_STACK: usize = 1;
+
+/// Cells each retained frame holds besides its locals and stack: the frame itself.
+const FRAME_OVERHEAD: usize = 1;
+
+/// Whether analyzing `nodes` nodes, one frame per node plus the entry, fits the ceiling when each
+/// frame holds `max_locals` locals and at most `max_stack` operand-stack values.
+fn analysis_within_limit(nodes: usize, max_locals: usize, max_stack: usize) -> bool {
+    let width = max_locals
+        .checked_add(max_stack)
+        .and_then(|width| width.checked_add(ASSUMPTION_STACK + FRAME_OVERHEAD));
     nodes
         .checked_add(1)
-        .and_then(|points| points.checked_mul(locals.max(1)))
+        .zip(width)
+        .and_then(|(points, width)| points.checked_mul(width))
         .is_some_and(|cells| cells <= ANALYSIS_CELL_LIMIT)
 }
 
@@ -127,9 +142,6 @@ pub(crate) fn eliminate(
     owner: &str,
     value_classes: &dyn ValueClasses,
 ) -> Result<Option<Rewritten>, AnalyzerError> {
-    if !analysis_within_limit(method.nodes.len(), usize::from(method.max_locals)) {
-        return Ok(None);
-    }
     let mut working = method.clone();
     let mut origins: Vec<Option<usize>> = (0..method.nodes.len()).map(Some).collect();
     let mut edited = false;
@@ -166,12 +178,18 @@ fn run_round(
     }
     let listing = Listing::of(method);
     let known = analyze_nullabilities(&listing, method, owner, value_classes)?;
-    let mut rewrite = Rewrite::new(method, origins, listing);
+    let mut rewrite = Rewrite::new(&method.nodes, listing);
     rewrite.apply(&known);
-    Ok(Round {
+    let round = Round {
         changes: rewrite.changes,
         edited: rewrite.edited,
-    })
+    };
+    if round.edited {
+        let (nodes, from) = rewrite.finish(origins);
+        method.nodes = nodes;
+        *origins = from;
+    }
+    Ok(round)
 }
 
 /// `analyzeNullabilities`: each check whose operand the analysis knows is `null` or non-null, by
@@ -183,6 +201,18 @@ fn analyze_nullabilities(
     value_classes: &dyn ValueClasses,
 ) -> Result<Vec<(usize, NullValue)>, AnalyzerError> {
     let assumed = assumptions::inject(listing, method);
+    if !analysis_within_limit(
+        assumed.method.nodes.len(),
+        usize::from(assumed.method.max_locals),
+        usize::from(assumed.method.max_stack),
+    ) {
+        crate::trace_compiler!(
+            "bytecode",
+            "null checks: {} is too large to analyze",
+            method.name
+        );
+        return Ok(Vec::new());
+    }
     let mut interpreter = NullabilityInterpreter::new(value_classes, assumed.placements);
     let frames = analyze(&assumed.method, owner, &mut interpreter)?;
     let mut known = Vec::new();
