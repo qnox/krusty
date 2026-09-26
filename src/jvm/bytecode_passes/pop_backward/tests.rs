@@ -347,3 +347,35 @@ fn a_wide_branchy_method_over_the_limit_is_declined_promptly() {
         "declining took {elapsed:?}"
     );
 }
+
+/// `[line k] iconst_0; pop` 500 times, then `return`: 1,001 instructions, but 2,001 nodes, each
+/// retaining a frame of the analysis.
+fn discarded_constants_with_lines(max_locals: u16) -> MethodNode {
+    let mut method = MethodNode::new(0x0009, "f", "()V");
+    method.max_locals = max_locals;
+    method.max_stack = 1;
+    for line in 0..500u16 {
+        let start = method.new_label();
+        method.nodes.extend([
+            Node::Label(start),
+            Node::Line { line, start },
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Op(POP)),
+        ]);
+    }
+    method.nodes.push(Node::Insn(Insn::Op(RETURN)));
+    method
+}
+
+#[test]
+fn line_numbers_count_toward_the_source_analysis_limit() {
+    // 2,002 retained frames squared, 13 wide: 49.7 MiB, inside.
+    let mut method = discarded_constants_with_lines(12);
+    assert_eq!(propagate(&mut method, "T"), Ok(true));
+    // 14 wide: 53.5 MiB, declined, although kotlinc's frame count (the instructions alone) would
+    // weigh 13.4 MiB.
+    let mut method = discarded_constants_with_lines(13);
+    let emitted = method.clone();
+    assert_eq!(propagate(&mut method, "T"), Ok(false));
+    assert_eq!(method, emitted);
+}

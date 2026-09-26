@@ -2,14 +2,16 @@
 //! companion): a pass declines a method whose analysis frames would weigh too much, and leaves it
 //! as it is.
 //!
-//! The frame count is `countInsnsWithFramesUntil`: over ASM's node list, every instruction with an
-//! opcode other than `nop`, and every other node (a label, a line number, a `nop`) that a label
-//! follows. A label is in ASM's list only when something refers to it. A frame weighs
-//! `max_locals + max_stack` values, and a method's weight is in MiB (`getTotalFramesWeight`).
+//! The gates keep kotlinc's formulas: a frame weighs `max_locals + max_stack` values, and a
+//! method's weight is in MiB (`getTotalFramesWeight`). They count frames as krusty's analyzer
+//! retains them, though, which is one per node of the method, label, line number and `nop`
+//! included, plus the entry frame. kotlinc counts only the nodes its analyzer keeps a frame for
+//! (`countInsnsWithFramesUntil`), so the count here is never lower and the gate is a hard bound on
+//! the analysis it guards; a method close to kotlinc's limit may be declined where kotlinc still
+//! optimizes it.
 //!
 //! kotlinc multiplies the counts as a 32-bit `Int`, so a product past `Int.MAX_VALUE` wraps. Here
-//! every product is checked instead, and a method whose weight does not fit is declined: the gate
-//! is a resource bound first.
+//! every product is checked instead, and a method whose weight does not fit is declined.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -21,22 +23,57 @@ const MEMORY_LIMIT_MB: u64 = 50;
 /// `TRY_CATCH_BLOCKS_SOFT_LIMIT`: past this many handlers, the handlers' ranges count too.
 const TRY_CATCH_BLOCKS_SOFT_LIMIT: usize = 16;
 
-const NOP: u8 = 0x00;
-
 const MIB: u64 = 1024 * 1024;
 
 /// `canBeOptimizedUsingSourceInterpreter`: whether a pass analyzing `method` with a source
 /// interpreter may run. Such an analysis holds, per frame and value, a set of the instructions
 /// that can have pushed it, so its weight counts the frames squared.
 pub(crate) fn fits_source_interpreter(method: &MethodNode) -> bool {
-    let counts = FrameCounts::of(method);
     source_interpreter_fits(
-        counts.frames,
+        retained_frames(method),
         method.try_catch_blocks.len(),
-        counts.handler_ranges(method),
+        handler_range_frames(method),
         usize::from(method.max_locals),
         usize::from(method.max_stack),
     )
+}
+
+/// The frames the analyzer retains for `method`: one per node, and the entry frame.
+fn retained_frames(method: &MethodNode) -> usize {
+    method.nodes.len() + 1
+}
+
+/// `getTotalTcbSize`, over the frames the analyzer retains: the nodes from each handler range's
+/// start label up to its end label, summed; `None` when the sum does not fit. A range whose end
+/// comes before its start, or whose labels are not in the method, counts to the end of the method.
+fn handler_range_frames(method: &MethodNode) -> Option<usize> {
+    let wanted: BTreeSet<LabelId> = method
+        .try_catch_blocks
+        .iter()
+        .flat_map(|block| [block.start, block.end])
+        .collect();
+    let at: HashMap<LabelId, usize> = method
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            Node::Label(label) if wanted.contains(label) => Some((*label, index)),
+            _ => None,
+        })
+        .collect();
+    let end = method.nodes.len();
+    method
+        .try_catch_blocks
+        .iter()
+        .try_fold(0usize, |sum, block| {
+            let start = at.get(&block.start).copied().unwrap_or(end);
+            let stop = at
+                .get(&block.end)
+                .copied()
+                .filter(|&stop| stop >= start)
+                .unwrap_or(end);
+            sum.checked_add(stop - start)
+        })
 }
 
 /// The gate over its counts: `frames` in the method, `handlers` try/catch blocks whose ranges hold
@@ -64,82 +101,13 @@ fn source_interpreter_fits(
     weight(frames.checked_mul(frames)).is_some_and(|weight| weight < MEMORY_LIMIT_MB)
 }
 
-/// Where the frames of a method are, over ASM's node list.
-struct FrameCounts {
-    /// Per node of the method, how many frames the nodes before it hold.
-    before: Vec<usize>,
-    /// The frames of the whole method.
-    frames: usize,
-}
-
-impl FrameCounts {
-    fn of(method: &MethodNode) -> FrameCounts {
-        let referenced = method.referenced_labels();
-        let listed =
-            |node: &Node| !matches!(node, Node::Label(label) if !referenced.contains(label));
-        // Per node, whether the next node in ASM's list is a label.
-        let mut label_next = vec![false; method.nodes.len()];
-        let mut next_is_label = false;
-        for (at, node) in method.nodes.iter().enumerate().rev() {
-            label_next[at] = next_is_label;
-            if listed(node) {
-                next_is_label = matches!(node, Node::Label(_));
-            }
-        }
-        let mut before = Vec::with_capacity(method.nodes.len() + 1);
-        let mut frames = 0usize;
-        for (node, label_next) in method.nodes.iter().zip(label_next) {
-            before.push(frames);
-            let counted = match node {
-                Node::Insn(insn) => super::analysis::opcode(insn) != NOP || label_next,
-                Node::Label(_) | Node::Line { .. } => listed(node) && label_next,
-            };
-            frames += usize::from(counted);
-        }
-        before.push(frames);
-        FrameCounts { before, frames }
-    }
-
-    /// `getTotalTcbSize`: the frames from each handler range's start label up to its end label,
-    /// summed; `None` when the sum does not fit.
-    fn handler_ranges(&self, method: &MethodNode) -> Option<usize> {
-        let wanted: BTreeSet<LabelId> = method
-            .try_catch_blocks
-            .iter()
-            .flat_map(|block| [block.start, block.end])
-            .collect();
-        let at: HashMap<LabelId, usize> = method
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| match node {
-                Node::Label(label) if wanted.contains(label) => Some((*label, index)),
-                _ => None,
-            })
-            .collect();
-        let end = self.before.len() - 1;
-        method
-            .try_catch_blocks
-            .iter()
-            .try_fold(0usize, |sum, block| {
-                let start = at.get(&block.start).copied().unwrap_or(end);
-                let stop = at
-                    .get(&block.end)
-                    .copied()
-                    .filter(|&stop| stop >= start)
-                    .unwrap_or(end);
-                sum.checked_add(self.before[stop] - self.before[start])
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jvm::method_node::{Insn, TryCatchBlock};
 
+    const NOP: u8 = 0x00;
     const ICONST_0: u8 = 0x03;
-    const GOTO: u8 = 0xa7;
     const RETURN: u8 = 0xb1;
 
     fn op(code: u8) -> Node {
@@ -147,36 +115,27 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_is_an_instruction_or_a_node_a_label_follows() {
+    fn every_node_retains_a_frame() {
+        // A label nothing names, a line number and a `nop` hold no frame of kotlinc's, but each
+        // holds one of krusty's analyzer.
         let mut method = MethodNode::new(0x0009, "f", "()V");
-        let named = method.new_label();
         let loose = method.new_label();
         let line = method.new_label();
         method.nodes = vec![
-            op(ICONST_0), // counted: an instruction
-            op(NOP),      // not counted: a `nop` with an instruction next
-            op(NOP),      // counted: the named label follows
-            Node::Label(named),
-            Node::Label(loose), // not in ASM's list
-            Node::Label(line),  // counted: named by the line, and a label follows
-            Node::Label(named),
+            Node::Label(loose),
+            Node::Label(line),
             Node::Line {
                 line: 1,
                 start: line,
-            }, // not counted: an instruction follows
-            op(RETURN), // counted
-            Node::Insn(Insn::Jump {
-                op: GOTO,
-                target: named,
-            }), // counted
+            },
+            op(NOP),
+            op(RETURN),
         ];
-        // `named` at 3 is followed by `loose`, which ASM does not hold, then by `line`: counted.
-        // `named` at 6 is followed by the line number: not counted.
-        assert_eq!(FrameCounts::of(&method).frames, 6);
+        assert_eq!(retained_frames(&method), 6);
     }
 
     #[test]
-    fn a_handler_range_counts_its_frames() {
+    fn a_handler_range_counts_its_nodes() {
         let mut method = MethodNode::new(0x0009, "f", "()V");
         let start = method.new_label();
         let end = method.new_label();
@@ -184,7 +143,7 @@ mod tests {
         method.nodes = vec![
             Node::Label(start),
             op(ICONST_0),
-            op(ICONST_0),
+            op(NOP),
             Node::Label(end),
             op(RETURN),
             Node::Label(handler),
@@ -196,9 +155,7 @@ mod tests {
             handler,
             catch_type: None,
         }];
-        let counts = FrameCounts::of(&method);
-        // The second `iconst_0` is followed by `end`, but is an instruction anyway.
-        assert_eq!(counts.handler_ranges(&method), Some(2));
+        assert_eq!(handler_range_frames(&method), Some(3));
     }
 
     #[test]
