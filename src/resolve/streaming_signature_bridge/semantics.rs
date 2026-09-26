@@ -3857,27 +3857,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
         }
         if unbound {
-            let owner = receiver.get().non_null().obj_internal();
-            if let Some(property) = owner.and_then(|owner| {
-                self.with_resolver(scope, |resolver| {
-                    resolver.associated_property(owner, spelling)
-                })
-                .ok()
-            }) {
-                if expected.is_some_and(|expected| matches!(expected.get().non_null(), Ty::Fun(_)))
-                {
-                    if let Some(contextual) =
-                        self.contextual_callable_reference_type(scope, &[], property.ty, expected)?
-                    {
-                        return Ok(contextual);
-                    }
+            if let Some(owner) = receiver.get().non_null().obj_internal() {
+                if let Some(reference) = self.select_qualified_associated_reference(
+                    scope,
+                    (owner, spelling),
+                    expected,
+                    demand,
+                )? {
+                    return Ok(reference);
                 }
-                let natural = self
-                    .table
-                    .libraries
-                    .property_reference_type(0, property.setter.is_some(), &[property.ty])
-                    .ok_or_else(Self::failure)?;
-                return crate::fir::ResolvedTy::new(natural).map_err(|_| Self::failure());
             }
         }
         let unbound = unbound

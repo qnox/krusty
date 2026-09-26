@@ -316,6 +316,8 @@ pub struct LibraryMember {
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
     /// A compiled `companion { … }` block member's classifier; see `FunctionInfo`'s field.
     pub associated_classifier: Option<TypeName>,
+    /// Classifier whose lexical body owns access to a private companion-block declaration.
+    pub associated_access_owner: Option<TypeName>,
     /// Compiler-plugin expression implementation attached to this exact declaration. Ordinary
     /// declarations leave it unset; selection carries it unchanged to the plugin planning phase.
     pub plugin_expression: Option<PluginExpressionDeclaration>,
@@ -762,6 +764,7 @@ impl LibraryMember {
             declared_ret: None,
             implicit_classifier_callable: None,
             associated_classifier: None,
+            associated_access_owner: None,
             plugin_expression: None,
             stable_declaration: None,
             source_member: None,
@@ -1830,6 +1833,8 @@ pub struct FunctionInfo {
     /// The classifier of a `companion { … }` block member or `companion fun C.name`: named through
     /// the classifier with no value operand, so providers publish it as a receiver-less candidate.
     pub associated_classifier: Option<TypeName>,
+    /// Classifier whose lexical body owns access to this companion-block declaration.
+    pub associated_access_owner: Option<TypeName>,
     /// The extension/member receiver type; `None` for a top-level function.
     pub receiver: Option<Ty>,
     pub ret: ReturnInfo,
@@ -2085,6 +2090,7 @@ impl FunctionInfo {
         FunctionInfo {
             kind,
             associated_classifier: None,
+            associated_access_owner: None,
             receiver,
             ret: ReturnInfo::default(),
             flags: FnFlags::default(),
@@ -2170,6 +2176,7 @@ impl FunctionInfo {
         candidate.source_member = member.source_member;
         candidate.implicit_classifier_callable = member.implicit_classifier_callable;
         candidate.associated_classifier = member.associated_classifier;
+        candidate.associated_access_owner = member.associated_access_owner;
         candidate
     }
 
@@ -2423,6 +2430,8 @@ pub struct PropertyInfo {
     /// a companion `@JvmField`, a `companion { … }` block property or a written `companion val
     /// C.name`, published in `C`'s namespace; see [`FunctionInfo::associated_classifier`].
     pub associated_classifier: Option<TypeName>,
+    /// Classifier whose lexical body owns access to this companion-block declaration.
+    pub associated_access_owner: Option<TypeName>,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
     pub formals: Vec<String>,
     /// The property's declared type.
@@ -3061,6 +3070,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
             associated_classifier: None,
+            associated_access_owner: None,
             formals: Vec::new(),
             ty,
             context_count: 0,

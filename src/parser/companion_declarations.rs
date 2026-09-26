@@ -19,12 +19,20 @@ impl Parser<'_> {
         }
         let save = self.i;
         self.bump(); // `companion`
-        let mut tail = if self.at(TokenKind::At) || self.at_modifier() {
-            self.skip_decl_prefix()
-        } else {
-            Vec::new()
-        };
-        self.skip_newlines();
+        let mut tail = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::At) || self.at_modifier() {
+                tail.extend(self.skip_decl_prefix());
+                continue;
+            }
+            let before_context = self.i;
+            tail.extend(self.maybe_parse_context_receivers());
+            if self.i != before_context {
+                continue;
+            }
+            break;
+        }
         if matches!(
             self.kind(),
             TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar

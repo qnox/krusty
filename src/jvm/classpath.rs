@@ -3313,10 +3313,10 @@ impl Classpath {
                         default_values: Vec::new(),
                         default_realization: None,
                         constructor_realization: None,
-                        // Builtin members predate value classes, so none returns one.
                         declared_ret: None,
                         implicit_classifier_callable: None,
                         associated_classifier: None,
+                        associated_access_owner: None,
                         plugin_expression: None,
                         stable_declaration: None,
                         source_member: None,

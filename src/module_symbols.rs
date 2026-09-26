@@ -776,6 +776,7 @@ impl<'a> ModuleSymbols<'a> {
                 kind: PropKind::MemberExtension,
                 receiver: Some(declaration.receiver_ty()),
                 associated_classifier: None,
+                associated_access_owner: None,
                 formals: declaration.type_params().to_vec(),
                 ty: declaration.ret(),
                 context_count: declaration.context_params().len(),
@@ -867,6 +868,7 @@ fn associated_fn_info(
 ) -> FunctionInfo {
     let mut function = fn_info(FnKind::TopLevel, sig, None, owner, name, 0, origin);
     function.associated_classifier = Some(classifier);
+    function.associated_access_owner = sig.is_companion_block_member().then_some(classifier);
     function.callable.source_receiver = None;
     if let Some(signature) = function.generic_sig.as_mut() {
         signature.receiver = None;
@@ -1095,6 +1097,7 @@ fn source_property(
         kind: PropKind::Member,
         receiver: Some(Ty::obj_name(owner)),
         associated_classifier: None,
+        associated_access_owner: None,
         formals: Vec::new(),
         ty: property.ty,
         context_count: property.context_params.len(),
@@ -1334,6 +1337,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 kind: PropKind::TopLevel,
                 receiver: None,
                 associated_classifier: None,
+                associated_access_owner: None,
                 formals: property.formals.clone(),
                 ty: read_ty,
                 context_count: property.context_params.len(),
@@ -1423,6 +1427,8 @@ impl SymbolSource for ModuleSymbols<'_> {
                     },
                     receiver,
                     associated_classifier,
+                    associated_access_owner: associated_classifier
+                        .filter(|_| property.is_companion_block_member),
                     formals: property.formals.clone(),
                     ty: property.ty,
                     context_count: property.context_params.len(),
@@ -2248,6 +2254,7 @@ mod tests {
                     annotations: Vec::new(),
                     stable_declaration: None,
                     is_companion_extension: false,
+                    is_companion_block_member: false,
                 },
                 FrontendExtPropSig {
                     formal_names: Vec::new(),
@@ -2266,6 +2273,7 @@ mod tests {
                     annotations: Vec::new(),
                     stable_declaration: None,
                     is_companion_extension: false,
+                    is_companion_block_member: false,
                 },
             ],
         );

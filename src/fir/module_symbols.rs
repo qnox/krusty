@@ -611,6 +611,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             kind,
             receiver,
             associated_classifier: None,
+            associated_access_owner: None,
             formals: Vec::new(),
             ty: Ty::Error,
             context_count,
@@ -1158,6 +1159,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 },
                 receiver,
                 associated_classifier: None,
+                associated_access_owner: None,
                 formals,
                 // Property lookup exposes the declared Kotlin type. A narrower explicit backing
                 // field is storage visible only while checking the declaring body's lexical
@@ -1320,6 +1322,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                     false,
                 ) {
                     function.associated_classifier = associated_classifier;
+                    function.associated_access_owner = associated_classifier
+                        .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
                     functions.push(function);
                 }
                 continue;
@@ -1375,6 +1379,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             };
             let mut function = FunctionInfo::plain(kind, receiver, callable);
             function.associated_classifier = associated_classifier;
+            function.associated_access_owner = associated_classifier
+                .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
             function.flags = FnFlags {
                 inline: InlineKind::from_flags(
                     callable_header.is_inline(),
@@ -1471,6 +1477,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                     property.is_some_and(|property| property.mutable),
                 );
                 failed.associated_classifier = associated_classifier;
+                if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+                    failed.associated_access_owner = associated_classifier;
+                }
                 properties.push(failed);
                 continue;
             };
@@ -1540,6 +1549,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 kind,
                 receiver,
                 associated_classifier,
+                associated_access_owner: associated_classifier
+                    .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)),
                 formals,
                 ty: read_ty,
                 context_count,

@@ -151,6 +151,19 @@ impl Checker<'_> {
             .resolver()
             .classifier_associated_callables(classifier, name);
         if candidates.is_empty() {
+            let inaccessible = self
+                .resolver()
+                .associated_function_declarations(classifier, name)
+                .into_iter()
+                .find(|function| !self.resolver().associated_function_accessible(function));
+            if let Some(function) = inaccessible {
+                self.report_inaccessible_associated_function(
+                    &function,
+                    classifier,
+                    self.call_callee_name_span(call),
+                );
+                return Some(Ty::Error);
+            }
             return None;
         }
         let (arg_tys, probe_mark) = self.probe_argument_types(scope, call, args);
@@ -308,7 +321,7 @@ impl Checker<'_> {
             );
             return;
         };
-        let written = property.owner != classifier;
+        let written = property.associated_access_owner.is_none();
         let kind = if property.setter.is_some() {
             "var"
         } else {
@@ -401,6 +414,84 @@ impl Checker<'_> {
             "companion {}",
             Self::callable_candidate_display(name, function)
         )
+    }
+
+    pub(super) fn report_inaccessible_associated_function(
+        &mut self,
+        function: &crate::libraries::FunctionInfo,
+        classifier: TypeName,
+        span: Span,
+    ) {
+        if self.visibility_access_suppressed() {
+            return;
+        }
+        let written = function.associated_access_owner.is_none();
+        let name = if written {
+            format!(
+                "{}.{}",
+                Ty::obj_name(classifier).source_name(),
+                function.callable.name
+            )
+        } else {
+            function.callable.name.clone()
+        };
+        let declaration = Self::associated_candidate_display(&name, function);
+        let container = if written {
+            "file".to_string()
+        } else {
+            format!("'{}'", Self::access_owner_display(classifier))
+        };
+        let visibility = match function.visibility {
+            Visibility::Private => "private",
+            Visibility::Protected => "protected",
+            Visibility::Internal => "internal",
+            Visibility::PackagePrivate => "package-private",
+            Visibility::Public => "public",
+        };
+        self.diags.error(
+            span,
+            format!("cannot access '{declaration}': it is {visibility} in {container}."),
+        );
+    }
+
+    /// Preserve access diagnostics for an explicit classifier-coordinate reference after the
+    /// accessible associated family has been exhausted. The inaccessible declaration remains out
+    /// of overload selection; this only reports the already-bound classifier namespace member.
+    pub(super) fn reject_inaccessible_associated_reference(
+        &mut self,
+        expression: ExprId,
+        classifier: TypeName,
+        name: &str,
+    ) -> bool {
+        let inaccessible_function = {
+            let resolver = self.resolver();
+            resolver
+                .associated_function_declarations(classifier, name)
+                .into_iter()
+                .find(|function| !resolver.associated_function_accessible(function))
+        };
+        if let Some(function) = inaccessible_function {
+            self.report_inaccessible_associated_function(
+                &function,
+                classifier,
+                self.member_name_span(expression, name),
+            );
+            return true;
+        }
+        let inaccessible_property = {
+            let resolver = self.resolver();
+            resolver
+                .associated_property(classifier, name)
+                .filter(|property| !resolver.associated_property_accessible(property))
+        };
+        if let Some(property) = inaccessible_property {
+            self.report_inaccessible_associated_property(
+                &property,
+                self.member_name_span(expression, name),
+            );
+            return true;
+        }
+        false
     }
 
     /// `C::name`, or `::name` from `C`'s static scope, naming one of `classifier`'s associated

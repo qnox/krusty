@@ -56,16 +56,10 @@ impl SymbolResolver<'_> {
                     || self.lib.internal_accessible(property.owner)
             }
             Visibility::PackagePrivate => self.package_private_member_accessible(property.owner),
-            Visibility::Private => {
-                current_module
-                    || self.lexical_classes.iter().copied().any(|enclosing| {
-                        enclosing == property.owner
-                            || std::iter::successors(enclosing.nested_owner(), |owner| {
-                                owner.nested_owner()
-                            })
-                            .any(|owner| owner == property.owner)
-                    })
+            Visibility::Private if property.associated_access_owner.is_some() => {
+                self.lexically_inside(property.associated_access_owner.expect("checked above"))
             }
+            Visibility::Private => current_module,
             Visibility::Protected => self.lexical_classes.iter().copied().any(|enclosing| {
                 is_subtype(
                     &TyCtx::new(),
@@ -127,19 +121,48 @@ impl SymbolResolver<'_> {
         name: &str,
         rank: u32,
     ) -> Vec<FunctionInfo> {
+        self.associated_function_declarations(classifier, name)
+            .into_iter()
+            .filter(|function| self.associated_function_accessible(function))
+            .map(|mut function| {
+                function.receiver_rank = rank;
+                function
+            })
+            .collect()
+    }
+
+    /// All declarations on this exact classifier coordinate, before lexical access filtering.
+    /// Callers use this only to preserve the selected declaration's access diagnostic after the
+    /// accessible family is empty; applicability and overload selection never see these entries.
+    pub(crate) fn associated_function_declarations(
+        &self,
+        classifier: TypeName,
+        name: &str,
+    ) -> Vec<FunctionInfo> {
         self.src
             .symbols(SymbolNamespace::Classifier(classifier), name)
             .callables
             .functions()
             .iter()
             .filter(|function| function.associated_classifier == Some(classifier))
-            .filter(|function| self.non_member_callable_accessible(function))
             .cloned()
-            .map(|mut function| {
-                function.receiver_rank = rank;
-                function
-            })
             .collect()
+    }
+
+    pub(crate) fn associated_function_accessible(&self, function: &FunctionInfo) -> bool {
+        if function.visibility == Visibility::Private && function.associated_access_owner.is_some()
+        {
+            self.lexically_inside(function.associated_access_owner.expect("checked above"))
+        } else {
+            self.non_member_callable_accessible(function)
+        }
+    }
+
+    fn lexically_inside(&self, owner: TypeName) -> bool {
+        self.lexical_classes
+            .iter()
+            .copied()
+            .any(|enclosing| enclosing.same_or_nested_within(owner))
     }
 
     fn associated_properties_of(

@@ -230,6 +230,38 @@ impl ProductionSignatureSemantics<'_> {
                 ))
             })
             .unwrap_or_default();
+        self.select_associated_reference(scope, functions, properties, expected, demand)
+    }
+
+    /// `C::name` naming `classifier`'s own associated declaration. Qualified and open-static
+    /// references use one selector so compact return inference cannot turn an overloaded function
+    /// family into a missing member merely because the classifier has no same-named property.
+    pub(super) fn select_qualified_associated_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        (classifier, spelling): (crate::types::TypeName, &str),
+        expected: Option<crate::fir::ResolvedTy>,
+        demand: &mut Demand<'_>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        let (functions, properties) = self
+            .with_resolver(scope, |resolver| {
+                Some((
+                    resolver.classifier_associated_callables(classifier, spelling),
+                    resolver.classifier_associated_properties(classifier, spelling),
+                ))
+            })
+            .unwrap_or_default();
+        self.select_associated_reference(scope, functions, properties, expected, demand)
+    }
+
+    fn select_associated_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        functions: Vec<crate::libraries::FunctionInfo>,
+        properties: Vec<crate::libraries::PropertyInfo>,
+        expected: Option<crate::fir::ResolvedTy>,
+        demand: &mut Demand<'_>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         if let (false, Some(Ty::Fun(expected))) = (
             functions.is_empty(),
             expected.map(|expected| expected.get().non_null()),

@@ -63,6 +63,7 @@ pub(super) fn merge_metadata_const(
         kind: crate::libraries::PropKind::TopLevel,
         receiver: None,
         associated_classifier: None,
+        associated_access_owner: None,
         formals: metadata
             .generic_sig
             .as_ref()

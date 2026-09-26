@@ -393,6 +393,7 @@ mod tests {
                                     kind: PropKind::Member,
                                     receiver: None,
                                     associated_classifier: None,
+                                    associated_access_owner: None,
                                     formals: Vec::new(),
                                     ty: Ty::Int,
                                     context_count: 0,

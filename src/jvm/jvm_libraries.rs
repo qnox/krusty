@@ -1177,6 +1177,7 @@ impl JvmLibraries {
                         )
                     }),
                 associated_classifier: None,
+                associated_access_owner: None,
                 formals: property_gsig
                     .as_ref()
                     .map(|gsig| gsig.formals.clone())
@@ -2026,6 +2027,7 @@ impl JvmLibraries {
                     // A `companion { … }` block function is a static member of its class, named
                     // through the classifier coordinate with no value operand.
                     member.associated_classifier = Some(internal_name);
+                    member.associated_access_owner = Some(internal_name);
                     companion.push(member);
                 } else if declaration.is_some() {
                     members.push(member);
@@ -3757,6 +3759,7 @@ impl JvmLibraries {
                         kind: PropKind::MemberExtension,
                         receiver: Some(receiver),
                         associated_classifier: None,
+                        associated_access_owner: None,
                         formals: property_signature
                             .map(|signature| signature.formals.clone())
                             .unwrap_or_default(),
@@ -3898,6 +3901,7 @@ impl JvmLibraries {
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
                     associated_classifier: None,
+                    associated_access_owner: None,
                     formals: property_signature
                         .map(|signature| signature.formals.clone())
                         .or_else(|| {
@@ -4014,6 +4018,7 @@ impl JvmLibraries {
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
                     associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty: field_ty,
                     context_count: 0,
@@ -4072,6 +4077,7 @@ impl JvmLibraries {
                     kind: PropKind::Member,
                     receiver: Some(recv),
                     associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty,
                     context_count: 0,
@@ -4152,6 +4158,7 @@ impl JvmLibraries {
                         kind: PropKind::Member,
                         receiver: Some(recv),
                         associated_classifier: None,
+                        associated_access_owner: None,
                         formals: Vec::new(),
                         ty,
                         context_count: 0,
@@ -5629,6 +5636,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     kind: crate::libraries::PropKind::Member,
                     receiver: Some(receiver),
                     associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty,
                     context_count: 0,

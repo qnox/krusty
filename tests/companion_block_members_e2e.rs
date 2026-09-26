@@ -120,6 +120,71 @@ fn instance_member_calls_inherited_and_private_block_members() {
 }
 
 #[test]
+fn private_block_members_are_owned_by_their_class_not_their_file() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class Vault {\n\
+        \x20   companion {\n\
+        \x20       private fun hiddenCall(): String = \"O\"\n\
+        \x20       private val hiddenValue: String = \"K\"\n\
+        \x20   }\n\
+        \x20   fun inside(): String = hiddenCall() + hiddenValue\n\
+        }\n\
+        private companion fun Vault.fileVisible(): String = \"OK\"\n\
+        fun writtenControl(): String = Vault.fileVisible()\n\
+        fun outside(): String {\n\
+        \x20   return Vault.hiddenCall() + Vault.hiddenValue\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
+fn private_block_member_access_uses_the_declaring_class_lexical_boundary() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class Host {\n\
+        \x20   companion { private fun ownerOnly(): String = \"OK\" }\n\
+        \x20   class Nested { fun legal(): String = ownerOnly() }\n\
+        \x20   class NestedOwner {\n\
+        \x20       companion { private val innerOnly: String = \"hidden\" }\n\
+        \x20   }\n\
+        \x20   fun illegalFromEnclosing(): String = NestedOwner.innerOnly\n\
+        \x20   class Sibling { fun illegalFromSibling(): String = NestedOwner.innerOnly }\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
+fn private_block_members_are_not_visible_from_another_file() {
+    const DECLARATION: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class Secret { companion { private fun hidden(): String = \"hidden\" } }\n";
+    const USE: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        fun illegal(): String = Secret.hidden()\n";
+    common::assert_errors_match_kotlinc(
+        &[("Secret.kt", DECLARATION), ("Use.kt", USE)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
+fn kotlin_classifier_scope_does_not_inherit_companion_block_members() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        open class Parent {\n\
+        \x20   companion { fun marker(): String = \"not inherited\" }\n\
+        }\n\
+        class Child : Parent()\n\
+        fun invalid(): String { return Child.marker() }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
 fn block_property_initializes_with_its_class_not_the_file() {
     const SRC: &str = "var initialized = false\n\
         fun initialize(): String {\n\
@@ -257,6 +322,47 @@ fn static_scope_writes_and_increments_companion_properties() {
         \x20   return if (\"${C.n}${C.s}${C.m}\" == \"4K6\") \"OK\" else \"${C.n}${C.s}${C.m}\"\n\
         }\n";
     assert_eq!(run(SRC).expect("static-scope writes"), "OK");
+}
+
+#[test]
+fn static_scope_write_rung_precedes_an_outer_receiver() {
+    const SRC: &str = "class Outer {\n\
+        \x20   var assigned = \"outer\"\n\
+        \x20   var added = 1\n\
+        \x20   var incremented = 2\n\
+        \x20   inner class Inner {\n\
+        \x20       companion {\n\
+        \x20           var assigned = \"inner\"\n\
+        \x20           var added = 10\n\
+        \x20           var incremented = 20\n\
+        \x20       }\n\
+        \x20       fun update(): String {\n\
+        \x20           assigned = \"set\"\n\
+        \x20           added += 5\n\
+        \x20           incremented++\n\
+        \x20           return this@Outer.assigned + \",\" + Inner.assigned + \",\" +\n\
+        \x20               this@Outer.added + \",\" + Inner.added + \",\" +\n\
+        \x20               this@Outer.incremented + \",\" + Inner.incremented\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val result = Outer().let { it.Inner().update() }\n\
+        \x20   return if (result == \"outer,set,1,15,2,21\") \"OK\" else result\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "OrderedStaticWrites");
+}
+
+#[test]
+fn companion_modifier_and_context_clause_accept_both_prefix_orders() {
+    const SRC: &str = "annotation class Mark\n\
+        class Ambient\n\
+        class Coordinate\n\
+        context(_: Ambient) @Mark companion public fun Coordinate.first() = \"O\"\n\
+        companion @Mark public context(_: Ambient) val Coordinate.second get() = \"K\"\n\
+        fun <T, R> within(value: T, block: T.() -> R): R = value.block()\n\
+        fun box() = within(Ambient()) { Coordinate.first() + Coordinate.second }\n";
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "CompanionContextPrefixes");
 }
 
 #[test]
@@ -575,6 +681,35 @@ fn static_scope_reference_without_an_expected_type_is_ambiguous() {
         \x20   }\n\
         \x20   fun pick() = ::f\n\
         }\n";
+    common::assert_error_blocks_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
+fn qualified_block_function_reference_is_selected_in_compact_signatures() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       fun f(x: Int): String = \"O\"\n\
+        \x20       fun f(x: String): String = x\n\
+        \x20   }\n\
+        }\n\
+        fun selected(): (Int) -> String = C::f\n\
+        fun box() = selected()(1) + \"K\"\n";
+    assert_eq!(run(SRC).expect("qualified block function reference"), "OK");
+}
+
+#[test]
+fn qualified_overloaded_block_function_reference_has_one_ambiguity() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        class C {\n\
+        \x20   companion {\n\
+        \x20       fun f(x: Int): String = \"int\"\n\
+        \x20       fun f(x: String): String = \"string\"\n\
+        \x20   }\n\
+        }\n\
+        fun ref() = C::f\n";
     common::assert_error_blocks_match_kotlinc(
         &[("Main.kt", SRC)],
         &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],

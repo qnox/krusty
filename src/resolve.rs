@@ -84,6 +84,7 @@ mod plugin_expression_annotations;
 mod plugin_expression_planning;
 mod postponed_applicability;
 mod postponed_diagnostics;
+mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
@@ -161,6 +162,7 @@ pub(crate) use member_extension_selection::{
 };
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 use stable_path::StablePathRead;
@@ -1049,6 +1051,7 @@ impl SigFlags {
     const IS_INFIX: u16 = 1 << 8;
     const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 9;
     const IS_COMPANION_EXTENSION: u16 = 1 << 10;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1107,6 +1110,10 @@ impl SigFlags {
     #[inline]
     pub const fn with_is_companion_extension(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
     }
 }
 
@@ -1302,6 +1309,10 @@ impl Signature {
     #[inline]
     pub fn is_companion_extension(&self) -> bool {
         self.flags.has(SigFlags::IS_COMPANION_EXTENSION)
+    }
+    #[inline]
+    pub fn is_companion_block_member(&self) -> bool {
+        self.flags.has(SigFlags::IS_COMPANION_BLOCK_MEMBER)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -3302,6 +3313,7 @@ pub struct ExtPropSig {
     pub ty: Ty,
     pub is_var: bool,
     pub is_companion_extension: bool,
+    pub is_companion_block_member: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     pub context_params: Vec<Ty>,
@@ -15102,8 +15114,9 @@ impl<'a> Checker<'a> {
         property: crate::libraries::PropertyInfo,
         report_diagnostics: bool,
     ) -> Ty {
+        let access_owner = property.associated_access_owner.unwrap_or(property.owner);
         if property.visibility != Visibility::Public
-            && !self.member_accessible(property.visibility, property.owner)
+            && !self.member_accessible(property.visibility, access_owner)
         {
             if let Some(expr) = expr.filter(|_| report_diagnostics) {
                 let span = self.member_name_span(expr, &property.name);
@@ -19993,16 +20006,23 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                     if self.resolved_type_name(classifier).is_some() {
-                        let owner = match self.file.expr(receiver) {
-                            Expr::Name(source_name) => source_name.as_str().into(),
-                            _ => classifier.to_string(),
-                        };
-                        self.diags.error(
-                            span,
-                            format!(
-                                "unresolved Java static '{owner}.{name}' for given argument types"
-                            ),
-                        );
+                        if self.libraries.inherits_classifier_callables(classifier) {
+                            let owner = match self.file.expr(receiver) {
+                                Expr::Name(source_name) => source_name.as_str().into(),
+                                _ => classifier.to_string(),
+                            };
+                            self.diags.error(
+                                span,
+                                format!(
+                                    "unresolved Java static '{owner}.{name}' for given argument types"
+                                ),
+                            );
+                        } else {
+                            self.diags.error(
+                                self.call_callee_name_span(call),
+                                format!("unresolved reference '{name}'."),
+                            );
+                        }
                         return Ty::Error;
                     }
                 }
@@ -25335,51 +25355,22 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        let implicit_property = (local.is_none() && backing_field.is_none())
-            .then(|| self.implicit_property_write(scope, &name))
-            .flatten();
-        if let Some(resolution) = &implicit_property {
+        let property = if local.is_none() && backing_field.is_none() {
+            self.implicit_property_write(scope, &name)
+        } else {
+            PropertyWriteSelection::None
+        };
+        if let PropertyWriteSelection::Implicit(resolution) = &property {
             if let Some(span) = resolution.receiver.extension_receiver {
                 self.mark_extension_receiver_stmt_span_used(s, span);
             }
-            self.record_implicit_property_write(s, resolution);
         }
-        // A TOP-LEVEL `var` increment (`g++`). The assignment path records the selected property so
-        // FIR can lower the write; without the same record here the increment reached FIR with no
-        // target at all and failed as an unknown local.
-        let top_level_property =
-            (local.is_none() && backing_field.is_none() && implicit_property.is_none())
-                .then(|| match self.select_top_level_property(scope, &name) {
-                    TopLevelPropertySelection::Selected(property) => Some(property),
-                    TopLevelPropertySelection::Ambiguous
-                    | TopLevelPropertySelection::MissingContext(..)
-                    | TopLevelPropertySelection::None => None,
-                })
-                .flatten();
-        if let Some(property) = top_level_property.clone() {
-            self.stmt_lowers
-                .insert(s, StmtLowering::TopLevelPropertySet(property));
+        if property.storage().is_some() {
+            self.record_implicit_property_write(s, &property);
         }
         let found = local
             .or(backing_field)
-            .or_else(|| {
-                implicit_property.as_ref().map(|resolution| {
-                    (
-                        resolution.property_ty,
-                        resolution.is_var,
-                        resolution.property_ty,
-                    )
-                })
-            })
-            .or_else(|| {
-                top_level_property.as_ref().map(|property| {
-                    (
-                        property.property.ty,
-                        property.property.setter.is_some(),
-                        property.property.ty,
-                    )
-                })
-            });
+            .or_else(|| property.storage().map(|(ty, is_var)| (ty, is_var, ty)));
         match found {
             Some((storage_ty, is_var, nominal_read_ty)) => {
                 if !is_var {
@@ -25414,9 +25405,24 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            None => self
-                .diags
-                .error(span, format!("unresolved reference '{name}'.")),
+            None => match property {
+                PropertyWriteSelection::Ambiguous => self.diags.error(
+                    target_span,
+                    format!("overload resolution ambiguity for property '{name}'"),
+                ),
+                PropertyWriteSelection::MissingContext(missing, names) => self.diags.error(
+                    target_span,
+                    format!(
+                        "No context argument for '{}' found.",
+                        missing.display(&names)
+                    ),
+                ),
+                PropertyWriteSelection::None
+                | PropertyWriteSelection::Implicit(_)
+                | PropertyWriteSelection::Receiverless(_) => self
+                    .diags
+                    .error(span, format!("unresolved reference '{name}'.")),
+            },
         }
     }
 
@@ -25468,41 +25474,25 @@ impl<'a> Checker<'a> {
                 )
             })
             .map(|local| (local.write_ty.unwrap_or(local.ty), local.write_ty.is_some()));
-        let implicit_property = (deferred_property.is_none() && local.is_none())
-            .then(|| self.implicit_property_write(scope, &name))
-            .flatten();
+        let property = if deferred_property.is_none() && local.is_none() {
+            self.implicit_property_write(scope, &name)
+        } else {
+            PropertyWriteSelection::None
+        };
         crate::trace_compiler!(
             "resolve",
-            "assign name={name} local={:?} implicit_property={} deferred={}",
+            "assign name={name} local={:?} property={} deferred={}",
             scoped.map(|binding| binding.origin),
-            implicit_property.is_some(),
+            property.storage().is_some(),
             deferred_property.is_some(),
         );
-        let context_property =
-            if deferred_property.is_none() && local.is_none() && implicit_property.is_none() {
-                // Select every receiver-less property through the ordinary property resolver. The old
-                // `syms.props` fallback validated plain source properties but recorded no declaration,
-                // leaving checked FIR and lowering without a semantic target.
-                self.select_top_level_property(scope, &name)
-            } else {
-                TopLevelPropertySelection::None
-            };
         let assignment_expected = if name == "field" && local.is_none() && self.field_ty.is_some() {
             self.field_ty
         } else {
             deferred_property
                 .map(|(_, _, ty, _)| ty)
                 .or_else(|| local.map(|(ty, _)| ty))
-                .or_else(|| {
-                    implicit_property
-                        .as_ref()
-                        .map(|resolution| resolution.property_ty)
-                })
-                .or(match &context_property {
-                    TopLevelPropertySelection::Selected(property) => Some(property.property.ty),
-                    TopLevelPropertySelection::MissingContext(..) => None,
-                    _ => None,
-                })
+                .or_else(|| property.storage().map(|(ty, _)| ty))
         };
         let vt = match assignment_expected {
             Some(expected) => self.expr_expected(scope, value, expected),
@@ -25619,8 +25609,8 @@ impl<'a> Checker<'a> {
                 }
                 None => {
                     let span = self.file.stmt_spans[s.0 as usize];
-                    match implicit_property {
-                        Some(resolution) => {
+                    match property {
+                        PropertyWriteSelection::Implicit(resolution) => {
                             self.mark_extension_receiver_stmt_used(s, resolution.receiver);
                             if let Some(setter) = resolution.setter.as_ref() {
                                 if setter.visibility != Visibility::Public {
@@ -25644,37 +25634,38 @@ impl<'a> Checker<'a> {
                                 self.value_diagnostic_span(value, vt),
                                 "assignment",
                             );
-                            self.record_implicit_property_write(s, &resolution);
+                            self.record_implicit_property_write(
+                                s,
+                                &PropertyWriteSelection::Implicit(resolution),
+                            );
                         }
-                        None => match context_property {
-                            TopLevelPropertySelection::Selected(property) => {
-                                if property.property.setter.is_none() {
-                                    self.report_val_reassignment(
-                                        target_span,
-                                        "'val' cannot be reassigned.",
-                                    );
-                                }
-                                self.expect_assignable(
-                                    property.property.ty,
-                                    vt,
-                                    self.value_diagnostic_span(value, vt),
-                                    "assignment",
+                        PropertyWriteSelection::Receiverless(property) => {
+                            if property.property.setter.is_none() {
+                                self.report_val_reassignment(
+                                    target_span,
+                                    "'val' cannot be reassigned.",
                                 );
-                                self.stmt_lowers
-                                    .insert(s, StmtLowering::TopLevelPropertySet(property));
                             }
-                            TopLevelPropertySelection::Ambiguous => self.diags.error(
-                                target_span,
-                                format!("overload resolution ambiguity for property '{name}'"),
-                            ),
-                            TopLevelPropertySelection::MissingContext(..) => self.diags.error(
-                                target_span,
-                                format!("No context argument for '{name}' found."),
-                            ),
-                            TopLevelPropertySelection::None => self
-                                .diags
-                                .error(span, format!("unresolved reference '{name}'.")),
-                        },
+                            self.expect_assignable(
+                                property.property.ty,
+                                vt,
+                                self.value_diagnostic_span(value, vt),
+                                "assignment",
+                            );
+                            self.stmt_lowers
+                                .insert(s, StmtLowering::TopLevelPropertySet(property));
+                        }
+                        PropertyWriteSelection::Ambiguous => self.diags.error(
+                            target_span,
+                            format!("overload resolution ambiguity for property '{name}'"),
+                        ),
+                        PropertyWriteSelection::MissingContext(..) => self.diags.error(
+                            target_span,
+                            format!("No context argument for '{name}' found."),
+                        ),
+                        PropertyWriteSelection::None => self
+                            .diags
+                            .error(span, format!("unresolved reference '{name}'.")),
                     }
                 }
             }
@@ -25776,7 +25767,8 @@ impl<'a> Checker<'a> {
             }
             if let Some(property) = self.resolver().associated_property(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
-                if !self.member_accessible(property.visibility, property.owner) {
+                let access_owner = property.associated_access_owner.unwrap_or(property.owner);
+                if !self.member_accessible(property.visibility, access_owner) {
                     self.report_inaccessible_associated_property(&property, member_span);
                     return;
                 }
@@ -30713,6 +30705,7 @@ fun box(): String {
                             kind: crate::libraries::PropKind::MemberExtension,
                             receiver: Some(parameter),
                             associated_classifier: None,
+                            associated_access_owner: None,
                             formals: Vec::new(),
                             ty: Ty::String,
                             context_count: 0,
@@ -30820,6 +30813,7 @@ fun box(): String {
                         return_value_status: None,
                         external_identity: None,
                         associated_classifier: None,
+                        associated_access_owner: None,
                         external_default_provider: None,
                         external_property_identity: None,
                         singleton_dispatch: None,
@@ -39928,17 +39922,6 @@ impl CallableCandidateSelection {
     }
 }
 
-struct ImplicitPropertyWriteResolution {
-    receiver: ImplicitReceiver,
-    property_ty: Ty,
-    is_var: bool,
-    context_args: Vec<ResolvedContextArgument>,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    setter: Option<crate::symbol_resolver::ResolvedPropertySetter>,
-    extension: Option<ResolvedPropertyAccess>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct ImplicitReceiver {
     ty: Ty,
@@ -48537,6 +48520,14 @@ impl<'a> Checker<'a> {
         if !matches!(associated, TopLevelPropertySelection::None) {
             return associated;
         }
+        self.select_declared_top_level_property(scope, name)
+    }
+
+    fn select_declared_top_level_property(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> TopLevelPropertySelection {
         let properties = self
             .resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
@@ -53216,8 +53207,10 @@ impl<'a> Checker<'a> {
     fn lexical_associated_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
         self.lexical_classifier_callable_owners()
             .into_iter()
-            .filter_map(|owner| self.resolver().associated_property(owner, name))
-            .find(|property| self.member_accessible(property.visibility, property.owner))
+            .find_map(|owner| {
+                self.resolver()
+                    .accessible_classifier_associated_property(owner, name)
+            })
     }
 
     /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
@@ -61331,194 +61324,6 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// Resolve a bare property write through Kotlin's ordered implicit receivers. Every provider
-    /// exposes the same getter/setter pair; declaration origin affects only later linkage.
-    /// A read-only property on a nearer receiver is terminal and must not fall through to a farther
-    /// writable receiver.
-    fn implicit_property_write(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<ImplicitPropertyWriteResolution> {
-        for implicit_receiver in self.implicit_receivers(scope) {
-            if let Some(property) = self.property_write_on_receiver(scope, implicit_receiver, name)
-            {
-                return Some(property);
-            }
-        }
-        let (receiver, declared_name, _) = self.imported_singleton_member(name)?;
-        self.property_write_on_receiver(scope, receiver, &declared_name)
-    }
-
-    fn property_write_on_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ImplicitReceiver,
-        name: &str,
-    ) -> Option<ImplicitPropertyWriteResolution> {
-        if let Some(property) = self.checked_body_local_property(receiver.ty, name) {
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ty,
-                is_var: property.mutable,
-                context_args: Vec::new(),
-                getter: None,
-                setter: None,
-                extension: None,
-                stable_declaration: property.stable_declaration,
-            });
-        }
-        let selected = self.resolver().select_member_property_applicable_where(
-            receiver.ty,
-            name,
-            |property| {
-                let context_types = property.getter.params.get(..property.context_count)?;
-                self.select_context_arguments_with_types(scope, context_types)
-                    .ok()
-                    .map(|_| {
-                        (
-                            self.receiver_property_accessible(
-                                property.visibility,
-                                property.owner,
-                                receiver.ty,
-                            ),
-                            property.context_count,
-                        )
-                    })
-            },
-        );
-        if let Some((selected_ty, property)) = selected.and_then(|selected| {
-            let ty = selected.ty;
-            selected.property.map(|property| (ty, property))
-        }) {
-            let context_types = property.getter.params.get(..property.context_count)?;
-            let context_args = self.select_context_arguments(scope, context_types)?;
-            let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
-                receiver.ty,
-                property.getter.clone(),
-                false,
-            );
-            getter.context_args = context_args.iter().cloned().map(Some).collect();
-            getter.member.context_count = property.context_count;
-            getter.member.stable_declaration =
-                property.getter_declaration.or(property.stable_declaration);
-            let setter = property.setter.clone().map(|callable| {
-                crate::symbol_resolver::ResolvedPropertySetter {
-                    callable,
-                    visibility: property.setter_visibility,
-                    source_member: property.source_member,
-                    stable_declaration: property.stable_declaration,
-                }
-            });
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: selected_ty,
-                is_var: setter.is_some(),
-                context_args,
-                getter: Some(getter),
-                setter,
-                extension: None,
-                stable_declaration: property.stable_declaration,
-            });
-        }
-        let getter = self.select_property_member(receiver.ty, name);
-        let setter = self.select_property_setter(receiver.ty, name);
-        if let Some(setter) = setter {
-            let ty = setter.callable.params.first().copied().unwrap_or(Ty::Error);
-            let stable_declaration = setter.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: ty,
-                is_var: true,
-                context_args: Vec::new(),
-                getter,
-                setter: Some(setter),
-                extension: None,
-                stable_declaration,
-            });
-        }
-        if let Some(property) = getter {
-            let stable_declaration = property.member.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ret,
-                is_var: false,
-                context_args: Vec::new(),
-                getter: Some(property),
-                setter: None,
-                extension: None,
-                stable_declaration,
-            });
-        }
-        if let Ok(Some(property)) = self.resolver().select_extension_property(receiver.ty, name) {
-            let context_args = if property.context_count == 0 {
-                Vec::new()
-            } else {
-                let context_types = property.getter.params.get(1..1 + property.context_count)?;
-                self.select_context_arguments(scope, context_types)?
-            };
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ty,
-                is_var: property.setter.is_some(),
-                context_args: Vec::new(),
-                getter: None,
-                setter: None,
-                extension: Some(ResolvedPropertyAccess {
-                    property,
-                    context_args,
-                }),
-                stable_declaration: None,
-            });
-        }
-        None
-    }
-
-    fn implicit_property_write_target(
-        &self,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) -> ImplicitPropertyWriteTarget {
-        let receiver = self.implicit_receiver_selection(resolution.receiver);
-        if let Some(access) = &resolution.extension {
-            ImplicitPropertyWriteTarget::Extension {
-                receiver,
-                access: Box::new(access.clone()),
-            }
-        } else {
-            ImplicitPropertyWriteTarget::Member {
-                receiver,
-                stable_declaration: resolution.stable_declaration,
-                property_ty: resolution.property_ty,
-                context_args: resolution.context_args.clone(),
-                getter: resolution.getter.clone().map(Box::new),
-                setter: resolution.setter.clone().map(Box::new),
-            }
-        }
-    }
-
-    fn record_implicit_property_write(
-        &mut self,
-        stmt: StmtId,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) {
-        let target = self.implicit_property_write_target(resolution);
-        self.stmt_lowers
-            .insert(stmt, StmtLowering::ImplicitPropertyWrite(Box::new(target)));
-    }
-
-    fn record_implicit_property_incdec(
-        &mut self,
-        expression: ExprId,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) {
-        self.mark_extension_receiver_used(expression, resolution.receiver);
-        let target = self.implicit_property_write_target(resolution);
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::ImplicitPropertyIncDec(Box::new(target)),
-        );
-    }
-
     /// `args` are the reference's type arguments (`[V]` at arity 0, `[Recv, V]` at arity 1).
     fn property_ref_ty(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
         // The checker and lowering must agree on one complete property-reference signature. An
@@ -67471,38 +67276,18 @@ impl<'a> Checker<'a> {
                     Some(ExprLowering::BackingFieldRead)
                 )
                 .then_some((read_ty, true));
-                let implicit_property = (local_binding.is_none() && backing_field.is_none())
-                    .then(|| self.implicit_property_write(scope, &name))
-                    .flatten();
-                if let Some(resolution) = &implicit_property {
-                    self.record_implicit_property_incdec(e, resolution);
-                }
-                let top_level_property = (local_binding.is_none()
-                    && backing_field.is_none()
-                    && implicit_property.is_none())
-                .then(|| match self.select_top_level_property(scope, &name) {
-                    TopLevelPropertySelection::Selected(property) => Some(property),
-                    TopLevelPropertySelection::Ambiguous
-                    | TopLevelPropertySelection::MissingContext(..)
-                    | TopLevelPropertySelection::None => None,
-                })
-                .flatten();
-                if let Some(property) = top_level_property.clone() {
-                    self.expr_lowers
-                        .insert(e, ExprLowering::TopLevelPropertyIncDec(property));
+                let property = if local_binding.is_none() && backing_field.is_none() {
+                    self.implicit_property_write(scope, &name)
+                } else {
+                    PropertyWriteSelection::None
+                };
+                if property.storage().is_some() {
+                    self.record_implicit_property_incdec(e, &property);
                 }
                 match local_binding
                     .or(backing_field)
-                    .or_else(|| {
-                        implicit_property
-                            .as_ref()
-                            .map(|resolution| (resolution.property_ty, resolution.is_var))
-                    })
-                    .or_else(|| {
-                        top_level_property.as_ref().map(|property| {
-                            (property.property.ty, property.property.setter.is_some())
-                        })
-                    }) {
+                    .or_else(|| property.storage())
+                {
                     Some((storage_ty, is_var)) => {
                         if !is_var {
                             self.report_val_reassignment(
@@ -67538,8 +67323,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                     None => {
-                        self.diags
-                            .error(self.span(e), format!("unresolved reference '{name}'."));
+                        match property {
+                            PropertyWriteSelection::Ambiguous => self.diags.error(
+                                self.span(target),
+                                format!("overload resolution ambiguity for property '{name}'"),
+                            ),
+                            PropertyWriteSelection::MissingContext(..) => self.diags.error(
+                                self.span(target),
+                                format!("No context argument for '{name}' found."),
+                            ),
+                            PropertyWriteSelection::None
+                            | PropertyWriteSelection::Implicit(_)
+                            | PropertyWriteSelection::Receiverless(_) => self
+                                .diags
+                                .error(self.span(e), format!("unresolved reference '{name}'.")),
+                        }
                         Ty::Error
                     }
                 }
@@ -70920,6 +70718,9 @@ impl<'a> Checker<'a> {
         };
         if let Some(ty) = self.associated_callable_ref(expression, name, associated, expected) {
             return UnboundRefSelection::Selected(ty);
+        }
+        if self.reject_inaccessible_associated_reference(expression, internal, name) {
+            return UnboundRefSelection::Selected(Ty::Error);
         }
         if self.classifier_is_object(internal) {
             return match self.nested_constructor_reference(
