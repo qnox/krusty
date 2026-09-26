@@ -11,6 +11,9 @@
 //!   lifted member;
 //! - a class's lexical captures and outer instance (LocalDeclarationsLowering, InnerClassesLowering)
 //!   are appended after its declared fields.
+//! - members an interface inherits from sibling supertypes (its `access$…$jd` bridges, its
+//!   `DefaultImpls` forwarders, an implementing class's default-method forwarders) follow the
+//!   supertypes' declaration order at every level of the hierarchy.
 //!
 //! Each case asserts the complete member list of every class kotlinc emits — names and descriptors
 //! in order — against the reference compiler. The fixtures use neutral names only.
@@ -173,5 +176,17 @@ fn an_enum_places_local_functions_before_values_array_and_lambdas_after_it() {
          \x20   }\n\
          \x20   fun spare() = 5\n\
          }\n",
+    );
+}
+
+#[test]
+fn inherited_interface_members_follow_sibling_supertypes_in_declaration_order() {
+    assert_same_member_order(
+        "InheritedSiblings",
+        "interface Left { fun left() = \"l\" }\n\
+         interface Right { fun right() = \"r\" }\n\
+         interface Both : Left, Right\n\
+         interface Child : Both\n\
+         class Leaf : Child\n",
     );
 }

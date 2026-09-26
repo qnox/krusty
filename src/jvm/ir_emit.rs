@@ -8475,15 +8475,15 @@ fn sorted_interface_closure(
         else {
             return;
         };
-        for parent in shape.supertypes.iter().copied() {
+        for parent in shape.supertypes.iter().rev().copied() {
             visit(symbols, parent, seen, out);
         }
         out.push((owner, shape));
     }
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    // The direct list is walked reversed and the post-order reversed again, so incomparable
-    // direct supertypes come out in declaration order.
+    // Every supertype list is walked reversed and the post-order reversed again, so incomparable
+    // supertypes come out in declaration order at every level, as kotlinc's inherited members do.
     for owner in direct.into_iter().rev() {
         visit(symbols, owner, &mut seen, &mut out);
     }
