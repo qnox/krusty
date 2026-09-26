@@ -1486,48 +1486,15 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
-        // A member called from the same lexical classifier needs no target access bridge: cloning its
-        // retained checked template preserves the exact `this` operand and lets literal lambda
-        // arguments splice in common IR. Value-class, singleton, and companion members are physically
-        // reshaped by target backends, so they also consume the checked template while the semantic
-        // source receiver is still explicit. An arbitrary cross-class member still needs the
-        // declaration-owned private-access and generic-receiver adaptation path.
-        let enclosing_classifier = self.index.enclosing_classifier(callable.declaration);
-        let common_member_inline = dispatch_receiver.is_none()
-            || enclosing_classifier.is_some_and(|classifier| {
-                self.body.lexical_class_owner() == Some(classifier.declaration)
-                    || self
-                        .index
-                        .declaration_header(classifier.declaration)
-                        .is_some_and(|header| {
-                            header.flags.has(crate::fir::DeclarationFlags::VALUE)
-                                || header.flags.has(crate::fir::DeclarationFlags::SINGLETON)
-                                || header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                        })
-            });
-        // A lambda containing a checked return through an enclosing callable boundary has no
-        // independently executable JVM shape: its apparent lambda result can differ from the
-        // enclosing function's return value. It must be spliced while that lexical return target is
-        // still present, even when the inline member belongs to another ordinary class.
-        let has_nonlocal_inline_return = inline_lambdas.iter().flatten().any(|lambda| {
-            let IrExpr::Lambda {
-                inline_body: Some(body),
-                ..
-            } = self.ir.expr(*lambda)
-            else {
-                return false;
-            };
-            !super::inline_returns::reachable_checked_returns(self.ir, *body).is_empty()
-        });
+        // kotlinc inlines every call of a same-module inline function, whichever class declares
+        // it: the checked template is cloned here with its receiver as an explicit operand, and a
+        // target backend adds the synthetic accessors its private member uses need.
         crate::trace_compiler!(
             "lower",
-            "same-file call target={target:?} inline={} function={function:?} common_member_inline={common_member_inline} defaults={has_defaults} nonlocal={has_nonlocal_inline_return} substitutions={substitutions:?}"
+            "same-file call target={target:?} inline={} function={function:?} defaults={has_defaults} substitutions={substitutions:?}"
             , callable.is_inline()
         );
-        if callable.is_inline()
-            && (common_member_inline || has_nonlocal_inline_return)
-            && !has_defaults
-        {
+        if callable.is_inline() && !has_defaults {
             if let Some(function) = function {
                 let mut operands =
                     Vec::with_capacity(slots.len() + usize::from(dispatch_receiver.is_some()));

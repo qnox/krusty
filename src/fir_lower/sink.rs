@@ -11,7 +11,10 @@ use super::{
     },
     data_classes::finalize_data_classes,
     finish_callable_body,
-    generics::{attach_callable_generic_facts, attach_classifier_generic_facts},
+    generics::{
+        attach_callable_generic_facts, attach_classifier_generic_facts,
+        classifier_own_type_parameters,
+    },
     initialization::{accept_non_callable_body, finalize_enum_entries},
     interface_delegation::{
         finalize_interface_delegations, predeclare_interface_delegation_fields,
@@ -534,6 +537,18 @@ impl<'a> CommonIrBodySink<'a> {
         if dispatch_receiver.is_none() {
             let source = super::module_declarations::source(index, declaration)?;
             self.ir.record_foreign_template_source(function, source);
+        }
+        // A member template's body may describe its classifiers' type parameters at run time.
+        let mut classifier = index.enclosing_classifier(declaration);
+        while let Some(header) = classifier {
+            self.ir.record_foreign_template_classifier(
+                header.classifier,
+                classifier_own_type_parameters(index, header.declaration),
+            );
+            classifier = index
+                .declaration_header(header.declaration)
+                .and_then(|owner| owner.owner)
+                .and_then(|owner| index.enclosing_classifier(owner));
         }
         if callable.shape.extension_receiver.is_some() && !companion_associated {
             self.ir.extension_receiver_fns.insert(function);

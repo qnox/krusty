@@ -711,3 +711,43 @@ fun box(): String {
         "cross_file_inline_member_nested_lambda",
     );
 }
+
+/// kotlinc inlines every call of an inline member, whichever class declares it. A reified member
+/// cannot run as an ordinary method at all: its emitted body throws, so only a spliced call works
+/// (`reified/method.kt`, `typeErasure/funWithReifiedTypeParameterInsideClass.kt`).
+#[test]
+fn reified_inline_member_called_from_another_file_is_spliced() {
+    const LIB: &str = "class Probe(val value: Any?) {\n\
+                       \x20   inline fun <reified T> holds(): Boolean = value is T\n\
+                       \x20   inner class Inner { inline fun <reified T> holds(x: Any?): Boolean = x is T }\n\
+                       }\n\
+                       class Other\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   if (!Probe(Other()).holds<Other>()) return \"fail: holds\"\n\
+                        \x20   if (Probe(Probe(null)).holds<Other>()) return \"fail: rejects\"\n\
+                        \x20   if (!Probe(null).Inner().holds<Other?>(null)) return \"fail: inner\"\n\
+                        \x20   return \"OK\"\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_reified_inline_member",
+    );
+}
+
+/// The same-file form: a call from another class of the file is spliced too, and a private member
+/// the spliced body reads is reached through the declaring class's synthetic accessor.
+#[test]
+fn inline_member_of_another_class_in_the_same_file_is_spliced() {
+    const SRC: &str = "class Probe(private val value: Any?) {\n\
+                       \x20   private inline fun <reified T> holds(): Boolean = value is T\n\
+                       \x20   class Reader { fun read(p: Probe): Boolean = p.holds<Other>() }\n\
+                       \x20   inline fun <reified T> matches(): Boolean = holds<T>()\n\
+                       }\n\
+                       class Other\n\
+                       fun box(): String {\n\
+                       \x20   if (!Probe.Reader().read(Probe(Other()))) return \"fail: reader\"\n\
+                       \x20   if (Probe(null).matches<Other>()) return \"fail: matches\"\n\
+                       \x20   return \"OK\"\n\
+                       }\n";
+    common::expect_box_ok_with_stdlib(SRC, "same_file_reified_inline_member");
+}

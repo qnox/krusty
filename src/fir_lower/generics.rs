@@ -58,13 +58,22 @@ fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> Ir
     }
 }
 
-pub(super) fn attach_classifier_generic_facts(
+/// A classifier's own type parameters, without the ones it captures from an outer declaration.
+pub(super) fn classifier_own_type_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
-    header: &ResolvedClassifierHeader,
-    class: &mut IrClass,
-    ir: &mut IrFile,
-) {
+) -> Vec<IrTypeParameter> {
+    let (layout, own_count) = classifier_type_parameter_layout(index, declaration);
+    layout[..own_count]
+        .iter()
+        .map(|parameter| type_parameter(index, *parameter))
+        .collect()
+}
+
+fn classifier_type_parameter_layout(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+) -> (&[TypeParameterId], usize) {
     let layout = index
         .classifier_type_arguments(declaration)
         .expect("a published classifier must retain its applied type-parameter layout");
@@ -72,6 +81,17 @@ pub(super) fn attach_classifier_generic_facts(
         .classifier_own_type_parameter_count(declaration)
         .expect("a published classifier must distinguish own and captured type parameters")
         as usize;
+    (layout, own_count)
+}
+
+pub(super) fn attach_classifier_generic_facts(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    header: &ResolvedClassifierHeader,
+    class: &mut IrClass,
+    ir: &mut IrFile,
+) {
+    let (layout, own_count) = classifier_type_parameter_layout(index, declaration);
     let parameters = layout
         .iter()
         .copied()
