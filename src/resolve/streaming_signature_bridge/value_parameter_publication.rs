@@ -19,6 +19,7 @@ pub(super) fn published_flags(
         parameter.flags.is_mutable_property(),
     )
     .with_materialized_lambda(parameter.flags.materializes_its_lambda())
+    .with_crossinline(parameter.flags.is_crossinline())
     .with_context_kind(parameter.context_kind)
 }
 

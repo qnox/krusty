@@ -26,6 +26,7 @@ names! {
     any => "kotlin/Any",
     java_object => "java/lang/Object",
     java_enum => "java/lang/Enum",
+    kotlin_enum => "kotlin/Enum",
     uint => "kotlin/UInt",
     ulong => "kotlin/ULong",
     int_range => "kotlin/ranges/IntRange",

@@ -41,6 +41,7 @@ impl Parser<'_> {
             // `crossinline` is NOT this. It forbids a non-local return from the lambda, and the
             // reference compiler still inlines the body, so such a parameter owns no local either.
             let is_materialized_lambda = pmods.iter().any(|modifier| modifier == "noinline");
+            let is_crossinline = pmods.iter().any(|modifier| modifier == "crossinline");
             let pname = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -68,6 +69,7 @@ impl Parser<'_> {
                 is_vararg,
                 vararg_span,
                 is_materialized_lambda,
+                is_crossinline,
                 default,
                 annotations: pannos,
                 annotation_args: pannos_args,

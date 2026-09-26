@@ -415,7 +415,7 @@ pub(super) fn emit_prop_ref_class(
     emit_singleton_instance_clinit(&mut cw, &fq);
     // kotlinc visits a carrier's fields after its methods.
     add_singleton_instance_field(&mut cw, &fq);
-    finish_property_reference_class(cw)
+    finish_local_synthetic_class(cw)
 }
 
 /// Emit a bound property-reference (`obj::prop` → `PropertyReference0Impl` subclass): a constructor
@@ -481,7 +481,7 @@ fn emit_bound_prop_ref_class(
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
         attach_accessor_debug(&mut cw, c, "set", "(Ljava/lang/Object;)V", &["value"]);
     }
-    finish_property_reference_class(cw)
+    finish_local_synthetic_class(cw)
 }
 
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
@@ -638,7 +638,7 @@ fn emit_toplevel_prop_ref_class(
     emit_singleton_instance_clinit(&mut cw, &fq);
     // kotlinc visits a carrier's fields after its methods.
     add_singleton_instance_field(&mut cw, &fq);
-    finish_property_reference_class(cw)
+    finish_local_synthetic_class(cw)
 }
 
 /// kotlinc's header for a property-reference carrier: a synthetic final class, enclosed by the
@@ -676,12 +676,6 @@ fn attach_accessor_debug(
         function_reference_invoke::reference_constructor_locals(cw, &c.fq_name(), parameters);
     let line = (c.decl_line != 0).then_some((0, c.decl_line));
     cw.set_method_debug(name, descriptor, line, &locals);
-}
-
-/// A reference class carries the minimal synthetic-class metadata record, local to its scope.
-fn finish_property_reference_class(mut cw: ClassWriter) -> Vec<u8> {
-    cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &[], &[]);
-    cw.finish()
 }
 
 /// A method's name and descriptor intern before its code, as a writer visiting the method first

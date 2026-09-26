@@ -6,18 +6,16 @@
 //! `MutableCollection.add`, so an override of either repeats that status; an override of a member
 //! declared in the current module, or of a Java-only method, records none. A Java method in between
 //! is transparent: overriding `java.util.ArrayList.add` repeats Kotlin's `MutableCollection.add`.
+//! Members of local classes and anonymous objects inherit the same way, and so do `operator` and
+//! `infix`.
 
 use super::common;
 
 fn assert_identical(stem: &str, src: &str, class_internal: &str) {
     let classpath = [common::stdlib_jar(), common::jdk_modules()];
-    let Some(result) =
-        common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
-    else {
-        eprintln!("skip ({stem}: provisioned kotlinc unavailable)");
-        return;
-    };
-    result.unwrap_or_else(|diff| panic!("{diff}"));
+    common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
 #[test]
@@ -124,4 +122,44 @@ fn an_object_in_a_default_argument_publishes_its_statuses_once() {
         None,
     );
     assert_eq!(result.as_deref(), Some("OK"));
+}
+
+#[test]
+fn an_anonymous_object_override_repeats_must_use() {
+    const SRC: &str = "package app\n\
+        \n\
+        import kotlin.coroutines.*\n\
+        \n\
+        fun make(): Continuation<Unit> = object : Continuation<Unit> {\n\
+        \x20   override val context: CoroutineContext get() = EmptyCoroutineContext\n\
+        \x20   override fun resumeWith(result: Result<Unit>) {}\n\
+        }\n";
+    assert_identical("anonymous_override", SRC, "app/Anonymous_overrideKt$make$1");
+}
+
+#[test]
+fn a_local_class_override_repeats_must_use() {
+    const SRC: &str = "package app\n\
+        \n\
+        fun make(): Any {\n\
+        \x20   class Local { override fun toString(): String = \"local\" }\n\
+        \x20   return Local()\n\
+        }\n";
+    assert_identical("local_override", SRC, "app/Local_overrideKt$make$Local");
+}
+
+#[test]
+fn a_local_class_override_inherits_operator_and_infix() {
+    const SRC: &str = "package app\n\
+        \n\
+        interface Op {\n\
+        \x20   operator fun plus(other: Op): Op\n\
+        \x20   infix fun join(other: Op): Op\n\
+        }\n\
+        \n\
+        fun make(): Op = object : Op {\n\
+        \x20   override fun plus(other: Op): Op = this\n\
+        \x20   override fun join(other: Op): Op = this\n\
+        }\n";
+    assert_identical("local_operator", SRC, "app/Local_operatorKt$make$1");
 }

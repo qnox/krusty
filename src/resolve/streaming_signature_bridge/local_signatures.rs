@@ -1173,7 +1173,8 @@ fn publish_checked_local_signatures_selected(
                                     false,
                                 )
                                 .with_context_kind(parameter.context_kind)
-                                .with_materialized_lambda(parameter.is_materialized_lambda),
+                                .with_materialized_lambda(parameter.is_materialized_lambda)
+                                .with_crossinline(parameter.is_crossinline),
                             )
                         }),
                     );
@@ -1748,7 +1749,8 @@ fn publish_checked_local_signatures_selected(
                                 false,
                             )
                             .with_context_kind(parameter.context_kind)
-                            .with_materialized_lambda(parameter.is_materialized_lambda),
+                            .with_materialized_lambda(parameter.is_materialized_lambda)
+                            .with_crossinline(parameter.is_crossinline),
                         )
                     }),
                 );

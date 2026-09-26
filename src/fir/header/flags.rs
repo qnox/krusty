@@ -83,6 +83,16 @@ impl HeaderParameterFlags {
     pub(super) const PROPERTY: u8 = 1 << 2;
     pub(super) const MUTABLE_PROPERTY: u8 = 1 << 3;
     pub(super) const MATERIALIZED_LAMBDA: u8 = 1 << 4;
+    pub(super) const CROSSINLINE: u8 = 1 << 5;
+
+    /// The modifiers a source value parameter wrote.
+    pub(super) const fn of_value_parameter(parameter: &crate::ast::Param) -> Self {
+        Self(0)
+            .with(Self::VARARG, parameter.is_vararg)
+            .with(Self::DEFAULT, parameter.default.is_some())
+            .with(Self::MATERIALIZED_LAMBDA, parameter.is_materialized_lambda)
+            .with(Self::CROSSINLINE, parameter.is_crossinline)
+    }
 
     pub(super) const fn with(mut self, flag: u8, enabled: bool) -> Self {
         if enabled {
@@ -112,6 +122,11 @@ impl HeaderParameterFlags {
     /// parameters are function-TYPED, so only this modifier separates them.
     pub const fn materializes_its_lambda(self) -> bool {
         self.0 & Self::MATERIALIZED_LAMBDA != 0
+    }
+
+    /// The parameter wrote `crossinline`.
+    pub const fn is_crossinline(self) -> bool {
+        self.0 & Self::CROSSINLINE != 0
     }
 }
 

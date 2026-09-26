@@ -2,7 +2,7 @@
 //! `java.lang.annotation.Annotation` contract: accessors, `annotationType()`, `equals`, `hashCode`
 //! and `toString`.
 
-use super::metadata_policy::annotation_impl_carries_nullability;
+use super::metadata_policy::{annotation_impl_carries_nullability, finish_local_synthetic_class};
 use super::{
     arrays_param_desc, constructor_defaults, emit_return, finish_code, jvm_declared_ty, load,
     new_writer, slot_words, EmitEnv, EmitOptions,
@@ -170,7 +170,7 @@ pub(super) fn emit_annotation_impl_class(
             &[("this".to_string(), format!("L{fq};"), 0)],
         );
     }
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }
 
 /// `equals(Object)Z` for an annotation impl: `o` must be an instance of the annotation interface and every

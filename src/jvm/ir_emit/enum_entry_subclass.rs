@@ -144,5 +144,12 @@ pub(super) fn emit_enum_entry_subclass(
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
     // (for example `apply(Object)` forwarding to `apply(String)`).
     emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    if let Some(m) = opts
+        .emit_class_metadata
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten()
+    {
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
     cw.finish()
 }

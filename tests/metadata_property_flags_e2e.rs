@@ -8,19 +8,16 @@
 //! one, while a bodiless `set` is. An accessor word is written only when it
 //! differs from the default word derived from the property. A non-default setter records its value
 //! parameter: the written name, `value` for a bodiless `private set`, `<set-?>` for a delegated
-//! `var`.
+//! `var`. A `val` whose declared initializer is a non-null literal of its constant type has a
+//! constant (bit 13), even a zero value that leaves no field store in the constructor.
 
 use super::common;
 
 fn assert_identical(stem: &str, src: &str, class_internal: &str) {
     let classpath = [common::stdlib_jar()];
-    let Some(result) =
-        common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
-    else {
-        eprintln!("skip ({stem}: provisioned kotlinc unavailable)");
-        return;
-    };
-    result.unwrap_or_else(|diff| panic!("{diff}"));
+    common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
 #[test]
@@ -118,4 +115,21 @@ fn only_a_setter_body_makes_a_declared_setter_not_default() {
         \x20       set(given) { field = given }\n\
         }\n";
     assert_identical("declared_setter", SRC, "app/A");
+}
+
+#[test]
+fn a_zero_literal_initializer_is_a_constant() {
+    const SRC: &str = "package app\n\
+        \n\
+        class K {\n\
+        \x20   val zero: Int = 0\n\
+        \x20   val no: Boolean = false\n\
+        \x20   val none: Double = 0.0\n\
+        \x20   val one: Long = 1L\n\
+        \x20   var count: Int = 0\n\
+        \x20   val sum: Int = 1 + 2\n\
+        \x20   val boxed: Any = 0\n\
+        \x20   val maybe: Int? = 0\n\
+        }\n";
+    assert_identical("ZeroConstants", SRC, "app/K");
 }

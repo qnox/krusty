@@ -1236,6 +1236,9 @@ pub struct IrEnumEntry {
     /// itself.
     /// 1-based source line of the entry's declaration, for the `<clinit>` `LineNumberTable`.
     pub decl_line: u32,
+    /// The entry declaration's stable source position, in the key space of the class's other
+    /// members, so metadata can visit it in declaration order.
+    pub source_order: u32,
     pub subclass: Option<TypeName>,
 }
 
@@ -2571,13 +2574,12 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: std::collections::HashSet<ExprId>,
-    /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
-    /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
-    /// `get`, …); the JVM method itself carries no such bit.
+    /// Function ids declared `operator` — `@Metadata` `Function.flags` bit 8, so a consumer admits
+    /// the conventional call form (`recv(args)`, `a[i]`); the JVM method carries no such bit.
     pub operator_fns: std::collections::HashSet<u32>,
-    /// Function ids declared `infix` — `@Metadata` marks `Function.flags` bit 9 (`isInfix`) so a
-    /// consumer admits the `a f b` call form; like `operator`, only metadata carries it.
+    /// Function ids declared `infix` (metadata bit 9, `a f b`) and, separately, `tailrec` (bit 11).
     pub infix_fns: std::collections::HashSet<u32>,
+    pub tailrec_fns: std::collections::HashSet<u32>,
     /// Per declared method/function, the user annotations on each SOURCE parameter, parallel to
     /// [`IrFunction::params`] (so an extension's leading receiver slot is present and empty). Absent ⇒
     /// no parameter of that function carries one, the overwhelmingly common case; the JVM emitter and
@@ -3042,6 +3044,7 @@ pub struct IrPackageFunction {
     pub inline: bool,
     pub operator: bool,
     pub infix: bool,
+    pub tailrec: bool,
     /// A value parameter (context parameters excluded) or the extension receiver has a function type.
     pub has_function_typed_parameter: bool,
     pub contract: Option<crate::contracts::ResolvedContract>,
@@ -3598,8 +3601,8 @@ pub use generated_members::{
 };
 mod function_parameters;
 pub use function_parameters::{
-    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
-    IrParameterProvenance, IrParameterRole, IrVarargParameter,
+    FnParamInfo, IrGeneratedParameterRole, IrInlineParameterModifier, IrParameterCheck,
+    IrParameterIdentity, IrParameterProvenance, IrParameterRole, IrVarargParameter,
 };
 mod traversal;
 pub use traversal::*;
