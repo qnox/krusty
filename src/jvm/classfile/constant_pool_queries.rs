@@ -106,13 +106,28 @@ impl ConstPool {
     }
 }
 
+/// A constant a rewritten body names that the pool did not hold when it was laid out, as the
+/// writer interns it (see [`PoolLookup::into_wanted`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Wanted {
+    Class(String),
+    Field(String, String, String),
+    Method(String, String, String, bool),
+    Constant(Constant),
+    /// A local variable's descriptor, which only the local-variable table names.
+    Utf8(String),
+}
+
 /// The writer's pool as a finished method's rewrite reads and assembles against it, adding no
-/// entry. A rewrite only moves operands the method already names, so each constant it asks for is
-/// in the pool; a request for one that is not is remembered, and the rewrite is then declined.
+/// entry. Each constant asked for that the pool does not hold is remembered as [`Wanted`], and the
+/// layout that asked for it is not usable: the caller interns what was wanted and lays the body out
+/// again, or declines the rewrite.
 pub(super) struct PoolLookup<'a> {
     pool: &'a ConstPool,
     bootstrap_methods: &'a [(u16, Vec<u16>)],
-    missing: bool,
+    wanted: Vec<Wanted>,
+    /// A constant was asked for that cannot be named by a [`Wanted`] (a new call site).
+    unnameable: bool,
 }
 
 impl<'a> PoolLookup<'a> {
@@ -123,41 +138,97 @@ impl<'a> PoolLookup<'a> {
         PoolLookup {
             pool,
             bootstrap_methods,
-            missing: false,
+            wanted: Vec::new(),
+            unnameable: false,
         }
     }
 
     /// Whether a constant was asked for that the pool does not hold.
     pub(super) fn missed(&self) -> bool {
-        self.missing
+        self.unnameable || !self.wanted.is_empty()
     }
 
-    fn find(&mut self, constant: Const) -> u16 {
-        match self.pool.dedup.get(&constant) {
-            Some(&index) => index,
-            None => {
-                self.missing = true;
-                0
-            }
-        }
+    /// The constants asked for that the pool does not hold, in the order they were asked for;
+    /// `None` when one of them cannot be interned on its own.
+    pub(super) fn into_wanted(self) -> Option<Vec<Wanted>> {
+        (!self.unnameable).then_some(self.wanted)
     }
 
-    fn utf8(&mut self, text: &str) -> u16 {
-        self.find(Const::Utf8(text.to_string()))
+    /// The `CONSTANT_Utf8` holding a local variable's descriptor.
+    pub(super) fn descriptor(&mut self, desc: &str) -> u16 {
+        let index = self.pool.lookup_utf8(desc);
+        self.wanted_unless(index, || Wanted::Utf8(desc.to_string()))
     }
 
-    fn name_and_type(&mut self, name: &str, desc: &str) -> u16 {
-        let (name, desc) = (self.utf8(name), self.utf8(desc));
-        self.find(Const::NameAndType(name, desc))
+    /// `index`, or `0` with `wanted` remembered when the pool does not hold the constant.
+    fn wanted_unless(&mut self, index: Option<u16>, wanted: impl FnOnce() -> Wanted) -> u16 {
+        index.unwrap_or_else(|| {
+            self.wanted.push(wanted());
+            0
+        })
     }
 
-    fn handle(&mut self, handle: &Handle) -> u16 {
-        let member = match handle.kind {
-            1..=4 => self.field(&handle.owner, &handle.name, &handle.desc),
-            _ => self.method(&handle.owner, &handle.name, &handle.desc, handle.interface),
+    fn find(&self, constant: Const) -> Option<u16> {
+        self.pool.dedup.get(&constant).copied()
+    }
+
+    fn utf8(&self, text: &str) -> Option<u16> {
+        self.pool.lookup_utf8(text)
+    }
+
+    fn name_and_type(&self, name: &str, desc: &str) -> Option<u16> {
+        self.find(Const::NameAndType(self.utf8(name)?, self.utf8(desc)?))
+    }
+
+    fn class_index(&self, name: &str) -> Option<u16> {
+        self.find(Const::Class(self.utf8(&classfile_internal_name(name))?))
+    }
+
+    fn member(&self, owner: &str, name: &str, desc: &str, kind: MemberKind) -> Option<u16> {
+        let (owner, signature) = (self.class_index(owner)?, self.name_and_type(name, desc)?);
+        self.find(match kind {
+            MemberKind::Field => Const::Fieldref(owner, signature),
+            MemberKind::Method => Const::Methodref(owner, signature),
+            MemberKind::InterfaceMethod => Const::InterfaceMethodref(owner, signature),
+        })
+    }
+
+    fn handle_index(&self, handle: &Handle) -> Option<u16> {
+        let kind = match handle.kind {
+            1..=4 => MemberKind::Field,
+            _ if handle.interface => MemberKind::InterfaceMethod,
+            _ => MemberKind::Method,
         };
+        let member = self.member(&handle.owner, &handle.name, &handle.desc, kind)?;
         self.find(Const::MethodHandle(handle.kind, member))
     }
+
+    fn constant_index(&self, constant: &Constant) -> Option<u16> {
+        match constant {
+            Constant::Int(value) => self.find(Const::Integer(*value)),
+            Constant::Float(bits) => self.find(Const::Float(*bits)),
+            Constant::Long(value) => self.find(Const::Long(*value)),
+            Constant::Double(bits) => self.find(Const::Double(*bits)),
+            Constant::String(value) => {
+                let text = match value.as_str() {
+                    Some(text) => self.utf8(text)?,
+                    None => self.find(Const::Utf8Units(value.units().collect()))?,
+                };
+                self.find(Const::String(text))
+            }
+            Constant::Class(name) => self.class_index(name),
+            Constant::MethodType(desc) => self.find(Const::MethodType(self.utf8(desc)?)),
+            Constant::Handle(handle) => self.handle_index(handle),
+        }
+    }
+}
+
+/// Which reference constant a member names.
+#[derive(Clone, Copy)]
+enum MemberKind {
+    Field,
+    Method,
+    InterfaceMethod,
 }
 
 impl ClassWriter {
@@ -209,44 +280,37 @@ impl ConstantPoolView for PoolLookup<'_> {
 
 impl ConstantSink for PoolLookup<'_> {
     fn class(&mut self, name: &str) -> u16 {
-        let name = self.utf8(&classfile_internal_name(name));
-        self.find(Const::Class(name))
+        let index = self.class_index(name);
+        self.wanted_unless(index, || Wanted::Class(name.to_string()))
     }
 
     fn field(&mut self, owner: &str, name: &str, desc: &str) -> u16 {
-        let (owner, signature) = (self.class(owner), self.name_and_type(name, desc));
-        self.find(Const::Fieldref(owner, signature))
+        let index = self.member(owner, name, desc, MemberKind::Field);
+        self.wanted_unless(index, || {
+            Wanted::Field(owner.to_string(), name.to_string(), desc.to_string())
+        })
     }
 
     fn method(&mut self, owner: &str, name: &str, desc: &str, interface: bool) -> u16 {
-        let (owner, signature) = (self.class(owner), self.name_and_type(name, desc));
-        self.find(if interface {
-            Const::InterfaceMethodref(owner, signature)
+        let kind = if interface {
+            MemberKind::InterfaceMethod
         } else {
-            Const::Methodref(owner, signature)
+            MemberKind::Method
+        };
+        let index = self.member(owner, name, desc, kind);
+        self.wanted_unless(index, || {
+            Wanted::Method(
+                owner.to_string(),
+                name.to_string(),
+                desc.to_string(),
+                interface,
+            )
         })
     }
 
     fn constant(&mut self, constant: &Constant) -> u16 {
-        match constant {
-            Constant::Int(value) => self.find(Const::Integer(*value)),
-            Constant::Float(bits) => self.find(Const::Float(*bits)),
-            Constant::Long(value) => self.find(Const::Long(*value)),
-            Constant::Double(bits) => self.find(Const::Double(*bits)),
-            Constant::String(value) => {
-                let text = match value.as_str() {
-                    Some(text) => self.utf8(text),
-                    None => self.find(Const::Utf8Units(value.units().collect())),
-                };
-                self.find(Const::String(text))
-            }
-            Constant::Class(name) => self.class(name),
-            Constant::MethodType(desc) => {
-                let desc = self.utf8(desc);
-                self.find(Const::MethodType(desc))
-            }
-            Constant::Handle(handle) => self.handle(handle),
-        }
+        let index = self.constant_index(constant);
+        self.wanted_unless(index, || Wanted::Constant(constant.clone()))
     }
 
     fn invoke_dynamic(
@@ -256,21 +320,25 @@ impl ConstantSink for PoolLookup<'_> {
         bootstrap: &Handle,
         arguments: &[Constant],
     ) -> u16 {
-        let handle = self.handle(bootstrap);
-        let arguments: Vec<u16> = arguments
-            .iter()
-            .map(|argument| self.constant(argument))
-            .collect();
-        let entry = self
-            .bootstrap_methods
-            .iter()
-            .position(|(known, known_arguments)| *known == handle && *known_arguments == arguments);
-        let Some(entry) = entry else {
-            self.missing = true;
-            return 0;
-        };
-        let signature = self.name_and_type(name, desc);
-        self.find(Const::InvokeDynamic(entry as u16, signature))
+        let site = (|| {
+            let handle = self.handle_index(bootstrap)?;
+            let arguments: Vec<u16> = arguments
+                .iter()
+                .map(|argument| self.constant_index(argument))
+                .collect::<Option<_>>()?;
+            let entry = self
+                .bootstrap_methods
+                .iter()
+                .position(|(known, known_arguments)| {
+                    *known == handle && *known_arguments == arguments
+                })?;
+            let signature = self.name_and_type(name, desc)?;
+            self.find(Const::InvokeDynamic(u16::try_from(entry).ok()?, signature))
+        })();
+        site.unwrap_or_else(|| {
+            self.unnameable = true;
+            0
+        })
     }
 }
 
@@ -294,5 +362,46 @@ mod tests {
             view.entry(following),
             Some(PoolEntry::Utf8("following"))
         ));
+    }
+
+    #[test]
+    fn a_constant_the_pool_lacks_is_wanted_and_found_once_interned() {
+        let mut writer = ClassWriter::new("T", "java/lang/Object");
+        let mut lookup = PoolLookup::new(&writer.cp, &writer.bootstrap_methods);
+        assert_eq!(lookup.class("T"), writer.this_class);
+        assert!(!lookup.missed());
+        assert_eq!(lookup.field("T", "x", "I"), 0);
+        assert_eq!(lookup.descriptor("J"), 0);
+        assert!(lookup.missed());
+        let wanted = lookup.into_wanted().expect("every constant can be named");
+        assert_eq!(
+            wanted,
+            [
+                Wanted::Field("T".to_string(), "x".to_string(), "I".to_string()),
+                Wanted::Utf8("J".to_string()),
+            ]
+        );
+        let field = writer.field("T", "x", "I");
+        let descriptor = writer.cp.utf8("J");
+        let mut lookup = PoolLookup::new(&writer.cp, &writer.bootstrap_methods);
+        assert_eq!(lookup.field("T", "x", "I"), field);
+        assert_eq!(lookup.descriptor("J"), descriptor);
+        assert!(!lookup.missed());
+    }
+
+    #[test]
+    fn a_call_site_the_pool_lacks_cannot_be_wanted() {
+        let writer = ClassWriter::new("T", "java/lang/Object");
+        let mut lookup = PoolLookup::new(&writer.cp, &writer.bootstrap_methods);
+        let bootstrap = Handle {
+            kind: 6,
+            owner: "B".to_string(),
+            name: "bootstrap".to_string(),
+            desc: "()V".to_string(),
+            interface: false,
+        };
+        assert_eq!(lookup.invoke_dynamic("run", "()V", &bootstrap, &[]), 0);
+        assert!(lookup.missed());
+        assert_eq!(lookup.into_wanted(), None);
     }
 }

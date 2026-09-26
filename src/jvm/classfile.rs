@@ -21,6 +21,7 @@ mod inner_classes;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
+mod pool_layout;
 mod stack_maps;
 
 use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
@@ -2051,15 +2052,8 @@ impl ClassWriter {
             implicit_void_return_pc: code.implicit_void_return_pc,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
-            rewrite_source: (!code.bytes.is_empty()).then(|| {
-                Box::new(method_rewrite::RewriteSource {
-                    access,
-                    name: name.to_string(),
-                    desc: desc.to_string(),
-                    builder: code.clone(),
-                    decided: None,
-                })
-            }),
+            rewrite_source: (!code.bytes.is_empty())
+                .then(|| method_rewrite::RewriteSource::new(access, name, desc, code)),
             exceptions: code.resolved_exceptions(),
             stackmap: None,
             signature: sig,
@@ -2280,7 +2274,7 @@ impl ClassWriter {
     }
 
     fn write(mut self) -> Vec<u8> {
-        self.rewrite_methods();
+        let relaid = self.rewrite_methods();
         // Every body is final now: write the frames it implies.
         self.compute_stack_maps();
         // A class that never attached `@Metadata` still realizes its deferred fields first —
@@ -2895,7 +2889,7 @@ impl ClassWriter {
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
         }
-        out
+        pool_layout::relayout(out, &relaid, self.unnamed_entries())
     }
 }
 

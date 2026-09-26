@@ -10,21 +10,23 @@
 //! keyed by a byte offset — exception ranges, line numbers, local ranges, the implicit return —
 //! hangs off a label and moves with it.
 //!
-//! A rewrite adds no instruction operand, and edits no frame: the class carries the frames the
-//! rewritten body implies, computed when the class is written (see [`super::stack_maps`]). The
-//! rewritten body is only kept if those frames can be computed; otherwise the method is written
-//! exactly as emitted.
+//! A rewrite edits no frame: the class carries the frames the rewritten body implies, computed when
+//! the class is written (see [`super::stack_maps`]). The rewritten body is only kept if those frames
+//! can be computed; otherwise the method is written exactly as emitted. A constant the rewritten
+//! body names that the pool lacks (a `Ref` element's descriptor, an unboxing call) is interned and
+//! the body laid out again. Where each of the method's constants lands in the pool, and which of
+//! its emitted constants no longer belong there, is settled once the class is serialized (see
+//! [`super::pool_layout`]), from the [`RelaidMethod`]s the rewrites report.
 
 mod finished_node;
 
-use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
-use super::constant_pool_queries::PoolLookup;
+use super::constant_pool_queries::{PoolLookup, Wanted};
+use super::pool_layout::RelaidMethod;
 use super::stack_maps;
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::bytecode_passes::pipeline::{self, Outcome, PassContext};
-use crate::jvm::bytecode_passes::redundant_checkcasts::StackTops;
-use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
-use crate::jvm::method_node::{LabelId, MethodNode};
+use crate::jvm::inline::Insn;
+use crate::jvm::method_node::{ConstantSink, LabelId, MethodNode};
 use finished_node::FinishedNode;
 
 /// What a method keeps so it can be rewritten when its class is written: its builder, for the
@@ -37,6 +39,22 @@ pub(super) struct RewriteSource {
     pub builder: CodeBuilder,
     /// The rewrite already decided when the method was added (see [`ClassWriter::remembered_rewrite`]).
     pub decided: Option<Decided>,
+    /// The pool's size once the method was added: the entries past the previous method's are the
+    /// ones its emission and addition interned.
+    pub pool_end: Option<u16>,
+}
+
+impl RewriteSource {
+    pub(super) fn new(access: u16, name: &str, desc: &str, builder: &CodeBuilder) -> Box<Self> {
+        Box::new(RewriteSource {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            builder: builder.clone(),
+            decided: None,
+            pool_end: None,
+        })
+    }
 }
 
 /// A rewrite decided from a method's tables, reused when the class is written if they still hold.
@@ -141,64 +159,129 @@ impl MethodInfo {
 }
 
 impl ClassWriter {
-    /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final.
-    pub(super) fn rewrite_methods(&mut self) {
+    /// Apply kotlinc's bytecode rewrites to every method, now that each one's tables are final, and
+    /// report the methods rewritten with the pool entries each one interned.
+    pub(super) fn rewrite_methods(&mut self) -> Vec<RelaidMethod> {
+        let mut relaid = Vec::new();
+        let mut previous_end = 0;
         for index in 0..self.methods.len() {
             let Some(mut source) = self.methods[index].rewrite_source.take() else {
                 continue;
             };
+            let added_after = previous_end;
+            previous_end = source.pool_end.unwrap_or(previous_end);
             let decided = source
                 .decided
                 .take()
                 .filter(|decided| decided.inputs == RewriteInputs::of(&self.methods[index]));
+            let interned_after = self.cp.slot_count();
             let rewritten = match decided {
                 Some(decided) => decided.outcome,
-                None => self.rewritten(&self.methods[index], &source),
+                None => self.rewrite_interning(index, &source).0,
             };
             let Some(rewritten) = rewritten else {
                 continue;
             };
             self.methods[index].take_rewritten(rewritten);
+            relaid.push(RelaidMethod {
+                index,
+                added: added_after + 1..previous_end.max(added_after) + 1,
+                interned: interned_after + 1..self.cp.slot_count() + 1,
+            });
             crate::trace_compiler!("bytecode", "rewrote {}{}", source.name, source.desc);
         }
+        relaid
     }
 
     /// The rewrite of the method at `index`, remembered for when the class is written. The
     /// rewrite reads the method's tables, which can still change until then, and the constant
     /// pool, which only grows: a constant it found keeps its index, so an outcome that found every
-    /// constant it looked for holds while the tables do. One that missed a constant is decided
-    /// again, when a later method may have added it.
+    /// constant it looked for holds while the tables do.
     pub(super) fn remembered_rewrite(&mut self, index: usize) -> Option<Rewritten> {
-        let method = &self.methods[index];
-        let source = method.rewrite_source.as_deref()?;
-        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let outcome = self.rewritten_with(method, source, &mut pool);
-        if !pool.missed() {
-            let inputs = RewriteInputs::of(method);
-            if let Some(source) = self.methods[index].rewrite_source.as_deref_mut() {
-                source.decided = Some(Decided {
-                    inputs,
-                    outcome: outcome.clone(),
-                });
-            }
+        let mut source = self.methods[index].rewrite_source.take()?;
+        let (outcome, complete) = self.rewrite_interning(index, &source);
+        if complete {
+            source.decided = Some(Decided {
+                inputs: RewriteInputs::of(&self.methods[index]),
+                outcome: outcome.clone(),
+            });
         }
+        self.methods[index].rewrite_source = Some(source);
         outcome
     }
 
-    /// `method` after kotlinc's rewrites, or `None` when none applies or the rewritten body could
-    /// not be proven to keep its frames.
-    pub(super) fn rewritten(
-        &self,
-        method: &MethodInfo,
+    /// The rewrite of the method at `index` from `source`, and whether it found every constant it
+    /// looked for. The constants a first layout wanted are interned and the method rewritten once
+    /// more against the grown pool; if that rewrite is then declined, the entries are left for
+    /// [`super::pool_layout`] to drop.
+    fn rewrite_interning(
+        &mut self,
+        index: usize,
         source: &RewriteSource,
-    ) -> Option<Rewritten> {
-        self.rewritten_with(
-            method,
-            source,
-            &mut PoolLookup::new(&self.cp, &self.bootstrap_methods),
-        )
+    ) -> (Option<Rewritten>, bool) {
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let outcome = self.rewritten_with(&self.methods[index], source, &mut pool);
+        let wanted = match pool.into_wanted() {
+            Some(wanted) if wanted.is_empty() => return (outcome, true),
+            Some(wanted) => wanted,
+            None => {
+                crate::trace_compiler!(
+                    "bytecode",
+                    "{}.{}{} names a call site the pool lacks",
+                    self.internal_name,
+                    source.name,
+                    source.desc
+                );
+                return (outcome, false);
+            }
+        };
+        crate::trace_compiler!(
+            "bytecode",
+            "{}.{}{} interns {} constants",
+            self.internal_name,
+            source.name,
+            source.desc,
+            wanted.len()
+        );
+        self.intern_wanted(&wanted);
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let outcome = self.rewritten_with(&self.methods[index], source, &mut pool);
+        if outcome.is_none() {
+            crate::trace_compiler!(
+                "bytecode",
+                "{}.{}{} is written as emitted after interning",
+                self.internal_name,
+                source.name,
+                source.desc
+            );
+        }
+        (outcome, !pool.missed())
     }
 
+    fn intern_wanted(&mut self, wanted: &[Wanted]) {
+        for constant in wanted {
+            match constant {
+                Wanted::Class(name) => {
+                    self.class(name);
+                }
+                Wanted::Field(owner, name, desc) => {
+                    self.field(owner, name, desc);
+                }
+                Wanted::Method(owner, name, desc, interface) => {
+                    self.method(owner, name, desc, *interface);
+                }
+                Wanted::Constant(constant) => {
+                    self.constant(constant);
+                }
+                Wanted::Utf8(text) => {
+                    self.cp.utf8(text);
+                }
+            }
+        }
+    }
+
+    /// `method` after kotlinc's rewrites, or `None` when none applies or the rewritten body could
+    /// not be proven to keep its frames. Every constant it names is looked up in `pool`.
     fn rewritten_with(
         &self,
         method: &MethodInfo,
@@ -231,8 +314,8 @@ impl ClassWriter {
     /// could not be proven to keep its frames. `implicit_return` labels the method's implicit
     /// `return`, if it has one. The optimized body looks its constants up in `pool`, which records
     /// whether one was missing. This is the class-file boundary around the passes: it supplies the
-    /// method's entry state and the verifier's view of the emitted bytes, and lays the result out
-    /// again with its local-variable table re-keyed and its frames proven.
+    /// method's entry state, and lays the result out again with its local-variable table re-keyed
+    /// and its frames proven.
     pub(super) fn optimized(
         &self,
         method: &MethodInfo,
@@ -241,7 +324,6 @@ impl ClassWriter {
         implicit_return: Option<LabelId>,
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
-        let bytes = method.code.as_ref()?;
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
         if source.access & 0x0008 == 0 {
@@ -255,53 +337,10 @@ impl ClassWriter {
             return None;
         }
         let entry = expand_slots(&entry);
-        // The verifier's view of the method as emitted, by instruction number: what the
-        // redundant-cast pass asks about the value each cast sees.
-        let insns = disassemble(bytes)?;
-        let offsets = insn_offsets_at(&insns, 0);
-        let index_of = |pc: u16| offsets.binary_search(&usize::from(pc)).ok();
-        let handlers = method
-            .exceptions
-            .iter()
-            .map(|&(start, end, handler, _)| {
-                Some(Handler {
-                    start: index_of(start)?,
-                    end: index_of(end)?,
-                    handler: index_of(handler)?,
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let graph = ControlGraph::build(&insns, &handlers)?;
-        // Seed the walk with the frames the emitted bytecode itself implies: in particular, a typed
-        // catch handler enters with its declared exception class, not the generic `Throwable` used
-        // by an untyped exceptional edge. These are computed frames, never emitter-recorded
-        // semantic guesses; the rewritten body is computed and validated independently below.
-        let flow_types_cell = std::cell::OnceCell::new();
-        let flow_types = || {
-            flow_types_cell
-                .get_or_init(|| {
-                    let body = stack_maps::Body {
-                        access: source.access,
-                        name: source.name,
-                        descriptor: source.desc,
-                        code: bytes,
-                        exceptions: &method.exceptions,
-                        labels: stack_maps::table_labels(&method.lnt, &method.lvt, bytes.len()),
-                    };
-                    let frames = self
-                        .compute_frames(&body)
-                        .ok()
-                        .map(|computed| stack_maps::verif_frames(computed.frames()))?;
-                    FrameTypes::analyze(&insns, &graph, &entry, &frames, self)
-                })
-                .as_ref()
-        };
-        let stack_tops = || flow_types().map(|types| types as &dyn StackTops);
         let context = PassContext {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
-            stack_tops: &stack_tops,
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,
@@ -309,12 +348,12 @@ impl ClassWriter {
         };
         // A short branch that no longer reaches its target, or a body grown past the JVM's limit,
         // fails to lay out; the method is then written as emitted.
+        // A layout that wanted a constant is only laid out to learn every constant it wants.
         let assembled = node.assemble(pool).ok()?;
-        if pool.missed()
-            || assembled
-                .exception_table
-                .iter()
-                .any(|&(start, end, _, _)| start >= end)
+        if assembled
+            .exception_table
+            .iter()
+            .any(|&(start, end, _, _)| start >= end)
         {
             return None;
         }
@@ -327,7 +366,7 @@ impl ClassWriter {
             .filter(|&(at, _)| !removed_locals.get(at).copied().unwrap_or(false))
             .map(|(_, entry)| entry);
         // A local whose type a rewrite changed (a `Ref` become its element) names its new
-        // descriptor, which must already be in the pool like every constant the body uses.
+        // descriptor, which the pool must hold like every constant the body uses.
         let lvt: Vec<LvtEntry> = kept_locals
             .zip(&assembled.local_variables)
             .map(|(&(name, desc, _, old_start, old_len), local)| {
@@ -337,11 +376,14 @@ impl ClassWriter {
                 let desc = if self.cp.utf8_at(desc) == Some(local.desc.as_str()) {
                     desc
                 } else {
-                    self.cp.lookup_utf8(&local.desc)?
+                    pool.descriptor(&local.desc)
                 };
-                Some((name, desc, local.slot, start, len))
+                (name, desc, local.slot, start, len)
             })
-            .collect::<Option<_>>()?;
+            .collect();
+        if pool.missed() {
+            return None;
+        }
         if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
             // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
             // does not own debug-local deletion, so preserve the original method instead.
@@ -373,22 +415,17 @@ impl ClassWriter {
     }
 }
 
-/// The class-file analysis answers the redundant-cast pass: `null`, or exactly the cast's class,
-/// on top of the verifier's stack.
-impl StackTops for FrameTypes {
-    fn is_exactly(&self, index: usize, class: &str) -> bool {
-        match self.before(index).and_then(|state| state.stack.last()) {
-            Some(VerificationType::Null) => true,
-            Some(VerificationType::Reference(name)) => **name == *class,
-            _ => false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jvm::classfile::{ACC_PUBLIC, ACC_STATIC};
+
+    impl ClassWriter {
+        fn rewritten(&self, method: &MethodInfo, source: &RewriteSource) -> Option<Rewritten> {
+            let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+            self.rewritten_with(method, source, &mut pool)
+        }
+    }
 
     /// `static int f() { int t = 1; return t; }` with `t` a temporary the rewrite folds.
     fn writer_with_temporary() -> ClassWriter {

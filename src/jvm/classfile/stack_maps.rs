@@ -257,9 +257,18 @@ impl ClassWriter {
     /// them. ASM computes that table after kotlinc's bytecode rewrites, so it is the table of the
     /// rewritten body, in which a folded temporary names no class. A constructor or class
     /// initializer gets its line and local tables only after it is added, so its rewrite cannot be
-    /// decided yet; its table as emitted stands in.
+    /// decided yet; its table as emitted stands in. The pool's size once they are in closes the
+    /// range of entries the method interned (see [`super::pool_layout`]).
     pub(super) fn intern_frame_classes(&mut self, body: &Body<'_>, computed: &Computed) {
         let index = self.methods.len() - 1;
+        self.intern_added_frame_classes(index, body, computed);
+        let end = self.cp.slot_count();
+        if let Some(source) = self.methods[index].rewrite_source.as_deref_mut() {
+            source.pool_end = Some(end);
+        }
+    }
+
+    fn intern_added_frame_classes(&mut self, index: usize, body: &Body<'_>, computed: &Computed) {
         let rewritten = if body.name == "<init>" || body.name == "<clinit>" {
             None
         } else {

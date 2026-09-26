@@ -42,8 +42,13 @@ fn is_subroutine(insn: &Insn) -> bool {
 }
 
 /// Per node, whether it is an instruction the method's entry reaches; per protected range, whether
-/// a reached instruction stands inside it.
-fn liveness(method: &MethodNode, at: &LabelPositions) -> (Vec<bool>, Vec<bool>) {
+/// a reached instruction stands inside it. `visit_exception_handlers` is the analyzer's flag of the
+/// same name: without it a handler is reached only through ordinary control flow.
+fn liveness(
+    method: &MethodNode,
+    at: &LabelPositions,
+    visit_exception_handlers: bool,
+) -> (Vec<bool>, Vec<bool>) {
     let nodes = &method.nodes;
     let ranges: Vec<(usize, usize, usize)> = method
         .try_catch_blocks
@@ -68,6 +73,9 @@ fn liveness(method: &MethodNode, at: &LabelPositions) -> (Vec<bool>, Vec<bool>) 
             pending.push(p + 1);
         }
         pending.extend(insn.jump_targets().into_iter().map(|label| at.at(label)));
+        if !visit_exception_handlers {
+            continue;
+        }
         for (h, &(start, end, handler)) in ranges.iter().enumerate() {
             if (start..end).contains(&p) {
                 handler_live[h] = true;
@@ -116,7 +124,7 @@ impl Liveness {
             return None;
         }
         let at = LabelPositions::of(method);
-        let (live, handler_live) = liveness(method, &at);
+        let (live, handler_live) = liveness(method, &at, true);
         Some(Liveness {
             at,
             live,
@@ -162,6 +170,21 @@ impl Liveness {
             self.handler_live[block - 1]
         });
     }
+}
+
+/// `InstructionLivenessAnalyzer(method, visitExceptionHandlers).analyze()` for its instructions:
+/// per node, whether it is an instruction the method's entry reaches, following a protected range
+/// to its handler only when `visit_exception_handlers` is set; `None` for a body outside what the
+/// analysis models.
+pub(crate) fn live_instructions(
+    method: &MethodNode,
+    visit_exception_handlers: bool,
+) -> Option<Vec<bool>> {
+    if method.instructions().any(is_subroutine) {
+        return None;
+    }
+    let at = LabelPositions::of(method);
+    Some(liveness(method, &at, visit_exception_handlers).0)
 }
 
 /// The transformer in the middle of kotlinc's passes: remove every instruction the method's entry
