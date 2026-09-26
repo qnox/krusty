@@ -14,7 +14,7 @@ use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
 use super::inline_body::ExternalInlineCallRequest;
-use super::BodyLowering;
+use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
 enum CheckedArgumentPolicy<'a> {
@@ -1335,7 +1335,7 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
-    ) -> Option<ExprId> {
+    ) -> Option<Result<ExprId, FirLoweringFailure>> {
         let callable = self.index.callable(target)?;
         let declaration = self.index.declaration_anchor(callable.declaration)?;
         if declaration.kind != DeclarationKind::Function {
@@ -1494,38 +1494,42 @@ impl BodyLowering<'_> {
             "same-file call target={target:?} inline={} function={function:?} defaults={has_defaults} substitutions={substitutions:?}"
             , callable.is_inline()
         );
-        if callable.is_inline() && !has_defaults {
-            if let Some(function) = function {
-                let mut operands =
-                    Vec::with_capacity(slots.len() + usize::from(dispatch_receiver.is_some()));
-                let mut inlined_lambda_operands = Vec::with_capacity(
-                    inline_lambdas.len() + usize::from(dispatch_receiver.is_some()),
-                );
-                if let Some(receiver) = dispatch_receiver {
-                    operands.push(receiver);
-                    inlined_lambda_operands.push(None);
-                }
-                operands.extend(slots.iter().copied().collect::<Option<Vec<_>>>()?);
-                inlined_lambda_operands.extend(inline_lambdas.iter().copied());
-                if let Some(inlined) = self.inline_same_file_call(
-                    target,
-                    function,
-                    &operands,
-                    &inlined_lambda_operands,
-                    substitutions,
-                ) {
-                    let expanded = if statements.is_empty() {
-                        inlined
-                    } else {
-                        self.ir.add_expr(IrExpr::Block {
-                            stmts: statements,
-                            value: Some(inlined),
-                        })
-                    };
-                    self.ir.inline_regions.insert(expanded);
-                    return Some(expanded);
-                }
+        // A call that takes its defaults from an overridden declaration dispatches through that
+        // declaration's default stub, as kotlinc's does, so it expands nothing here.
+        if callable.is_inline() && inherited_default_provider.is_none() {
+            let declined = FirLoweringFailure::InlineExpansionDeclined(target);
+            let Some(function) = function else {
+                return Some(Err(declined));
+            };
+            let mut operands =
+                Vec::with_capacity(slots.len() + usize::from(dispatch_receiver.is_some()));
+            let mut inlined_lambda_operands =
+                Vec::with_capacity(inline_lambdas.len() + usize::from(dispatch_receiver.is_some()));
+            if let Some(receiver) = dispatch_receiver {
+                operands.push(Some(receiver));
+                inlined_lambda_operands.push(None);
             }
+            operands.extend(slots.iter().copied());
+            inlined_lambda_operands.extend(inline_lambdas.iter().copied());
+            let Some(inlined) = self.inline_same_file_call(
+                target,
+                function,
+                &operands,
+                &inlined_lambda_operands,
+                substitutions,
+            ) else {
+                return Some(Err(declined));
+            };
+            let expanded = if statements.is_empty() {
+                inlined
+            } else {
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: statements,
+                    value: Some(inlined),
+                })
+            };
+            self.ir.inline_regions.insert(expanded);
+            return Some(Ok(expanded));
         }
         let physical_function =
             function.filter(|function| !self.ir.foreign_inline_templates.contains(function));
@@ -1674,14 +1678,14 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(call, signature.result.get());
         }
-        Some(if statements.is_empty() {
+        Some(Ok(if statements.is_empty() {
             call
         } else {
             self.ir.add_expr(IrExpr::Block {
                 stmts: statements,
                 value: Some(call),
             })
-        })
+        }))
     }
 
     /// Consume the checker's parameter mapping once for all ordinary source calls. This is the

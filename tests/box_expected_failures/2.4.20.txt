@@ -110,7 +110,6 @@ coroutines/inlineClasses/resumeWithException/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/inlineSuspendFunction.kt
-coroutines/inlineSuspendLambdaNonLocalReturn.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt

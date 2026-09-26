@@ -126,18 +126,18 @@ pub fn emit_analyzed<B: Backend>(
             &index,
             sink.ir_mut(),
         );
+        if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: cannot consume inline FIR: {error:?}"),
+            );
+            continue;
+        }
         if let Err(error) = sink.accept_default_arguments(&index, &mut default_arguments) {
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
                 format!("internal error: default FIR lowering failed: {error:?}"),
-            );
-            continue;
-        }
-        if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
-            diags.error(
-                Span::new(0, 0),
-                format!("internal error: cannot consume inline FIR: {error:?}"),
             );
             continue;
         }
