@@ -414,7 +414,7 @@ fn realize_own_invoke(
                 ir.expr_source_lines.insert(current, line);
             } else {
                 ir.expr_source_lines.remove(&current);
-                ir.dispatch_lines.insert(current, line);
+                ir.mark_dispatch_line(current, line);
             }
         }
     }
