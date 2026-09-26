@@ -8,13 +8,8 @@
 //! `NegatedJumps`, `RedundantCheckcastsBeforeAastore`, then `DeadCode` once more, and closes the
 //! slots left unused (`removeUnusedLocalVariables`, which kotlinc also runs after several passes;
 //! closing the gaps once at the end numbers the slots the same). A pass krusty does not have yet
-//! would be a named step that changes nothing, so the list reads as kotlinc's does.
-//!
-//! One step is out of kotlinc's place: the redundant-null-check and redundant-cast passes judge
-//! the method as emitted (the cast pass asks the verifier's frames of the emitted bytes, by
-//! instruction number), so they run before `CapturedVars`. The null-check pass's result waits
-//! until the cast pass has selected its casts in the emitted method; the casts then go from that
-//! result, by where its nodes came from, before the next step.
+//! would be a named step that changes nothing, so the list reads as kotlinc's does. Each step runs
+//! over what the one before it left.
 //!
 //! The class-file boundary (`classfile::method_rewrite`) builds the node, supplies the facts only it
 //! has ([`PassContext`]), and lays the result out again.
@@ -22,23 +17,22 @@
 use std::collections::BTreeSet;
 
 use super::redundant_boxing::{self, ValueClasses};
-use super::redundant_checkcasts::{self, StackTops};
-use super::redundant_null_checks::{self, Rewritten};
 use super::{
     captured_vars, checkcasts_before_aastore, constant_conditions, dead_code, local_slots,
-    negated_jumps, pop_backward, redundant_gotos, redundant_nops, stack_peephole, temporaries,
+    negated_jumps, pop_backward, redundant_checkcasts, redundant_gotos, redundant_nops,
+    redundant_null_checks, stack_peephole, temporaries,
 };
 use crate::jvm::method_node::{LabelId, MethodNode};
 
 /// One step of kotlinc's optimizer, named after its transformer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pass {
+    /// `CapturedVarsOptimizationMethodTransformer` (see `captured_vars`).
+    CapturedVars,
     /// `RedundantNullCheckMethodTransformer` (see `redundant_null_checks`).
     RedundantNullCheck,
     /// `RedundantCheckCastEliminationMethodTransformer` (see `redundant_checkcasts`).
     RedundantCheckCast,
-    /// `CapturedVarsOptimizationMethodTransformer` (see `captured_vars`).
-    CapturedVars,
     /// `ConstantConditionEliminationMethodTransformer` (see `constant_conditions`).
     ConstantCondition,
     /// `RedundantBoxingMethodTransformer` (see `redundant_boxing`).
@@ -65,12 +59,11 @@ pub(crate) enum Pass {
     UnusedLocalSlots,
 }
 
-/// The steps in the order they run: kotlinc's, except that the two passes judging the method as
-/// emitted come before `CapturedVars` (see the module documentation).
+/// The steps in the order they run: kotlinc's.
 pub(crate) const ORDER: &[Pass] = &[
+    Pass::CapturedVars,
     Pass::RedundantNullCheck,
     Pass::RedundantCheckCast,
-    Pass::CapturedVars,
     Pass::ConstantCondition,
     Pass::RedundantBoxing,
     Pass::TemporaryVariables,
@@ -93,9 +86,6 @@ pub(crate) struct PassContext<'a> {
     pub value_classes: &'a dyn ValueClasses,
     /// The slots `this` and the parameters take, which slot compaction leaves where they are.
     pub parameter_slots: u16,
-    /// What the verifier holds on top of the stack before each instruction of the method as
-    /// emitted, asked only when the method has a cast to judge.
-    pub stack_tops: &'a dyn Fn() -> Option<&'a dyn StackTops>,
 }
 
 /// What the passes did to the method.
@@ -117,10 +107,6 @@ pub(crate) enum Outcome {
 /// The state the steps hand on to the ones after them.
 #[derive(Default)]
 struct Run {
-    /// Node positions of the method as emitted the redundant-cast pass selected, not removed yet.
-    emitted_selection: BTreeSet<usize>,
-    /// The redundant-null-check pass's result, applied with the selection.
-    null_checked: Option<Rewritten>,
     /// The labels the temporaries pass pinned; the `goto` and jump passes leave jumps to them.
     pinned: BTreeSet<LabelId>,
     removed_locals: Vec<bool>,
@@ -128,28 +114,6 @@ struct Run {
 }
 
 impl Run {
-    /// Apply what the passes judging the method as emitted found: the null-check pass's result,
-    /// without the casts selected in the method as emitted.
-    fn remove_emitted_selection(&mut self, method: &mut MethodNode) {
-        let selection = std::mem::take(&mut self.emitted_selection);
-        let (nodes, origins) = match self.null_checked.take() {
-            Some(rewritten) => (rewritten.nodes, rewritten.origins),
-            None if selection.is_empty() => return,
-            None => {
-                let nodes = std::mem::take(&mut method.nodes);
-                let origins = (0..nodes.len()).map(Some).collect();
-                (nodes, origins)
-            }
-        };
-        method.nodes = nodes
-            .into_iter()
-            .zip(origins)
-            .filter(|(_, origin)| !origin.is_some_and(|origin| selection.contains(&origin)))
-            .map(|(node, _)| node)
-            .collect();
-        self.changed = true;
-    }
-
     /// Run `pass`; `None` when its analysis does not model the body.
     fn step(
         &mut self,
@@ -157,22 +121,15 @@ impl Run {
         method: &mut MethodNode,
         context: &PassContext<'_>,
     ) -> Option<()> {
-        if !matches!(pass, Pass::RedundantNullCheck | Pass::RedundantCheckCast) {
-            self.remove_emitted_selection(method);
-        }
         let changed = match pass {
+            Pass::CapturedVars => captured_vars::eliminate(method, context.owner).ok()?,
             Pass::RedundantNullCheck => {
-                self.null_checked =
-                    redundant_null_checks::eliminate(method, context.owner, context.value_classes)
-                        .ok()?;
-                false
+                redundant_null_checks::eliminate(method, context.owner, context.value_classes)
+                    .ok()?
             }
             Pass::RedundantCheckCast => {
-                self.emitted_selection
-                    .extend(redundant_checkcasts::select(method, context.stack_tops));
-                false
+                redundant_checkcasts::eliminate(method, context.owner).ok()?
             }
-            Pass::CapturedVars => captured_vars::eliminate(method, context.owner).ok()?,
             Pass::ConstantCondition => {
                 constant_conditions::eliminate(method, context.owner).ok()?
             }
@@ -218,7 +175,6 @@ pub(crate) fn optimize(method: &mut MethodNode, context: &PassContext<'_>) -> Ou
             return Outcome::Declined;
         }
     }
-    run.remove_emitted_selection(method);
     if !run.changed {
         return Outcome::Unchanged;
     }
@@ -234,34 +190,10 @@ mod tests {
     use crate::jvm::method_node::{Insn, Node};
 
     #[test]
-    fn the_order_is_kotlincs_with_the_emitted_method_checks_first() {
+    fn the_order_is_kotlincs() {
+        // kotlinc 2.4.20's `OptimizationMethodVisitor.performTransformations`.
         assert_eq!(
             ORDER,
-            [
-                Pass::RedundantNullCheck,
-                Pass::RedundantCheckCast,
-                Pass::CapturedVars,
-                Pass::ConstantCondition,
-                Pass::RedundantBoxing,
-                Pass::TemporaryVariables,
-                Pass::StackPeephole,
-                Pass::PopBackwardPropagation,
-                Pass::DeadCode,
-                Pass::RedundantGoto,
-                Pass::RedundantNops,
-                Pass::NegatedJumps,
-                Pass::RedundantCheckcastsBeforeAastore,
-                Pass::FinalDeadCode,
-                Pass::UnusedLocalSlots,
-            ]
-        );
-        // kotlinc 2.4.20's `OptimizationMethodVisitor.performTransformations`, with `CapturedVars`
-        // moved behind the two passes that judge the method as emitted.
-        let mut kotlinc = ORDER.to_vec();
-        kotlinc.retain(|&pass| pass != Pass::CapturedVars);
-        kotlinc.insert(0, Pass::CapturedVars);
-        assert_eq!(
-            kotlinc,
             [
                 Pass::CapturedVars,
                 Pass::RedundantNullCheck,
@@ -282,15 +214,11 @@ mod tests {
         );
     }
 
-    fn context<'a>(
-        value_classes: &'a ValueClassDescriptors,
-        stack_tops: &'a dyn Fn() -> Option<&'a dyn StackTops>,
-    ) -> PassContext<'a> {
+    fn context(value_classes: &ValueClassDescriptors) -> PassContext<'_> {
         PassContext {
             owner: "T",
             value_classes,
             parameter_slots: 0,
-            stack_tops,
         }
     }
 
@@ -315,8 +243,7 @@ mod tests {
             [Insn::Op(0x03), Insn::Op(0x00), Insn::Op(0xac)]
         );
         let value_classes = ValueClassDescriptors::default();
-        let no_tops = || None;
-        let outcome = optimize(&mut method, &context(&value_classes, &no_tops));
+        let outcome = optimize(&mut method, &context(&value_classes));
         assert_eq!(
             outcome,
             Outcome::Changed {
@@ -355,9 +282,8 @@ mod tests {
             Node::Insn(Insn::Op(0xb1)),
         ];
         let value_classes = ValueClassDescriptors::default();
-        let no_tops = || None;
         assert_eq!(
-            optimize(&mut method, &context(&value_classes, &no_tops)),
+            optimize(&mut method, &context(&value_classes)),
             Outcome::Changed {
                 removed_locals: Vec::new()
             }
@@ -376,13 +302,69 @@ mod tests {
     }
 
     #[test]
+    fn a_cast_of_a_ref_element_goes_once_the_ref_is_a_local() {
+        // `var s: Any = "a"` captured by an inlined lambda, then `s as String`: the cast reads the
+        // `ObjectRef`'s `Object` element, and only once `CapturedVars` has made the element a local
+        // holding the `String` does the cast pass see that the cast is redundant.
+        const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
+        let element = |op| {
+            Node::Insn(Insn::Field {
+                op,
+                owner: OBJECT_REF.into(),
+                name: "element".into(),
+                desc: "Ljava/lang/Object;".into(),
+            })
+        };
+        let mut method = MethodNode::new(0x0009, "f", "()Ljava/lang/Object;");
+        method.max_locals = 1;
+        method.nodes = vec![
+            Node::Insn(Insn::Type {
+                op: 0xbb,
+                class: OBJECT_REF.into(),
+            }),
+            Node::Insn(Insn::Op(0x59)),
+            Node::Insn(Insn::Method {
+                op: 0xb7,
+                owner: OBJECT_REF.into(),
+                name: "<init>".into(),
+                desc: "()V".into(),
+                interface: false,
+            }),
+            Node::Insn(Insn::Var { op: 0x3a, slot: 0 }),
+            Node::Insn(Insn::Var { op: 0x19, slot: 0 }),
+            Node::Insn(Insn::Ldc(crate::jvm::method_node::Constant::String(
+                "a".into(),
+            ))),
+            element(0xb5),
+            Node::Insn(Insn::Var { op: 0x19, slot: 0 }),
+            element(0xb4),
+            Node::Insn(Insn::Type {
+                op: 0xc0,
+                class: "java/lang/String".into(),
+            }),
+            Node::Insn(Insn::Op(0xb0)),
+        ];
+        let value_classes = ValueClassDescriptors::default();
+        assert!(matches!(
+            optimize(&mut method, &context(&value_classes)),
+            Outcome::Changed { .. }
+        ));
+        assert!(
+            !method
+                .instructions()
+                .any(|insn| matches!(insn, Insn::Type { op: 0xc0, .. })),
+            "{:?}",
+            method.nodes
+        );
+    }
+
+    #[test]
     fn a_body_no_pass_changes_is_unchanged() {
         let mut method = MethodNode::new(0x0009, "f", "()I");
         method.nodes = vec![Node::Insn(Insn::Op(0x03)), Node::Insn(Insn::Op(0xac))];
         let value_classes = ValueClassDescriptors::default();
-        let no_tops = || None;
         assert_eq!(
-            optimize(&mut method, &context(&value_classes, &no_tops)),
+            optimize(&mut method, &context(&value_classes)),
             Outcome::Unchanged
         );
     }
