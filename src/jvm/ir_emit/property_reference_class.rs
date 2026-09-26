@@ -491,8 +491,8 @@ fn emit_bound_prop_ref_class(
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
 /// `INSTANCE` singleton whose `get()` does `invokestatic <facade>.getFoo()` (no receiver), and — for a
 /// `var` — a `set(Object)` doing `invokestatic <facade>.setFoo(v)`. The super ctor is the 4-arg
-/// `(Class, String, String, int)` form with top-level flags = 1. `owner_internal = None` is the facade
-/// sentinel (the declaring file class, unknown until emit).
+/// `(Class, String, String, int)` form, flagged top-level when a package owns the property.
+/// `owner_internal = None` is the facade sentinel (the declaring file class, unknown until emit).
 fn emit_toplevel_prop_ref_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -533,7 +533,13 @@ fn emit_toplevel_prop_ref_class(
     } else {
         prop_jvm
     };
-    let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
+    // e.g. "getFoo()LBox;". A bridged private property reflects the accessor it declares.
+    let reflected_getter = if realization.bridged_storage.is_some() {
+        &realization.declared_getter_name
+    } else {
+        &pr.getter_name
+    };
+    let signature = format!("{reflected_getter}{getter_desc}");
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
     seed_method_header(&mut cw, "<init>", "()V");
@@ -542,7 +548,7 @@ fn emit_toplevel_prop_ref_class(
     ctor.ldc_class(&owner, &mut cw);
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
-    ctor.push_int(1, &mut cw);
+    ctor.push_int(i32::from(realization.package_owner), &mut cw);
     let sup = cw.methodref(
         &superclass,
         "<init>",

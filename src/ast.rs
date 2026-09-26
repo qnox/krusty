@@ -1091,6 +1091,9 @@ pub struct ClassDecl {
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
     pub ctor_close_line: u32,
+    /// The file-level declarations this classifier's `companion { … }` blocks introduced, in
+    /// source order. They are hoisted beside the classifier, which remains their lexical owner.
+    pub companion_block_members: Vec<DeclId>,
 }
 
 #[derive(Clone, Debug)]

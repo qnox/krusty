@@ -91,6 +91,7 @@ use try_emission::ProtectedRegion;
 mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
+mod static_accessors;
 mod static_fields;
 mod string_members;
 mod type_operation_emission;
@@ -252,6 +253,9 @@ pub(crate) struct EmitRun {
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
     private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// The synthetic accessors each static owner declares for its private static declarations
+    /// used from other classes; see [`static_accessors`].
+    static_accessor_plan: std::cell::RefCell<static_accessors::StaticAccessorPlan>,
     /// Spill plans discovered for the suspend functions whose coroutine machine emission owns.
     /// Absent on the discovery pass and present on the one that builds the machine.
     machine_plans: std::cell::RefCell<coroutine_machine::MachinePlans>,
@@ -3603,14 +3607,13 @@ struct LambdaSelection<'a> {
 /// boundary and runs once per emission pass, never once per method candidate.
 fn cross_owner_private_member_calls(
     ir: &IrFile,
-    facade: &str,
-    class_member_fids: &std::collections::HashSet<u32>,
+    contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
 ) -> std::collections::HashSet<u32> {
     let mut result = std::collections::HashSet::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
+    for context in contexts {
         let mut seen = std::collections::HashSet::new();
-        let mut stack = roots;
+        let mut stack = context.roots.clone();
         while let Some(expression) = stack.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -3618,7 +3621,7 @@ fn cross_owner_private_member_calls(
             if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
                 let target_class = &ir.classes[*class as usize];
                 let target = target_class.methods[*index as usize];
-                if target_class.fq_name() != owner
+                if target_class.fq_name() != context.owner
                     && (private_interface_bodies_are_members || !target_class.is_interface)
                     && ir.private_methods.contains(&target)
                 {
@@ -3627,70 +3630,6 @@ fn cross_owner_private_member_calls(
             }
             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
-    };
-
-    let facade_roots = ir
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(fid, function)| {
-            !class_member_fids.contains(&(*fid as u32)) && function.dispatch_receiver.is_none()
-        })
-        .filter_map(|(_, function)| function.body)
-        .chain(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner.is_none())
-                .map(|property| property.init),
-        )
-        .collect();
-    scan(facade, facade_roots);
-
-    for class in &ir.classes {
-        let owner = class.fq_name();
-        let mut roots = class
-            .methods
-            .iter()
-            .filter_map(|fid| {
-                ir.functions
-                    .get(*fid as usize)
-                    .and_then(|function| function.body)
-            })
-            .collect::<Vec<_>>();
-        for fid in &class.methods {
-            if let Some(defaults) = ir
-                .fn_params
-                .get(fid)
-                .and_then(|parameters| parameters.defaults.as_ref())
-            {
-                roots.extend(defaults.iter().flatten().copied());
-            }
-        }
-        roots.extend(class.init_body);
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        roots.extend(
-            class
-                .properties
-                .iter()
-                .filter_map(|property| property.initializer),
-        );
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body);
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-        }
-        for entry in &class.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
-        roots.extend(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner_matches(&owner))
-                .map(|property| property.init),
-        );
-        scan(&owner, roots);
     }
     result
 }
@@ -3745,80 +3684,23 @@ fn emit_pass(
         .iter()
         .flat_map(|c| c.methods.iter().copied())
         .collect();
+    let contexts = static_accessors::emission_contexts(ir, facade, &class_member_fids);
     env.run
         .private_member_access_bridges
         .borrow_mut()
         .clone_from(&cross_owner_private_member_calls(
             ir,
-            facade,
-            &class_member_fids,
+            &contexts,
             opts.jvm_default != JvmDefaultMode::Disable,
         ));
+    *env.run.static_accessor_plan.borrow_mut() =
+        static_accessors::plan(ir, facade, env, &contexts, &class_member_fids);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
     // `IncompatibleClassChangeError` when only one carries the entry. kotlinc emits it here too.
     env.inner_classes.register(&mut cw);
-    // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
-    // continuation class, or any class member): a cross-class private invokestatic is illegal, so
-    // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
-    // and the class calls that (the `Callee::Local` emit arm does the routing).
-    let facade_access_bridges: std::collections::HashSet<u32> = {
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for c in &ir.classes {
-            for &fid in &c.methods {
-                if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                    roots.push(b);
-                }
-            }
-            roots.extend(c.init_body);
-            roots.extend(c.super_arg_prelude.iter().copied());
-            roots.extend(c.super_args.iter().copied());
-            for sc in &c.secondary_ctors {
-                roots.extend(sc.body);
-                roots.extend(sc.defaults.iter().flatten().copied());
-                roots.extend(sc.delegate_prelude.iter().copied());
-                roots.extend(sc.delegate_args.iter().copied());
-            }
-            for en in &c.enum_entries {
-                roots.extend(en.args.iter().copied());
-            }
-        }
-        let mut out = std::collections::HashSet::new();
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let crate::ir::IrExpr::Call {
-                callee: Callee::Local(fid),
-                ..
-            } = &ir.exprs[cur as usize]
-            {
-                if ir.private_methods.contains(fid) && !class_member_fids.contains(fid) {
-                    out.insert(*fid);
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-        // A function-reference class dispatching to a PRIVATE facade function (its `invoke` is
-        // synthesized bytecode, not IR) needs the same bridge.
-        for c in &ir.classes {
-            if let Some(fr) = &c.func_ref {
-                if fr.call_owner_is_facade() {
-                    if let Some(target) = function_reference_target(ir, fr).filter(|target| {
-                        ir.private_methods.contains(target) && !class_member_fids.contains(target)
-                    }) {
-                        out.insert(target);
-                    }
-                }
-            }
-        }
-        out
-    };
     let mut facade_has_method = false;
-    let mut deferred_access_bridges = Vec::new();
     let facade_functions = ir.functions.iter().enumerate().filter_map(|(i, f)| {
         let i = i as u32;
         // Inline-only lambda impls (spliced) and dead ones (inlined at every use) are not facade
@@ -3877,9 +3759,6 @@ fn emit_pass(
                 &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
             );
         }
-        if facade_access_bridges.contains(&(i as u32)) {
-            deferred_access_bridges.push(i as u32);
-        }
         // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -3913,11 +3792,14 @@ fn emit_pass(
             );
         }
     }
-    // kotlinc's SyntheticAccessorLowering appends each `access$<name>` bridge to the facade after
-    // every declared and lifted member.
-    for function in deferred_access_bridges {
-        access_bridges::emit_facade_function_access_bridge(ir, function, facade, &mut cw);
-    }
+    // A facade's accessors map to the file's first line.
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        facade,
+        1,
+        &mut cw,
+    );
     static_fields::emit_statics(ir, facade, &mut cw, env);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
@@ -5932,6 +5814,13 @@ fn emit_class(
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        &fq_name,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -12295,10 +12184,13 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(&f.ret);
                     // A PRIVATE facade function can't be invoked from another class (a lambda impl on
                     // its enclosing class, a continuation class, any class member) — kotlinc routes
-                    // those callers through the `access$<name>` bridge (emitted by `emit_pass` when
-                    // referenced; see `facade_access_bridges`).
-                    let name = if self.owner != self.facade && self.ir.private_methods.contains(fid)
-                    {
+                    // those callers through the facade's `access$<name>` accessor.
+                    let name = if static_accessors::routes_through_accessor(
+                        self.ir,
+                        &self.owner,
+                        &self.facade,
+                        *fid,
+                    ) {
                         format!("access${}", f.name)
                     } else {
                         f.name.clone()
@@ -12343,10 +12235,21 @@ impl<'a> Emitter<'a> {
                     // too.
                     let owner_is_interface =
                         source_owner_is_interface || self.bodies.owner_is_interface(&owner);
-                    let method = if owner_is_interface {
-                        self.cw.interface_methodref(&owner, &f.name, &descriptor)
+                    // A private one reached from another class goes through its owner's accessor.
+                    let name = if static_accessors::routes_through_accessor(
+                        self.ir,
+                        &self.owner,
+                        &owner,
+                        *function,
+                    ) {
+                        format!("access${}", f.name)
                     } else {
-                        self.cw.methodref(&owner, &f.name, &descriptor)
+                        f.name.clone()
+                    };
+                    let method = if owner_is_interface {
+                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    } else {
+                        self.cw.methodref(&owner, &name, &descriptor)
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));

@@ -455,13 +455,11 @@ pub(super) fn emit_func_ref_class(
     } else {
         slot_words(target_ret_jvm) as i32
     };
-    // A reference to a PRIVATE same-file top-level function can't invokestatic it from this
-    // (separate) class — call kotlinc's `access$<name>` facade bridge instead (`emit_pass` emits it
-    // for exactly these referenced targets).
-    let static_call_name = if fr.call_owner_is_facade()
-        && function_reference_target(ir, fr)
-            .is_some_and(|target| ir.private_methods.contains(&target))
-    {
+    // A reference to a PRIVATE same-file static function can't invokestatic it from this
+    // (separate) class — call its static owner's `access$<name>` accessor instead.
+    let static_call_name = if function_reference_target(ir, fr).is_some_and(|target| {
+        static_accessors::routes_through_accessor(ir, &fq, &call_owner, target)
+    }) {
         format!("access${}", fr.call_name)
     } else {
         fr.call_name.clone()

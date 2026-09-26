@@ -189,6 +189,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         type_aliases: Vec::new(),
         span,
         ctor_close_line: 0,
+        companion_block_members: Vec::new(),
         decl_line: 0,
         decl_start_line: 0,
         decl_end_line: 0,
@@ -2635,6 +2636,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -2733,6 +2735,7 @@ impl<'a> Parser<'a> {
         let mut init_order: Vec<ClassInit> = Vec::new();
         // A `companion object { … }` in the enum body (`enum class E { A; companion object { … } }`).
         let mut companion = None;
+        let mut companion_block_members = Vec::new();
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
@@ -2980,7 +2983,8 @@ impl<'a> Parser<'a> {
                             // class's companion and attach its singleton identity to the enum.
                             companion = Some(self.parse_companion(&name, &emods));
                         } else {
-                            self.parse_companion_block(&name, &emods);
+                            companion_block_members
+                                .extend(self.parse_companion_block(&name, &emods));
                         }
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
@@ -3044,6 +3048,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            companion_block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -3680,6 +3685,7 @@ impl<'a> Parser<'a> {
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut companion = None;
+        let mut companion_block_members = Vec::new();
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
@@ -3733,7 +3739,8 @@ impl<'a> Parser<'a> {
                         if self.at_companion_object_declaration() {
                             companion = Some(self.parse_companion(&name, &mods));
                         } else {
-                            self.parse_companion_block(&name, &mods);
+                            companion_block_members
+                                .extend(self.parse_companion_block(&name, &mods));
                         }
                     }
                     TokenKind::Ident
@@ -3807,6 +3814,7 @@ impl<'a> Parser<'a> {
             type_aliases,
             span: Span::new(start.lo, end.hi),
             ctor_close_line: ctor_close_lo,
+            companion_block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -4080,6 +4088,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion = None;
+        let mut companion_block_members = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
@@ -4139,7 +4148,8 @@ impl<'a> Parser<'a> {
                         if self.at_companion_object_declaration() {
                             companion = Some(self.parse_companion(&name, &imods));
                         } else {
-                            self.parse_companion_block(&name, &imods);
+                            companion_block_members
+                                .extend(self.parse_companion_block(&name, &imods));
                         }
                     }
                     _ => {
@@ -4191,6 +4201,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            companion_block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -4315,6 +4326,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
             ctor_close_line: 0,
+            companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -4460,6 +4472,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,

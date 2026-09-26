@@ -62,8 +62,14 @@ impl Parser<'_> {
     /// Parse a `companion { ... }` block as associated declarations on its containing classifier.
     /// Unlike `companion object`, a block introduces no singleton classifier: its members use the
     /// same receiver-less associated-call representation as `companion fun/val C.name`.
-    pub(super) fn parse_companion_block(&mut self, outer: &str, modifiers: &[String]) {
+    /// Returns the members' declarations, which the classifier records as its block members.
+    pub(super) fn parse_companion_block(
+        &mut self,
+        outer: &str,
+        modifiers: &[String],
+    ) -> Vec<DeclId> {
         let start = self.tok().span;
+        let mut members = Vec::new();
         self.bump(); // `companion`
         self.expect(TokenKind::LBrace, "'{'");
         loop {
@@ -90,6 +96,7 @@ impl Parser<'_> {
                     function.flags = function.flags.with_is_companion_block_member(true);
                     let declaration = self.file.add_decl(Decl::Fun(function));
                     self.file.decls.push(declaration);
+                    members.push(declaration);
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
                     let lateinit = member_modifiers
@@ -121,6 +128,7 @@ impl Parser<'_> {
                     property.is_companion_block_member = true;
                     let declaration = self.file.add_decl(Decl::Property(property));
                     self.file.decls.push(declaration);
+                    members.push(declaration);
                 }
                 _ => {
                     self.diags.error(
@@ -132,6 +140,7 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::RBrace, "'}'");
+        members
     }
 
     /// A companion-block member is hoisted as a companion extension of the class whose block
