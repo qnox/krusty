@@ -703,7 +703,124 @@ fn the_intrinsics_calls_are_known_by_owner_name_and_descriptor() {
 
 #[test]
 fn nullness_analysis_has_a_checked_size_ceiling() {
-    assert!(analysis_within_limit(1_000, 50));
-    assert!(!analysis_within_limit(usize::MAX, 2));
-    assert!(!analysis_within_limit(65_535, 65_535));
+    assert!(analysis_within_limit(1_000, 50, 10));
+    assert!(!analysis_within_limit(usize::MAX, 2, 2));
+    assert!(!analysis_within_limit(65_535, 65_535, 0));
+    // A method with few locals is still too wide when its operand stack is deep.
+    assert!(!analysis_within_limit(65_535, 1, 65_535));
+    assert!(!analysis_within_limit(1_000, usize::MAX, 1));
+    assert!(!analysis_within_limit(1_000, 1, usize::MAX));
+}
+
+#[test]
+fn a_method_too_wide_to_analyze_is_left_as_it_is() {
+    // Foldable, but one frame per node at a 65,535-value stack is over the ceiling.
+    let (mut method, _) = method_of(
+        vec![
+            type_insn(NEW, "Foo"),
+            op(DUP),
+            call(INVOKESPECIAL, "Foo", "<init>", "()V"),
+            type_insn(INSTANCEOF, "Foo"),
+            op(IRETURN),
+        ],
+        "()Z",
+        0,
+    );
+    assert!(run_method(&method).is_some());
+    method.max_stack = u16::MAX;
+    method
+        .nodes
+        .splice(0..0, (0..1_000).map(|_| Node::Insn(Insn::Op(NOP))));
+    assert_eq!(run_method(&method), None);
+}
+
+/// A call that has the reified-operation marker's owner and name but not its identity is ordinary
+/// bytecode: the `instanceof` after it folds, and the call and its arguments stay.
+#[test]
+fn a_call_that_only_shares_the_markers_name_is_no_placeholder() {
+    for interface in [false, true] {
+        let desc = if interface {
+            "(ILjava/lang/String;)V"
+        } else {
+            "(ILjava/lang/Object;)V"
+        };
+        let named = || {
+            I::Insn(Insn::Method {
+                op: INVOKESTATIC,
+                owner: INTRINSICS.to_string(),
+                name: "reifiedOperationMarker".to_string(),
+                desc: desc.to_string(),
+                interface,
+            })
+        };
+        let kind = || {
+            I::Insn(Insn::Int {
+                op: BIPUSH,
+                operand: 3,
+            })
+        };
+        assert_rewrites(
+            vec![
+                op(ACONST_NULL),
+                kind(),
+                ldc("T"),
+                named(),
+                type_insn(INSTANCEOF, "java/lang/Object"),
+                op(IRETURN),
+            ],
+            "()Z",
+            0,
+            Some(vec![
+                op(ACONST_NULL),
+                kind(),
+                ldc("T"),
+                named(),
+                op(POP),
+                op(ICONST_0),
+                op(IRETURN),
+            ]),
+        );
+    }
+}
+
+/// Every check of a long method folds in one pass over it: a round finds each check where the
+/// analysis did, instead of searching the method for it.
+#[test]
+fn many_foldable_checks_rewrite_in_linear_time() {
+    const CHECKS: usize = 20_000;
+    let mut insns = vec![
+        type_insn(NEW, "Foo"),
+        op(DUP),
+        call(INVOKESPECIAL, "Foo", "<init>", "()V"),
+        astore(0),
+    ];
+    for _ in 0..CHECKS {
+        insns.extend([aload(0), ldc("m"), check_with_message()]);
+    }
+    insns.extend([aload(0), op(ARETURN)]);
+    let (mut method, _) = method_of(insns, "()Ljava/lang/Object;", 1);
+    method.max_stack = 2;
+    let started = std::time::Instant::now();
+    let rewritten = run_method(&method).expect("every check folds");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        instructions(&rewritten.nodes),
+        [
+            type_insn(NEW, "Foo"),
+            op(DUP),
+            call(INVOKESPECIAL, "Foo", "<init>", "()V"),
+            astore(0),
+            aload(0),
+            op(ARETURN),
+        ]
+        .into_iter()
+        .map(|insn| resolve(insn, &[]))
+        .collect::<Vec<_>>()
+    );
+    // Searching the method for each check, or shifting it on each removal, costs about
+    // CHECKS * nodes = 2.4e9 steps here; the linear rewrite takes milliseconds.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "{CHECKS} checks took {elapsed:?}"
+    );
 }

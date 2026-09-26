@@ -17,16 +17,35 @@ use super::super::redundant_checkcasts::is_reified_marker;
 use super::assumptions::Listing;
 use super::nullability::{NullValue, Nullability};
 use super::Check;
-use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
+use crate::jvm::method_node::{Insn, LabelId, Node};
 
-/// The method under rewrite, with where each node came from.
+/// What the round does to the node at one position of the method as the round received it.
+#[derive(Clone, Default)]
+struct Edit {
+    /// The node goes.
+    removed: bool,
+    /// The instruction that takes the node's place.
+    replacement: Option<Insn>,
+    /// How many `pop`s the round puts right before the node.
+    pops_before: usize,
+}
+
+/// A node of the method as the round has rewritten it so far.
+#[derive(Clone, Copy)]
+enum Current {
+    /// The node at this position of the method as the round received it.
+    Node(usize),
+    /// A `pop` the round added.
+    AddedPop,
+}
+
+/// The round's rewrite of a method, kept as an edit per node of the method as the round received
+/// it. kotlinc rewrites its node list in place; recording the same edits against the unchanged
+/// positions keeps every check where the analysis found it, so each lookup is direct and the round
+/// builds the new node list once, in one pass.
 pub(super) struct Rewrite<'a> {
-    pub(super) method: &'a mut MethodNode,
-    /// Per node, the position of the node in the method as the pass received it; `None` for a node
-    /// the pass added.
-    pub(super) origins: &'a mut Vec<Option<usize>>,
-    /// Per node, its position when this round of the pass started.
-    round: Vec<Option<usize>>,
+    nodes: &'a [Node],
+    edits: Vec<Edit>,
     listing: Listing,
     /// Whether a jump or `instanceof` was rewritten: kotlinc's `changes`, which runs another round.
     pub(super) changes: bool,
@@ -35,84 +54,116 @@ pub(super) struct Rewrite<'a> {
 }
 
 impl<'a> Rewrite<'a> {
-    pub(super) fn new(
-        method: &'a mut MethodNode,
-        origins: &'a mut Vec<Option<usize>>,
-        listing: Listing,
-    ) -> Self {
-        let round = (0..method.nodes.len()).map(Some).collect();
+    pub(super) fn new(nodes: &'a [Node], listing: Listing) -> Self {
         Rewrite {
-            method,
-            origins,
-            round,
+            nodes,
+            edits: vec![Edit::default(); nodes.len()],
             listing,
             changes: false,
             edited: false,
         }
     }
 
-    /// Where the node that stood at `at` when the round started stands now.
-    fn position(&self, at: usize) -> Option<usize> {
-        self.round.iter().position(|&from| from == Some(at))
+    /// The node list the round made, and for each node the entry of `origins` (the position in the
+    /// method the pass received) of the node it was; `None` for a `pop` the pass added.
+    pub(super) fn finish(self, origins: &[Option<usize>]) -> (Vec<Node>, Vec<Option<usize>>) {
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        let mut from = Vec::with_capacity(self.nodes.len());
+        for (at, (node, edit)) in self.nodes.iter().zip(self.edits).enumerate() {
+            for _ in 0..edit.pops_before {
+                nodes.push(Node::Insn(Insn::Op(POP)));
+                from.push(None);
+            }
+            if edit.removed {
+                continue;
+            }
+            nodes.push(edit.replacement.map_or_else(|| node.clone(), Node::Insn));
+            from.push(origins[at]);
+        }
+        (nodes, from)
     }
 
-    fn previous(&self, at: usize) -> Option<usize> {
-        self.listing.previous(&self.method.nodes, at)
-    }
-
-    fn opcode_at(&self, at: Option<usize>) -> Option<u8> {
-        match self.method.nodes.get(at?)? {
-            Node::Insn(insn) => Some(opcode(insn)),
+    /// The instruction at `at` as the round has left it; `None` for a node that is not one.
+    fn insn(&self, at: usize) -> Option<&Insn> {
+        match (&self.edits[at].replacement, &self.nodes[at]) {
+            (Some(insn), _) | (None, Node::Insn(insn)) => Some(insn),
             _ => None,
         }
     }
 
-    fn remove(&mut self, at: usize) {
-        self.method.nodes.remove(at);
-        self.origins.remove(at);
-        self.round.remove(at);
-        self.edited = true;
+    /// `getPrevious` of the node at `at` in the method as the round has rewritten it so far: an
+    /// added `pop` right before it, or the nearest earlier node still in ASM's list.
+    fn previous(&self, at: usize) -> Option<Current> {
+        if self.edits[at].pops_before > 0 {
+            return Some(Current::AddedPop);
+        }
+        for index in (0..at).rev() {
+            let edit = &self.edits[index];
+            if !edit.removed && self.listing.holds(&self.nodes[index]) {
+                return Some(Current::Node(index));
+            }
+            if edit.pops_before > 0 {
+                return Some(Current::AddedPop);
+            }
+        }
+        None
     }
 
-    fn insert_before(&mut self, at: usize, insn: Insn) {
-        self.method.nodes.insert(at, Node::Insn(insn));
-        self.origins.insert(at, None);
-        self.round.insert(at, None);
+    fn remove(&mut self, at: usize) {
+        self.edits[at].removed = true;
         self.edited = true;
     }
 
     fn set(&mut self, at: usize, insn: Insn) {
-        self.method.nodes[at] = Node::Insn(insn);
+        self.edits[at].replacement = Some(insn);
         self.edited = true;
     }
 
-    /// `popReferenceValueBefore`; returns where the instruction at `at` stands afterwards.
-    fn pop_reference_value_before(&mut self, at: usize) -> usize {
-        let previous = self.previous(at);
-        match (self.opcode_at(previous), previous) {
-            (Some(ACONST_NULL | DUP | ALOAD), Some(previous)) => {
-                self.remove(previous);
-                at - 1
+    /// `popReferenceValueBefore`.
+    fn pop_reference_value_before(&mut self, at: usize) {
+        match self.previous(at) {
+            Some(Current::Node(previous))
+                if matches!(
+                    self.insn(previous).map(opcode),
+                    Some(ACONST_NULL | DUP | ALOAD)
+                ) =>
+            {
+                self.remove(previous)
             }
             _ => {
-                self.insert_before(at, Insn::Op(POP));
-                at + 1
+                self.edits[at].pops_before += 1;
+                self.edited = true;
             }
+        }
+    }
+
+    /// The node right before `at` when it is an instruction of the round's method with an opcode
+    /// in `ops`.
+    fn previous_of(&self, at: usize, ops: &[u8]) -> Option<usize> {
+        match self.previous(at)? {
+            Current::Node(previous)
+                if self
+                    .insn(previous)
+                    .is_some_and(|insn| ops.contains(&opcode(insn))) =>
+            {
+                Some(previous)
+            }
+            _ => None,
         }
     }
 
     /// Rewrite each check the analysis knows the operand of, in order (`transformTrivialChecks`).
     pub(super) fn apply(&mut self, known: &[(usize, NullValue)]) {
-        for (id, value) in known {
-            let id = *id;
-            let Some(at) = self.position(id) else {
+        for (at, value) in known {
+            let at = *at;
+            if self.edits[at].removed {
                 continue;
-            };
-            let Node::Insn(insn) = &self.method.nodes[at] else {
+            }
+            let Some(insn) = self.insn(at).cloned() else {
                 continue;
             };
             let nullability = value.nullability();
-            match insn.clone() {
+            match insn {
                 Insn::Jump { op: IFNULL, target } => {
                     self.trivial_null_jump(at, target, nullability == Nullability::Null)
                 }
@@ -128,7 +179,7 @@ impl<'a> Rewrite<'a> {
                     _ if nullability != Nullability::NotNull => {}
                     Some(Check::NotNull) => self.trivial_check_not_null(at),
                     Some(Check::NotNullWithMessage) => self.trivial_check_with_message(at),
-                    Some(Check::ExpressionValue) => self.trivial_expression_check(id),
+                    Some(Check::ExpressionValue) => self.trivial_expression_check(at),
                     Some(Check::Parameter) | None => {}
                 },
             }
@@ -138,7 +189,7 @@ impl<'a> Rewrite<'a> {
     /// `transformTrivialNullJump`.
     fn trivial_null_jump(&mut self, at: usize, target: LabelId, always: bool) {
         self.changes = true;
-        let at = self.pop_reference_value_before(at);
+        self.pop_reference_value_before(at);
         if always {
             self.set(at, Insn::Jump { op: GOTO, target });
         } else {
@@ -148,11 +199,10 @@ impl<'a> Rewrite<'a> {
 
     /// `transformInstanceOf`.
     fn instance_of(&mut self, at: usize, class: &str, value: &NullValue) {
-        let previous = self
-            .previous(at)
-            .map(|previous| &self.method.nodes[previous]);
-        if matches!(previous, Some(Node::Insn(insn)) if is_reified_marker(insn)) {
-            return;
+        if let Some(Current::Node(previous)) = self.previous(at) {
+            if self.insn(previous).is_some_and(is_reified_marker) {
+                return;
+            }
         }
         let result = match value.nullability() {
             Nullability::Null => ICONST_0,
@@ -166,36 +216,27 @@ impl<'a> Rewrite<'a> {
             _ => return,
         };
         self.changes = true;
-        let at = self.pop_reference_value_before(at);
+        self.pop_reference_value_before(at);
         self.set(at, Insn::Op(result));
     }
 
     /// `transformTrivialCheckNotNull`: `dup|aload; checkNotNull(Object)`.
     fn trivial_check_not_null(&mut self, at: usize) {
-        let Some(feed) = self.previous(at) else {
+        let Some(feed) = self.previous_of(at, &[DUP, ALOAD]) else {
             return;
         };
-        if !matches!(self.opcode_at(Some(feed)), Some(DUP | ALOAD)) {
-            return;
-        }
         self.remove(at);
         self.remove(feed);
     }
 
     /// `transformTrivialCheckNotNullWithMessage`: `dup|aload; ldc; checkNotNull(Object, String)`.
     fn trivial_check_with_message(&mut self, at: usize) {
-        let Some(message) = self.previous(at) else {
+        let Some(message) = self.previous_of(at, &[LDC]) else {
             return;
         };
-        if self.opcode_at(Some(message)) != Some(LDC) {
-            return;
-        }
-        let Some(feed) = self.previous(message) else {
+        let Some(feed) = self.previous_of(message, &[DUP, ALOAD]) else {
             return;
         };
-        if !matches!(self.opcode_at(Some(feed)), Some(DUP | ALOAD)) {
-            return;
-        }
         self.remove(at);
         self.remove(message);
         self.remove(feed);
@@ -203,18 +244,11 @@ impl<'a> Rewrite<'a> {
 
     /// `transformTrivialCheckExpressionValueIsNotNull`: `ldc; checkNotNullExpressionValue`, with the
     /// checked value dropped before the message.
-    fn trivial_expression_check(&mut self, id: usize) {
-        let Some(at) = self.position(id) else {
+    fn trivial_expression_check(&mut self, at: usize) {
+        let Some(message) = self.previous_of(at, &[LDC]) else {
             return;
         };
-        let Some(message) = self.previous(at) else {
-            return;
-        };
-        if self.opcode_at(Some(message)) != Some(LDC) {
-            return;
-        }
-        let message = self.pop_reference_value_before(message);
-        let at = self.position(id).expect("the check is still in the method");
+        self.pop_reference_value_before(message);
         self.remove(at);
         self.remove(message);
     }
