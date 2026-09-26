@@ -6,8 +6,9 @@
 //! `RedundantCheckCast`, `ConstantCondition`, `RedundantBoxing`, `TemporaryVariablesElimination`,
 //! `StackPeephole`, `PopBackwardPropagation`, `DeadCode`, `RedundantGoto`, `RedundantNopsCleanup`,
 //! `NegatedJumps`, `RedundantCheckcastsBeforeAastore`, then `DeadCode` once more, and closes the
-//! slots left unused (`removeUnusedLocalVariables`). A pass krusty does not have yet is a named step
-//! that changes nothing, so the list reads as kotlinc's does.
+//! slots left unused (`removeUnusedLocalVariables`, which kotlinc also runs after several passes;
+//! closing the gaps once at the end numbers the slots the same). A pass krusty does not have yet
+//! would be a named step that changes nothing, so the list reads as kotlinc's does.
 //!
 //! One step is out of kotlinc's place: the redundant-null-check and redundant-cast passes judge
 //! the method as emitted (the cast pass asks the verifier's frames of the emitted bytes, by
@@ -25,7 +26,7 @@ use super::redundant_checkcasts::{self, StackTops};
 use super::redundant_null_checks::{self, Rewritten};
 use super::{
     captured_vars, checkcasts_before_aastore, constant_conditions, dead_code, local_slots,
-    negated_jumps, redundant_gotos, redundant_nops, stack_peephole, temporaries,
+    negated_jumps, pop_backward, redundant_gotos, redundant_nops, stack_peephole, temporaries,
 };
 use crate::jvm::method_node::{LabelId, MethodNode};
 
@@ -46,9 +47,9 @@ pub(crate) enum Pass {
     TemporaryVariables,
     /// `StackPeepholeOptimizationsTransformer` (see `stack_peephole`).
     StackPeephole,
-    /// `PopBackwardPropagationTransformer`: not ported yet.
+    /// `PopBackwardPropagationTransformer` (see `pop_backward`).
     PopBackwardPropagation,
-    /// The `DeadCodeEliminationMethodTransformer` in the middle of the list: not run yet.
+    /// The `DeadCodeEliminationMethodTransformer` in the middle of the list (see `dead_code`).
     DeadCode,
     /// `RedundantGotoMethodTransformer` (see `redundant_gotos`).
     RedundantGoto,
@@ -186,11 +187,13 @@ impl Run {
                 None => false,
             },
             Pass::StackPeephole => stack_peephole::optimize(method),
+            Pass::PopBackwardPropagation => pop_backward::propagate(method, context.owner).ok()?,
+            Pass::DeadCode => dead_code::eliminate(method),
             Pass::RedundantGoto => redundant_gotos::remove(method, &self.pinned),
             Pass::RedundantNops => redundant_nops::remove(method),
             Pass::NegatedJumps => negated_jumps::negate(method, &self.pinned),
             Pass::RedundantCheckcastsBeforeAastore => checkcasts_before_aastore::remove(method),
-            Pass::FinalDeadCode => match dead_code::eliminate(method) {
+            Pass::FinalDeadCode => match dead_code::eliminate_for_emitting(method) {
                 Some(dead) => {
                     self.removed_locals = dead.removed_locals;
                     true
@@ -201,7 +204,6 @@ impl Run {
                 let parameters: BTreeSet<u16> = (0..context.parameter_slots).collect();
                 local_slots::compact(method, &parameters)
             }
-            Pass::PopBackwardPropagation | Pass::DeadCode => false,
         };
         self.changed |= changed;
         Some(())
@@ -324,6 +326,52 @@ mod tests {
         assert_eq!(
             method.instructions().cloned().collect::<Vec<_>>(),
             [Insn::Op(0x03), Insn::Op(0xac)]
+        );
+    }
+
+    #[test]
+    fn a_discarded_select_collapses_before_the_goto_step() {
+        // `if (c) a else b` as a statement: the pop step leaves `nop`s for the loads and the `pop`,
+        // and the `goto` over the other branch then leads only past `nop`s.
+        let mut method = MethodNode::new(0x0009, "f", "(ZII)V");
+        method.max_locals = 3;
+        let (otherwise, merge) = (method.new_label(), method.new_label());
+        let iload = |slot| Node::Insn(Insn::Var { op: 0x15, slot });
+        method.nodes = vec![
+            iload(0),
+            Node::Insn(Insn::Jump {
+                op: 0x99,
+                target: otherwise,
+            }),
+            iload(1),
+            Node::Insn(Insn::Jump {
+                op: 0xa7,
+                target: merge,
+            }),
+            Node::Label(otherwise),
+            iload(2),
+            Node::Label(merge),
+            Node::Insn(Insn::Op(0x57)),
+            Node::Insn(Insn::Op(0xb1)),
+        ];
+        let value_classes = ValueClassDescriptors::default();
+        let no_tops = || None;
+        assert_eq!(
+            optimize(&mut method, &context(&value_classes, &no_tops)),
+            Outcome::Changed {
+                removed_locals: Vec::new()
+            }
+        );
+        assert_eq!(
+            method.instructions().cloned().collect::<Vec<_>>(),
+            [
+                Insn::Var { op: 0x15, slot: 0 },
+                Insn::Jump {
+                    op: 0x99,
+                    target: otherwise
+                },
+                Insn::Op(0xb1)
+            ]
         );
     }
 

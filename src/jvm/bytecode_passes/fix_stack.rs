@@ -294,6 +294,7 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
             prune_exception_edges: false,
             fast_handlers: true,
             fast_merge: true,
+            ..AnalyzerOptions::default()
         },
     )
     .map_err(FixStackError::Analysis)?;
