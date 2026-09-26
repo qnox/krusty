@@ -327,17 +327,15 @@ fn retained_dispatching_reference_shapes_run() {
         .join(", ");
     let source = format!(
         "@JvmInline value class Token(val raw: String)\n\
-         suspend fun paused(value: Int): Int = value\n\
          fun wide({high_parameters}): Int = p0 + p22\n\
          fun unwrap(token: Token): String = token.raw\n\
          fun shapes(): String {{\n\
          \x20   val prefix = \"K\"\n\
          \x20   fun local(value: String): String = prefix + value\n\
-         \x20   val suspended: suspend (Int) -> Int = ::paused\n\
          \x20   val captured: (String) -> String = ::local\n\
          \x20   val high: ({high_function_parameters}) -> Int = ::wide\n\
          \x20   val valueClass: (Token) -> String = ::unwrap\n\
-         \x20   arrayOf<Any>(suspended, captured, high, valueClass)\n\
+         \x20   arrayOf<Any>(captured, high, valueClass)\n\
          \x20   return captured(\"!\") + high({}) + valueClass(Token(\"v\"))\n\
          }}\n\
          fun box(): String = if (shapes() == \"K!22v\") \"OK\" else \"fail: \" + shapes()\n",
@@ -378,23 +376,6 @@ fn retained_dispatching_reference_shapes_run() {
         })
         .collect::<Vec<_>>();
     let expected = [
-        (
-            "ReferenceInvokeRetainedRunKt$shapes$suspended$1",
-            vec![(
-                "INSTANCE",
-                0x0019,
-                "LReferenceInvokeRetainedRunKt$shapes$suspended$1;",
-            )],
-            vec![
-                ("<init>", 0, "()V"),
-                (
-                    "invoke",
-                    0x0001,
-                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-                ),
-                ("<clinit>", 0x0008, "()V"),
-            ],
-        ),
         (
             "ReferenceInvokeRetainedRunKt$shapes$captured$1",
             vec![("$captured$0", 0x0012, "Ljava/lang/String;")],
@@ -465,6 +446,69 @@ fn assert_carriers_match_and_run(fixture: &Fixture<'_>) {
         assert_eq!(ours, reference, "{class}: carrier differs from kotlinc");
     }
     common::expect_box_same_as_kotlinc(fixture.source, &format!("{}Run", fixture.stem));
+}
+
+const SUSPEND_SOURCE: &str = r##"import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
+
+class Held(vararg val all: Any)
+
+object Unused : Continuation<Any?> {
+    override val context: CoroutineContext get() = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {}
+}
+
+suspend fun later(value: Int): Int = value + 1
+fun name(value: String): String = value
+
+class Tank(val level: Int) {
+    suspend fun fill(by: Int): Int = level + by
+}
+
+var drained = 0
+
+suspend fun Tank.drain() {
+    drained = level
+}
+
+fun carriers(tank: Tank): Held {
+    val converted: suspend (String) -> String = ::name
+    val declared = ::later
+    val bound = tank::fill
+    val unbound = Tank::fill
+    val boundExtension = tank::drain
+    return Held(converted, declared, bound, unbound, boundExtension)
+}
+
+@Suppress("UNCHECKED_CAST")
+fun box(): String {
+    val all = carriers(Tank(10)).all
+    if ((all[0] as (String, Continuation<Any?>) -> Any?)("n", Unused) != "n") return "converted"
+    if ((all[1] as (Int, Continuation<Any?>) -> Any?)(41, Unused) != 42) return "declared"
+    if ((all[2] as (Int, Continuation<Any?>) -> Any?)(5, Unused) != 15) return "bound"
+    if ((all[3] as (Tank, Int, Continuation<Any?>) -> Any?)(Tank(1), 2, Unused) != 3) return "unbound"
+    if ((all[4] as (Continuation<Any?>) -> Any?)(Unused) != Unit || drained != 10) return "drained"
+    return "OK"
+}
+"##;
+
+/// A suspend reference's carrier declares kotlinc's typed `invoke`, which takes the continuation
+/// last and returns an object, plus the erased bridge that casts the continuation to it. This holds
+/// for a suspend declaration, bound or not, and for an ordinary one converted to a suspend type.
+#[test]
+fn suspend_reference_carriers_declare_kotlincs_typed_invoke() {
+    assert_carriers_match_and_run(&Fixture {
+        source: SUSPEND_SOURCE,
+        stem: "SuspendReferenceInvoke",
+        carriers: &[
+            "SuspendReferenceInvokeKt$carriers$converted$1",
+            "SuspendReferenceInvokeKt$carriers$declared$1",
+            "SuspendReferenceInvokeKt$carriers$bound$1",
+            "SuspendReferenceInvokeKt$carriers$unbound$1",
+            "SuspendReferenceInvokeKt$carriers$boundExtension$1",
+        ],
+    });
 }
 
 const EXTENSION_SOURCE: &str = r##"class Held(vararg val all: Any)

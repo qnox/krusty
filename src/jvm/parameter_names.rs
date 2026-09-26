@@ -41,8 +41,12 @@ pub(super) fn local_variable(
 }
 
 /// A value parameter of the generic `invoke` bridge kotlinc writes for a callable-reference class.
-/// It numbers them from one, unlike the specialized `invoke` it bridges to.
-pub(super) fn reference_invoke_bridge_parameter(ordinal: u16) -> String {
+/// It numbers them from one, unlike the specialized `invoke` it bridges to; a suspend reference's
+/// trailing continuation keeps its `$completion` name.
+pub(super) fn reference_invoke_bridge_parameter(ordinal: u16, continuation: bool) -> String {
+    if continuation {
+        return "$completion".to_string();
+    }
     format!("p{}", ordinal + 1)
 }
 
