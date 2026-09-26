@@ -47,6 +47,7 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
 mod checker_symbol_queries;
+mod classifier_associated;
 mod collection_literals;
 #[cfg(test)]
 mod common_supertype_identity_tests;
@@ -64,6 +65,7 @@ mod finalized_projection;
 mod for_loop_iteration;
 pub(crate) mod function_type_parameters;
 mod generic_call_bindings;
+mod implicit_rungs;
 mod inspection_analysis;
 mod interface_delegation;
 mod invoke_selection;
@@ -82,6 +84,7 @@ mod plugin_expression_annotations;
 mod plugin_expression_planning;
 mod postponed_applicability;
 mod postponed_diagnostics;
+mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
@@ -159,6 +162,7 @@ pub(crate) use member_extension_selection::{
 };
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 use stable_path::StablePathRead;
@@ -1047,6 +1051,7 @@ impl SigFlags {
     const IS_INFIX: u16 = 1 << 8;
     const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 9;
     const IS_COMPANION_EXTENSION: u16 = 1 << 10;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1105,6 +1110,10 @@ impl SigFlags {
     #[inline]
     pub const fn with_is_companion_extension(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
     }
 }
 
@@ -1300,6 +1309,10 @@ impl Signature {
     #[inline]
     pub fn is_companion_extension(&self) -> bool {
         self.flags.has(SigFlags::IS_COMPANION_EXTENSION)
+    }
+    #[inline]
+    pub fn is_companion_block_member(&self) -> bool {
+        self.flags.has(SigFlags::IS_COMPANION_BLOCK_MEMBER)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -3300,6 +3313,7 @@ pub struct ExtPropSig {
     pub ty: Ty,
     pub is_var: bool,
     pub is_companion_extension: bool,
+    pub is_companion_block_member: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     pub context_params: Vec<Ty>,
@@ -11638,9 +11652,6 @@ pub enum CallableReferenceTarget {
     Extension {
         callable: Box<crate::libraries::LibraryCallable>,
         stable_declaration: Option<crate::fir::DeclarationId>,
-        /// The declared classifier receiver is an associated lookup coordinate, not a runtime or
-        /// callable-reference receiver parameter.
-        companion_extension: bool,
     },
     Member {
         receiver: Ty,
@@ -12440,7 +12451,7 @@ struct SelectedLocalExtension {
 
 enum LocalExtensionSelection {
     None,
-    Selected(SelectedLocalExtension),
+    Selected(Box<SelectedLocalExtension>),
     Ambiguous,
 }
 
@@ -14992,12 +15003,15 @@ impl<'a> Checker<'a> {
             }
             Ok(None) => {}
         }
+        // A singleton's value also names its classifier's associated properties (`C.Companion.x`).
         if let Some(internal) = rt.non_null().obj_internal() {
-            if let Some(property) = self
-                .libraries
-                .classifier_associated_property(internal, name)
-            {
-                return self.record_associated_property(mexpr, property, report_diagnostics);
+            let singleton = self
+                .resolved_type_name(internal)
+                .is_some_and(|c| c.is_object());
+            if let Some(property) = self.resolver().associated_property(internal, name) {
+                if singleton {
+                    return self.record_associated_property(mexpr, property, report_diagnostics);
+                }
             }
         }
         if let Some(member) = self.libraries.intrinsic_property(rt, name) {
@@ -15100,19 +15114,13 @@ impl<'a> Checker<'a> {
         property: crate::libraries::PropertyInfo,
         report_diagnostics: bool,
     ) -> Ty {
+        let access_owner = property.associated_access_owner.unwrap_or(property.owner);
         if property.visibility != Visibility::Public
-            && !self.member_accessible(property.visibility, property.owner)
+            && !self.member_accessible(property.visibility, access_owner)
         {
             if let Some(expr) = expr.filter(|_| report_diagnostics) {
                 let span = self.member_name_span(expr, &property.name);
-                self.reject_property_if_inaccessible(
-                    property.visibility,
-                    &property.name,
-                    property.ty,
-                    property.owner,
-                    property.getter.external_property_identity,
-                    span,
-                );
+                self.report_inaccessible_associated_property(&property, span);
             }
             return Ty::Error;
         }
@@ -16351,7 +16359,7 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             }
-            [] => self.libraries.classifier_associated_property(owner, name)?,
+            [] => return None,
         };
         Some(self.record_associated_property(Some(expression), property, true))
     }
@@ -16433,7 +16441,19 @@ impl<'a> Checker<'a> {
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::values)
             .unwrap_or_default();
-        let property = match self.select_top_level_property_candidates(scope, properties) {
+        let selection = self.select_top_level_property_candidates(scope, properties);
+        self.record_receiverless_property_read(expression, name, selection)
+    }
+
+    /// Record the read of a selected receiver-less property — a package-qualified or associated
+    /// one — or report why its selection failed. `None` when nothing was selectable.
+    fn record_receiverless_property_read(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        selection: TopLevelPropertySelection,
+    ) -> Option<Ty> {
+        let property = match selection {
             TopLevelPropertySelection::Selected(property) => property,
             TopLevelPropertySelection::MissingContext(missing, names) => {
                 self.diags.error(
@@ -16580,9 +16600,9 @@ impl<'a> Checker<'a> {
             crate::symbol_source::SymbolNamespace::Package(package) => self
                 .libraries
                 .top_level_associated_property(package, &declared_name),
-            crate::symbol_source::SymbolNamespace::Classifier(owner) => self
-                .libraries
-                .classifier_associated_property(owner, &declared_name),
+            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
+                self.resolver().associated_property(owner, &declared_name)
+            }
         }
     }
 
@@ -18688,18 +18708,14 @@ impl<'a> Checker<'a> {
         // call; only declarations explicitly marked `operator` are eligible for this syntax.
         let companion_candidates = classifier
             .map(|classifier| {
-                let classifier_receiver = Ty::obj_name(classifier);
                 let mut candidates = self
                     .resolver()
                     .classifier_call_candidates(classifier, "of")
                     .map(|(_, candidates)| candidates)
                     .unwrap_or_default();
                 candidates.extend(
-                    self.stable_receiver_callables(classifier_receiver, "of")
-                        .functions()
-                        .iter()
-                        .filter(|candidate| candidate.companion_extension)
-                        .cloned(),
+                    self.resolver()
+                        .classifier_associated_callables(classifier, "of"),
                 );
                 candidates
                     .into_iter()
@@ -18746,9 +18762,11 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                if selected.companion_extension {
+                // An associated `operator fun of` has no value operand: it is recorded as the
+                // receiver-less call its provider shape already is.
+                if selected.kind == crate::libraries::FnKind::TopLevel {
                     let argument_names = self.file.call_arg_names.get(&call.0).cloned();
-                    return self.finish_companion_extension_call(
+                    return self.finish_top_level_call(
                         scope,
                         call,
                         args,
@@ -18756,6 +18774,7 @@ impl<'a> Checker<'a> {
                         argument_names.as_deref(),
                         selected,
                         &[],
+                        None,
                     );
                 }
                 let Some(shape) = self.contextual_call_shape(
@@ -18918,17 +18937,13 @@ impl<'a> Checker<'a> {
         if standard_factory(classifier).is_some() {
             return true;
         }
-        let classifier_receiver = Ty::obj_name(classifier);
         self.resolver()
             .classifier_call_candidates(classifier, "of")
             .into_iter()
             .flat_map(|(_, candidates)| candidates)
             .chain(
-                self.stable_receiver_callables(classifier_receiver, "of")
-                    .functions()
-                    .iter()
-                    .filter(|candidate| candidate.companion_extension)
-                    .cloned(),
+                self.resolver()
+                    .classifier_associated_callables(classifier, "of"),
             )
             .any(|candidate| candidate.flags.operator)
     }
@@ -19839,61 +19854,19 @@ impl<'a> Checker<'a> {
                 // otherwise a resolved classifier supplies both its value facet (object/companion)
                 // and its classifier callables. Do not reconstruct or re-resolve the dotted spelling.
                 if let Ok(ResolvedQualifier::Classifier(classifier)) = receiver_qualifier {
-                    // Companion-block declarations are associated with the classifier itself and
-                    // form an earlier scope-tower rung than members of its companion-object value.
-                    // Select that rung before translating `C` to `C.Companion`; otherwise
-                    // `C.blockMember` is tested against the wrong runtime receiver and a same-named
-                    // object member incorrectly wins.
-                    let explicit_type_args = self.explicit_call_type_args(scope, call);
-                    let classifier_receiver = Ty::obj_name(classifier);
-                    let companion_extensions = self
-                        .stable_receiver_callables(classifier_receiver, &name)
-                        .functions()
-                        .iter()
-                        .filter(|candidate| candidate.companion_extension)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !companion_extensions.is_empty() {
-                        let arg_tys = self.ext_arg_tys(
-                            scope,
-                            call,
-                            classifier_receiver,
-                            &name,
-                            args,
-                            &explicit_type_args,
-                            expected,
-                        );
-                        if let Some(selected) = self
-                            .select_callable_candidate(
-                                scope,
-                                CallArgs {
-                                    call,
-                                    args,
-                                    arg_tys: &arg_tys,
-                                },
-                                &explicit_type_args,
-                                Some(classifier_receiver),
-                                CallResultConstraint::direct(expected),
-                                companion_extensions,
-                            )
-                            .and_then(CallableCandidateSelection::available)
-                        {
-                            self.set(receiver, classifier_receiver);
-                            return self.finish_companion_extension_call(
-                                scope,
-                                call,
-                                args,
-                                &arg_tys,
-                                arg_names.as_deref(),
-                                selected,
-                                &explicit_type_args,
-                            );
-                        }
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                        );
-                        return Ty::Error;
+                    // Associated declarations form an earlier scope-tower rung than members of the
+                    // classifier's companion-object value. Select that rung before translating `C`
+                    // to `C.Companion`; otherwise a same-named object member incorrectly wins.
+                    if let Some(ret) = self.qualified_associated_call(
+                        scope,
+                        call,
+                        args,
+                        arg_names.as_deref(),
+                        (classifier, &name),
+                        expected,
+                    ) {
+                        self.set(receiver, Ty::obj_name(classifier));
+                        return ret;
                     }
                     // A classifier that denotes an object or companion is a VALUE receiver. Commit
                     // that identity and use the ordinary member/extension tower; a failed member is
@@ -19907,15 +19880,8 @@ impl<'a> Checker<'a> {
 
                     let explicit_type_args = self.explicit_call_type_args(scope, call);
                     let classifier_receiver = Ty::obj_name(classifier);
-                    let companion_extensions = self
-                        .stable_receiver_callables(classifier_receiver, &name)
-                        .functions()
-                        .iter()
-                        .filter(|candidate| candidate.companion_extension)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let arg_tys = if companion_extensions.is_empty() {
-                        self.provider_member_lambda_arg_kinds(
+                    let arg_tys = self
+                        .provider_member_lambda_arg_kinds(
                             scope,
                             call,
                             crate::symbol_resolver::SymRecv::TypeName(classifier),
@@ -19925,24 +19891,12 @@ impl<'a> Checker<'a> {
                         )
                         .iter()
                         .map(CallArgKind::ty)
-                        .collect::<Vec<_>>()
-                    } else {
-                        self.ext_arg_tys(
-                            scope,
-                            call,
-                            classifier_receiver,
-                            &name,
-                            args,
-                            &explicit_type_args,
-                            expected,
-                        )
-                    };
-                    let mut candidates = self
+                        .collect::<Vec<_>>();
+                    let candidates = self
                         .resolver()
                         .classifier_call_candidates(classifier, &name)
                         .map(|(_, candidates)| candidates)
                         .unwrap_or_default();
-                    candidates.extend(companion_extensions);
                     if let Some(selected) = self
                         .select_callable_candidate(
                             scope,
@@ -19958,18 +19912,6 @@ impl<'a> Checker<'a> {
                         )
                         .and_then(CallableCandidateSelection::available)
                     {
-                        if selected.companion_extension {
-                            self.set(receiver, classifier_receiver);
-                            return self.finish_companion_extension_call(
-                                scope,
-                                call,
-                                args,
-                                &arg_tys,
-                                arg_names.as_deref(),
-                                selected,
-                                &explicit_type_args,
-                            );
-                        }
                         if selected.visibility == Visibility::PackagePrivate
                             && !self.member_accessible(selected.visibility, selected.callable.owner)
                         {
@@ -20064,16 +20006,23 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                     if self.resolved_type_name(classifier).is_some() {
-                        let owner = match self.file.expr(receiver) {
-                            Expr::Name(source_name) => source_name.as_str().into(),
-                            _ => classifier.to_string(),
-                        };
-                        self.diags.error(
-                            span,
-                            format!(
-                                "unresolved Java static '{owner}.{name}' for given argument types"
-                            ),
-                        );
+                        if self.libraries.inherits_classifier_callables(classifier) {
+                            let owner = match self.file.expr(receiver) {
+                                Expr::Name(source_name) => source_name.as_str().into(),
+                                _ => classifier.to_string(),
+                            };
+                            self.diags.error(
+                                span,
+                                format!(
+                                    "unresolved Java static '{owner}.{name}' for given argument types"
+                                ),
+                            );
+                        } else {
+                            self.diags.error(
+                                self.call_callee_name_span(call),
+                                format!("unresolved reference '{name}'."),
+                            );
+                        }
                         return Ty::Error;
                     }
                 }
@@ -23725,8 +23674,37 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let implicit_receivers = self.implicit_receivers(scope);
-                for implicit_receiver in implicit_receivers.iter().copied() {
+                // A class's static scope, holding its associated declarations, directly follows its
+                // own receiver; a companion-associated declaration's follows its context receivers.
+                // Inapplicable associated candidates join the final report.
+                let mut inapplicable_associated = Vec::new();
+                let associated_site = classifier_associated::AssociatedCallSite {
+                    call_args: CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    argument_names: arg_names.as_deref(),
+                    explicit_type_args: &explicit_type_args,
+                    expected,
+                };
+                let mut receivers_closed = false;
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            if let Some(ret) = self.static_scope_call(
+                                scope,
+                                associated_site,
+                                (&fname, classifier),
+                                &mut inapplicable_associated,
+                            ) {
+                                return ret;
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(_) if receivers_closed => continue,
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
                     if receiver == Ty::String || matches!(receiver, Ty::Obj(..) | Ty::TyParam(..)) {
@@ -23786,7 +23764,8 @@ impl<'a> Checker<'a> {
                             // rung below. Stop before an OUTER implicit receiver can steal the call;
                             // the shared second probe either commits an applicable receiver-less
                             // declaration or reselects this nearest imported extension.
-                            break;
+                            receivers_closed = true;
+                            continue;
                         }
                         match &extension.selection {
                             Some(CallableCandidateSelection::Selected(_))
@@ -24171,8 +24150,21 @@ impl<'a> Checker<'a> {
                 // a class with a companion denotes that companion. The common classifier-value
                 // operation records the exact singleton storage handle; invoke selection then uses
                 // the same operator path as every other value. A plain class/enum contributes no
-                // value here and continues to constructor/SAM selection below.
+                // value here and continues to constructor/SAM selection below. The classifier's
+                // associated `operator fun invoke` precedes that value, as `C.f(args)` does for
+                // other names; an inapplicable one joins the reported candidates.
                 let mut inapplicable_classifier_invoke = Vec::new();
+                if let Some(classifier) = bare_classifier {
+                    if let Some(ret) = self.classifier_invoke_call(
+                        scope,
+                        associated_site,
+                        classifier,
+                        &mut inapplicable_classifier_invoke,
+                    ) {
+                        self.set(callee, Ty::obj_name(classifier));
+                        return ret;
+                    }
+                }
                 let imported_classifier_value = unshadowed_name
                     .then(|| self.function_import_scope.explicit_target(&fname))
                     .flatten()
@@ -24214,7 +24206,7 @@ impl<'a> Checker<'a> {
                             return Ty::Error;
                         }
                         InvokeResolution::Inapplicable(candidates) => {
-                            inapplicable_classifier_invoke = candidates;
+                            inapplicable_classifier_invoke.extend(candidates);
                         }
                         InvokeResolution::Absent => {}
                     }
@@ -24291,7 +24283,8 @@ impl<'a> Checker<'a> {
                         None,
                     );
                 }
-                let mut candidates = self.resolver().top_level_candidates(&fname);
+                let mut candidates = inapplicable_associated;
+                candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 let had_rejected_callable = had_inapplicable_constructor
                     || !candidates.is_empty()
@@ -25362,51 +25355,22 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        let implicit_property = (local.is_none() && backing_field.is_none())
-            .then(|| self.implicit_property_write(scope, &name))
-            .flatten();
-        if let Some(resolution) = &implicit_property {
+        let property = if local.is_none() && backing_field.is_none() {
+            self.implicit_property_write(scope, &name)
+        } else {
+            PropertyWriteSelection::None
+        };
+        if let PropertyWriteSelection::Implicit(resolution) = &property {
             if let Some(span) = resolution.receiver.extension_receiver {
                 self.mark_extension_receiver_stmt_span_used(s, span);
             }
-            self.record_implicit_property_write(s, resolution);
         }
-        // A TOP-LEVEL `var` increment (`g++`). The assignment path records the selected property so
-        // FIR can lower the write; without the same record here the increment reached FIR with no
-        // target at all and failed as an unknown local.
-        let top_level_property =
-            (local.is_none() && backing_field.is_none() && implicit_property.is_none())
-                .then(|| match self.select_top_level_property(scope, &name) {
-                    TopLevelPropertySelection::Selected(property) => Some(property),
-                    TopLevelPropertySelection::Ambiguous
-                    | TopLevelPropertySelection::MissingContext(..)
-                    | TopLevelPropertySelection::None => None,
-                })
-                .flatten();
-        if let Some(property) = top_level_property.clone() {
-            self.stmt_lowers
-                .insert(s, StmtLowering::TopLevelPropertySet(property));
+        if property.storage().is_some() {
+            self.record_implicit_property_write(s, &property);
         }
         let found = local
             .or(backing_field)
-            .or_else(|| {
-                implicit_property.as_ref().map(|resolution| {
-                    (
-                        resolution.property_ty,
-                        resolution.is_var,
-                        resolution.property_ty,
-                    )
-                })
-            })
-            .or_else(|| {
-                top_level_property.as_ref().map(|property| {
-                    (
-                        property.property.ty,
-                        property.property.setter.is_some(),
-                        property.property.ty,
-                    )
-                })
-            });
+            .or_else(|| property.storage().map(|(ty, is_var)| (ty, is_var, ty)));
         match found {
             Some((storage_ty, is_var, nominal_read_ty)) => {
                 if !is_var {
@@ -25441,9 +25405,24 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            None => self
-                .diags
-                .error(span, format!("unresolved reference '{name}'.")),
+            None => match property {
+                PropertyWriteSelection::Ambiguous => self.diags.error(
+                    target_span,
+                    format!("overload resolution ambiguity for property '{name}'"),
+                ),
+                PropertyWriteSelection::MissingContext(missing, names) => self.diags.error(
+                    target_span,
+                    format!(
+                        "No context argument for '{}' found.",
+                        missing.display(&names)
+                    ),
+                ),
+                PropertyWriteSelection::None
+                | PropertyWriteSelection::Implicit(_)
+                | PropertyWriteSelection::Receiverless(_) => self
+                    .diags
+                    .error(span, format!("unresolved reference '{name}'.")),
+            },
         }
     }
 
@@ -25495,41 +25474,25 @@ impl<'a> Checker<'a> {
                 )
             })
             .map(|local| (local.write_ty.unwrap_or(local.ty), local.write_ty.is_some()));
-        let implicit_property = (deferred_property.is_none() && local.is_none())
-            .then(|| self.implicit_property_write(scope, &name))
-            .flatten();
+        let property = if deferred_property.is_none() && local.is_none() {
+            self.implicit_property_write(scope, &name)
+        } else {
+            PropertyWriteSelection::None
+        };
         crate::trace_compiler!(
             "resolve",
-            "assign name={name} local={:?} implicit_property={} deferred={}",
+            "assign name={name} local={:?} property={} deferred={}",
             scoped.map(|binding| binding.origin),
-            implicit_property.is_some(),
+            property.storage().is_some(),
             deferred_property.is_some(),
         );
-        let context_property =
-            if deferred_property.is_none() && local.is_none() && implicit_property.is_none() {
-                // Select every receiver-less property through the ordinary property resolver. The old
-                // `syms.props` fallback validated plain source properties but recorded no declaration,
-                // leaving checked FIR and lowering without a semantic target.
-                self.select_top_level_property(scope, &name)
-            } else {
-                TopLevelPropertySelection::None
-            };
         let assignment_expected = if name == "field" && local.is_none() && self.field_ty.is_some() {
             self.field_ty
         } else {
             deferred_property
                 .map(|(_, _, ty, _)| ty)
                 .or_else(|| local.map(|(ty, _)| ty))
-                .or_else(|| {
-                    implicit_property
-                        .as_ref()
-                        .map(|resolution| resolution.property_ty)
-                })
-                .or(match &context_property {
-                    TopLevelPropertySelection::Selected(property) => Some(property.property.ty),
-                    TopLevelPropertySelection::MissingContext(..) => None,
-                    _ => None,
-                })
+                .or_else(|| property.storage().map(|(ty, _)| ty))
         };
         let vt = match assignment_expected {
             Some(expected) => self.expr_expected(scope, value, expected),
@@ -25646,8 +25609,8 @@ impl<'a> Checker<'a> {
                 }
                 None => {
                     let span = self.file.stmt_spans[s.0 as usize];
-                    match implicit_property {
-                        Some(resolution) => {
+                    match property {
+                        PropertyWriteSelection::Implicit(resolution) => {
                             self.mark_extension_receiver_stmt_used(s, resolution.receiver);
                             if let Some(setter) = resolution.setter.as_ref() {
                                 if setter.visibility != Visibility::Public {
@@ -25671,37 +25634,38 @@ impl<'a> Checker<'a> {
                                 self.value_diagnostic_span(value, vt),
                                 "assignment",
                             );
-                            self.record_implicit_property_write(s, &resolution);
+                            self.record_implicit_property_write(
+                                s,
+                                &PropertyWriteSelection::Implicit(resolution),
+                            );
                         }
-                        None => match context_property {
-                            TopLevelPropertySelection::Selected(property) => {
-                                if property.property.setter.is_none() {
-                                    self.report_val_reassignment(
-                                        target_span,
-                                        "'val' cannot be reassigned.",
-                                    );
-                                }
-                                self.expect_assignable(
-                                    property.property.ty,
-                                    vt,
-                                    self.value_diagnostic_span(value, vt),
-                                    "assignment",
+                        PropertyWriteSelection::Receiverless(property) => {
+                            if property.property.setter.is_none() {
+                                self.report_val_reassignment(
+                                    target_span,
+                                    "'val' cannot be reassigned.",
                                 );
-                                self.stmt_lowers
-                                    .insert(s, StmtLowering::TopLevelPropertySet(property));
                             }
-                            TopLevelPropertySelection::Ambiguous => self.diags.error(
-                                target_span,
-                                format!("overload resolution ambiguity for property '{name}'"),
-                            ),
-                            TopLevelPropertySelection::MissingContext(..) => self.diags.error(
-                                target_span,
-                                format!("No context argument for '{name}' found."),
-                            ),
-                            TopLevelPropertySelection::None => self
-                                .diags
-                                .error(span, format!("unresolved reference '{name}'.")),
-                        },
+                            self.expect_assignable(
+                                property.property.ty,
+                                vt,
+                                self.value_diagnostic_span(value, vt),
+                                "assignment",
+                            );
+                            self.stmt_lowers
+                                .insert(s, StmtLowering::TopLevelPropertySet(property));
+                        }
+                        PropertyWriteSelection::Ambiguous => self.diags.error(
+                            target_span,
+                            format!("overload resolution ambiguity for property '{name}'"),
+                        ),
+                        PropertyWriteSelection::MissingContext(..) => self.diags.error(
+                            target_span,
+                            format!("No context argument for '{name}' found."),
+                        ),
+                        PropertyWriteSelection::None => self
+                            .diags
+                            .error(span, format!("unresolved reference '{name}'.")),
                     }
                 }
             }
@@ -25792,80 +25756,20 @@ impl<'a> Checker<'a> {
         // declaration, so this file's imports must neither shadow nor widen it).
         let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
-            if let Ok(Some(property)) = self
-                .resolver()
-                .select_extension_property(Ty::obj_name(owner), &name)
-            {
-                if property.is_companion_extension() {
-                    if self.reject_inaccessible_classifier_expression(receiver, owner) {
-                        return;
-                    }
-                    let target_span = self.assignment_target_span(s);
-                    if property.setter.is_none() {
-                        self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
-                        return;
-                    }
-                    if property.setter_visibility != Visibility::Public {
-                        self.reject_if_inaccessible(
-                            property.setter_visibility,
-                            &name,
-                            property.owner_type_or(owner),
-                            target_span,
-                        );
-                    }
-                    let context_args = if property.context_count == 0 {
-                        Vec::new()
-                    } else {
-                        let Some(context_types) =
-                            property.getter.params.get(1..1 + property.context_count)
-                        else {
-                            self.diags.error(
-                                target_span,
-                                format!("No context argument for '{name}' found."),
-                            );
-                            return;
-                        };
-                        let Some(context_args) =
-                            self.select_context_arguments(scope, context_types)
-                        else {
-                            self.diags.error(
-                                target_span,
-                                format!("No context argument for '{name}' found."),
-                            );
-                            return;
-                        };
-                        context_args
-                    };
-                    let value_ty = self.expr_expected(scope, value, property.ty);
-                    self.expect_assignable(
-                        property.ty,
-                        value_ty,
-                        self.value_diagnostic_span(value, value_ty),
-                        "assignment",
-                    );
-                    self.stmt_lowers.insert(
-                        s,
-                        StmtLowering::ExtensionPropertyWrite {
-                            access: Box::new(ResolvedPropertyAccess {
-                                property,
-                                context_args,
-                            }),
-                        },
-                    );
+            // Associated properties precede the members of the companion-object value.
+            let associated = self.select_qualified_associated_property(scope, owner, &name);
+            if !matches!(associated, TopLevelPropertySelection::None) {
+                if self.reject_inaccessible_classifier_expression(receiver, owner) {
                     return;
                 }
+                self.write_receiverless_property(scope, s, value, &name, associated);
+                return;
             }
-            if let Some(property) = self.libraries.classifier_associated_property(owner, &name) {
+            if let Some(property) = self.resolver().associated_property(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
-                if !self.member_accessible(property.visibility, property.owner) {
-                    self.reject_property_if_inaccessible(
-                        property.visibility,
-                        &property.name,
-                        property.ty,
-                        property.owner,
-                        property.getter.external_property_identity,
-                        member_span,
-                    );
+                let access_owner = property.associated_access_owner.unwrap_or(property.owner);
+                if !self.member_accessible(property.visibility, access_owner) {
+                    self.report_inaccessible_associated_property(&property, member_span);
                     return;
                 }
                 let Some(setter) = property.setter.as_ref() else {
@@ -30800,6 +30704,8 @@ fun box(): String {
                             name: "prop".to_string(),
                             kind: crate::libraries::PropKind::MemberExtension,
                             receiver: Some(parameter),
+                            associated_classifier: None,
+                            associated_access_owner: None,
                             formals: Vec::new(),
                             ty: Ty::String,
                             context_count: 0,
@@ -30906,6 +30812,8 @@ fun box(): String {
                     let member = |second, descriptor: &str| crate::libraries::LibraryMember {
                         return_value_status: None,
                         external_identity: None,
+                        associated_classifier: None,
+                        associated_access_owner: None,
                         external_default_provider: None,
                         external_property_identity: None,
                         singleton_dispatch: None,
@@ -40014,17 +39922,6 @@ impl CallableCandidateSelection {
     }
 }
 
-struct ImplicitPropertyWriteResolution {
-    receiver: ImplicitReceiver,
-    property_ty: Ty,
-    is_var: bool,
-    context_args: Vec<ResolvedContextArgument>,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    setter: Option<crate::symbol_resolver::ResolvedPropertySetter>,
-    extension: Option<ResolvedPropertyAccess>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct ImplicitReceiver {
     ty: Ty,
@@ -42281,12 +42178,7 @@ impl<'a> Checker<'a> {
                 if !function.is_extension() {
                     return None;
                 }
-                // A companion extension is associated with the classifier named to the left of
-                // `::`; unlike an ordinary extension reference, that classifier is not an unbound
-                // value parameter. Keep the syntactic binding mode outside the candidate, but derive
-                // the semantic reference shape from the selected declaration fact here.
-                let unbound = matches!(binding, CallableReferenceBinding::Unbound)
-                    && !function.companion_extension;
+                let unbound = matches!(binding, CallableReferenceBinding::Unbound);
                 let context_count = function.context_count.min(function.semantic_params().len());
                 let expected_values = if let Some(expected) = expected {
                     let mut values = expected.params.to_vec();
@@ -42468,8 +42360,7 @@ impl<'a> Checker<'a> {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
         }
-        let unbound =
-            matches!(binding, CallableReferenceBinding::Unbound) && !function.companion_extension;
+        let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let mut semantic_params = function.semantic_params().into_owned();
         let context_count = function.context_count.min(semantic_params.len());
         if unbound {
@@ -42523,7 +42414,6 @@ impl<'a> Checker<'a> {
         let target = CallableReferenceTarget::Extension {
             callable: Box::new(target),
             stable_declaration: function.stable_declaration,
-            companion_extension: function.companion_extension,
         };
         let adapted = !Self::adapted_ref_plan_is_identity(&argument_mapping);
         self.expr_lowers.insert(
@@ -42602,10 +42492,7 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         let property_unbound = matches!(binding, CallableReferenceBinding::Unbound)
-            && candidates
-                .extension_property
-                .as_ref()
-                .is_some_and(|property| !property.companion_extension);
+            && candidates.extension_property.is_some();
         let callable_params = if property_unbound {
             std::slice::from_ref(&receiver)
         } else {
@@ -43721,12 +43608,13 @@ impl<'a> Checker<'a> {
                 .extension_property
                 .as_ref()
                 .is_some_and(|property| {
-                    let params = if property.companion_extension {
-                        &[][..]
-                    } else {
-                        std::slice::from_ref(&receiver_ty)
-                    };
-                    self.callable_ref_is_compatible(params, property.prop_ty, false, expected, true)
+                    self.callable_ref_is_compatible(
+                        std::slice::from_ref(&receiver_ty),
+                        property.prop_ty,
+                        false,
+                        expected,
+                        true,
+                    )
                 }),
         )
     }
@@ -43753,13 +43641,24 @@ impl<'a> Checker<'a> {
         name: &str,
         expected: &'static crate::types::FnSig,
     ) -> Option<Ty> {
+        let candidates = self.resolver().top_level_candidates(name);
+        self.selected_receiverless_function_ref(expression, name, expected, candidates)
+    }
+
+    /// Select, against `expected`, the receiver-less function a callable reference names among
+    /// `candidates`: top-level functions, or a classifier's associated functions.
+    fn selected_receiverless_function_ref(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        expected: &'static crate::types::FnSig,
+        candidates: Vec<crate::libraries::FunctionInfo>,
+    ) -> Option<Ty> {
         let mut inaccessible = false;
         let mut structurally_adaptable = Vec::new();
         let mut unavailable_default = None;
         let mut unresolved_type_arguments = false;
-        let candidates = self
-            .resolver()
-            .top_level_candidates(name)
+        let candidates = candidates
             .into_iter()
             .filter_map(|mut function| {
                 if function.kind != crate::libraries::FnKind::TopLevel {
@@ -47172,8 +47071,7 @@ impl<'a> Checker<'a> {
             property.setter = None;
         }
         let property_ty = property.prop_ty;
-        let unbound =
-            matches!(binding, CallableReferenceBinding::Unbound) && !property.companion_extension;
+        let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let (arity, type_args) = if unbound {
             (1, vec![receiver, property_ty])
         } else {
@@ -48611,7 +48509,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The receiver-less property an unqualified `name` denotes after the implicit receivers: an
+    /// associated property of a lexically open static scope, else a top-level property.
     fn select_top_level_property(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> TopLevelPropertySelection {
+        let associated = self.select_scoped_associated_property(scope, name);
+        if !matches!(associated, TopLevelPropertySelection::None) {
+            return associated;
+        }
+        self.select_declared_top_level_property(scope, name)
+    }
+
+    fn select_declared_top_level_property(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
@@ -49223,48 +49135,6 @@ impl<'a> Checker<'a> {
                 contract: selected.callable.contract.clone(),
             })),
         );
-    }
-
-    /// Commit an associated (`companion fun C.name`) source extension as the receiver-less
-    /// callable it becomes after selection. The declared receiver participates in candidate
-    /// applicability and generic binding above; it is not a runtime argument and therefore must not
-    /// enter checked FIR or the physical parameter list.
-    fn finish_companion_extension_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        argument_names: Option<&[Option<String>]>,
-        mut selected: SelectedCallable,
-        explicit_type_args: &[Ty],
-    ) -> Ty {
-        selected.info.kind = crate::libraries::FnKind::TopLevel;
-        selected.info.receiver = None;
-        let receiver_index = selected
-            .info
-            .context_count
-            .min(selected.info.callable.params.len());
-        if receiver_index < selected.info.callable.params.len() {
-            selected.info.callable.params.remove(receiver_index);
-        }
-        selected.info.callable.source_receiver = None;
-        if let Some(signature) = selected.info.generic_sig.as_mut() {
-            signature.receiver = None;
-        }
-        if let Some(signature) = selected.info.callable.generic_sig.as_mut() {
-            signature.receiver = None;
-        }
-        self.finish_top_level_call(
-            scope,
-            call,
-            args,
-            arg_tys,
-            argument_names,
-            selected,
-            explicit_type_args,
-            None,
-        )
     }
 
     fn finish_top_level_call(
@@ -53337,8 +53207,10 @@ impl<'a> Checker<'a> {
     fn lexical_associated_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
         self.lexical_classifier_callable_owners()
             .into_iter()
-            .filter_map(|owner| self.libraries.classifier_associated_property(owner, name))
-            .find(|property| self.member_accessible(property.visibility, property.owner))
+            .find_map(|owner| {
+                self.resolver()
+                    .accessible_classifier_associated_property(owner, name)
+            })
     }
 
     /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
@@ -53780,25 +53652,46 @@ impl<'a> Checker<'a> {
         declaration
     }
 
+    /// The classifier a companion-associated declaration's receiver names. It names a classifier
+    /// namespace, not an applied value type, so a generic classifier needs no use-site arguments and
+    /// an alias (generic or with fixed arguments) names its expanded classifier. The spelling is
+    /// selected by the ordinary lexical classifier rules; the result is the raw classifier.
     fn check_associated_companion_receiver_type(
         &mut self,
         scope: &CheckerScope<'_>,
         reference: &TypeRef,
     ) -> Ty {
-        let visible = scope.visible_tparams();
-        let declaration = match self.module.legacy_symbols() {
-            Some(symbols) => associated_companion_receiver_ty(
-                self.file,
-                reference,
-                &symbols.class_names,
-                &visible,
-                self.diags,
-            ),
-            None => self.type_ref_ty(scope, reference),
+        let spelling = self
+            .file
+            .alias_spellings
+            .get(&reference.span)
+            .unwrap_or(reference)
+            .name
+            .clone();
+        let alias_classifier = self
+            .scoped_source_alias_identity(scope, &spelling)
+            .and_then(|identity| self.source_alias_expansion(identity))
+            .and_then(|(_, expansion)| expansion.obj_internal());
+        let classifier =
+            alias_classifier.or_else(
+                || match self.select_classifier_binding(scope, &spelling).0 {
+                    InheritedNestedClassifier::Found(internal) => Some(internal),
+                    InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => {
+                        None
+                    }
+                },
+            );
+        let declaration = match classifier {
+            Some(classifier) => Ty::obj_name(classifier),
+            None => {
+                // Not a classifier spelling: the ordinary type resolution reports what it names.
+                let ty = self.type_ref_ty(scope, reference);
+                if ty.contains_error() {
+                    self.report_unresolved_type_ref(reference);
+                }
+                ty.obj_internal().map_or(ty, Ty::obj_name)
+            }
         };
-        if declaration.contains_error() {
-            self.report_unresolved_type_ref(reference);
-        }
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
         declaration
@@ -56721,13 +56614,20 @@ impl<'a> Checker<'a> {
             .take(f.context_count)
             .map(|(parameter, &ty)| lexical_context_receiver(self.file, parameter, ty))
             .collect::<Vec<_>>();
+        // A companion-associated function opens its classifier's static scope, with no `this`.
+        let companion_classifier = extension_receiver
+            .filter(|_| f.is_companion_extension())
+            .and_then(Ty::obj_internal);
+        let block = self.enter_block_body(companion_classifier, f.is_companion_block_member());
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = extension_receiver.expect("receiver was resolved");
-            self.this_labels.push((f.name.clone(), recv_ty, false));
-            let label_index = self.this_labels.len() - 1;
-            self.extension_receiver_labels
-                .push((label_index, recv_ref.span));
-            self.this_extension_receiver = Some(recv_ref.span);
+            if companion_classifier.is_none() {
+                self.this_labels.push((f.name.clone(), recv_ty, false));
+                let label_index = self.this_labels.len() - 1;
+                self.extension_receiver_labels
+                    .push((label_index, recv_ref.span));
+                self.this_extension_receiver = Some(recv_ref.span);
+            }
             // Pick THIS declaration's overload out of the receiver+name overload set by matching its
             // parameter list (an extension may be overloaded by arity — `fun R.f()` and `fun R.f(x)`).
             let want = parameter_types.clone();
@@ -56836,13 +56736,18 @@ impl<'a> Checker<'a> {
         // Default arguments are evaluated in the caller's context. The extension receiver and
         // preceding value parameters are available, while later parameters are not.
         {
-            let defaults_scope = scope.declaration_function_child_with_context(
-                extension_receiver,
-                f.receiver
-                    .as_ref()
-                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
-                &context_receivers,
-            );
+            let defaults_scope = match companion_classifier {
+                Some(classifier) => {
+                    scope.declaration_companion_function_child(classifier, &context_receivers)
+                }
+                None => scope.declaration_function_child_with_context(
+                    extension_receiver,
+                    f.receiver
+                        .as_ref()
+                        .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
+                    &context_receivers,
+                ),
+            };
             let scope = &defaults_scope;
             self.check_parameter_defaults(
                 scope,
@@ -56853,13 +56758,18 @@ impl<'a> Checker<'a> {
             );
         }
         {
-            let params_scope = scope.declaration_function_child_with_context(
-                extension_receiver,
-                f.receiver
-                    .as_ref()
-                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
-                &context_receivers,
-            );
+            let params_scope = match companion_classifier {
+                Some(classifier) => {
+                    scope.declaration_companion_function_child(classifier, &context_receivers)
+                }
+                None => scope.declaration_function_child_with_context(
+                    extension_receiver,
+                    f.receiver
+                        .as_ref()
+                        .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
+                    &context_receivers,
+                ),
+            };
             let scope = &params_scope;
             for (index, (p, &ty)) in f.params.iter().zip(&parameter_types).enumerate() {
                 if p.name != "_" {
@@ -56897,12 +56807,13 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
-        if f.receiver.is_some() {
+        if f.receiver.is_some() && companion_classifier.is_none() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
         }
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
+        self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.diagnostic_function = previous_diagnostic_function;
         self.active_statement_suppressions
@@ -57106,14 +57017,25 @@ impl<'a> Checker<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        // A companion-associated property opens its classifier's static scope; see functions.
+        let companion_classifier = recv_ty
+            .filter(|_| p.is_companion_extension)
+            .and_then(Ty::obj_internal);
+        let value_receiver = recv_ty.filter(|_| companion_classifier.is_none());
+        let block = self.enter_block_body(companion_classifier, p.is_companion_block_member);
         let resolved_property_ty = {
-            let context_scope = scope.declaration_function_child_with_context(
-                recv_ty,
-                p.receiver
-                    .as_ref()
-                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
-                &context_receivers,
-            );
+            let context_scope = match companion_classifier {
+                Some(classifier) => {
+                    scope.declaration_companion_function_child(classifier, &context_receivers)
+                }
+                None => scope.declaration_function_child_with_context(
+                    recv_ty,
+                    p.receiver
+                        .as_ref()
+                        .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
+                    &context_receivers,
+                ),
+            };
             let scope = &context_scope;
             for parameter in &p.context_params {
                 if parameter.name == "_" {
@@ -57122,7 +57044,7 @@ impl<'a> Checker<'a> {
                 let parameter_type = self.type_ref_ty(scope, &parameter.ty);
                 self.declare_context_parameter(scope, &parameter.name, parameter_type);
             }
-            if let Some(rt) = recv_ty {
+            if let Some(rt) = value_receiver {
                 self.this_labels.push((p.name.clone(), rt, false));
                 let label_index = self.this_labels.len() - 1;
                 let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
@@ -57234,7 +57156,7 @@ impl<'a> Checker<'a> {
                     }
                 });
             }
-            if recv_ty.is_some() {
+            if value_receiver.is_some() {
                 self.extension_receiver_labels.pop();
                 self.this_labels.pop();
             }
@@ -57347,6 +57269,7 @@ impl<'a> Checker<'a> {
                 explicit_type_required,
             );
         }
+        self.leave_block_body(block);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }
@@ -61403,194 +61326,6 @@ impl<'a> Checker<'a> {
             property.setter.as_ref().map(|_| property.setter_visibility),
             property.stable_declaration,
         ))
-    }
-
-    /// Resolve a bare property write through Kotlin's ordered implicit receivers. Every provider
-    /// exposes the same getter/setter pair; declaration origin affects only later linkage.
-    /// A read-only property on a nearer receiver is terminal and must not fall through to a farther
-    /// writable receiver.
-    fn implicit_property_write(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<ImplicitPropertyWriteResolution> {
-        for implicit_receiver in self.implicit_receivers(scope) {
-            if let Some(property) = self.property_write_on_receiver(scope, implicit_receiver, name)
-            {
-                return Some(property);
-            }
-        }
-        let (receiver, declared_name, _) = self.imported_singleton_member(name)?;
-        self.property_write_on_receiver(scope, receiver, &declared_name)
-    }
-
-    fn property_write_on_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ImplicitReceiver,
-        name: &str,
-    ) -> Option<ImplicitPropertyWriteResolution> {
-        if let Some(property) = self.checked_body_local_property(receiver.ty, name) {
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ty,
-                is_var: property.mutable,
-                context_args: Vec::new(),
-                getter: None,
-                setter: None,
-                extension: None,
-                stable_declaration: property.stable_declaration,
-            });
-        }
-        let selected = self.resolver().select_member_property_applicable_where(
-            receiver.ty,
-            name,
-            |property| {
-                let context_types = property.getter.params.get(..property.context_count)?;
-                self.select_context_arguments_with_types(scope, context_types)
-                    .ok()
-                    .map(|_| {
-                        (
-                            self.receiver_property_accessible(
-                                property.visibility,
-                                property.owner,
-                                receiver.ty,
-                            ),
-                            property.context_count,
-                        )
-                    })
-            },
-        );
-        if let Some((selected_ty, property)) = selected.and_then(|selected| {
-            let ty = selected.ty;
-            selected.property.map(|property| (ty, property))
-        }) {
-            let context_types = property.getter.params.get(..property.context_count)?;
-            let context_args = self.select_context_arguments(scope, context_types)?;
-            let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
-                receiver.ty,
-                property.getter.clone(),
-                false,
-            );
-            getter.context_args = context_args.iter().cloned().map(Some).collect();
-            getter.member.context_count = property.context_count;
-            getter.member.stable_declaration =
-                property.getter_declaration.or(property.stable_declaration);
-            let setter = property.setter.clone().map(|callable| {
-                crate::symbol_resolver::ResolvedPropertySetter {
-                    callable,
-                    visibility: property.setter_visibility,
-                    source_member: property.source_member,
-                    stable_declaration: property.stable_declaration,
-                }
-            });
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: selected_ty,
-                is_var: setter.is_some(),
-                context_args,
-                getter: Some(getter),
-                setter,
-                extension: None,
-                stable_declaration: property.stable_declaration,
-            });
-        }
-        let getter = self.select_property_member(receiver.ty, name);
-        let setter = self.select_property_setter(receiver.ty, name);
-        if let Some(setter) = setter {
-            let ty = setter.callable.params.first().copied().unwrap_or(Ty::Error);
-            let stable_declaration = setter.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: ty,
-                is_var: true,
-                context_args: Vec::new(),
-                getter,
-                setter: Some(setter),
-                extension: None,
-                stable_declaration,
-            });
-        }
-        if let Some(property) = getter {
-            let stable_declaration = property.member.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ret,
-                is_var: false,
-                context_args: Vec::new(),
-                getter: Some(property),
-                setter: None,
-                extension: None,
-                stable_declaration,
-            });
-        }
-        if let Ok(Some(property)) = self.resolver().select_extension_property(receiver.ty, name) {
-            let context_args = if property.context_count == 0 {
-                Vec::new()
-            } else {
-                let context_types = property.getter.params.get(1..1 + property.context_count)?;
-                self.select_context_arguments(scope, context_types)?
-            };
-            return Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ty,
-                is_var: property.setter.is_some(),
-                context_args: Vec::new(),
-                getter: None,
-                setter: None,
-                extension: Some(ResolvedPropertyAccess {
-                    property,
-                    context_args,
-                }),
-                stable_declaration: None,
-            });
-        }
-        None
-    }
-
-    fn implicit_property_write_target(
-        &self,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) -> ImplicitPropertyWriteTarget {
-        let receiver = self.implicit_receiver_selection(resolution.receiver);
-        if let Some(access) = &resolution.extension {
-            ImplicitPropertyWriteTarget::Extension {
-                receiver,
-                access: Box::new(access.clone()),
-            }
-        } else {
-            ImplicitPropertyWriteTarget::Member {
-                receiver,
-                stable_declaration: resolution.stable_declaration,
-                property_ty: resolution.property_ty,
-                context_args: resolution.context_args.clone(),
-                getter: resolution.getter.clone().map(Box::new),
-                setter: resolution.setter.clone().map(Box::new),
-            }
-        }
-    }
-
-    fn record_implicit_property_write(
-        &mut self,
-        stmt: StmtId,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) {
-        let target = self.implicit_property_write_target(resolution);
-        self.stmt_lowers
-            .insert(stmt, StmtLowering::ImplicitPropertyWrite(Box::new(target)));
-    }
-
-    fn record_implicit_property_incdec(
-        &mut self,
-        expression: ExprId,
-        resolution: &ImplicitPropertyWriteResolution,
-    ) {
-        self.mark_extension_receiver_used(expression, resolution.receiver);
-        let target = self.implicit_property_write_target(resolution);
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::ImplicitPropertyIncDec(Box::new(target)),
-        );
     }
 
     /// `args` are the reference's type arguments (`[V]` at arity 0, `[Recv, V]` at arity 1).
@@ -67545,38 +67280,18 @@ impl<'a> Checker<'a> {
                     Some(ExprLowering::BackingFieldRead)
                 )
                 .then_some((read_ty, true));
-                let implicit_property = (local_binding.is_none() && backing_field.is_none())
-                    .then(|| self.implicit_property_write(scope, &name))
-                    .flatten();
-                if let Some(resolution) = &implicit_property {
-                    self.record_implicit_property_incdec(e, resolution);
-                }
-                let top_level_property = (local_binding.is_none()
-                    && backing_field.is_none()
-                    && implicit_property.is_none())
-                .then(|| match self.select_top_level_property(scope, &name) {
-                    TopLevelPropertySelection::Selected(property) => Some(property),
-                    TopLevelPropertySelection::Ambiguous
-                    | TopLevelPropertySelection::MissingContext(..)
-                    | TopLevelPropertySelection::None => None,
-                })
-                .flatten();
-                if let Some(property) = top_level_property.clone() {
-                    self.expr_lowers
-                        .insert(e, ExprLowering::TopLevelPropertyIncDec(property));
+                let property = if local_binding.is_none() && backing_field.is_none() {
+                    self.implicit_property_write(scope, &name)
+                } else {
+                    PropertyWriteSelection::None
+                };
+                if property.storage().is_some() {
+                    self.record_implicit_property_incdec(e, &property);
                 }
                 match local_binding
                     .or(backing_field)
-                    .or_else(|| {
-                        implicit_property
-                            .as_ref()
-                            .map(|resolution| (resolution.property_ty, resolution.is_var))
-                    })
-                    .or_else(|| {
-                        top_level_property.as_ref().map(|property| {
-                            (property.property.ty, property.property.setter.is_some())
-                        })
-                    }) {
+                    .or_else(|| property.storage())
+                {
                     Some((storage_ty, is_var)) => {
                         if !is_var {
                             self.report_val_reassignment(
@@ -67612,8 +67327,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                     None => {
-                        self.diags
-                            .error(self.span(e), format!("unresolved reference '{name}'."));
+                        match property {
+                            PropertyWriteSelection::Ambiguous => self.diags.error(
+                                self.span(target),
+                                format!("overload resolution ambiguity for property '{name}'"),
+                            ),
+                            PropertyWriteSelection::MissingContext(..) => self.diags.error(
+                                self.span(target),
+                                format!("No context argument for '{name}' found."),
+                            ),
+                            PropertyWriteSelection::None
+                            | PropertyWriteSelection::Implicit(_)
+                            | PropertyWriteSelection::Receiverless(_) => self
+                                .diags
+                                .error(self.span(e), format!("unresolved reference '{name}'.")),
+                        }
                         Ty::Error
                     }
                 }
@@ -68445,7 +68173,7 @@ impl<'a> Checker<'a> {
                     );
                     return Some(ty);
                 }
-                if let Some(property) = self.libraries.classifier_associated_property(owner, name) {
+                if let Some(property) = self.resolver().associated_property(owner, name) {
                     let ty = property.ty;
                     if !self.receiver_is_assignable(ty, expected) {
                         return None;
@@ -68564,8 +68292,8 @@ impl<'a> Checker<'a> {
             return true;
         }
         if self
-            .libraries
-            .classifier_associated_property(owner, name)
+            .resolver()
+            .associated_property(owner, name)
             .is_some_and(|property| self.receiver_is_assignable(property.ty, expected))
         {
             return true;
@@ -68710,8 +68438,22 @@ impl<'a> Checker<'a> {
                     // the cached dispatch binding: an extension receiver or receiver lambda is nearer
                     // and its same-named property wins. The selected property supplies the type; using
                     // the cached dispatch type after selecting another receiver turned
-                    // `Token.value: String` into `Container.value: Int`.
-                    for receiver in self.implicit_receivers(scope) {
+                    // `Token.value: String` into `Container.value: Int`. A nearer class's static
+                    // scope is a rung of that tower too.
+                    for rung in self.implicit_rungs(scope) {
+                        let receiver = match rung {
+                            implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                                let selection =
+                                    self.select_static_scope_property(scope, classifier, &n);
+                                if let Some(ty) =
+                                    self.record_receiverless_property_read(e, &n, selection)
+                                {
+                                    return self.set(e, ty);
+                                }
+                                continue;
+                            }
+                            implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                        };
                         if let Some(selected_ty) =
                             self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                         {
@@ -68833,7 +68575,21 @@ impl<'a> Checker<'a> {
                 });
                 let mut deferred_receivers = Vec::new();
                 let implicit_receivers = self.implicit_receivers(scope);
-                for implicit_receiver in implicit_receivers.iter().copied() {
+                // A class's static scope directly follows its own receiver; see the call tower.
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            let selection =
+                                self.select_static_scope_property(scope, classifier, &n);
+                            if let Some(ty) =
+                                self.record_receiverless_property_read(e, &n, selection)
+                            {
+                                return self.set(e, ty);
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     if !implicit_receiver.current
                         && implicit_receiver.ty.obj_internal() == deferred_companion
                     {
@@ -69378,10 +69134,10 @@ impl<'a> Checker<'a> {
                     .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LATEINIT))
             })
         };
-        // Associated `companion lateinit var C.p` declarations live on an implicit/classifier
-        // receiver rung even though that receiver is only a lookup coordinate. Select the exact
-        // property-reference facet and require its stable `LATEINIT` header before publishing the
-        // compiler operation; the reflective property type alone cannot authorize it.
+        // Select the exact property-reference facet and require its stable `LATEINIT` header
+        // before publishing the compiler operation; the reflective property type alone cannot
+        // authorize it. Associated properties are reached through the classifier coordinate
+        // (`C::p`) or a static scope (`::p`, through the top-level rung below).
         let selected_on_receiver = |this: &Self, receiver: Ty| {
             let candidates = this.callable_ref_candidates(receiver, &name);
             candidates
@@ -69397,6 +69153,17 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if receiver.is_some() {
+            let associated = explicit_classifier
+                .and_then(Ty::obj_internal)
+                .map(|classifier| {
+                    self.resolver()
+                        .classifier_associated_properties(classifier, &name)
+                })
+                .unwrap_or_default();
+            if let [property] = associated.as_slice() {
+                return stable_is_lateinit(property.stable_declaration)
+                    .then_some(property.stable_declaration);
+            }
             if let Some(selected) =
                 explicit_classifier.and_then(|ty| selected_on_receiver(self, ty))
             {
@@ -69520,21 +69287,16 @@ impl<'a> Checker<'a> {
                         return self.set(e, ty);
                     }
                 }
-                if let Ok(Some(selection)) =
-                    self.select_property_read(scope, Ty::obj_name(owner), &name)
-                {
-                    let associated = matches!(
-                        &selection,
-                        PropertyReadSelection::Extension(access)
-                            if access.property.is_companion_extension()
-                    );
-                    if associated {
-                        if self.reject_inaccessible_classifier_expression(receiver, owner) {
-                            return self.set(e, Ty::Error);
-                        }
-                        let ty = self.record_property_read(scope, Some(e), selection);
-                        return self.set(e, ty);
+                // Associated properties precede the members of the companion-object value.
+                let associated = self.select_qualified_associated_property(scope, owner, &name);
+                if !matches!(associated, TopLevelPropertySelection::None) {
+                    if self.reject_inaccessible_classifier_expression(receiver, owner) {
+                        return self.set(e, Ty::Error);
                     }
+                    let ty = self
+                        .record_receiverless_property_read(e, &name, associated)
+                        .unwrap_or(Ty::Error);
+                    return self.set(e, ty);
                 }
                 if let Some((owner, property)) = self.classifier_property_for_owner(owner, &name) {
                     if self.reject_inaccessible_classifier_expression(receiver, owner) {
@@ -69550,8 +69312,7 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, ty);
                 }
-                if let Some(property) = self.libraries.classifier_associated_property(owner, &name)
-                {
+                if let Some(property) = self.resolver().associated_property(owner, &name) {
                     if self.reject_inaccessible_classifier_expression(receiver, owner) {
                         return self.set(e, Ty::Error);
                     }
@@ -70381,8 +70142,7 @@ impl<'a> Checker<'a> {
                     Some(Ty::fun(Vec::new(), property.ty))
                 }
                 CallableReferenceTarget::Property(property) => {
-                    let unbound = matches!(binding, CallableReferenceBinding::Unbound)
-                        && !property.companion_extension;
+                    let unbound = matches!(binding, CallableReferenceBinding::Unbound);
                     let extension = property.extension_facade.is_some();
                     let params = if unbound {
                         vec![if property.extension_facade.is_some() {
@@ -70421,13 +70181,8 @@ impl<'a> Checker<'a> {
                         Ty::fun(params, member.ret)
                     })
                 }
-                CallableReferenceTarget::Extension {
-                    callable,
-                    companion_extension,
-                    ..
-                } => {
-                    let unbound = matches!(binding, CallableReferenceBinding::Unbound)
-                        && !companion_extension;
+                CallableReferenceTarget::Extension { callable, .. } => {
+                    let unbound = matches!(binding, CallableReferenceBinding::Unbound);
                     let params = if !unbound {
                         callable.params.get(1..).unwrap_or_default().to_vec()
                     } else {
@@ -70957,6 +70712,20 @@ impl<'a> Checker<'a> {
         else {
             return UnboundRefSelection::NotClassifier;
         };
+        // `C::name` naming one of `C`'s associated declarations binds no receiver.
+        let associated = {
+            let resolver = self.resolver();
+            (
+                resolver.classifier_associated_callables(internal, name),
+                resolver.classifier_associated_properties(internal, name),
+            )
+        };
+        if let Some(ty) = self.associated_callable_ref(expression, name, associated, expected) {
+            return UnboundRefSelection::Selected(ty);
+        }
+        if self.reject_inaccessible_associated_reference(expression, internal, name) {
+            return UnboundRefSelection::Selected(Ty::Error);
+        }
         if self.classifier_is_object(internal) {
             return match self.nested_constructor_reference(
                 scope,
@@ -71156,10 +70925,7 @@ impl<'a> Checker<'a> {
                         .record_classifier_property_ref(expression, internal, name, property);
                 }
             }
-            if let Some(property) = self
-                .libraries
-                .classifier_associated_property(internal, name)
-            {
+            if let Some(property) = self.resolver().associated_property(internal, name) {
                 let applicable = expected_function.is_none_or(|expected| {
                     self.callable_ref_is_compatible(&[], property.ty, false, expected, true)
                 });
@@ -71696,7 +71462,27 @@ impl<'a> Checker<'a> {
                     let (params, ret) = Self::local_function_reference_shape(&sig, None);
                     return self.set(e, Ty::fun(params, ret));
                 }
-                for implicit_receiver in self.implicit_receivers(scope) {
+                // The static scopes open here name associated declarations without a receiver.
+                for rung in self.implicit_rungs(scope) {
+                    let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            let resolver = self.resolver();
+                            let functions =
+                                resolver.static_scope_associated_callables(classifier, &name);
+                            let properties =
+                                resolver.static_scope_associated_properties(classifier, &name);
+                            if let Some(ty) = self.associated_callable_ref(
+                                e,
+                                &name,
+                                (functions, properties),
+                                expected,
+                            ) {
+                                return self.set(e, ty);
+                            }
+                            continue;
+                        }
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                    };
                     let receiver = implicit_receiver.ty;
                     let candidates = self.callable_ref_candidates(receiver, &name);
                     if let Some(selection) = self.select_bound_callable_ref(&candidates, expected) {
@@ -72945,7 +72731,7 @@ impl<'a> Checker<'a> {
             statement,
             signature,
             context_args,
-        } = selected;
+        } = *selected;
         let context_count = signature.context_count.min(signature.params.len());
         self.expect_call_args(
             scope,
@@ -73054,11 +72840,11 @@ impl<'a> Checker<'a> {
         if selected.next().is_some() {
             return LocalExtensionSelection::Ambiguous;
         }
-        LocalExtensionSelection::Selected(SelectedLocalExtension {
+        LocalExtensionSelection::Selected(Box::new(SelectedLocalExtension {
             statement,
             signature,
             context_args,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -73127,7 +72913,10 @@ impl<'a> Checker<'a> {
                         return BareLocalSelection::Ambiguous;
                     }
                     LocalExtensionSelection::Selected(selected) => {
-                        return BareLocalSelection::Extension { receiver, selected };
+                        return BareLocalSelection::Extension {
+                            receiver,
+                            selected: *selected,
+                        };
                     }
                 }
             }
@@ -76908,21 +76697,6 @@ impl<'a> Checker<'a> {
         } else {
             false
         }
-    }
-
-    fn reject_property_if_inaccessible(
-        &mut self,
-        visibility: Visibility,
-        name: &str,
-        ty: Ty,
-        owner: TypeName,
-        property: Option<crate::fir::ExternalPropertyId>,
-        span: Span,
-    ) {
-        if self.member_accessible(visibility, owner) {
-            return;
-        }
-        self.report_inaccessible_property(visibility, name, ty, owner, property, span);
     }
 
     /// Render an already-established semantic property-access rejection. The caller owns receiver

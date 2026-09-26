@@ -1,0 +1,42 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[associated_declarations_are_not_members_of_instances]
+2.4.20:
+  Main.kt:6:9: unresolved reference 'f' on receiver of type 'C'.
+  Main.kt:7:9: unresolved reference 'q' on receiver of type 'C'.
+
+[companion_extension_has_no_value_receiver]
+2.4.20:
+  Main.kt:3:23: 'this' is not defined in this context.
+  Main.kt:4:23: unresolved reference 'm'.
+
+[kotlin_classifier_scope_does_not_inherit_companion_block_members]
+2.4.20:
+  Main.kt:6:38: unresolved reference 'marker'.
+
+[private_block_member_access_uses_the_declaring_class_lexical_boundary]
+2.4.20:
+  Main.kt:8:54: cannot access 'companion val innerOnly: String': it is private in 'Host.NestedOwner'.
+  Main.kt:9:68: cannot access 'companion val innerOnly: String': it is private in 'Host.NestedOwner'.
+
+[private_block_members_are_not_visible_from_another_file]
+2.4.20:
+  Use.kt:2:32: cannot access 'companion fun hidden(): String': it is private in 'Secret'.
+
+[private_block_members_are_owned_by_their_class_not_their_file]
+2.4.20:
+  Main.kt:12:18: cannot access 'companion fun hiddenCall(): String': it is private in 'Vault'.
+  Main.kt:12:39: cannot access 'companion val hiddenValue: String': it is private in 'Vault'.
+
+[qualified_overloaded_block_function_reference_has_one_ambiguity]
+2.4.20:
+  Main.kt:8:16: overload resolution ambiguity between candidates:
+  | companion fun f(x: Int): String
+  | companion fun f(x: String): String
+
+[static_scope_reference_without_an_expected_type_is_ambiguous]
+2.4.20:
+  Main.kt:7:20: overload resolution ambiguity between candidates:
+  | companion fun f(x: Int): String
+  | companion fun f(x: String): String

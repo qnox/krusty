@@ -10,6 +10,7 @@ use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 use std::collections::HashMap;
 
+mod companion_declarations;
 mod constructors;
 mod context_clause;
 mod debug_lines;
@@ -1167,21 +1168,6 @@ impl<'a> Parser<'a> {
                 .get(self.i + 1)
                 .is_some_and(|t| t.kind == TokenKind::Eq)
     }
-    fn at_companion_declaration(&self) -> bool {
-        self.at(TokenKind::Ident)
-            && self.keyword_text("companion")
-            && self.t.get(self.i + 1).is_some_and(|token| {
-                token.kind == TokenKind::LBrace || self.token_keyword_text(*token, "object")
-            })
-    }
-    fn at_companion_object_declaration(&self) -> bool {
-        self.at(TokenKind::Ident)
-            && self.keyword_text("companion")
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|token| self.token_keyword_text(*token, "object"))
-    }
     fn bump(&mut self) -> Token {
         let t = self.t[self.i];
         if self.i + 1 < self.t.len() {
@@ -1387,31 +1373,11 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            // `+CompanionBlocksAndExtensions`: `companion fun/val/var C.member …` is a real
-            // top-level declaration modifier. It is intentionally consumed only at file scope;
-            // inside a classifier, `companion object` and `companion { … }` select member grammar
-            // productions and must remain visible to that dispatcher.
-            if self.at(TokenKind::Ident) && self.keyword_text("companion") {
-                let save = self.i;
-                self.bump(); // `companion`
-                let mut tail = if self.at(TokenKind::At) || self.at_modifier() {
-                    self.skip_decl_prefix()
-                } else {
-                    Vec::new()
-                };
-                self.skip_newlines();
-                if matches!(
-                    self.kind(),
-                    TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar
-                ) {
-                    mods.push("companion".to_string());
-                    mods.append(&mut tail);
-                } else {
-                    self.i = save;
-                }
-            }
-            // `context` is a soft keyword and only starts a clause before a declaration.
+            self.take_top_level_companion_modifier(&mut mods);
+            // `context` is a soft keyword and only starts a clause before a declaration. Like any
+            // modifier, `companion` may follow it (`context(_: A) companion fun C.f()`).
             mods.extend(self.maybe_parse_context_receivers());
+            self.take_top_level_companion_modifier(&mut mods);
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
@@ -2326,6 +2292,7 @@ impl<'a> Parser<'a> {
             ty,
             is_var,
             is_companion_extension: false,
+            is_companion_block_member: false,
             is_override: false,
             is_lateinit,
             is_external: accessor_external,
@@ -2678,79 +2645,6 @@ impl<'a> Parser<'a> {
         debug_assert!(self.lexical_type_parameters.names().is_empty());
         self.lexical_type_parameters = enclosing_type_parameters;
         id
-    }
-
-    /// Parse a `companion { ... }` block as associated declarations on its containing classifier.
-    /// Unlike `companion object`, a block introduces no singleton classifier: its members use the
-    /// same receiver-less associated-call representation as `companion fun/val C.name`.
-    fn parse_companion_block(&mut self, outer: &str, modifiers: &[String]) {
-        let start = self.tok().span;
-        self.bump(); // `companion`
-        self.expect(TokenKind::LBrace, "'{'");
-        loop {
-            self.skip_newlines();
-            if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
-                break;
-            }
-            let mut member_modifiers = self.parse_member_decl_prefix();
-            member_modifiers.extend(modifiers.iter().cloned());
-            member_modifiers.push("companion".to_string());
-            let receiver = || TypeRef {
-                name: outer.to_string(),
-                flags: TrFlags::default(),
-                arg: None,
-                targs: Vec::new(),
-                span: start,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            };
-            match self.kind() {
-                TokenKind::KwFun => {
-                    let mut function = self.parse_fun(&member_modifiers);
-                    function.receiver = Some(receiver());
-                    let declaration = self.file.add_decl(Decl::Fun(function));
-                    self.file.decls.push(declaration);
-                }
-                TokenKind::KwVal | TokenKind::KwVar => {
-                    let lateinit = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "lateinit");
-                    let mut property = self.parse_top_property_c(
-                        lateinit,
-                        false,
-                        member_modifiers.iter().any(|modifier| modifier == "const"),
-                        false,
-                    );
-                    property.receiver = Some(receiver());
-                    property.visibility = visibility_of(&member_modifiers);
-                    property.is_open = !member_modifiers.iter().any(|modifier| modifier == "final")
-                        && member_modifiers
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override");
-                    property.is_override = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "override");
-                    property.is_external = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "external");
-                    property.is_expect =
-                        member_modifiers.iter().any(|modifier| modifier == "expect");
-                    property.is_actual =
-                        member_modifiers.iter().any(|modifier| modifier == "actual");
-                    property.is_companion_extension = true;
-                    let declaration = self.file.add_decl(Decl::Property(property));
-                    self.file.decls.push(declaration);
-                }
-                _ => {
-                    self.diags.error(
-                        self.tok().span,
-                        "expected a companion-block member declaration",
-                    );
-                    self.bump();
-                }
-            }
-        }
-        self.expect(TokenKind::RBrace, "'}'");
     }
 
     /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
@@ -3452,6 +3346,9 @@ impl<'a> Parser<'a> {
     fn reprefix_hoisted(&mut self, outer: &str, start: usize) {
         for k in start..self.file.decls.len() {
             let did = self.file.decls[k];
+            if self.reprefix_companion_receiver(did, outer) {
+                continue;
+            }
             if let crate::ast::Decl::Class(nc) = self.file.decl_mut(did) {
                 let previous_root = nc.name.split('.').next().unwrap_or_default().to_string();
                 nc.name = format!("{outer}.{}", nc.name);

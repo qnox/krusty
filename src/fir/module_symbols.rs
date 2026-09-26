@@ -610,6 +610,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             name: name.to_owned(),
             kind,
             receiver,
+            associated_classifier: None,
+            associated_access_owner: None,
             formals: Vec::new(),
             ty: Ty::Error,
             context_count,
@@ -1156,6 +1158,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                     PropKind::Member
                 },
                 receiver,
+                associated_classifier: None,
+                associated_access_owner: None,
                 formals,
                 // Property lookup exposes the declared Kotlin type. A narrower explicit backing
                 // field is storage visible only while checking the declaring body's lexical
@@ -1286,30 +1290,40 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .shape
                 .extension_receiver
                 .map(|receiver| receiver.get());
-            let companion_extension = header.flags.has(DeclarationFlags::COMPANION);
-            let imported_associated = associated_owner.is_some_and(|owner| {
-                companion_extension
-                    && receiver.and_then(|receiver| receiver.non_null().obj_internal())
-                        == Some(owner)
-            });
-            if package != Some(declaration_package) && !imported_associated {
-                continue;
-            }
-            let Some(signature) = self.index.signature(declaration) else {
-                let selected_receiver = (!imported_associated).then_some(receiver).flatten();
-                let kind = if imported_associated || receiver.is_none() {
-                    FnKind::TopLevel
-                } else {
-                    FnKind::Extension
+            // A companion-associated declaration belongs to its classifier's namespace only: it is
+            // never an extension of a value of that classifier. Its declared receiver names the
+            // classifier and is not a value parameter.
+            let associated_classifier = if header.flags.has(DeclarationFlags::COMPANION) {
+                let Some(classifier) = associated_owner.filter(|owner| {
+                    receiver.and_then(|receiver| receiver.non_null().obj_internal()) == Some(*owner)
+                }) else {
+                    continue;
                 };
-                if let Some(function) = self.failed_function_projection(
+                Some(classifier)
+            } else {
+                if package != Some(declaration_package) {
+                    continue;
+                }
+                None
+            };
+            let receiver = receiver.filter(|_| associated_classifier.is_none());
+            let kind = if receiver.is_some() {
+                FnKind::Extension
+            } else {
+                FnKind::TopLevel
+            };
+            let Some(signature) = self.index.signature(declaration) else {
+                if let Some(mut function) = self.failed_function_projection(
                     declaration,
                     name,
                     kind,
                     TypeName::ROOT,
-                    selected_receiver,
+                    receiver,
                     false,
                 ) {
+                    function.associated_classifier = associated_classifier;
+                    function.associated_access_owner = associated_classifier
+                        .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
                     functions.push(function);
                 }
                 continue;
@@ -1339,14 +1353,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             if let Some(receiver) = receiver {
                 realized_parameters.insert(context_count.min(realized_parameters.len()), receiver);
             }
-            let selected_receiver = (!imported_associated).then_some(receiver).flatten();
-            let kind = if imported_associated {
-                FnKind::TopLevel
-            } else if receiver.is_some() {
-                FnKind::Extension
-            } else {
-                FnKind::TopLevel
-            };
             let mut callable =
                 Self::semantic_callable(name, realized_parameters, result, receiver, context_count);
             callable.suspend = header.flags.has(DeclarationFlags::SUSPEND);
@@ -1363,14 +1369,6 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .callable_equality_bound(callable_header.id)
                 .map(|bound| bound.get());
             callable.generic_sig = generic_sig.clone().map(Box::new);
-            if companion_extension && receiver.is_some() {
-                let receiver_index = context_count.min(callable.physical_params.len());
-                callable.physical_params.remove(receiver_index);
-            }
-            if imported_associated && receiver.is_some() {
-                let receiver_index = context_count.min(callable.params.len());
-                callable.params.remove(receiver_index);
-            }
             let any = Ty::obj("kotlin/Any");
             let receiver_rank = if receiver.is_some_and(|receiver| {
                 receiver.non_null().is_ty_param() || receiver.non_null() == any
@@ -1379,8 +1377,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             } else {
                 0
             };
-            let mut function = FunctionInfo::plain(kind, selected_receiver, callable);
-            function.companion_extension = companion_extension;
+            let mut function = FunctionInfo::plain(kind, receiver, callable);
+            function.associated_classifier = associated_classifier;
+            function.associated_access_owner = associated_classifier
+                .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
             function.flags = FnFlags {
                 inline: InlineKind::from_flags(
                     callable_header.is_inline(),
@@ -1442,36 +1442,45 @@ impl<'a> StreamedModuleSymbols<'a> {
             let receiver = property
                 .and_then(|property| property.extension_receiver)
                 .map(|receiver| receiver.get());
-            let companion_extension = header.flags.has(DeclarationFlags::COMPANION);
-            let imported_associated = associated_owner.is_some_and(|owner| {
-                companion_extension
-                    && receiver.and_then(|receiver| receiver.non_null().obj_internal())
-                        == Some(owner)
-            });
-            if !package.is_some_and(|package| package == declaration_package)
-                && !imported_associated
-            {
-                continue;
-            }
+            // A companion-associated property belongs to its classifier's namespace only; its
+            // accessors take no classifier parameter.
+            let associated_classifier = if header.flags.has(DeclarationFlags::COMPANION) {
+                let Some(classifier) = associated_owner.filter(|owner| {
+                    receiver.and_then(|receiver| receiver.non_null().obj_internal()) == Some(*owner)
+                }) else {
+                    continue;
+                };
+                Some(classifier)
+            } else {
+                if !package.is_some_and(|package| package == declaration_package) {
+                    continue;
+                }
+                None
+            };
+            let receiver = receiver.filter(|_| associated_classifier.is_none());
             if header.visibility.is_private() && self.source_file != Some(anchor.source.raw()) {
                 continue;
             }
+            let kind = if receiver.is_some() {
+                PropKind::Extension
+            } else {
+                PropKind::TopLevel
+            };
             let Some(signature) = self.index.signature(declaration) else {
-                properties.push(self.failed_property_projection(
+                let mut failed = self.failed_property_projection(
                     declaration,
                     name,
-                    if imported_associated {
-                        PropKind::TopLevel
-                    } else if receiver.is_some() {
-                        PropKind::Extension
-                    } else {
-                        PropKind::TopLevel
-                    },
+                    kind,
                     TypeName::ROOT,
-                    (!imported_associated).then_some(receiver).flatten(),
+                    receiver,
                     property.map_or(0, |property| property.context_parameter_count as usize),
                     property.is_some_and(|property| property.mutable),
-                ));
+                );
+                failed.associated_classifier = associated_classifier;
+                if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+                    failed.associated_access_owner = associated_classifier;
+                }
+                properties.push(failed);
                 continue;
             };
             let Some(property) = property else {
@@ -1529,26 +1538,6 @@ impl<'a> StreamedModuleSymbols<'a> {
                     setter.generic_sig = Some(Box::new(setter_generic));
                 }
             }
-            if companion_extension {
-                if receiver.is_some() && !getter.physical_params.is_empty() {
-                    getter.physical_params.remove(0);
-                }
-                if let Some(setter) = &mut setter {
-                    if receiver.is_some() && !setter.physical_params.is_empty() {
-                        setter.physical_params.remove(0);
-                    }
-                }
-            }
-            if imported_associated {
-                if receiver.is_some() && !getter.params.is_empty() {
-                    getter.params.remove(0);
-                }
-                if let Some(setter) = &mut setter {
-                    if receiver.is_some() && !setter.params.is_empty() {
-                        setter.params.remove(0);
-                    }
-                }
-            }
             let setter_visibility = self
                 .index
                 .owned_declaration(declaration, DeclarationKind::Accessor, 1)
@@ -1557,14 +1546,11 @@ impl<'a> StreamedModuleSymbols<'a> {
             properties.push(PropertyInfo {
                 return_value_status: None,
                 name: name.to_owned(),
-                kind: if imported_associated {
-                    PropKind::TopLevel
-                } else if receiver.is_some() {
-                    PropKind::Extension
-                } else {
-                    PropKind::TopLevel
-                },
-                receiver: (!imported_associated).then_some(receiver).flatten(),
+                kind,
+                receiver,
+                associated_classifier,
+                associated_access_owner: associated_classifier
+                    .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)),
                 formals,
                 ty: read_ty,
                 context_count,

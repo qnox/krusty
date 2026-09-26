@@ -13,6 +13,7 @@ use crate::types::{Ty, TypeName};
 use super::{ClassSig, Signature, SymbolTable};
 
 mod callable_references;
+mod classifier_associated;
 mod classifier_identities;
 mod declaration_aliases;
 mod declaration_conflicts;
@@ -57,9 +58,9 @@ enum SelectedTopLevelCall {
         parameter_by_argument: Box<[Option<u32>]>,
     },
     Value(Box<crate::libraries::PropertyInfo>),
-    /// Runtime value denoted by a classifier name (an object singleton or companion). Call syntax
-    /// applies the ordinary `invoke` convention to this value before considering construction.
-    ClassifierValue(Ty),
+    /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
+    /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
+    ClassifierInvoke(TypeName, Option<Ty>),
     Constructor(Box<crate::libraries::LibraryMember>),
     /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
     /// constructor, so this is not a `Constructor` selection — the result is the interface itself.
@@ -1027,7 +1028,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut lexical_classes = Vec::new();
         let mut owner = Some(scope.owner);
         while let Some(declaration) = owner {
-            if let Some(classifier) = self.classifier_types.get(&declaration).copied() {
+            if let Some(classifier) = self.lexical_access_classifier(declaration) {
                 lexical_classes.push(classifier);
             }
             owner = self
@@ -3232,18 +3233,16 @@ impl ProductionSignatureSemantics<'_> {
                 owner = parent;
             }
         }
-        // A top-level EXTENSION PROPERTY (`val A.z get() = this.x`) also has a receiver, and `this`
-        // inside its accessor resolves to it. Only functions were consulted here, so the receiver
-        // was invisible and the whole module's signatures declined with no diagnostic.
+        // An extension property's accessor sees its receiver as `this`; a companion one has none.
         if let Some(receiver) = self
             .table
             .ext_props
             .values()
             .flatten()
             .find(|property| property.stable_declaration == Some(scope.owner))
-            .map(|property| property.receiver)
+            .map(|property| (!property.is_companion_extension).then_some(property.receiver))
         {
-            let mut receivers = vec![receiver];
+            let mut receivers = receiver.into_iter().collect::<Vec<_>>();
             receivers.extend(context_receivers);
             return receivers;
         }
@@ -3260,6 +3259,7 @@ impl ProductionSignatureSemantics<'_> {
                     .flatten(),
             )
             .find(|signature| signature.stable_declaration == Some(scope.owner))
+            .filter(|signature| !signature.is_companion_extension())
             .and_then(|signature| signature.source_receiver);
         let mut receivers = source_receiver.into_iter().collect::<Vec<_>>();
         receivers.extend(context_receivers);

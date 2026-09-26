@@ -17,6 +17,7 @@ mod bottom_value_tests;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
+mod companion_blocks;
 mod constant_folding;
 mod constructors;
 mod data_classes;
