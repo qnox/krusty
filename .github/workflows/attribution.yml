@@ -30,8 +30,10 @@ jobs:
         run: scripts/check-attribution.sh "$RANGE"
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
+      # Dependabot's text is quoted upstream release notes, which may name an assistant that
+      # contributed upstream; it says nothing about who wrote this change.
       - name: title and body
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
