@@ -1,12 +1,15 @@
 //! The semantic role of a type-operation target that a plain instance test or cast cannot decide.
 //!
 //! A mutable Kotlin collection shares its platform interface with its read-only face, and a
-//! function type erases to a class every lambda of any arity may implement. Both roles come from
-//! declaration facts: the mapped-collection builtins and the function-classifier builtins (or a
-//! `Ty::Fun` signature). A backend maps a role to its own runtime checks.
+//! function type erases to a class every lambda of any arity may implement. Both roles are
+//! declaration facts: a provider publishes a classifier's [`ClassifierRole`] on its record, this IR
+//! carries it for every classifier the file references, and a `Ty::Fun` signature carries its own
+//! arity. A backend maps a role to its own runtime checks and never recovers one from a name.
 
-use crate::types::wk::{self, CollectionKind};
-use crate::types::Ty;
+use super::referenced_classifiers::{collect_classifier_names, referenced_classifier_names};
+use super::{Callee, IrExpr, IrFile, IrIntrinsic};
+use crate::types::{ClassifierFactSource, ClassifierRole, CollectionKind, MappedCollection};
+use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TypeCheckRole {
@@ -16,27 +19,66 @@ pub enum TypeCheckRole {
     FunctionOfArity(u8),
 }
 
-impl TypeCheckRole {
-    /// The role of the target `ty` of an `is` or `as` (nullability aside).
-    pub fn of(ty: Ty) -> Option<Self> {
-        match ty.non_null() {
-            Ty::Obj(name, _) => {
-                if let Some(collection) = wk::mapped_collection(name) {
-                    return collection
-                        .mutable
-                        .then_some(Self::MutableCollection(collection.kind));
-                }
-                let classifier = crate::libraries::function_classifiers::classifier(name)?;
-                if classifier.is_suspend() || classifier.is_reflective() {
-                    return None;
-                }
-                u8::try_from(classifier.arity())
-                    .ok()
-                    .map(Self::FunctionOfArity)
+impl IrFile {
+    /// Record the checked role of every classifier this file references, from the one normalized
+    /// classifier-fact boundary. Runs once the file's types are final.
+    pub fn publish_classifier_roles(&mut self, classifiers: &dyn ClassifierFactSource) {
+        let mut referenced = referenced_classifier_names(self);
+        for substitutions in self.reified_call_subst.values() {
+            for (_, ty) in substitutions {
+                collect_classifier_names(*ty, &mut referenced);
             }
+        }
+        for expression in &self.exprs {
+            if let IrExpr::Call {
+                callee:
+                    Callee::Intrinsic {
+                        operation: IrIntrinsic::TypeOf { ty },
+                        ..
+                    },
+                ..
+            } = expression
+            {
+                collect_classifier_names(*ty, &mut referenced);
+            }
+        }
+        for classifier in referenced {
+            if self.classifier_roles.contains_key(&classifier) {
+                continue;
+            }
+            if let Some(role) = classifiers.classifier_role(classifier) {
+                self.classifier_roles.insert(classifier, role);
+            }
+        }
+    }
+
+    /// The published role of a referenced classifier.
+    pub fn classifier_role(&self, classifier: TypeName) -> Option<ClassifierRole> {
+        self.classifier_roles.get(&classifier).copied()
+    }
+
+    /// The mapped collection face a referenced classifier is, if any.
+    pub fn mapped_collection(&self, classifier: TypeName) -> Option<MappedCollection> {
+        match self.classifier_role(classifier)? {
+            ClassifierRole::MappedCollection(collection) => Some(collection),
+            ClassifierRole::FunctionOfArity(_) => None,
+        }
+    }
+
+    /// The role of the target `ty` of an `is` or `as` (nullability aside).
+    pub fn type_check_role(&self, ty: Ty) -> Option<TypeCheckRole> {
+        match ty.non_null() {
+            Ty::Obj(name, _) => match self.classifier_role(name)? {
+                ClassifierRole::MappedCollection(collection) => collection
+                    .mutable
+                    .then_some(TypeCheckRole::MutableCollection(collection.kind)),
+                ClassifierRole::FunctionOfArity(arity) => {
+                    Some(TypeCheckRole::FunctionOfArity(arity))
+                }
+            },
             Ty::Fun(signature) if !signature.suspend => u8::try_from(signature.params.len())
                 .ok()
-                .map(Self::FunctionOfArity),
+                .map(TypeCheckRole::FunctionOfArity),
             _ => None,
         }
     }
@@ -45,19 +87,100 @@ impl TypeCheckRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{IrConst, IrTypeOp};
     use crate::types::{intern_fnsig, type_name, FnSig};
 
-    #[test]
-    fn mutable_collections_and_plain_function_types_have_roles() {
-        let entry = Ty::Obj(type_name("kotlin/collections/MutableMap.MutableEntry"), &[]);
-        assert_eq!(
-            TypeCheckRole::of(Ty::nullable(entry)),
-            Some(TypeCheckRole::MutableCollection(CollectionKind::MapEntry))
-        );
-        assert_eq!(
-            TypeCheckRole::of(Ty::Obj(type_name("kotlin/collections/List"), &[])),
+    /// Publishes roles only for repository-owned classifiers, so any role the IR reports for a
+    /// Kotlin-looking name would have come from reading that name.
+    struct PublishedRoles;
+
+    impl ClassifierFactSource for PublishedRoles {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
             None
+        }
+
+        fn classifier_role(&self, classifier: TypeName) -> Option<ClassifierRole> {
+            if classifier == type_name("test/roles/Editable") {
+                Some(ClassifierRole::MappedCollection(MappedCollection {
+                    kind: CollectionKind::List,
+                    mutable: true,
+                }))
+            } else if classifier == type_name("test/roles/Readable") {
+                Some(ClassifierRole::MappedCollection(MappedCollection {
+                    kind: CollectionKind::List,
+                    mutable: false,
+                }))
+            } else if classifier == type_name("test/roles/Binary") {
+                Some(ClassifierRole::FunctionOfArity(2))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn test_of(ir: &mut IrFile, classifier: &str) -> Ty {
+        let target = Ty::Obj(type_name(classifier), &[]);
+        let arg = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg,
+            type_operand: target,
+        });
+        target
+    }
+
+    #[test]
+    fn published_roles_reach_type_operations() {
+        let mut ir = IrFile::default();
+        let editable = test_of(&mut ir, "test/roles/Editable");
+        let readable = test_of(&mut ir, "test/roles/Readable");
+        let binary = test_of(&mut ir, "test/roles/Binary");
+        let mutable_list = test_of(&mut ir, "kotlin/collections/MutableList");
+        let function = test_of(&mut ir, "kotlin/Function2");
+        ir.publish_classifier_roles(&PublishedRoles);
+
+        let roles = [editable, readable, binary, mutable_list, function]
+            .map(|target| ir.type_check_role(Ty::nullable(target)));
+        assert_eq!(
+            roles,
+            [
+                Some(TypeCheckRole::MutableCollection(CollectionKind::List)),
+                None,
+                Some(TypeCheckRole::FunctionOfArity(2)),
+                None,
+                None,
+            ]
         );
+        assert_eq!(
+            ir.mapped_collection(type_name("test/roles/Readable")),
+            Some(MappedCollection {
+                kind: CollectionKind::List,
+                mutable: false,
+            })
+        );
+    }
+
+    /// A reified call's type argument is tested inside the specialized body, so its classifier's
+    /// role is carried too.
+    #[test]
+    fn reified_type_arguments_carry_their_roles() {
+        let mut ir = IrFile::default();
+        let editable = Ty::Obj(type_name("test/roles/Editable"), &[]);
+        ir.reified_call_subst
+            .insert(0, vec![("T".to_string(), editable)]);
+        ir.publish_classifier_roles(&PublishedRoles);
+        assert_eq!(
+            ir.type_check_role(editable),
+            Some(TypeCheckRole::MutableCollection(CollectionKind::List))
+        );
+    }
+
+    #[test]
+    fn a_function_type_takes_its_signature_arity() {
+        let ir = IrFile::default();
         let function = |suspend| {
             Ty::Fun(intern_fnsig(FnSig {
                 params: vec![Ty::Int, Ty::String],
@@ -68,22 +191,9 @@ mod tests {
             }))
         };
         assert_eq!(
-            TypeCheckRole::of(function(false)),
+            ir.type_check_role(function(false)),
             Some(TypeCheckRole::FunctionOfArity(2))
         );
-        assert_eq!(TypeCheckRole::of(function(true)), None);
-    }
-
-    /// A written `FunctionN` classifier takes its arity from the builtins declaration, not from
-    /// how many type arguments the reference happens to carry.
-    #[test]
-    fn a_function_classifier_takes_its_declared_arity() {
-        let written = Ty::Obj(type_name("kotlin/Function2"), &[]);
-        assert_eq!(
-            TypeCheckRole::of(written),
-            Some(TypeCheckRole::FunctionOfArity(2))
-        );
-        let suspending = Ty::Obj(type_name("kotlin/coroutines/SuspendFunction1"), &[]);
-        assert_eq!(TypeCheckRole::of(suspending), None);
+        assert_eq!(ir.type_check_role(function(true)), None);
     }
 }

@@ -9,7 +9,7 @@
 //! a reified argument once it is substituted.
 
 use crate::ir::TypeCheckRole;
-use crate::types::wk::{CollectionKind, MappedCollection};
+use crate::types::{CollectionKind, MappedCollection};
 
 const TYPE_INTRINSICS: &str = "kotlin/jvm/internal/TypeIntrinsics";
 

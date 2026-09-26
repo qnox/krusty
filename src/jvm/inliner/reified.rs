@@ -38,26 +38,15 @@ struct Marker {
     repoint: Repoint,
 }
 
-/// Whether specializing `node` for `arguments` writes code of its own around a marker's
-/// type-bearing instruction (kotlinc's `ReifiedTypeInliner` checks), rather than only repointing
-/// it. A body whose markers cannot be planned generates nothing here; specialization reports it.
-pub(in crate::jvm) fn generates_checks(node: &MethodNode, arguments: &ReifiedArguments) -> bool {
-    plan(node, arguments).is_ok_and(|markers| {
-        markers.iter().any(|marker| match &marker.repoint {
-            Repoint::Class {
-                instruction,
-                mode,
-                nullable,
-                intrinsic,
-                ..
-            } => reified_type_checks::writes_code(
-                *mode,
-                &node.nodes[*instruction],
-                *nullable,
-                intrinsic.is_some(),
-            ),
-            Repoint::Forwarded { .. } | Repoint::TypeOf { .. } => false,
-        })
+/// Whether `node` calls `Intrinsics.reifiedOperationMarker`: its reified type parameters must be
+/// specialized for the call site, which only this inliner does.
+pub(in crate::jvm) fn has_reified_markers(node: &MethodNode) -> bool {
+    node.nodes.iter().any(|entry| {
+        matches!(
+            entry,
+            Node::Insn(Insn::Method { owner, name, .. })
+                if owner == INTRINSICS && name == "reifiedOperationMarker"
+        )
     })
 }
 
@@ -456,59 +445,12 @@ mod tests {
         }
     }
 
-    /// Only a check kotlinc writes code for sends a call off the byte splice: a non-null `is`
-    /// repoints its `instanceof`, while a nullable `is`, a non-null `as`, and a `TypeIntrinsics`
-    /// target each need the symbolic inliner. A forwarded argument keeps its marker.
     #[test]
-    fn generated_checks_are_the_ones_kotlinc_writes_code_for() {
-        let body = |mode, op| {
-            let mut node = MethodNode::new(0x0008, "t", "(Ljava/lang/Object;)Ljava/lang/Object;");
-            node.nodes = marker("T", mode);
-            node.nodes.push(Node::Insn(Insn::Type {
-                op,
-                class: "java/lang/Object".into(),
-            }));
-            node
-        };
-        let class = |nullable, intrinsic| ReifiedArguments {
-            classes: HashMap::from([(
-                "T".to_owned(),
-                ReifiedArgument::Class {
-                    internal: "a/Token".to_owned(),
-                    nullable,
-                    intrinsic,
-                    rendered: "a.Token".to_owned(),
-                },
-            )]),
-            ..Default::default()
-        };
-        let function = Some(TypeCheckRole::FunctionOfArity(1));
-        let cases = [
-            ((3, 0xc1), class(false, None), false),
-            ((3, 0xc1), class(true, None), true),
-            ((3, 0xc1), class(false, function), true),
-            ((1, 0xc0), class(true, None), false),
-            ((1, 0xc0), class(false, None), true),
-            ((2, 0xc0), class(true, None), true),
-        ];
-        for ((mode, op), arguments, expected) in cases {
-            assert_eq!(
-                generates_checks(&body(mode, op), &arguments),
-                expected,
-                "mode {mode} over {arguments:?}"
-            );
-        }
-        let forwarded = ReifiedArguments {
-            classes: HashMap::from([(
-                "T".to_owned(),
-                ReifiedArgument::Forwarded {
-                    name: "R".to_owned(),
-                    nullable: true,
-                },
-            )]),
-            ..Default::default()
-        };
-        assert!(!generates_checks(&body(3, 0xc1), &forwarded));
+    fn a_marker_call_makes_a_reified_body() {
+        let mut node = MethodNode::new(0x0008, "t", "()V");
+        assert!(!has_reified_markers(&node));
+        node.nodes = marker("T", 3);
+        assert!(has_reified_markers(&node));
     }
 
     #[test]

@@ -152,6 +152,7 @@ mod tests {
             annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
+            mapped_collection: None,
         })
     }
 

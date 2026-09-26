@@ -2685,6 +2685,7 @@ impl JvmLibraries {
                 // FIELD, never on the property.
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
+                mapped_collection: None,
             })
         }
     }
@@ -4268,6 +4269,8 @@ impl JvmLibraries {
             self.builtins_customizer
                 .customize(internal_name, self.build_library_type(internal_name))
                 .map(|mut classifier| {
+                    // Publish the collection face from this provider's builtin class map.
+                    classifier.mapped_collection = super::jvm_class_map::mapped_collection(internal_name);
                     for constructor in &mut classifier.constructors {
                         self.register_external_constructor(internal_name, constructor);
                     }

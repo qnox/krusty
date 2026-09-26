@@ -1,8 +1,7 @@
 //! The call-site values of an inline body's reified type parameters.
 //!
 //! This is the contract between the emitter, which knows each call's reified arguments, and the
-//! code that specializes an inline body for them: the symbolic inliner, and the raw-byte splicer's
-//! temporary adapter while it remains.
+//! symbolic inliner, the only code that specializes an inline body for them.
 
 use std::collections::HashMap;
 
@@ -11,12 +10,6 @@ use std::collections::HashMap;
 pub(in crate::jvm) struct ReifiedArguments {
     pub(in crate::jvm) classes: HashMap<String, ReifiedArgument>,
     pub(in crate::jvm) type_of: HashMap<String, Vec<crate::jvm::type_of::TypeOfInsn>>,
-}
-
-impl ReifiedArguments {
-    pub(in crate::jvm) fn is_empty(&self) -> bool {
-        self.classes.is_empty() && self.type_of.is_empty()
-    }
 }
 
 /// The call-site value of one reified type parameter of an inline body.

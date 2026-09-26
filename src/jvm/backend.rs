@@ -206,6 +206,9 @@ fn run_backend_passes_after_plugins(
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir);
+    // Every type the emitter will test or cast against is final now: carry each referenced
+    // classifier's checked role into the IR, where type operations read it.
+    ir.publish_classifier_roles(classifiers);
     Ok(())
 }
 

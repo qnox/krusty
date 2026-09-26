@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet};
 
 use super::reified_arguments::ReifiedArgument;
-use crate::ir::TypeCheckRole;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
@@ -86,7 +85,7 @@ pub(super) fn splice_type_map(
                 Some(ReifiedArgument::Class {
                     internal: reified_class_internal(*ty)?,
                     nullable: ty.is_nullable(),
-                    intrinsic: TypeCheckRole::of(*ty),
+                    intrinsic: ir.type_check_role(*ty),
                     rendered: render(ty.non_null()),
                 })
             })?;

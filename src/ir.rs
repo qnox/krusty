@@ -42,6 +42,7 @@ mod intrinsic;
 mod local_class_names;
 mod overrides;
 mod progression;
+pub(crate) mod referenced_classifiers;
 mod references;
 mod type_check_role;
 mod type_reflection;
@@ -2828,9 +2829,8 @@ pub struct IrFile {
     /// whose user-written name happens to resemble a backend helper. Consumers must treat the entry as
     /// valid only while the rewritten expression remains at the same arena index.
     erased_value_constructions: std::collections::HashMap<ExprId, (TypeName, Ty)>,
-    /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
-    /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
-    /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
+    /// Checked [`crate::types::ClassifierRole`] of each referenced classifier that has one.
+    classifier_roles: std::collections::HashMap<TypeName, crate::types::ClassifierRole>,
     /// Call `ExprId` → checked reified-type substitutions for a classpath inline declaration whose
     /// compiled body a target may splice. The values stay backend-agnostic [`Ty`]s here. At the JVM
     /// boundary, a concrete value becomes a class-pool operand while a reified parameter of the host

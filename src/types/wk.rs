@@ -38,22 +38,6 @@ names! {
     char_progression => "kotlin/ranges/CharProgression",
     uint_progression => "kotlin/ranges/UIntProgression",
     ulong_progression => "kotlin/ranges/ULongProgression",
-    iterator => "kotlin/collections/Iterator",
-    iterable => "kotlin/collections/Iterable",
-    collection => "kotlin/collections/Collection",
-    list => "kotlin/collections/List",
-    list_iterator => "kotlin/collections/ListIterator",
-    set => "kotlin/collections/Set",
-    map => "kotlin/collections/Map",
-    map_entry => "kotlin/collections/Map.Entry",
-    mutable_iterator => "kotlin/collections/MutableIterator",
-    mutable_iterable => "kotlin/collections/MutableIterable",
-    mutable_collection => "kotlin/collections/MutableCollection",
-    mutable_list => "kotlin/collections/MutableList",
-    mutable_list_iterator => "kotlin/collections/MutableListIterator",
-    mutable_set => "kotlin/collections/MutableSet",
-    mutable_map => "kotlin/collections/MutableMap",
-    mutable_map_entry => "kotlin/collections/MutableMap.MutableEntry",
 }
 
 /// How kotlinc's `ForLoopsLowering` treats a `kotlin.ranges` progression class. Its constructors
@@ -137,62 +121,3 @@ pub fn progression_builder(package: TypeName, name: &str) -> Option<ProgressionB
 /// element a stepped progression reaches (`getProgressionLastElementByReturnType`). Its overloads
 /// come from the provider's declarations.
 pub const PROGRESSION_LAST_ELEMENT: &str = "getProgressionLastElement";
-
-/// Which Kotlin collection classifier a mapped builtin is: kotlinc's `JavaToKotlinClassMap` pairs
-/// each read-only and mutable face with one JVM collection interface.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum CollectionKind {
-    Iterator,
-    Iterable,
-    Collection,
-    List,
-    ListIterator,
-    Set,
-    Map,
-    MapEntry,
-}
-
-/// A Kotlin collection classifier mapped onto a JVM collection interface, and which of its two
-/// faces it is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct MappedCollection {
-    pub kind: CollectionKind,
-    pub mutable: bool,
-}
-
-/// The mapped collection classifier `name` identifies, if any.
-pub fn mapped_collection(name: TypeName) -> Option<MappedCollection> {
-    let faces = [
-        (CollectionKind::Iterator, iterator(), mutable_iterator()),
-        (CollectionKind::Iterable, iterable(), mutable_iterable()),
-        (
-            CollectionKind::Collection,
-            collection(),
-            mutable_collection(),
-        ),
-        (CollectionKind::List, list(), mutable_list()),
-        (
-            CollectionKind::ListIterator,
-            list_iterator(),
-            mutable_list_iterator(),
-        ),
-        (CollectionKind::Set, set(), mutable_set()),
-        (CollectionKind::Map, map(), mutable_map()),
-        (CollectionKind::MapEntry, map_entry(), mutable_map_entry()),
-    ];
-    faces.into_iter().find_map(|(kind, read_only, mutable)| {
-        if name == read_only {
-            Some(MappedCollection {
-                kind,
-                mutable: false,
-            })
-        } else if name == mutable {
-            Some(MappedCollection {
-                kind,
-                mutable: true,
-            })
-        } else {
-            None
-        }
-    })
-}

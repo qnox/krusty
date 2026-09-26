@@ -164,7 +164,7 @@ impl Emitter<'_> {
         type_operand: Ty,
         code: &mut CodeBuilder,
     ) {
-        match TypeCheckRole::of(type_operand) {
+        match self.ir.type_check_role(type_operand) {
             Some(intrinsic) => self.emit_type_intrinsic_call(&instance_check(intrinsic), code),
             None => {
                 let class = self.cw.class_ref(internal);
@@ -191,7 +191,9 @@ impl Emitter<'_> {
         expression: ExprId,
         type_operand: Ty,
     ) -> Option<TypeCheckRole> {
-        TypeCheckRole::of(type_operand).filter(|_| self.ir.written_casts.contains(&expression))
+        self.ir
+            .type_check_role(type_operand)
+            .filter(|_| self.ir.written_casts.contains(&expression))
     }
 
     /// kotlinc's `TypeIntrinsics.checkcast` for a non-safe cast to a mutable collection or a

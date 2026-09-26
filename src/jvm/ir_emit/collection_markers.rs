@@ -5,18 +5,18 @@
 //! table and the class `Signature`. `TypeIntrinsics.isMutableList` and its siblings read them at
 //! run time, so a class without them is taken for a Java collection, which is always mutable.
 
-use crate::ir::IrClass;
+use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::type_intrinsics::collection_marker;
 
 /// The markers in kotlinc's order: first appearance among the direct supertypes, each once.
-pub(super) fn marker_interfaces(class: &IrClass) -> Vec<&'static str> {
+pub(super) fn marker_interfaces(ir: &IrFile, class: &IrClass) -> Vec<&'static str> {
     let mut markers = Vec::new();
     for supertype in &class.supertypes {
         let Some(marker) = supertype
             .non_null()
             .obj_internal()
-            .and_then(crate::types::wk::mapped_collection)
+            .and_then(|classifier| ir.mapped_collection(classifier))
             .map(collection_marker)
         else {
             continue;
@@ -29,19 +29,23 @@ pub(super) fn marker_interfaces(class: &IrClass) -> Vec<&'static str> {
 }
 
 /// Add the classifier's declared interfaces and then its collection markers.
-pub(super) fn add_interfaces(cw: &mut ClassWriter, class: &IrClass) {
+pub(super) fn add_interfaces(cw: &mut ClassWriter, ir: &IrFile, class: &IrClass) {
     for interface in class.interfaces.iter_rendered() {
         cw.add_interface(&interface);
     }
-    for marker in marker_interfaces(class) {
+    for marker in marker_interfaces(ir, class) {
         cw.add_interface(marker);
     }
 }
 
 /// A class `Signature` with the collection markers appended to its interfaces.
-pub(super) fn with_markers(signature: Option<String>, class: &IrClass) -> Option<String> {
+pub(super) fn with_markers(
+    signature: Option<String>,
+    ir: &IrFile,
+    class: &IrClass,
+) -> Option<String> {
     signature.map(|mut signature| {
-        for marker in marker_interfaces(class) {
+        for marker in marker_interfaces(ir, class) {
             signature.push('L');
             signature.push_str(marker);
             signature.push(';');
