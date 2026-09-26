@@ -1082,8 +1082,18 @@ mod member_property_inference_e2e;
 mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_array_signature_e2e.rs"]
 mod metadata_array_signature_e2e;
+#[path = "metadata_captured_type_parameters_e2e.rs"]
+mod metadata_captured_type_parameters_e2e;
+#[path = "metadata_enum_entry_classes_e2e.rs"]
+mod metadata_enum_entry_classes_e2e;
+#[path = "metadata_enum_supertypes_e2e.rs"]
+mod metadata_enum_supertypes_e2e;
 #[path = "metadata_field_presence_e2e.rs"]
 mod metadata_field_presence_e2e;
+#[path = "metadata_function_flags_e2e.rs"]
+mod metadata_function_flags_e2e;
+#[path = "metadata_inline_parameter_modifiers_e2e.rs"]
+mod metadata_inline_parameter_modifiers_e2e;
 #[path = "metadata_jvm_field_e2e.rs"]
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
@@ -1092,6 +1102,8 @@ mod metadata_kept_params;
 mod metadata_local_classes_e2e;
 #[path = "metadata_member_order_e2e.rs"]
 mod metadata_member_order_e2e;
+#[path = "metadata_parameter_defaults_e2e.rs"]
+mod metadata_parameter_defaults_e2e;
 #[path = "metadata_property_flags_e2e.rs"]
 mod metadata_property_flags_e2e;
 #[path = "metadata_reader_e2e.rs"]
