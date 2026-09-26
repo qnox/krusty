@@ -28,6 +28,17 @@ pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut 
     }
 }
 
+/// Mark a call's line at its physical dispatch: its own source line, or the line a generated call
+/// enters only there.
+pub(super) fn mark_dispatch(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
+    mark_expression_start(ir, expression, code);
+    if let Some(line) = ir.dispatch_line(expression) {
+        if line != 0 {
+            code.mark_line(line);
+        }
+    }
+}
+
 /// Mark the actual return instruction after any active `finally` blocks have run.
 ///
 /// An implicit expression-body return uses the body's closing line. An explicit return uses its own
@@ -35,11 +46,10 @@ pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut 
 /// to the pending return. A `return` written as a statement carries that line in the statement map
 /// rather than the per-expression one, so both are consulted.
 pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir
-        .implicit_return_end_lines
-        .get(&returned)
-        .or_else(|| ir.expr_source_lines.get(&returned))
-        .or_else(|| ir.expr_lines.get(&returned))
+    if let Some(line) = ir
+        .implicit_return_end_line(returned)
+        .or_else(|| ir.expr_source_lines.get(&returned).copied())
+        .or_else(|| ir.expr_lines.get(&returned).copied())
     {
         if line != 0 {
             code.mark_line(line);
@@ -120,7 +130,7 @@ impl Emitter<'_> {
     /// INLINE expansion, and kotlinc marks its call SITE instead (see
     /// [`Self::mark_inline_call_site_line`]).
     pub(super) fn mark_dispatch_line(&self, expression: ExprId, code: &mut CodeBuilder) {
-        mark_expression_start(self.ir, expression, code);
+        mark_dispatch(self.ir, expression, code);
     }
 
     /// Mark the site of an INLINE call, at the first instruction its expansion emits.
