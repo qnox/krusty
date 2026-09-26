@@ -33,6 +33,8 @@ pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) ty: TypeRef,
     pub(in crate::resolve) is_vararg: bool,
     pub(in crate::resolve) has_default: bool,
+    /// The `crossinline`/`noinline` modifier the parameter wrote.
+    pub(in crate::resolve) inline_modifier: crate::types::InlineParameterModifier,
     pub(in crate::resolve) annotations: Vec<TypeRef>,
     pub(in crate::resolve) type_annotations: Vec<TypeRef>,
     pub(in crate::resolve) annotation_class_literals: Vec<(usize, String)>,
@@ -136,6 +138,10 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
+                inline_modifier: crate::types::InlineParameterModifier::written(
+                    parameter.flags.materializes_its_lambda(),
+                    parameter.flags.is_crossinline(),
+                ),
                 annotations: materialize_range(parameter.annotations)?,
                 type_annotations: materialize_range(parameter.type_annotations)?,
                 annotation_class_literals: headers
@@ -279,6 +285,7 @@ pub(in crate::resolve) fn legacy_callable_header(function: &FunDecl) -> Streamed
                 ty: parameter.ty.clone(),
                 is_vararg: parameter.is_vararg,
                 has_default: parameter.default.is_some(),
+                inline_modifier: crate::resolve::written_inline_modifier(parameter),
                 annotations: parameter
                     .annotations
                     .iter()
@@ -937,6 +944,10 @@ pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
+                inline_modifier: crate::types::InlineParameterModifier::written(
+                    parameter.flags.materializes_its_lambda(),
+                    parameter.flags.is_crossinline(),
+                ),
                 annotations: headers
                     .syntax
                     .type_operands(parameter.annotations)

@@ -2888,10 +2888,10 @@ pub struct IrFile {
     /// Realized static call `ExprId` → the operand index its extension receiver was placed at. A
     /// JVM inliner reads an extension receiver differently from the parameters after it.
     pub static_extension_receivers: std::collections::HashMap<u32, u32>,
-    /// Realized inline-call `ExprId` → whether each ordinary call operand is a materialized
-    /// function parameter. Providers publish this declaration fact after inserting physical
-    /// receiver operands; JVM inlining consumes it instead of inferring `noinline` from types.
-    pub call_materialized_lambda_params: std::collections::HashMap<u32, Box<[bool]>>,
+    /// Realized inline-call `ExprId` → each call operand's parameter `crossinline`/`noinline`
+    /// modifier, published after the physical receiver operands are inserted.
+    pub call_inline_modifiers:
+        std::collections::HashMap<u32, Box<[crate::types::InlineParameterModifier]>>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether
@@ -3595,8 +3595,8 @@ pub use generated_members::{
 };
 mod function_parameters;
 pub use function_parameters::{
-    FnParamInfo, IrGeneratedParameterRole, IrInlineParameterModifier, IrParameterCheck,
-    IrParameterIdentity, IrParameterProvenance, IrParameterRole, IrVarargParameter,
+    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
+    IrParameterProvenance, IrParameterRole, IrVarargParameter,
 };
 mod traversal;
 pub use traversal::*;

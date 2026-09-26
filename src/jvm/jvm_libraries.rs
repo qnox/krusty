@@ -3569,9 +3569,9 @@ impl JvmLibraries {
     ) -> crate::libraries::Callables {
         let (mut functions, mut properties) = callables.into_parts();
         for function in &mut functions.overloads {
-            function.callable.lambda_materialized = function
+            function.callable.inline_modifiers = function
                 .call_sig
-                .lambda_materialized
+                .inline_modifiers
                 .clone()
                 .into_boxed_slice();
             self.register_external_callable(&mut function.callable, function.kind);

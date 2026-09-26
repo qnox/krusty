@@ -144,16 +144,6 @@ pub enum IrParameterCheck {
     NonNull,
 }
 
-/// The inline modifier a value parameter WROTE. `noinline` makes its argument a real closure;
-/// `crossinline` still splices it but forbids a non-local return. Declaration metadata records both.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum IrInlineParameterModifier {
-    #[default]
-    None,
-    Noinline,
-    Crossinline,
-}
-
 #[derive(Clone, Default, Debug)]
 pub struct FnParamInfo {
     pub identities: Vec<IrParameterIdentity>,
@@ -165,7 +155,7 @@ pub struct FnParamInfo {
     /// none: Kotlin forbids an override to write a default value.
     pub defaults_inherited: bool,
     /// Parallel to `identities` for a source declaration; empty for one the source did not write.
-    pub inline_modifiers: Vec<IrInlineParameterModifier>,
+    pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
 }
 
 impl FnParamInfo {
@@ -211,7 +201,7 @@ impl FnParamInfo {
         self.identities.insert(0, identity);
         if !self.inline_modifiers.is_empty() {
             self.inline_modifiers
-                .insert(0, IrInlineParameterModifier::None);
+                .insert(0, crate::types::InlineParameterModifier::None);
         }
     }
 }
@@ -228,7 +218,10 @@ impl IrFile {
 
     /// The inline modifier each value parameter of `fid` wrote, extension receiver excluded; empty
     /// for a function the source did not declare.
-    pub fn declared_inline_modifiers(&self, fid: u32) -> Vec<IrInlineParameterModifier> {
+    pub fn declared_inline_modifiers(
+        &self,
+        fid: u32,
+    ) -> Vec<crate::types::InlineParameterModifier> {
         let Some(info) = self.fn_params.get(&fid) else {
             return Vec::new();
         };
