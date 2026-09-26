@@ -28,6 +28,7 @@ mod module_members;
 mod operation_relocation;
 mod property_references;
 mod representation;
+mod result_tail_boxing;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
@@ -42,6 +43,7 @@ pub(crate) use representation::{
     boxed_value_class_names, boxed_value_class_terminal_underlying, boxed_value_class_underlying,
     is_boxed_value_class,
 };
+use result_tail_boxing::box_vc_tail;
 use std::collections::{HashMap, HashSet};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
@@ -4502,92 +4504,6 @@ pub(crate) fn lower_value_classes(
     property_references::realize(ir, &callable_under, property_reference_realizations)
 }
 
-/// Box an unboxed value-class result at every tail position of `id` (recursing `when`/block/return
-/// tails). `prim_only` (the lambda `() -> T` case) boxes only a primitive-underlying result — a
-/// reference one already satisfies the erased `Object`; the `Any`-return case (`prim_only = false`)
-/// boxes any, so an `is X`/`as X` on the result holds.
-fn box_vc_tail(ir: &mut IrFile, id: ExprId, under: &Under, rets: &[Ty], prim_only: bool) {
-    match &ir.exprs[id as usize] {
-        IrExpr::When { branches } => {
-            let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
-            for r in rs {
-                box_vc_tail(ir, r, under, rets, prim_only);
-            }
-        }
-        IrExpr::Block { value: Some(v), .. } => {
-            let v = *v;
-            box_vc_tail(ir, v, under, rets, prim_only);
-        }
-        // A statement-only block (`{ … ; return x }`) tails on its last statement.
-        IrExpr::Block { value: None, stmts } => {
-            if let Some(&last) = stmts.last() {
-                box_vc_tail(ir, last, under, rets, prim_only);
-            }
-        }
-        IrExpr::Return(Some(v)) => {
-            let v = *v;
-            box_vc_tail(ir, v, under, rets, prim_only);
-        }
-        // A supertype return-coercion (`make(): W` → `Any?`) wraps the value — box the INNER value, so
-        // the coercion then just widens the boxed `X` (a no-op), rather than boxing the coercion result.
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } if !prim_only => {
-            let arg = *arg;
-            box_vc_tail(ir, arg, under, rets, prim_only);
-        }
-        _ => {
-            if let Some(x) = unboxed_vc_class(&ir.exprs, rets, under, id, !prim_only) {
-                if ir.has_external_value_class_name(x) {
-                    return;
-                }
-                let prim = under
-                    .get(&x)
-                    .map(|u| !is_ref(&erase(u, under)))
-                    .unwrap_or(false);
-                if !prim_only || prim {
-                    box_wrap(ir, id, x, under);
-                }
-            }
-        }
-    }
-}
-
-/// The value class an expr produces UNBOXED (a `constructor-impl`/`unbox-impl` result, or a local call
-/// whose return type is a non-null value class), if any.
-fn unboxed_vc_class(
-    exprs: &[IrExpr],
-    rets: &[Ty],
-    under: &Under,
-    id: ExprId,
-    calls: bool,
-) -> Option<TypeName> {
-    match &exprs[id as usize] {
-        IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
-            ..
-        } if name == "constructor-impl" || name == "unbox-impl" => value_class_name(*owner, under),
-        // A local call returning an unboxed value class — only considered when `calls` is set (the
-        // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
-        IrExpr::Call { callee, .. } if calls && callee.source_function().is_some() => match rets
-            .get(
-                callee
-                    .source_function()
-                    .expect("guarded same-file function call") as usize,
-            ) {
-            Some(Ty::Obj(fq_name, _)) if under.contains_key(fq_name) => Some(*fq_name),
-            _ => None,
-        },
-        IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, under, *v, calls),
-        IrExpr::NotNullAssert { operand, .. } if calls => {
-            unboxed_vc_class(exprs, rets, under, *operand, calls)
-        }
-        _ => None,
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum BoxOp {
     Box(TypeName),
@@ -5455,9 +5371,14 @@ fn is_boxed_vc(
     if physical.get(&id).is_some_and(is_x) {
         return true;
     }
+    // An erased-top physical slot holds the box only for a generic result. Once `unbox_wrap` has
+    // realized `x`'s own `unbox-impl` over that slot, a carrier that is itself `Object`
+    // (`value class Box(val item: Any)`) records the same physical type, so that realized unbox
+    // decides.
     if types.get(&id).is_some_and(is_x)
         && physical.get(&id).is_some_and(|ty| ty.is_erased_top())
         && types.declared_value_class(id, under) != Some(x)
+        && !is_realized_unbox(exprs, id, x)
     {
         return true;
     }
@@ -5633,6 +5554,17 @@ fn boxed_vc(t: &Ty, under: &Under) -> Option<TypeName> {
         }
     }
     None
+}
+
+/// Whether the expr at `id` is `x`'s instance `unbox-impl`, as [`unbox_wrap`] realizes it.
+fn is_realized_unbox(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
+    matches!(
+        &exprs[id as usize],
+        IrExpr::Call {
+            callee: Callee::Virtual { owner, name, .. },
+            ..
+        } if *owner == x && name == "unbox-impl"
+    )
 }
 
 /// Whether the expr at `id` is an UNBOXED value-class value of class `x` (a `constructor-impl`/
