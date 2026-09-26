@@ -45,8 +45,8 @@ pub(super) fn emit_reference_invoke_bridge(
     let specialized = method_descriptor(&parameters, result);
     let erased = jvm_function_invoke_descriptor(arity);
     // A specialization that already erases to `FunctionN.invoke` is that method; nothing bridges.
-    // A mangled one over an `Any`-backed value class keeps the erased descriptor under its own name.
-    if function.name == "invoke" && specialized == erased {
+    // A renamed one over an `Any`-backed value class keeps the erased descriptor under its own name.
+    if !fr.invoke_renamed && specialized == erased {
         return;
     }
     cw.seed_utf8("invoke");

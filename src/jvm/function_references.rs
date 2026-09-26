@@ -171,6 +171,18 @@ fn realize_adapter_reference(
     let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
         adapted_flags(adaptation, reference.declaration_result)
     }) | (i32::from(suspend_conversion) << 1);
+    let reflected = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Module(_)
+        | crate::ir::IrCallableReferenceTarget::Local { .. } => {
+            crate::ir::ReflectedCallable::Source
+        }
+        crate::ir::IrCallableReferenceTarget::Constructor { .. } => {
+            crate::ir::ReflectedCallable::Constructor
+        }
+        crate::ir::IrCallableReferenceTarget::External { .. } => {
+            crate::ir::ReflectedCallable::Physical
+        }
+    };
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -257,6 +269,8 @@ fn realize_adapter_reference(
         invoke: None,
         function_type: reference.function_type.non_null(),
         reflection_signature,
+        reflected,
+        invoke_renamed: false,
     });
     let class = ir.add_class(class);
     if own_invoke {
