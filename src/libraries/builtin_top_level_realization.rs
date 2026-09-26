@@ -142,6 +142,18 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
         {
             Some(CompilerIntrinsic::NullableAnyToString)
         }
+        ("uintCompare", FnKind::TopLevel, None, [Ty::Int, Ty::Int])
+        | ("ulongCompare", FnKind::TopLevel, None, [Ty::Long, Ty::Long])
+            if facts.type_parameter_count == 0
+                && facts.vararg.is_none()
+                && !facts.is_operator
+                && !facts.is_infix
+                && facts.ret == Ty::Int =>
+        {
+            Some(CompilerIntrinsic::UnsignedCompare {
+                carrier: facts.params[0],
+            })
+        }
         ("assert", FnKind::TopLevel, None, [Ty::Boolean])
             if facts.type_parameter_count == 0
                 && facts.vararg.is_none()
@@ -319,7 +331,20 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     };
     use crate::types::wk::ProgressionBuilder;
     use crate::types::wk::ProgressionClass::{Progression, Range};
-    let integral = |ty: Ty| matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long | Ty::Char);
+    let integral = |ty: Ty| {
+        matches!(
+            ty,
+            Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Char
+                | Ty::UByte
+                | Ty::UShort
+                | Ty::UInt
+                | Ty::ULong
+        )
+    };
     match (
         crate::types::wk::progression_builder(facts.package, facts.name)?,
         facts.params,
@@ -413,6 +438,23 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
         };
     }
     None
+}
+
+/// The package and name of the top-level declaration a compiler-inserted call with `role` reaches.
+/// Only this provider boundary spells it; candidates still carry `role` only after
+/// [`function_realization`] has checked their full signature.
+pub(crate) fn runtime_function_declaration(
+    role: CompilerIntrinsic,
+) -> Option<(TypeName, &'static str)> {
+    match role {
+        CompilerIntrinsic::UnsignedCompare { carrier: Ty::Int } => {
+            Some((crate::types::type_name("kotlin"), "uintCompare"))
+        }
+        CompilerIntrinsic::UnsignedCompare { carrier: Ty::Long } => {
+            Some((crate::types::type_name("kotlin"), "ulongCompare"))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn function_realization(

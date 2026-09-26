@@ -156,6 +156,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
             start,
             end,
         },
+        unsigned_compare: None,
         body: outer,
         label: String::new(),
     }));
@@ -668,6 +669,7 @@ fn a_checked_range_declaration_reserves_its_value_slot() {
             start,
             end,
         },
+        unsigned_compare: None,
         body,
         label: "loop".to_string(),
     }));

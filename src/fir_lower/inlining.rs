@@ -1359,6 +1359,7 @@ mod value_rebasing_tests {
                 start: 0,
                 end: 1,
             },
+            unsigned_compare: None,
             body: 2,
             label: "loop".to_string(),
         });

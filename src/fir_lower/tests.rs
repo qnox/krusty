@@ -276,6 +276,7 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
                         start,
                         end,
                     },
+                unsigned_compare: None,
                 body,
                 label,
             }) => Some((

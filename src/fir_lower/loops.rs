@@ -29,6 +29,7 @@ struct RangeLoopContract<'a> {
     variable: LocalValueId,
     counter: FirRangeCounterKind,
     source: std::borrow::Cow<'a, FirProgressionSource>,
+    unsigned_compare: Option<&'a crate::fir::FirRuntimeFunction>,
     body: FirExprId,
 }
 
@@ -69,6 +70,7 @@ impl BodyLowering<'_> {
                 operation,
                 start,
                 end,
+                unsigned_compare,
             } => self.range_loop(RangeLoopContract {
                 target,
                 variable: *variable,
@@ -78,17 +80,20 @@ impl BodyLowering<'_> {
                     start: *start,
                     end: *end,
                 }),
+                unsigned_compare: unsigned_compare.as_ref(),
                 body,
             }),
             FirLoopHeader::Progression {
                 variable,
                 counter,
                 source,
+                unsigned_compare,
             } => self.range_loop(RangeLoopContract {
                 target,
                 variable: *variable,
                 counter: *counter,
                 source: std::borrow::Cow::Borrowed(source),
+                unsigned_compare: unsigned_compare.as_ref(),
                 body,
             }),
             FirLoopHeader::Iterable {
@@ -147,6 +152,7 @@ impl BodyLowering<'_> {
                 variable_name: self.body.debug_value_name(lp.variable).map(Into::into),
                 counter: lp.counter.ty(),
                 source,
+                unsigned_compare: lp.unsigned_compare.map(runtime_function),
                 body,
                 label: self.control_label(0, lp.target)?,
             })))
@@ -179,11 +185,7 @@ impl BodyLowering<'_> {
             } => IrProgressionSource::Step {
                 nested: Box::new(self.progression_source(nested)?),
                 step: self.expression(*step)?,
-                last_element: crate::ir::IrRuntimeFunction {
-                    function: last_element.function,
-                    parameters: last_element.parameters.to_vec(),
-                    result: last_element.result,
-                },
+                last_element: runtime_function(last_element),
             },
             FirProgressionSource::Reversed(nested) => {
                 IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))
@@ -555,5 +557,13 @@ impl BodyLowering<'_> {
                 )
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall),
         }
+    }
+}
+
+fn runtime_function(function: &crate::fir::FirRuntimeFunction) -> crate::ir::IrRuntimeFunction {
+    crate::ir::IrRuntimeFunction {
+        function: function.function,
+        parameters: function.parameters.to_vec(),
+        result: function.result,
     }
 }

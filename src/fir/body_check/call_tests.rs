@@ -964,25 +964,17 @@ fn unsigned_arithmetic_keeps_its_semantic_type_when_range_to_supplies_an_expecta
         "range",
         jvm_stdlib_semantics(),
     );
-    let FirExprKind::Call(range) = &body
+    let FirExprKind::Range { start, end, .. } = &body
         .expr(root_expression(&body))
-        .expect("unsigned range call")
+        .expect("unsigned range")
         .kind
     else {
-        panic!("unsigned range syntax must retain the selected rangeTo call")
+        panic!("unsigned range syntax must realize as range construction")
     };
-    assert!(matches!(range.target, FirCallTarget::External { .. }));
-    assert!(range.dispatch_receiver.is_some());
-    assert!(range.extension_receiver.is_none());
-    assert_eq!(range.arguments.len(), 1);
-    let receiver = range.dispatch_receiver.as_ref().expect("range start").value;
-    let FirExprKind::Call(start) = &body.expr(receiver).expect("unsigned plus call").kind else {
+    let FirExprKind::Call(start) = &body.expr(*start).expect("unsigned plus call").kind else {
         panic!("unsigned plus must retain its selected member call")
     };
     assert!(matches!(start.target, FirCallTarget::External { .. }));
-    let FirCallArgument::Expression { value: end, .. } = &range.arguments[0] else {
-        panic!("range end must remain an explicit checked argument")
-    };
     let FirExprKind::Call(end) = &body.expr(*end).expect("unsigned minus call").kind else {
         panic!("unsigned minus must retain its selected member call")
     };

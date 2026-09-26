@@ -5,6 +5,7 @@
 use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 use std::collections::HashMap;
 
@@ -19,6 +20,10 @@ pub struct ProgressionPlan {
     pub first: ProgressionMember,
     pub last: ProgressionMember,
     pub step: ProgressionMember,
+    /// The comparison a counted loop over unsigned elements orders them with: the declaration
+    /// carrying the provider's `UnsignedCompare` role for the element's carrier. `None` for a
+    /// signed or `Char` element.
+    pub compare: Option<RuntimeFunction>,
 }
 
 /// The progression facts a counted loop reads, keyed by progression class. A class's member plan
@@ -204,6 +209,14 @@ impl Checker<'_> {
                 .last_elements
                 .insert(ty, last_element);
         }
+        let compare = if first.ty.is_unsigned() {
+            match self.unsigned_loop_compare(first.ty) {
+                Some(compare) => Some(compare),
+                None => return,
+            }
+        } else {
+            None
+        };
         self.progression_plans.members.insert(
             ty,
             ProgressionPlan {
@@ -211,6 +224,7 @@ impl Checker<'_> {
                 first,
                 last,
                 step,
+                compare,
             },
         );
     }
@@ -225,6 +239,36 @@ impl Checker<'_> {
             &[element, element, step],
         )?;
         (function.result == element).then_some(function)
+    }
+
+    /// The comparison a counted loop orders two `element` values with. kotlinc passes it the value
+    /// class's declared underlying carrier, and the provider publishes the declaration that plays
+    /// that role (`CompilerIntrinsic::UnsignedCompare`) after checking its full signature. Exactly
+    /// one declaration may carry it: a second one on the classpath leaves the plan unselected
+    /// rather than letting candidate order decide which one a compiler-generated loop calls.
+    fn unsigned_loop_compare(&self, element: Ty) -> Option<RuntimeFunction> {
+        let carrier = self
+            .fed_source()
+            .classifier(element.kotlin_class_internal()?)?
+            .value_underlying?;
+        let role = crate::libraries::CompilerIntrinsic::UnsignedCompare { carrier };
+        let (package, name) =
+            crate::libraries::builtin_top_level_realization::runtime_function_declaration(role)?;
+        let scope = [package];
+        let mut candidates = self
+            .resolver_in_scope(&scope)
+            .top_level_candidates(name)
+            .into_iter()
+            .filter(|candidate| candidate.callable.compiler_intrinsic == Some(role));
+        let (Some(selected), None) = (candidates.next(), candidates.next()) else {
+            return None;
+        };
+        let callable = selected.callable;
+        Some(RuntimeFunction {
+            function: callable.external_identity?,
+            parameters: callable.params.into_boxed_slice(),
+            result: callable.ret,
+        })
     }
 
     /// Selects the stdlib function `name` of `package` a compiler-inserted call with `arguments`

@@ -305,6 +305,17 @@ pub fn compile_in_process(
     (report.diagnostics.is_empty() && !report.classes.is_empty()).then_some(report.classes)
 }
 
+/// The complete diagnostics of an in-process compile of `src`, in emission order; empty when it
+/// compiled.
+pub fn compile_in_process_diagnostics(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    compile_in_process_report(src, stem, cp_jars, jdk_modules).diagnostics
+}
+
 struct InProcessEmissionReport {
     artifacts: Vec<krusty::compiler::Artifact>,
     diagnostics: Vec<String>,

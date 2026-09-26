@@ -583,6 +583,8 @@ pub enum IrCheckedOperation {
         variable_name: Option<Box<str>>,
         counter: Ty,
         source: IrProgressionSource,
+        /// The selected comparison ordering an unsigned counter; `None` for any other counter.
+        unsigned_compare: Option<IrRuntimeFunction>,
         body: ExprId,
         label: String,
     },

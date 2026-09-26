@@ -229,6 +229,32 @@ fn range_result(left: Scalar, right: Scalar) -> Option<Ty> {
     }
 }
 
+/// `UInt.rangeTo`/`rangeUntil` and their `ULong` counterparts, which kotlinc constructs as directly
+/// as the builtin range operators. Their declarations come from the unsigned value classes' Kotlin
+/// metadata rather than `.kotlin_builtins`.
+pub(crate) fn unsigned_range_construction(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<MemberRealization> {
+    use crate::types::wk;
+    let open_end = match facts.name {
+        "rangeTo" => false,
+        "rangeUntil" => true,
+        _ => return None,
+    };
+    let (element, range) = if facts.owner == wk::uint() {
+        (Ty::UInt, wk::uint_range())
+    } else if facts.owner == wk::ulong() {
+        (Ty::ULong, wk::ulong_range())
+    } else {
+        return None;
+    };
+    (facts.is_operator
+        && !facts.is_property
+        && facts.params == [element]
+        && facts.ret == Ty::obj_name(range))
+    .then_some(MemberRealization::RangeConstruction { open_end })
+}
+
 fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberRealization> {
     let open_end = match facts.name {
         "rangeTo" => false,

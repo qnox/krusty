@@ -73,4 +73,10 @@ pub enum CompilerIntrinsic {
     RangeUntil,
     ProgressionStep,
     ProgressionReversed,
+    /// The stdlib's unsigned comparison over the carrier of an unsigned value class
+    /// (`uintCompare(Int, Int): Int`, `ulongCompare(Long, Long): Int`). kotlinc's counted loops
+    /// call it to order unsigned bounds; a source call of it is an ordinary call.
+    UnsignedCompare {
+        carrier: crate::types::Ty,
+    },
 }

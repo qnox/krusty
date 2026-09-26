@@ -47,6 +47,7 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
             start,
             end,
         },
+        unsigned_compare: None,
         body,
         label: "loop".to_string(),
     }));

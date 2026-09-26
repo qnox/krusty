@@ -26538,6 +26538,8 @@ impl<'a> Checker<'a> {
             Ty::range_counter_type_for(semantic_st, semantic_et)
         };
         let elem = if let Some(counter) = counter {
+            // The loop counts over a range class's selected members and helpers.
+            self.record_progression_plans();
             counter
         } else {
             let convention = match range.kind {

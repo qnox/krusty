@@ -279,4 +279,28 @@ fn progression_classes_publish_first_last_and_step() {
             "getProgressionLastElement over {element:?} publishes an external identity"
         );
     }
+    // An unsigned counted loop compares through the declaration that plays the provider's
+    // `UnsignedCompare` role for the element's carrier; exactly one stdlib declaration plays it.
+    for (name, carrier) in [("uintCompare", Ty::Int), ("ulongCompare", Ty::Long)] {
+        let role = krusty::libraries::CompilerIntrinsic::UnsignedCompare { carrier };
+        let symbols = lib.symbols(
+            krusty::symbol_source::SymbolNamespace::Package(krusty::types::wk::kotlin_package()),
+            name,
+        );
+        let (functions, _) = symbols.callables.clone().into_parts();
+        let roles = functions
+            .overloads
+            .iter()
+            .filter(|function| function.callable.compiler_intrinsic == Some(role))
+            .collect::<Vec<_>>();
+        let [compare] = roles.as_slice() else {
+            panic!("exactly one {name} plays {role:?}, found {}", roles.len());
+        };
+        assert_eq!(compare.callable.params, [carrier, carrier]);
+        assert_eq!(compare.callable.ret, Ty::Int);
+        assert!(
+            compare.callable.external_identity.is_some(),
+            "{name} publishes an external identity"
+        );
+    }
 }
