@@ -24,6 +24,7 @@ mod labelled_body;
 pub(crate) mod local_slots;
 pub(crate) mod negated_jumps;
 pub(crate) mod opcodes;
+mod optimization_limits;
 pub(crate) mod pipeline;
 mod pop_backward;
 pub(crate) mod redundant_boxing;

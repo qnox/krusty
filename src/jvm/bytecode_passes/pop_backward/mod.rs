@@ -16,6 +16,9 @@
 //! `getstatic kotlin/Unit.INSTANCE`) becomes a `nop`; a primitive `valueOf` or a primitive
 //! conversion becomes the `pop`/`pop2` of its own input; anything else gets a `pop`/`pop2` after
 //! it. A `pop2` never goes. The `nop`s are left to the later dead-code, `goto` and `nop` steps.
+//!
+//! Like kotlinc, the pass declines a method `canBeOptimizedUsingSourceInterpreter` rejects
+//! ([`fits_source_interpreter`]), before any analysis state is built.
 
 mod sources;
 
@@ -27,6 +30,7 @@ use std::collections::BTreeMap;
 
 use super::analysis::{analyze_with, opcode, AnalyzerError, AnalyzerOptions, Frame, PlainFrames};
 use super::opcodes::*;
+use super::optimization_limits::fits_source_interpreter;
 use super::redundant_boxing::is_primitive_boxing_insn;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 use sources::{HazardsTracking, SourceValue};
@@ -230,6 +234,14 @@ pub(crate) fn propagate(method: &mut MethodNode, owner: &str) -> Result<bool, An
         .instructions()
         .any(|insn| is_pop(insn) || is_pure_push(insn))
     {
+        return Ok(false);
+    }
+    if !fits_source_interpreter(method) {
+        crate::trace_compiler!(
+            "bytecode",
+            "pop propagation: {} is too large for the source analysis",
+            method.name
+        );
         return Ok(false);
     }
     let mut interpreter = HazardsTracking::new(method.nodes.len());
