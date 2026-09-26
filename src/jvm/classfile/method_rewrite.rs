@@ -17,13 +17,11 @@
 
 mod finished_node;
 
-use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
 use super::constant_pool_queries::PoolLookup;
 use super::stack_maps;
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::bytecode_passes::pipeline::{self, Outcome, PassContext};
-use crate::jvm::bytecode_passes::redundant_checkcasts::StackTops;
-use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
+use crate::jvm::inline::Insn;
 use crate::jvm::method_node::{LabelId, MethodNode};
 use finished_node::FinishedNode;
 
@@ -231,8 +229,8 @@ impl ClassWriter {
     /// could not be proven to keep its frames. `implicit_return` labels the method's implicit
     /// `return`, if it has one. The optimized body looks its constants up in `pool`, which records
     /// whether one was missing. This is the class-file boundary around the passes: it supplies the
-    /// method's entry state and the verifier's view of the emitted bytes, and lays the result out
-    /// again with its local-variable table re-keyed and its frames proven.
+    /// method's entry state, and lays the result out again with its local-variable table re-keyed
+    /// and its frames proven.
     pub(super) fn optimized(
         &self,
         method: &MethodInfo,
@@ -241,7 +239,6 @@ impl ClassWriter {
         implicit_return: Option<LabelId>,
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
-        let bytes = method.code.as_ref()?;
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
         if source.access & 0x0008 == 0 {
@@ -255,53 +252,10 @@ impl ClassWriter {
             return None;
         }
         let entry = expand_slots(&entry);
-        // The verifier's view of the method as emitted, by instruction number: what the
-        // redundant-cast pass asks about the value each cast sees.
-        let insns = disassemble(bytes)?;
-        let offsets = insn_offsets_at(&insns, 0);
-        let index_of = |pc: u16| offsets.binary_search(&usize::from(pc)).ok();
-        let handlers = method
-            .exceptions
-            .iter()
-            .map(|&(start, end, handler, _)| {
-                Some(Handler {
-                    start: index_of(start)?,
-                    end: index_of(end)?,
-                    handler: index_of(handler)?,
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let graph = ControlGraph::build(&insns, &handlers)?;
-        // Seed the walk with the frames the emitted bytecode itself implies: in particular, a typed
-        // catch handler enters with its declared exception class, not the generic `Throwable` used
-        // by an untyped exceptional edge. These are computed frames, never emitter-recorded
-        // semantic guesses; the rewritten body is computed and validated independently below.
-        let flow_types_cell = std::cell::OnceCell::new();
-        let flow_types = || {
-            flow_types_cell
-                .get_or_init(|| {
-                    let body = stack_maps::Body {
-                        access: source.access,
-                        name: source.name,
-                        descriptor: source.desc,
-                        code: bytes,
-                        exceptions: &method.exceptions,
-                        labels: stack_maps::table_labels(&method.lnt, &method.lvt, bytes.len()),
-                    };
-                    let frames = self
-                        .compute_frames(&body)
-                        .ok()
-                        .map(|computed| stack_maps::verif_frames(computed.frames()))?;
-                    FrameTypes::analyze(&insns, &graph, &entry, &frames, self)
-                })
-                .as_ref()
-        };
-        let stack_tops = || flow_types().map(|types| types as &dyn StackTops);
         let context = PassContext {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
-            stack_tops: &stack_tops,
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,
@@ -370,18 +324,6 @@ impl ClassWriter {
             lvt,
             implicit_void_return_pc,
         })
-    }
-}
-
-/// The class-file analysis answers the redundant-cast pass: `null`, or exactly the cast's class,
-/// on top of the verifier's stack.
-impl StackTops for FrameTypes {
-    fn is_exactly(&self, index: usize, class: &str) -> bool {
-        match self.before(index).and_then(|state| state.stack.last()) {
-            Some(VerificationType::Null) => true,
-            Some(VerificationType::Reference(name)) => **name == *class,
-            _ => false,
-        }
     }
 }
 
