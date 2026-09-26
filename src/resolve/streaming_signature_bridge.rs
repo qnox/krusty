@@ -1028,7 +1028,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut lexical_classes = Vec::new();
         let mut owner = Some(scope.owner);
         while let Some(declaration) = owner {
-            if let Some(classifier) = self.classifier_types.get(&declaration).copied() {
+            if let Some(classifier) = self.lexical_access_classifier(declaration) {
                 lexical_classes.push(classifier);
             }
             owner = self

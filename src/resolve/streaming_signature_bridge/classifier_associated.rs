@@ -36,6 +36,32 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> Option<crate::types::TypeName> {
+        self.declaration_association(declaration)
+            .map(|(classifier, _)| classifier)
+    }
+
+    /// The classifier whose lexical access `declaration` opens: a class's own, or the declaring
+    /// classifier of a `companion { … }` block member, whose body is inside that classifier (a
+    /// written `companion fun C.f` is outside `C`).
+    pub(super) fn lexical_access_classifier(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<crate::types::TypeName> {
+        self.classifier_types
+            .get(&declaration)
+            .copied()
+            .or_else(|| {
+                self.declaration_association(declaration)
+                    .filter(|(_, block_member)| *block_member)
+                    .map(|(classifier, _)| classifier)
+            })
+    }
+
+    /// A companion-associated declaration's classifier, and whether a block declared it.
+    fn declaration_association(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<(crate::types::TypeName, bool)> {
         let function = self
             .table
             .ext_funs
@@ -44,7 +70,12 @@ impl ProductionSignatureSemantics<'_> {
             .flatten()
             .find(|signature| signature.stable_declaration == Some(declaration))
             .filter(|signature| signature.is_companion_extension())
-            .and_then(|signature| signature.source_receiver);
+            .and_then(|signature| {
+                Some((
+                    signature.source_receiver?,
+                    signature.is_companion_block_member(),
+                ))
+            });
         let property = || {
             self.table
                 .ext_props
@@ -52,11 +83,11 @@ impl ProductionSignatureSemantics<'_> {
                 .flatten()
                 .find(|property| property.stable_declaration == Some(declaration))
                 .filter(|property| property.is_companion_extension)
-                .map(|property| property.receiver)
+                .map(|property| (property.receiver, property.is_companion_block_member))
         };
         function
             .or_else(property)
-            .and_then(|receiver| receiver.non_null().obj_internal())
+            .and_then(|(receiver, block)| Some((receiver.non_null().obj_internal()?, block)))
     }
 
     /// Classifiers whose static scope is open at `scope`, innermost first: the classifier of an

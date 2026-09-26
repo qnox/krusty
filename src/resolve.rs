@@ -56618,6 +56618,7 @@ impl<'a> Checker<'a> {
         let companion_classifier = extension_receiver
             .filter(|_| f.is_companion_extension())
             .and_then(Ty::obj_internal);
+        let block = self.enter_block_body(companion_classifier, f.is_companion_block_member());
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = extension_receiver.expect("receiver was resolved");
             if companion_classifier.is_none() {
@@ -56812,6 +56813,7 @@ impl<'a> Checker<'a> {
         }
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
+        self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.diagnostic_function = previous_diagnostic_function;
         self.active_statement_suppressions
@@ -57020,6 +57022,7 @@ impl<'a> Checker<'a> {
             .filter(|_| p.is_companion_extension)
             .and_then(Ty::obj_internal);
         let value_receiver = recv_ty.filter(|_| companion_classifier.is_none());
+        let block = self.enter_block_body(companion_classifier, p.is_companion_block_member);
         let resolved_property_ty = {
             let context_scope = match companion_classifier {
                 Some(classifier) => {
@@ -57266,6 +57269,7 @@ impl<'a> Checker<'a> {
                 explicit_type_required,
             );
         }
+        self.leave_block_body(block);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }

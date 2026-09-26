@@ -59,6 +59,26 @@ impl Checker<'_> {
         classifiers
     }
 
+    /// Enter a `companion { … }` block member's body, which is lexically inside its classifier: the
+    /// classifier's private declarations and nested classifiers are accessible there, with no `this`.
+    /// A written `companion fun/val C.name` stays outside `C`.
+    pub(super) fn enter_block_body(
+        &mut self,
+        classifier: Option<TypeName>,
+        block_member: bool,
+    ) -> Option<TypeName> {
+        let classifier = classifier.filter(|_| block_member)?;
+        self.lexical_class_context.insert(0, classifier);
+        Some(classifier)
+    }
+
+    pub(super) fn leave_block_body(&mut self, entered: Option<TypeName>) {
+        if let Some(classifier) = entered {
+            let removed = self.lexical_class_context.remove(0);
+            debug_assert_eq!(removed, classifier);
+        }
+    }
+
     /// The implicit rungs of `scope`, in the order compact signature solving walks them: a class's
     /// static scope directly follows its own instance receiver.
     pub(super) fn implicit_rungs(
