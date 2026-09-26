@@ -1,9 +1,9 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, platform-flexible, and type-parameter
-//! shapes.
-//! Backend-specific names and descriptors are kept out of this module.
+//! shapes. Backend-specific names and descriptors are kept out of this module.
 
 mod interning;
 pub use crate::context_parameters::ContextParameterKind;
+pub use crate::inline_parameter_modifier::InlineParameterModifier;
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 use std::collections::HashMap;

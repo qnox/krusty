@@ -85,6 +85,51 @@ pub(super) fn retain_selected(
     }
 }
 
+pub(super) fn candidate(
+    shape: &MemberExtensionFunctionShape,
+    instantiated: InstantiatedMemberExtension,
+) -> MemberExtensionFunctionCandidate {
+    MemberExtensionFunctionCandidate {
+        stable_declaration: shape.function.signature.stable_declaration,
+        external_identity: shape.function.external_identity,
+        external_default_provider: shape.function.external_default_provider,
+        priority: shape.priority,
+        dispatch_receiver: shape.dispatch_receiver,
+        score: instantiated.score,
+        physical_receiver: shape.function.physical_receiver,
+        extension_receiver: instantiated.extension_receiver,
+        params: instantiated.logical_params,
+        visible_params: instantiated.visible_params,
+        physical_params: shape.function.physical_params.clone(),
+        context_args: instantiated.context_sources,
+        context_count: shape.function.signature.context_count,
+        ret: instantiated.ret,
+        physical_ret: shape.function.signature.ret,
+        call_sig: instantiated.call_sig,
+        diagnostic_param_names: shape.function.signature.call_sig().param_names,
+        physical_vararg_index: instantiated.physical_vararg_index,
+        argument_parameters: instantiated.argument_parameters,
+        visibility: shape.function.signature.visibility,
+        is_operator: shape.is_operator,
+        inline: InlineKind::from_flags(
+            shape.function.signature.is_inline(),
+            shape.function.signature.requires_splice(),
+        ),
+        inline_body_plan: shape.function.inline_body_plan.clone(),
+        suspend: shape.function.signature.is_suspend(),
+        declared_params: shape
+            .function
+            .signature
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.params.clone())
+            .unwrap_or_else(|| shape.function.signature.params.clone()),
+        declared_ret: shape.function.declared_ret,
+        owner: shape.owner,
+        physical_name: shape.function.physical_name.clone(),
+    }
+}
+
 impl MemberExtensionFunctionSelection {
     pub(super) fn into_checker_result(
         self,

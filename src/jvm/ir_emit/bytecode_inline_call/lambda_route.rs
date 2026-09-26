@@ -42,13 +42,13 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
 
 impl Emitter<'_> {
     /// The route of `call`, whose callee's body invokes at least one of the literal lambdas among
-    /// its arguments. `materialized` is the call's published
-    /// materialization role for each value parameter. An error is a fact the checked IR or the
+    /// its arguments. `inline_modifiers` is the call's published `crossinline`/`noinline` modifier
+    /// for each value parameter. An error is a fact the checked IR or the
     /// callee's class file should have made impossible.
     pub(in crate::jvm::ir_emit) fn lambda_call_route(
         &mut self,
         call: &ClasspathInlineCall<'_, '_>,
-        materialized: &[bool],
+        inline_modifiers: &[crate::types::InlineParameterModifier],
         code: &CodeBuilder,
     ) -> Result<LambdaCallRoute, &'static str> {
         let ClasspathInlineCall {
@@ -85,11 +85,16 @@ impl Emitter<'_> {
             ) {
                 continue;
             }
-            let is_materialized = index
+            let inlining = index
                 .checked_sub(leading_non_argument_operands)
-                .and_then(|parameter| materialized.get(parameter))
-                .ok_or("a lambda argument has no published materialization role")?;
-            if *is_materialized {
+                .and_then(|parameter| inline_modifiers.get(parameter))
+                .ok_or("a lambda argument has no published crossinline/noinline modifier")?;
+            // Until crossinline lambdas are inlined, both modifiers take the splice.
+            if matches!(
+                inlining,
+                crate::types::InlineParameterModifier::Crossinline
+                    | crate::types::InlineParameterModifier::Noinline
+            ) {
                 return splice(SpliceReason::MaterializedLambda);
             }
             if let Some(reason) = self.lambda_splice_reason(argument) {
