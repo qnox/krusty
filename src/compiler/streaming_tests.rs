@@ -92,8 +92,7 @@ impl Backend for RecoveryMustNotLowerBackend {
 
 fn empty_signature_recovery_analysis() -> StreamingSourceSetAnalysis {
     let mut setup_diags = DiagSink::new();
-    let symbols =
-        crate::frontend::collect_signatures(&[], &mut setup_diags).into_pass_two_symbols();
+    let symbols = crate::resolve::collect_signatures(&[], &mut setup_diags).into_pass_two_symbols();
     assert!(setup_diags.diags.is_empty());
     StreamingSourceSetAnalysis {
         symbols,

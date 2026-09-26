@@ -16,7 +16,6 @@ use super::common;
 /// spelling against the declaration, whatever the encoder later does with it.
 #[test]
 fn resolution_records_the_alias_a_declared_type_spelled() {
-    use krusty::ast::Decl;
     const SRC: &str = "package app\n\
         \n\
         class Payload(val v: Int)\n\
@@ -24,21 +23,15 @@ fn resolution_records_the_alias_a_declared_type_spelled() {
         \n\
         fun make(c: Cargo): Cargo = c\n";
     let mut diags = krusty::diag::DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(SRC);
-    let tokens = krusty::lexer::lex(SRC, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        SRC, &tokens, &mut diags, &features,
-    )];
-    let symbols = krusty::frontend::collect_signatures(&files, &mut diags);
-    let make = files[0]
-        .decls
+    let (_, symbols, _) = krusty::frontend::analyze_source_standalone(SRC, &mut diags);
+    let symbols = symbols.expect("the fixture must parse");
+    let make = symbols.funs["make"]
         .iter()
-        .copied()
-        .find(|&d| matches!(files[0].decl(d), Decl::Fun(f) if f.name == "make"))
-        .expect("the fixture declares `make`");
+        .find_map(|signature| signature.stable_declaration)
+        .expect("the fixture declares stable `make`");
     let spellings = symbols
-        .declared_spellings
-        .get(&(0, make))
+        .stable_declared_spellings
+        .get(&make)
         .expect("a declaration spelling a typealias must be recorded");
     let cargo = Some(krusty::types::type_name("app/Cargo"));
     assert_eq!(spellings.ret.alias, cargo, "return type");

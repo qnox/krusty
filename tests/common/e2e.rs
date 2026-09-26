@@ -453,7 +453,7 @@ pub fn inspect_checker_with_stdlib<T>(
     let stdlib = common::stdlib_jar();
     let mut classpath = vec![stdlib];
     classpath.push(common::jdk_modules());
-    common::inspect_checker_with_classpath(main, classpath, inspect)
+    common::checker_analysis::inspect_checker_with_classpath(main, classpath, inspect)
 }
 
 /// Compile one in-memory fixture with the persistent reference compiler harness.

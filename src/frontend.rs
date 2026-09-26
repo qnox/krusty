@@ -24,9 +24,8 @@ pub(crate) use crate::resolve::Signature;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
-    check_file, check_file_at, check_file_in_source_set, collect_signatures,
-    collect_signatures_with_cp, AnonymousObjectCapture, AnonymousObjectCaptureSource,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, CompoundAssignmentTarget,
+    SourceConstructorMatcher,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
@@ -943,8 +942,15 @@ where
             source_contracts.extend(crate::resolve::extract_source_contract_candidates(
                 &file, source, &stubs,
             ));
-            signature_constraints.extract_file(&file, source, &stubs, |span| {
-                pass1_builder.source_origin(source, span)
+            // Inferred signatures are structurally copied into the compact graph before ordinary
+            // signature collection enters its own grown stack. Keep this recursive extraction on
+            // the same depth-safe boundary: the public indexed analysis path must preserve the
+            // checker's documented nesting contract without relying on the removed direct
+            // collection entry point.
+            crate::wide_stack::on_wide_stack(|| {
+                signature_constraints.extract_file(&file, source, &stubs, |span| {
+                    pass1_builder.source_origin(source, span)
+                });
             });
             // Compact signature extraction has consumed every ordinary expression dependency for
             // this source. Production keeps the parser body arenas only for bounded Pass-1 work
@@ -1215,13 +1221,18 @@ where
             &mut symbols,
         );
     }
-    let streamed_index = crate::resolve::finalized_streamed_signature_index(
-        &pass1_headers,
-        &mut symbols,
-        signature_constraints,
-        source_contracts,
-        diags,
-    );
+    // Solving an inferred signature graph recursively evaluates its compact expression tree. It
+    // has the same depth contract as extraction and body checking, so enter it on the shared grown
+    // stack rather than inheriting the caller thread's incidental stack size.
+    let streamed_index = crate::wide_stack::on_wide_stack(|| {
+        crate::resolve::finalized_streamed_signature_index(
+            &pass1_headers,
+            &mut symbols,
+            signature_constraints,
+            source_contracts,
+            diags,
+        )
+    });
     let mut recovery_streamed = None;
     let pending_streamed = if streamed_index.failures.is_empty() {
         let mut index = streamed_index.index;

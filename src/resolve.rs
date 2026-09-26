@@ -46,6 +46,10 @@ mod call_result_templates;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
+#[cfg(test)]
+mod checker_test_support;
+#[cfg(test)]
+use checker_test_support::{check_file, check_file_at, check_file_in_source_set};
 mod checker_symbol_queries;
 mod collection_literals;
 #[cfg(test)]
@@ -92,14 +96,15 @@ mod source_fragment;
 use source_fragment::SourceFragmentMode;
 mod scope;
 mod signature_collection;
-#[cfg(test)]
-pub(crate) use signature_collection::collect_signatures_with_cp_headers;
 use signature_collection::{
     base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
     resolve_source_alias_expansion, spelling_scope, supertype_components, supertype_graph,
 };
-pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
+#[cfg(test)]
+pub(crate) use signature_collection::{
+    collect_signatures, collect_signatures_with_cp, collect_signatures_with_cp_headers,
+};
 pub(crate) use signature_collection::{
     collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
 };
@@ -38791,7 +38796,7 @@ fn discover_anonymous_object_captures_at(
     }
 
     let mut scratch = DiagSink::new();
-    let info = check_file_at_impl_mode_with_index(
+    let info = check_file_at_impl_mode(
         file,
         file_index,
         None,
@@ -39010,7 +39015,11 @@ enum CaptureDiscovery<'a> {
     AtConstruction,
 }
 
-fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
+/// Shared checker implementation. Production body-check entry points require a stable index. The
+/// only index-free production callers are bounded signature work before stable publication:
+/// anonymous-capture discovery and classifier-annotation folding.
+#[allow(clippy::too_many_arguments)]
+fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
     file: &File,
     file_index: u32,
     source_files: Option<&[File]>,
@@ -39027,6 +39036,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
     let capture_discovery = matches!(captures, CaptureDiscovery::Scratch);
+    assert!(
+        resolved_index.is_some()
+            || capture_discovery
+            || fragment.is_classifier_annotations()
+            || cfg!(test),
+        "production body checking requires ResolvedModuleIndex",
+    );
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     let mut c = make_checker_with_index(
         file,
@@ -39762,29 +39778,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     info
 }
 
-pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
-    check_file_at(file, diags.current_file(), syms, diags)
-}
-
-pub fn check_file_at(
-    file: &File,
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    check_file_on_checker_stack(file, file_index, None, syms, diags)
-}
-
-pub fn check_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
-    check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
-}
-
 /// Check only the active declaration fragment that owns inline body work. Every non-active source
 /// declaration is resolved from `resolved_index`/`syms`; no sibling parser `File` is available at
 /// this boundary. This lets Pass 1 release each legacy declaration arena as soon as its retained
@@ -39801,7 +39794,7 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_file_at_impl_mode(
             file,
             file_index,
             None,
@@ -39833,7 +39826,7 @@ pub(crate) fn check_selected_declarations_in_pass_two(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_file_at_impl_mode(
             file,
             file_index,
             None,
@@ -39866,7 +39859,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_file_at_impl_mode(
             file,
             file_index,
             None,
@@ -39882,61 +39875,6 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             SourceFragmentMode::SignatureDefaults,
             None,
         )
-    })
-}
-
-/// Enter the check on a same-thread grown stack segment; `expr_with_context` rechecks the remaining
-/// stack per recursion level so paths with large helper frames can chain further segments before
-/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
-/// not the calling thread's stack — authoritative without moving non-`Send` symbols or
-/// caller-defined platform state (see [`crate::wide_stack`]).
-fn check_file_on_checker_stack(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    crate::wide_stack::on_wide_stack(move || {
-        let published = syms.pass_one_symbols().is_some_and(|symbols| {
-            file.anonymous_object_classes.values().all(|declaration| {
-                symbols
-                    .anonymous_object_capture_discovered
-                    .contains(&(file_index, *declaration))
-            })
-        });
-        let info = check_file_at_impl_mode_with_index(
-            file,
-            file_index,
-            source_files,
-            syms,
-            None,
-            diags,
-            if published {
-                CaptureDiscovery::Published
-            } else {
-                CaptureDiscovery::AtConstruction
-            },
-            None,
-            None,
-            None,
-            None,
-            None,
-            SourceFragmentMode::Complete,
-            None,
-        );
-        if !published {
-            // Every object constructed in the file was reached, so one without captures captures
-            // nothing.
-            let mut discovered = info.anonymous_object_captures_by_class.clone();
-            for declaration in file.anonymous_object_classes.values() {
-                discovered.entry(*declaration).or_default();
-            }
-            syms.begin_module_mutation();
-            install_anonymous_object_captures(syms, file_index, discovered);
-            syms.finish_module_mutation();
-        }
-        info
     })
 }
 

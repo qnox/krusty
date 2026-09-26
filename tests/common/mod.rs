@@ -1,8 +1,10 @@
 //! Shared test helpers.
 
+pub mod checker_analysis;
 mod kotlin_metadata;
 pub mod source_set_compile;
 
+use checker_analysis::checker_diagnostics_with_classpath;
 pub use source_set_compile::compile_in_process_files;
 
 pub(crate) use kotlin_metadata::raw_kotlin_metadata;
@@ -2097,7 +2099,7 @@ pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option
     let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
-    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
+    Some(checker_diagnostics_with_classpath(main, classpath))
 }
 
 /// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
@@ -2363,7 +2365,7 @@ pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec
     let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
-    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
+    Some(checker_diagnostics_with_classpath(main, classpath))
 }
 
 /// Check `main` against the Kotlin stdlib without lowering or emitting.
@@ -2372,37 +2374,7 @@ pub fn checker_diags_with_stdlib(main: &str) -> Option<Vec<String>> {
     let stdlib = stdlib_jar();
     let mut classpath = vec![stdlib];
     classpath.push(jdk_modules());
-    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
-}
-
-pub fn inspect_checker_with_classpath<T>(
-    main: &str,
-    classpath: Vec<PathBuf>,
-    inspect: impl FnOnce(
-        &krusty::ast::File,
-        &krusty::frontend::FrontendTypeInfo,
-        &krusty::frontend::FrontendSymbols,
-    ) -> T,
-) -> (Vec<String>, T) {
-    use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
-    let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(main);
-    let toks = krusty::lexer::lex(main, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        main, &toks, &mut diags, &features,
-    )];
-    let cp = std::rc::Rc::new(Classpath::new(classpath));
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
-    );
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let info = check_file(&files[0], &mut syms, &mut diags);
-    let inspected = inspect(&files[0], &info, &syms);
-    (
-        diags.diags.iter().map(|m| m.msg.clone()).collect(),
-        inspected,
-    )
+    Some(checker_diagnostics_with_classpath(main, classpath))
 }
 
 /// Whether both the JVM toolchain AND the box corpus are provisioned (an e2e that runs a corpus case

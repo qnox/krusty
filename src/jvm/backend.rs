@@ -1324,7 +1324,7 @@ fn build_facade_metadata(
 mod tests {
     use super::*;
     use crate::diag::DiagSink;
-    use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+    use crate::frontend::parse_source_with_detected_features;
 
     /// Every caller supplies a logical source stem, but module/corpus callers can retain directories
     /// that the CLI has already stripped. The shared constructor must own that normalization so all
@@ -1378,7 +1378,7 @@ mod tests {
             ),
         ];
         let stems = vec!["A".to_string(), "B".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
+        let mut syms = crate::resolve::collect_signatures(&files, &mut diags);
 
         prepare_module_symbols(&files, &stems, &mut syms);
 

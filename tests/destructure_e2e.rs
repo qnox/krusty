@@ -2,20 +2,13 @@
 //! the krusty binary, run on a real JVM. A type without `componentN` operators is cleanly rejected.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
-use krusty::lexer::lex;
-use krusty::parser::parse;
 
 use super::common;
 
 /// Run the checker only, returning its diagnostics (for the rejection test).
 fn check(src: &str) -> Vec<String> {
     let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let file = parse(src, &toks, &mut d);
-    let files = vec![file];
-    let mut syms = collect_signatures(&files, &mut d);
-    let _ = check_file(&files[0], &mut syms, &mut d);
+    let _ = krusty::frontend::analyze_source_standalone(src, &mut d);
     d.diags.iter().map(|x| x.msg.clone()).collect()
 }
 

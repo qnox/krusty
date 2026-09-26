@@ -38,14 +38,16 @@ pub(in crate::resolve) use type_universe::*;
 /// Stage C: collect top-level function + class signatures across all files. Two passes so that a
 /// class type can be referenced before its declaration (and across files).
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
-pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
+#[cfg(test)]
+pub(crate) fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     collect_signatures_with_cp(files, Box::new(EmptySymbolSource), diags)
 }
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists. No native
 /// compiler plugin runs; see [`collect_signatures_with_cp_and_plugins`].
-pub fn collect_signatures_with_cp(
+#[cfg(test)]
+pub(crate) fn collect_signatures_with_cp(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
@@ -53,9 +55,9 @@ pub fn collect_signatures_with_cp(
     collect_signatures_with_cp_and_plugins(files, libraries, NativePlugins::none(), diags)
 }
 
-/// [`collect_signatures_with_cp`] with the native compiler plugins the compilation runs: they add
-/// their generated declarations (a `@Serializable` class's `serializer()`) to the collected table,
-/// which keeps the selection for every later phase.
+/// Full signature collection with the native compiler plugins the compilation runs: they add their
+/// generated declarations (a `@Serializable` class's `serializer()`) to the collected table, which
+/// keeps the selection for every later phase.
 pub(crate) fn collect_signatures_with_cp_and_plugins(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,

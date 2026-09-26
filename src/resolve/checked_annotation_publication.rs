@@ -39,7 +39,7 @@ pub(crate) fn publish_checked_classifier_annotations(
         }
         diags.set_file(file_index as u32);
         let no_bodies = std::collections::HashSet::new();
-        let info = check_file_at_impl_mode_with_index(
+        let info = check_file_at_impl_mode(
             file,
             file_index as u32,
             Some(files),
