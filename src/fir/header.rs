@@ -2269,13 +2269,7 @@ pub fn extract_file_header_syntax(
                 name: names.intern(&parameter.name),
                 ty: headers.add_type(&parameter.ty, names),
                 context_kind: parameter.context_kind,
-                flags: HeaderParameterFlags::default()
-                    .with(HeaderParameterFlags::VARARG, parameter.is_vararg)
-                    .with(HeaderParameterFlags::DEFAULT, parameter.default.is_some())
-                    .with(
-                        HeaderParameterFlags::MATERIALIZED_LAMBDA,
-                        parameter.is_materialized_lambda,
-                    ),
+                flags: HeaderParameterFlags::of_value_parameter(parameter),
                 span: parameter.ty.span,
                 annotations,
                 type_annotations,
