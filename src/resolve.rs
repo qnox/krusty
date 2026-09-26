@@ -12451,7 +12451,7 @@ struct SelectedLocalExtension {
 
 enum LocalExtensionSelection {
     None,
-    Selected(SelectedLocalExtension),
+    Selected(Box<SelectedLocalExtension>),
     Ambiguous,
 }
 
@@ -72731,7 +72731,7 @@ impl<'a> Checker<'a> {
             statement,
             signature,
             context_args,
-        } = selected;
+        } = *selected;
         let context_count = signature.context_count.min(signature.params.len());
         self.expect_call_args(
             scope,
@@ -72840,11 +72840,11 @@ impl<'a> Checker<'a> {
         if selected.next().is_some() {
             return LocalExtensionSelection::Ambiguous;
         }
-        LocalExtensionSelection::Selected(SelectedLocalExtension {
+        LocalExtensionSelection::Selected(Box::new(SelectedLocalExtension {
             statement,
             signature,
             context_args,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -72913,7 +72913,10 @@ impl<'a> Checker<'a> {
                         return BareLocalSelection::Ambiguous;
                     }
                     LocalExtensionSelection::Selected(selected) => {
-                        return BareLocalSelection::Extension { receiver, selected };
+                        return BareLocalSelection::Extension {
+                            receiver,
+                            selected: *selected,
+                        };
                     }
                 }
             }

@@ -23,7 +23,7 @@ impl Parser<'_> {
         loop {
             self.skip_newlines();
             if self.at(TokenKind::At) || self.at_modifier() {
-                tail.extend(self.skip_decl_prefix());
+                tail.extend(self.extend_decl_prefix());
                 continue;
             }
             let before_context = self.i;
@@ -149,5 +149,60 @@ impl Parser<'_> {
             receiver.name = format!("{outer}.{}", receiver.name);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    #[test]
+    fn companion_and_context_prefixes_preserve_all_annotations() {
+        let source = "annotation class Before\n\
+            annotation class After\n\
+            class Ambient\n\
+            class Coordinate\n\
+            @Before context(_: Ambient) @After companion public fun Coordinate.first() = Unit\n\
+            companion @Before public context(_: Ambient) @After val Coordinate.second get() = Unit\n";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics.render("test.kt", source),
+            "",
+            "prefix forms must parse without diagnostics"
+        );
+
+        let annotations = file
+            .decls
+            .iter()
+            .filter_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.name == "first" => Some((
+                    function.name.as_str(),
+                    function
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.name.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                Decl::Property(property) if property.name == "second" => Some((
+                    property.name.as_str(),
+                    property
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.name.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            annotations,
+            vec![
+                ("first", vec!["Before", "After"]),
+                ("second", vec!["Before", "After"]),
+            ]
+        );
     }
 }
