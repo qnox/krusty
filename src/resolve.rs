@@ -1964,6 +1964,8 @@ pub struct ClassSig {
     pub callable_signatures: Vec<Ty>,
     /// Internal name of the base class (`: Base(..)`), if any.
     pub super_internal: Option<TypeName>,
+    /// How many of [`Self::interfaces`] the declaration lists before [`Self::super_internal`].
+    pub interfaces_before_superclass: u32,
     /// Applied type arguments on [`Self::super_internal`].
     pub super_type_args: Vec<Ty>,
     /// The parameter types of the base constructor that this class's `super(args)` targets, as the
@@ -2120,6 +2122,7 @@ impl ClassSig {
             callable_signature: None,
             callable_signatures: Vec::new(),
             super_internal: None,
+            interfaces_before_superclass: 0,
             super_type_args: Vec::new(),
             super_ctor_params: Vec::new(),
             ctor_defaults: Vec::new(),
@@ -4665,7 +4668,10 @@ impl SymbolTable {
                 .iter()
                 .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
                 .collect::<Vec<_>>();
-            parents.push((parent, Ty::obj_args_name(parent, &arguments)));
+            parents.insert(
+                class.interfaces_before_superclass as usize,
+                (parent, Ty::obj_args_name(parent, &arguments)),
+            );
         }
         parents
     }
@@ -39557,6 +39563,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
             for (internal, supertypes) in resolved_body_local_supertypes {
                 if let Some(class) = syms.class_by_type_name_mut(internal) {
+                    let mut interfaces_seen = 0;
                     for supertype in supertypes.iter().copied() {
                         let Some(super_internal) = supertype.kotlin_class_internal() else {
                             continue;
@@ -39566,12 +39573,14 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                             .iter()
                             .position(|interface| interface == super_internal)
                         {
+                            interfaces_seen += 1;
                             if class.interface_type_args.len() <= ordinal {
                                 class.interface_type_args.resize(ordinal + 1, Vec::new());
                             }
                             class.interface_type_args[ordinal] = supertype.type_args().to_vec();
                         } else {
                             class.super_internal = Some(super_internal);
+                            class.interfaces_before_superclass = interfaces_seen;
                             class.super_type_args = supertype.type_args().to_vec();
                         }
                     }

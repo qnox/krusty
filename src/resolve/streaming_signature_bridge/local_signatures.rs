@@ -788,10 +788,13 @@ fn publish_checked_local_signatures_selected(
                 };
                 let superclass = (!class_decl.is_interface())
                     .then(|| {
-                        checked_supertypes
+                        let slot = checked_supertypes
                             .iter()
-                            .copied()
-                            .find(|supertype| !is_interface(*supertype))
+                            .position(|supertype| !is_interface(*supertype))?;
+                        Some(crate::fir::DeclaredSuperclass::after(
+                            checked_supertypes[slot],
+                            slot,
+                        ))
                     })
                     .flatten();
                 let interfaces = checked_supertypes
@@ -846,7 +849,10 @@ fn publish_checked_local_signatures_selected(
         };
         let superclass = class
             .super_internal
-            .map(|owner| Ty::obj_args_name(owner, &class.super_type_args));
+            .map(|owner| crate::fir::DeclaredSuperclass {
+                ty: Ty::obj_args_name(owner, &class.super_type_args),
+                interfaces_before: class.interfaces_before_superclass,
+            });
         let interfaces = class
             .interfaces
             .iter()

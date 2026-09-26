@@ -3425,7 +3425,7 @@ fn compact_classifier_parents(
     classifier: &ClassSig,
     resolved_local: Option<&(Option<Ty>, Vec<Ty>)>,
     compact_cycle_edges: &HashSet<(crate::fir::DeclarationId, TypeName)>,
-) -> Option<(Option<Ty>, Vec<Ty>, Vec<Ty>)> {
+) -> Option<(Option<crate::fir::DeclaredSuperclass>, Vec<Ty>, Vec<Ty>)> {
     let header = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::Classifier {
         supertypes, base, ..
@@ -3539,23 +3539,34 @@ fn compact_classifier_parents(
                 }
             })
     };
+    let superclass_slot =
+        crate::fir::superclass_slot(&headers.syntax, source_syntax, base, source_superclass)?;
+    let source_interfaces = resolved_source_supertypes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(ordinal, parent)| Some(*ordinal) != source_superclass && retained_parent(*parent))
+        .collect::<Vec<_>>();
+    let written_before = source_interfaces
+        .iter()
+        .filter(|(ordinal, _)| *ordinal < superclass_slot)
+        .count();
     let superclass = explicit_base
         .or_else(|| source_superclass.map(|ordinal| resolved_source_supertypes[ordinal]))
         .filter(|parent| retained_parent(*parent))
+        .map(|ty| crate::fir::DeclaredSuperclass::after(ty, written_before))
         .or_else(|| {
             let owner = classifier.super_internal?;
             let implicit = semantic_type_with_classifier_captures(
                 semantics.table,
                 Ty::obj_args_name(owner, &classifier.super_type_args),
             );
-            (!implicit.mentions_error()).then_some(implicit)
+            (!implicit.mentions_error()).then(|| crate::fir::DeclaredSuperclass::after(implicit, 0))
         });
 
-    let mut interfaces = resolved_source_supertypes
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, parent)| (Some(ordinal) != source_superclass).then_some(*parent))
-        .filter(|parent| retained_parent(*parent))
+    let mut interfaces = source_interfaces
+        .into_iter()
+        .map(|(_, parent)| parent)
         .collect::<Vec<_>>();
     // Add validated implicit language parents from ClassSig. Source interfaces already carry their
     // compact applied arguments above; compare by resolved identity rather than relying on an

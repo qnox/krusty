@@ -4540,6 +4540,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `right`. The interface closure walks every supertype list in declaration order; only the direct
   list was ordered before, so siblings one level up came out reversed. Test:
   `tests/class_member_order_e2e.rs::inherited_interface_members_follow_sibling_supertypes_in_declaration_order`.
+- **A superclass keeps its written slot among the supertypes.** kotlinc walks a class's direct
+  supertypes in the order they are written, including the superclass, so `abstract class C : B(), IA`
+  bridges to `B`'s override before `IA`'s and `C : IA, B()` the other way round. The resolved
+  classifier header records how many interfaces precede a written superclass (`B()` by source
+  position, a parenless `B` by its place in the list), and the symbol providers and the applied
+  hierarchy list the superclass there. Tests:
+  `tests/class_member_order_e2e.rs::bridges_follow_a_superclass_*`.
 - **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
   has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
   `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the

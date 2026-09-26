@@ -317,8 +317,10 @@ impl<'a> ModuleSymbols<'a> {
                 &[Ty::obj_name(c.internal_name())],
             ));
         } else if let Some(s) = c.super_internal {
-            supertypes.push(s);
-            supertype_templates.push(Ty::obj_args_name(s, &c.super_type_args));
+            // The superclass keeps its written slot: Kotlin orders inherited members by it.
+            let slot = c.interfaces_before_superclass as usize;
+            supertypes.insert(slot, s);
+            supertype_templates.insert(slot, Ty::obj_args_name(s, &c.super_type_args));
         } else if c.internal_name() != crate::types::wk::any() {
             // Kotlin's root class is implicit in source syntax (`class A` and `interface I`), but it
             // is still part of the semantic classifier signature. Publish it in the same record as
@@ -1568,6 +1570,7 @@ mod tests {
             callable_signature: None,
             callable_signatures: Vec::new(),
             super_internal: None,
+            interfaces_before_superclass: 0,
             super_type_args: Vec::new(),
             super_ctor_params: Vec::new(),
             ctor_defaults: vec![],
