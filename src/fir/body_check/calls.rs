@@ -330,7 +330,7 @@ impl BodyFirChecker<'_> {
                     crate::resolve::BuiltinUnaryOperation::Negate => FirUnaryOperation::Negate,
                     crate::resolve::BuiltinUnaryOperation::Identity => FirUnaryOperation::Identity,
                 },
-                operand: self.expression(receiver)?,
+                operand: self.builtin_unary_operand(receiver)?,
             });
         }
         if let Some(target) = self.info.resolved_super_call(expression).cloned() {

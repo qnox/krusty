@@ -50,6 +50,10 @@ impl Emitter<'_> {
                 value.map(|expression| (expression, self.ir.expr(expression))),
             );
         }
+        let arg = match op {
+            IrTypeOp::ImplicitCoercion => self.unboxed_reference_source(arg, type_operand),
+            _ => arg,
+        };
         let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf if type_operand.is_nullable() => {
@@ -460,6 +464,36 @@ impl Emitter<'_> {
                 self.cw,
                 code,
             );
+        }
+    }
+
+    /// The reference an unboxing coercion reads. kotlinc coerces a value from the type it was
+    /// produced at straight to the primitive, so an implicit reference coercion directly beneath
+    /// the unbox (`ArrayList<Int>.get` producing `Object`, coerced to `Int!` and then to `int`)
+    /// writes no `checkcast` of its own: the unbox reads `Object` and goes through `Number`.
+    fn unboxed_reference_source(&self, arg: ExprId, type_operand: Ty) -> ExprId {
+        if !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar() {
+            return arg;
+        }
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: source,
+            type_operand: intermediate,
+        } = self.ir.expr(arg)
+        else {
+            return arg;
+        };
+        let source_is_reference = self
+            .ir
+            .physical_types
+            .get(source)
+            .map(ir_ty_to_jvm)
+            .unwrap_or_else(|| self.value_ty(*source))
+            .is_reference();
+        if source_is_reference && ir_ty_to_jvm(&stored_value_ty(*intermediate)).is_reference() {
+            *source
+        } else {
+            arg
         }
     }
 

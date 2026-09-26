@@ -65,6 +65,7 @@ mod test_support;
 mod type_materialization;
 #[cfg(test)]
 mod type_operation_tests;
+mod unary_operators;
 mod when_expressions;
 
 pub(crate) use driver::check_and_dispatch_active_body_in_session;
@@ -2120,7 +2121,7 @@ impl BodyFirChecker<'_> {
                                 UnOp::Not => FirUnaryOperation::BooleanNot,
                                 UnOp::Plus => FirUnaryOperation::Identity,
                             },
-                            operand: self.expression(*operand)?,
+                            operand: self.builtin_unary_operand(*operand)?,
                         }
                     }
                 }
