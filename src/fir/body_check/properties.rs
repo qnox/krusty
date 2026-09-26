@@ -1193,11 +1193,12 @@ impl BodyFirChecker<'_> {
                 Some(crate::types::stored_value_ty(target)),
             )?;
         }
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(expression, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(expression),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let target = self.property_target(expression, declaration, external)?;
         Ok(Some(FirExprKind::PropertyRead {
             target,
@@ -1461,11 +1462,8 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(super::StatementForm::IncDec),
                 )
             })?;
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument_at(span, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments =
+            self.property_context_arguments(span, cause, declaration, context_args)?;
         let origin = cause;
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
@@ -1764,11 +1762,12 @@ impl BodyFirChecker<'_> {
         };
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(expression, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(expression),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let read_target = self.property_target_at(Some(span), declaration, external_getter)?;
         let write_target = self.property_target_at(Some(span), declaration, external_setter)?;
         let resolution = self
@@ -2220,11 +2219,12 @@ impl BodyFirChecker<'_> {
                 Some(crate::types::stored_value_ty(target)),
             )?;
         }
-        let context_arguments = context_args
-            .iter()
-            .map(|argument| self.materialize_context_argument(value, cause, argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+        let context_arguments = self.property_context_arguments(
+            self.file.expr_span(value),
+            cause,
+            declaration,
+            &context_args,
+        )?;
         let value_target = declaration
             .and_then(|declaration| self.index.signature(declaration))
             .map(|signature| signature.result)

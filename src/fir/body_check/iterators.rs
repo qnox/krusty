@@ -42,6 +42,16 @@ impl BodyFirChecker<'_> {
         let iterator_ty = ResolvedTy::new(protocol.iter_ty)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
         let origin = self.statement_origin(statement)?;
+        let iterable_ty = self
+            .body
+            .expr(iterable)
+            .ok_or_else(|| {
+                self.failure(
+                    span,
+                    BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+                )
+            })?
+            .ty;
         Ok(FirLoopHeader::Iterator {
             variable,
             variable_ty,
@@ -51,16 +61,19 @@ impl BodyFirChecker<'_> {
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.iterator,
+                iterable_ty,
             )?),
             has_next: Box::new(self.iterator_protocol_call(
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.has_next,
+                iterator_ty,
             )?),
             next: Box::new(self.iterator_protocol_call(
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.next,
+                iterator_ty,
             )?),
         })
     }
@@ -70,6 +83,7 @@ impl BodyFirChecker<'_> {
         span: Option<crate::diag::Span>,
         origin: OriginId,
         selected: &ResolvedCall,
+        receiver_ty: ResolvedTy,
     ) -> Result<FirIteratorCall, BodyCheckFailure> {
         let selected_target = self.selected_call_target(span, Some(selected))?;
         if !selected_target.value_parameters.is_empty() || selected_target.vararg_index.is_some() {
@@ -125,10 +139,29 @@ impl BodyFirChecker<'_> {
                 ));
             }
         };
+        let declared_receiver = match (&selected_target.target, &receiver) {
+            (
+                FirCallTarget::Module(target),
+                FirIteratorReceiver::Extension | FirIteratorReceiver::MemberExtension { .. },
+            ) => self
+                .index
+                .callable(*target)
+                .and_then(|callable| callable.shape.extension_receiver),
+            _ => None,
+        };
+        let receiver_conversion = declared_receiver
+            .map(|declared| {
+                ResolvedTy::new(crate::types::stored_value_ty(declared.get())).map_err(|error| {
+                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                })
+            })
+            .transpose()?
+            .and_then(|declared| self.selected_type_conversion(receiver_ty, declared, origin));
         Ok(FirIteratorCall {
             target: selected_target.target,
             receiver,
             context_arguments,
+            receiver_conversion,
         })
     }
 }

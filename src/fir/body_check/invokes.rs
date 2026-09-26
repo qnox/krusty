@@ -436,6 +436,46 @@ impl BodyFirChecker<'_> {
         self.materialize_context_argument_at(self.file.expr_span(expression), cause, argument)
     }
 
+    /// The selected context arguments of a property access, each converted to the context
+    /// parameter the property DECLARES. The accessor is compiled once against its declared types,
+    /// so a substituted argument (`Int` for a context `T`) crosses that boundary here, exactly as
+    /// the access's extension receiver does.
+    pub(super) fn property_context_arguments(
+        &mut self,
+        span: Option<Span>,
+        cause: OriginId,
+        declaration: Option<DeclarationId>,
+        arguments: &[ResolvedContextArgument],
+    ) -> Result<Box<[FirReceiver]>, BodyCheckFailure> {
+        let declared: Vec<Ty> = declaration
+            .and_then(|declaration| {
+                let property = self
+                    .index
+                    .property_for_declaration(declaration)
+                    .and_then(|property| self.index.property(property))?;
+                let parameters = &self.index.signature(declaration)?.parameters;
+                parameters.get(..property.context_parameter_count as usize)
+            })
+            .map(|parameters| parameters.iter().map(|parameter| parameter.get()).collect())
+            .unwrap_or_default();
+        arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let mut receiver = self.materialize_context_argument_at(span, cause, argument)?;
+                if let Some(&target) = declared.get(index) {
+                    receiver.conversion = self.receiver_conversion_at(
+                        span,
+                        cause,
+                        receiver,
+                        Some(crate::types::stored_value_ty(target)),
+                    )?;
+                }
+                Ok(receiver)
+            })
+            .collect()
+    }
+
     /// Materialize a selected context argument for a synthetic call site. Operator conventions
     /// attached to statements have no call-expression arena id, so their checked FIR must use the
     /// statement span and origin directly instead of inventing a transient AST identity.

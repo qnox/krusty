@@ -1453,6 +1453,16 @@ impl BodyLowering<'_> {
             .ty
             .get();
         let expression = self.expression(expression)?;
+        self.lowered_with_conversion(expression, source_type, conversion)
+    }
+
+    /// Apply a checked conversion to an operand already lowered from a value of `source_type`.
+    pub(super) fn lowered_with_conversion(
+        &mut self,
+        expression: ExprId,
+        source_type: crate::types::Ty,
+        conversion: Option<FirConversion>,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let Some(conversion) = conversion else {
             return Ok(expression);
         };

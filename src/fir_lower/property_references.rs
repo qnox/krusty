@@ -115,37 +115,20 @@ impl BodyLowering<'_> {
             None
         };
         let selected_receiver = captured_receiver.or(unbound_receiver);
-        // A specialized reference reads the property through its declaration's accessor, whose
-        // generic receiver and result are erased: the specialized scalar receiver is boxed into the
-        // accessor and the erased result is converted back, as a source read's checked
-        // conversions do.
-        let declaration = match target {
-            FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
-                let property = self
-                    .index
-                    .property(*property)
-                    .ok_or(FirLoweringFailure::MissingProperty(*property))?;
-                let result = self
-                    .index
-                    .signature(property.declaration)
-                    .ok_or(FirLoweringFailure::MissingProperty(property.id))?
-                    .result
-                    .get();
-                Some((property.extension_receiver.map(|ty| ty.get()), result))
-            }
+        // A specialized reference reads the property through its declaration's accessors, which
+        // are compiled against the declared receiver and result: the specialized receiver crosses
+        // into the declared one, and the declared result back out, as a source read's do.
+        let declared = match target {
+            FirPropertyReferenceTarget::SpecializedModule {
+                declared_receiver,
+                declared_property_type,
+                ..
+            } => Some((*declared_receiver, *declared_property_type)),
             _ => None,
         };
-        let selected_receiver = match (selected_receiver, declaration, receiver_type) {
-            (Some(value), Some((Some(declared), _)), Some(selected))
-                if target_is_extension
-                    && !selected.get().is_reference()
-                    && declared.is_reference() =>
-            {
-                Some(self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: declared,
-                }))
+        let selected_receiver = match (selected_receiver, declared, receiver_type) {
+            (Some(value), Some((Some(declared), _)), Some(selected)) if target_is_extension => {
+                Some(self.coerce_to_declared(value, selected.get(), declared.get()))
             }
             (receiver, ..) => receiver,
         };
@@ -209,14 +192,12 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
             }
         };
-        let read = match declaration {
-            Some((_, declared)) if declared != property_type.get() => {
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: property_type.get(),
-                })
-            }
+        let read = match declared {
+            Some((_, declared)) if declared != property_type => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: read,
+                type_operand: property_type.get(),
+            }),
             _ => read,
         };
         let body = self.callable_reference_adapter_body(read, property_type.get(), reference.ret);

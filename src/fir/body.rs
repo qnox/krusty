@@ -544,6 +544,11 @@ pub enum FirPropertyReferenceTarget {
         receiver: Option<ResolvedTy>,
         extension_receiver: bool,
         property_type: ResolvedTy,
+        /// The extension receiver and property type the declaration itself declares. Its
+        /// accessors are compiled once against these, so the reference's specialized receiver
+        /// and result cross into and out of them.
+        declared_receiver: Option<ResolvedTy>,
+        declared_property_type: ResolvedTy,
     },
     Classifier {
         owner: TypeName,
@@ -1759,6 +1764,10 @@ pub struct FirIteratorCall {
     /// Checker-selected implicit context operands for this convention call. Iterator protocol
     /// calls have no source value arguments, but their declarations may have context parameters.
     pub context_arguments: Box<[FirIteratorContextArgument]>,
+    /// The receiver's conversion to the extension receiver the selected declaration declares. The
+    /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
+    /// crosses into the declared type here.
+    pub receiver_conversion: Option<FirConversion>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
