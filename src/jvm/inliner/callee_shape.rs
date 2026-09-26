@@ -27,15 +27,28 @@ pub(crate) enum UnsupportedShape {
     ClassReification,
 }
 
-/// The first shape in `callee` that needs a later stage of the port, if any.
-pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
+/// Whether the call site regenerates the anonymous objects a body constructs, or declines them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectRegeneration {
+    Regenerated,
+    Declined,
+}
+
+/// The first shape in `callee` that needs a later stage of the port, if any. An anonymous object
+/// the body constructs needs one unless the call site regenerates it.
+pub(crate) fn unsupported_shape(
+    callee: &MethodNode,
+    objects: ObjectRegeneration,
+) -> Option<UnsupportedShape> {
+    let regenerated = |class: &str| {
+        is_sam_wrapper(class)
+            || (is_anonymous_class(class) && objects == ObjectRegeneration::Declined)
+    };
     callee.instructions().find_map(|insn| match insn {
-        Insn::Type { op: NEW, class } if is_anonymous_class(class) || is_sam_wrapper(class) => {
+        Insn::Type { op: NEW, class } if regenerated(class) => {
             Some(UnsupportedShape::AnonymousObject)
         }
-        Insn::Method { name, owner, .. }
-            if name == "<init>" && (is_anonymous_class(owner) || is_sam_wrapper(owner)) =>
-        {
+        Insn::Method { name, owner, .. } if name == "<init>" && regenerated(owner) => {
             Some(UnsupportedShape::AnonymousObject)
         }
         Insn::Field {
@@ -71,8 +84,14 @@ pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape>
     })
 }
 
+/// Whether a body that constructs or loads `internal` has it regenerated for its call site:
+/// an anonymous object or a SAM wrapper (`isAnonymousClass || isSamWrapper`).
+pub(super) fn is_regenerated_class(internal: &str) -> bool {
+    is_anonymous_class(internal) || is_sam_wrapper(internal)
+}
+
 /// kotlinc's `isAnonymousClass`: a class whose simple name ends in `$<number>`, SAM wrappers aside.
-fn is_anonymous_class(internal: &str) -> bool {
+pub(super) fn is_anonymous_class(internal: &str) -> bool {
     if internal.contains("$sam$") {
         return false;
     }

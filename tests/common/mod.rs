@@ -2092,8 +2092,7 @@ pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option
 /// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
 /// classpath dir. `None` = toolchain unavailable; kotlinc REJECTING the sources panics — the
 /// fixture is invalid Kotlin, which must never read as a skip.
-#[allow(dead_code)]
-fn kotlinc_lib_out(sources: &[(&str, &str)]) -> Option<PathBuf> {
+pub fn kotlinc_lib_out(sources: &[(&str, &str)]) -> Option<PathBuf> {
     let stdlib = stdlib_jar();
     let work = scratch_dir()?;
     let out = work.join("libout");

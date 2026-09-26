@@ -81,6 +81,9 @@ pub struct SourceMap {
     /// The highest output line handed out. Output lines above the file's own line count are what
     /// identify inlined code.
     max_used: u16,
+    /// Whether the map is written even when it names only the owning file: kotlinc writes a
+    /// regenerated class's map whatever it holds (`visitSMAP(…, intoInline = true, …)`).
+    keep_trivial: bool,
 }
 
 impl SourceMap {
@@ -105,6 +108,17 @@ impl SourceMap {
                 }],
             }],
             max_used: lines,
+            keep_trivial: false,
+        }
+    }
+
+    /// The map of a class regenerated from a compiled class whose own source is `name` at `path`,
+    /// spanning `lines` lines (kotlinc's `SourceMapper(debugFileName, originalSmap)`). It is written
+    /// even when nothing else is mapped into it.
+    pub fn for_regenerated_class(name: &str, path: &str, lines: u16) -> SourceMap {
+        SourceMap {
+            keep_trivial: true,
+            ..SourceMap::new(name, path, lines)
         }
     }
 
@@ -137,6 +151,18 @@ impl SourceMap {
     /// marks one before a lambda that starts on the call's own line.
     pub fn map_synthetic_line(&mut self, id: u16) -> Option<u16> {
         self.map(FAKE_FILE_NAME, FAKE_PATH, id, None)
+    }
+
+    /// The output line for line `source` of file `name` at `path` as a copied class's own map
+    /// placed it, under the call it was expanded by there, if any (`SourceMapCopier`).
+    pub fn map_copied_line(
+        &mut self,
+        name: &str,
+        path: &str,
+        source: u16,
+        call_line: Option<u16>,
+    ) -> Option<u16> {
+        self.map(name, path, source, call_line)
     }
 
     fn map(&mut self, name: &str, path: &str, source: u16, call_site: Option<u16>) -> Option<u16> {
@@ -191,7 +217,7 @@ impl SourceMap {
 
     /// The `SourceDebugExtension` payload, or `None` when nothing was inlined.
     pub fn render(&self) -> Option<String> {
-        if self.is_unstarted() || self.is_empty() {
+        if self.is_unstarted() || (self.is_empty() && !self.keep_trivial) {
             return None;
         }
         let owner = self.files.first()?;
@@ -216,17 +242,23 @@ impl SourceMap {
             }
         }
         // The debug stratum names only the owning file: every inlined range is reported at the line
-        // of the call that expanded it.
-        out.push_str("*S KotlinDebug\n*F\n");
-        out.push_str(&format!("+ 1 {}\n{}\n", owner.name, owner.path));
-        out.push_str("*L\n");
-        for range in self.files.iter().flat_map(|file| &file.ranges) {
-            let Some(call_line) = range.call_site else {
-                continue;
-            };
-            // The debug stratum fixes the file and repeat count at 1. Its output-line increment is
-            // the inlined range's size; like the repeat count, an increment of 1 is omitted.
-            out.push_str(&line_row(call_line, 1, 1, range.dest, range.range));
+        // of the call that expanded it. A map with no such range has no debug stratum at all
+        // (`SMAPBuilder` writes a stratum only for mappings it has).
+        let calls: Vec<_> = self
+            .files
+            .iter()
+            .flat_map(|file| &file.ranges)
+            .filter_map(|range| Some((range.call_site?, range)))
+            .collect();
+        if !calls.is_empty() {
+            out.push_str("*S KotlinDebug\n*F\n");
+            out.push_str(&format!("+ 1 {}\n{}\n", owner.name, owner.path));
+            out.push_str("*L\n");
+            for (call_line, range) in calls {
+                // The debug stratum fixes the file and repeat count at 1. Its output-line increment
+                // is the inlined range's size; like the repeat count, an increment of 1 is omitted.
+                out.push_str(&line_row(call_line, 1, 1, range.dest, range.range));
+            }
         }
         out.push_str("*E\n");
         Some(out)
@@ -234,7 +266,8 @@ impl SourceMap {
 }
 
 /// The `Kotlin` stratum of a DEPENDENCY's own `SourceDebugExtension`, read back so a line of its
-/// code can be named by the file it really came from.
+/// code can be named by the file it really came from, and its `KotlinDebug` stratum, which names the
+/// call each inlined range was expanded by.
 ///
 /// A body from a class that already inlines something carries lines above its own source length;
 /// the reference compiler resolves each through this map before mapping it into the caller, which
@@ -242,14 +275,57 @@ impl SourceMap {
 /// one somewhere past the end of that file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyMap {
+    kotlin: Stratum,
+    debug: Stratum,
+}
+
+/// One stratum's `*F` and `*L` sections.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Stratum {
+    /// `(file id, name, path)`.
     files: Vec<(u16, String, String)>,
-    /// `(input_start, file id, repeat count, output_start, output increment)`.
-    rows: Vec<(u32, u16, u32, u32, u32)>,
+    rows: Vec<Row>,
+}
+
+/// One `*L` row as read. kotlinc's reader takes a repeat count other than 1 and an output increment
+/// other than 1 alike as the range's length (`SMAPParser`), which is what [`Row::covers`] does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Row {
+    input_start: u32,
+    file: u16,
+    repeat_count: u32,
+    output_start: u32,
+    output_increment: u32,
+}
+
+impl Row {
+    /// The input line output `line` stands for, when the row covers it.
+    fn source_of(&self, line: u32) -> Option<u32> {
+        let covered = self.repeat_count.checked_mul(self.output_increment)?;
+        let offset = line.checked_sub(self.output_start)?;
+        if offset >= covered {
+            return None;
+        }
+        self.input_start.checked_add(offset / self.output_increment)
+    }
+}
+
+impl Stratum {
+    /// The `(file name, path, input line)` output `line` stands for.
+    fn resolve(&self, line: u16) -> Option<(&str, &str, u16)> {
+        let line = u32::from(line);
+        let (file, source) = self
+            .rows
+            .iter()
+            .find_map(|row| Some((row.file, row.source_of(line)?)))?;
+        let (_, name, path) = self.files.iter().find(|(id, _, _)| *id == file)?;
+        Some((name.as_str(), path.as_str(), u16::try_from(source).ok()?))
+    }
 }
 
 impl DependencyMap {
-    /// Parse the `Kotlin` stratum of `text`. `None` when there is no such stratum or it does not
-    /// read as JSR-045 — a map that cannot be trusted names no lines.
+    /// Parse the `Kotlin` and `KotlinDebug` strata of `text`. `None` when there is no `Kotlin`
+    /// stratum or either does not read as JSR-045 — a map that cannot be trusted names no lines.
     pub fn parse(text: &str) -> Option<DependencyMap> {
         let mut lines = text.lines();
         if lines.next()? != "SMAP" {
@@ -257,89 +333,122 @@ impl DependencyMap {
         }
         lines.next()?; // the generated file's own name
         lines.next()?; // the default stratum
-        while lines.next()? != "*S Kotlin" {}
-        let mut map = DependencyMap::default();
-        let mut section = "";
-        let mut pending_file: Option<(u16, String)> = None;
-        for line in lines {
-            if line.starts_with('*') {
-                if line == "*S KotlinDebug" || line == "*E" || line.starts_with("*S ") {
-                    break;
-                }
-                section = line;
-                continue;
-            }
-            match section {
-                "*F" => {
-                    if let Some((id, name)) = pending_file.take() {
-                        map.files.push((id, name, line.to_string()));
-                        continue;
-                    }
-                    let rest = line.strip_prefix("+ ")?;
-                    let (id, name) = rest.split_once(' ')?;
-                    pending_file = Some((id.parse().ok()?, name.to_string()));
-                }
-                "*L" => {
-                    let (input, output) = line.split_once(':')?;
-                    let (input_start, file_and_count) = input.split_once('#')?;
-                    let (file, count) = match file_and_count.split_once(',') {
-                        Some((file, count)) => (file, count.parse().ok()?),
-                        None => (file_and_count, 1),
-                    };
-                    let (output_start, increment) = match output.split_once(',') {
-                        Some((start, increment)) => (start, increment.parse().ok()?),
-                        None => (output, 1),
-                    };
-                    map.rows.push((
-                        input_start.parse().ok()?,
-                        file.parse().ok()?,
-                        count,
-                        output_start.parse().ok()?,
-                        increment,
-                    ));
-                }
-                _ => {}
-            }
+        let kotlin = parse_stratum(&mut lines.skip_while(|line| *line != "*S Kotlin").skip(1))?;
+        if kotlin.files.is_empty() || kotlin.rows.is_empty() {
+            return None;
         }
-        let distinct_files = map.files.iter().enumerate().all(|(index, (id, _, _))| {
-            *id != 0 && map.files[..index].iter().all(|(known, _, _)| known != id)
-        });
-        let valid_rows =
-            map.rows
-                .iter()
-                .all(|&(input_start, file, count, output_start, increment)| {
-                    input_start != 0
-                        && count != 0
-                        && output_start != 0
-                        && increment != 0
-                        && map.files.iter().any(|(known, _, _)| *known == file)
-                });
-        (pending_file.is_none()
-            && !map.files.is_empty()
-            && !map.rows.is_empty()
-            && distinct_files
-            && valid_rows)
-            .then_some(map)
+        let mut debug = text
+            .lines()
+            .skip_while(|line| *line != "*S KotlinDebug")
+            .skip(1)
+            .peekable();
+        let debug = if debug.peek().is_some() {
+            parse_stratum(&mut debug)?
+        } else {
+            Stratum::default()
+        };
+        Some(DependencyMap { kotlin, debug })
     }
 
     /// The `(file name, path, source line)` that output `line` of the dependency's code stands for.
     pub fn resolve(&self, line: u16) -> Option<(&str, &str, u16)> {
-        let line = u32::from(line);
-        self.rows
-            .iter()
-            .find_map(|&(input_start, file, count, output_start, increment)| {
-                let covered = count.checked_mul(increment)?;
-                let offset = line.checked_sub(output_start)?;
-                if offset >= covered {
-                    return None;
-                }
-                Some((file, input_start.checked_add(offset / increment)?))
-            })
-            .and_then(|(file, source)| {
-                let (_, name, path) = self.files.iter().find(|(id, _, _)| *id == file)?;
-                Some((name.as_str(), path.as_str(), u16::try_from(source).ok()?))
-            })
+        self.kotlin.resolve(line)
     }
+
+    /// The `(line, file name, path)` of the call output `line` was expanded by, if it was inlined
+    /// (`SMAPParser`'s call site: the start of the debug range that covers it).
+    pub fn call_site(&self, line: u16) -> Option<(u16, &str, &str)> {
+        let row = self
+            .debug
+            .rows
+            .iter()
+            .find(|row| row.source_of(u32::from(line)).is_some())?;
+        let (_, name, path) = self.debug.files.iter().find(|(id, _, _)| *id == row.file)?;
+        Some((
+            u16::try_from(row.input_start).ok()?,
+            name.as_str(),
+            path.as_str(),
+        ))
+    }
+
+    /// The path and length of the file named `name` (`FileMapping.toSourceInfo`): the highest input
+    /// line any of its ranges covers.
+    pub fn source_info(&self, name: &str) -> Option<(&str, u16)> {
+        let (id, _, path) = self
+            .kotlin
+            .files
+            .iter()
+            .find(|(_, known, _)| known == name)?;
+        let lines = self
+            .kotlin
+            .rows
+            .iter()
+            .filter(|row| row.file == *id)
+            .map(|row| row.input_start + row.repeat_count * row.output_increment - 1)
+            .max()?;
+        Some((path.as_str(), u16::try_from(lines).ok()?))
+    }
+}
+
+/// The `*F` and `*L` sections of the stratum `lines` is positioned in, up to the next stratum or
+/// the end. `None` when they do not read as JSR-045: a file id repeated or zero, or a row naming a
+/// file the section does not list or covering nothing.
+fn parse_stratum<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Stratum> {
+    let mut stratum = Stratum::default();
+    let mut section = "";
+    let mut pending_file: Option<(u16, String)> = None;
+    for line in lines {
+        if line.starts_with('*') {
+            if line == "*E" || line.starts_with("*S ") {
+                break;
+            }
+            section = line;
+            continue;
+        }
+        match section {
+            "*F" => {
+                if let Some((id, name)) = pending_file.take() {
+                    stratum.files.push((id, name, line.to_string()));
+                    continue;
+                }
+                let rest = line.strip_prefix("+ ")?;
+                let (id, name) = rest.split_once(' ')?;
+                pending_file = Some((id.parse().ok()?, name.to_string()));
+            }
+            "*L" => {
+                let (input, output) = line.split_once(':')?;
+                let (input_start, file_and_count) = input.split_once('#')?;
+                let (file, repeat_count) = match file_and_count.split_once(',') {
+                    Some((file, count)) => (file, count.parse().ok()?),
+                    None => (file_and_count, 1),
+                };
+                let (output_start, output_increment) = match output.split_once(',') {
+                    Some((start, increment)) => (start, increment.parse().ok()?),
+                    None => (output, 1),
+                };
+                stratum.rows.push(Row {
+                    input_start: input_start.parse().ok()?,
+                    file: file.parse().ok()?,
+                    repeat_count,
+                    output_start: output_start.parse().ok()?,
+                    output_increment,
+                });
+            }
+            _ => {}
+        }
+    }
+    let files = &stratum.files;
+    let distinct_files = files.iter().enumerate().all(|(index, (id, _, _))| {
+        *id != 0 && files[..index].iter().all(|(known, _, _)| known != id)
+    });
+    let valid_rows = stratum.rows.iter().all(|row| {
+        row.input_start != 0
+            && row.repeat_count != 0
+            && row.output_start != 0
+            && row.output_increment != 0
+            && files.iter().any(|(known, _, _)| *known == row.file)
+    });
+    (pending_file.is_none() && distinct_files && valid_rows).then_some(stratum)
 }
 
 /// One `*L` row. JSR-045 omits a repeat count or output-line increment when it is 1. The reference
@@ -397,8 +506,8 @@ mod tests {
     }
 
     /// kotlinc's map for `repeat(n) { s += it }` in a seven-line file, where the lambda starts on
-    /// the `@InlineOnly` call's line: the synthetic line takes the fake file's line 1, and the
-    /// debug stratum leaves it out.
+    /// the `@InlineOnly` call's line: the synthetic line takes the fake file's line 1. No call
+    /// expanded it, so the map has no debug stratum.
     #[test]
     fn a_synthetic_line_maps_into_the_fake_file() {
         let mut map = SourceMap::new("t.kt", "TKt", 7);
@@ -408,8 +517,7 @@ mod tests {
             map.render().expect("a map"),
             "SMAP\nt.kt\nKotlin\n*S Kotlin\n*F\n\
              + 1 t.kt\nTKt\n+ 2 fake.kt\nkotlin/jvm/internal/FakeKt\n\
-             *L\n1#1,7:1\n1#2:8\n\
-             *S KotlinDebug\n*F\n+ 1 t.kt\nTKt\n*L\n*E\n"
+             *L\n1#1,7:1\n1#2:8\n*E\n"
         );
     }
 

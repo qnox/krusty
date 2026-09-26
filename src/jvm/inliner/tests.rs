@@ -1,3 +1,4 @@
+use super::anonymous_object::MalformedType;
 use super::*;
 use crate::jvm::method_node::{Category, Constant, LabelId, LocalVariable, TryCatchBlock};
 
@@ -21,6 +22,15 @@ fn temporaries(categories: &[Category]) -> Parameters {
             })
             .collect(),
         captured: Vec::new(),
+    }
+}
+
+/// Objects are regenerated only by the call-site tests.
+struct NoObjects;
+
+impl AnonymousObjects for NoObjects {
+    fn regenerate(&mut self, _class: &str, _desc: &str) -> Result<(String, String), InlineError> {
+        panic!("a body without anonymous objects regenerates none")
     }
 }
 
@@ -54,7 +64,10 @@ fn inline_plain(
         inline_only,
         frame_base,
         reified_arguments,
-        &mut OwnLines,
+        InliningContext {
+            lines: &mut OwnLines,
+            objects: &mut NoObjects,
+        },
     )
 }
 
@@ -396,13 +409,19 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     let mut reified = MethodNode::new(ACC_STATIC, "r", "()V");
     reified.nodes = vec![method("needClassReification", "()V", false)];
     assert_eq!(
-        unsupported_shape(&reified),
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
         Some(super::callee_shape::UnsupportedShape::ClassReification),
     );
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
+        None
+    );
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(
+        unsupported_shape(&reified, ObjectRegeneration::Declined),
+        None
+    );
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![
@@ -530,7 +549,10 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         false,
         5,
         &Default::default(),
-        &mut OwnLines,
+        InliningContext {
+            lines: &mut OwnLines,
+            objects: &mut NoObjects,
+        },
     )
     .expect("inlines");
     let instructions: Vec<Node> = inlined
@@ -587,4 +609,165 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         .collect();
     // The body's line, the lambda's, and the body's again after the lambda.
     assert_eq!(lines, vec![7, 2, 7]);
+}
+
+/// Regenerates the `n`th object as `Main$g$$inlined$f$n` with an `n`-`int` constructor, recording
+/// what it was asked to copy.
+#[derive(Default)]
+struct NumberingObjects {
+    asked: Vec<(String, String)>,
+}
+
+impl AnonymousObjects for NumberingObjects {
+    fn regenerate(&mut self, class: &str, desc: &str) -> Result<(String, String), InlineError> {
+        self.asked.push((class.to_string(), desc.to_string()));
+        let n = self.asked.len();
+        Ok((
+            format!("Main$g$$inlined$f${n}"),
+            format!("({})V", "I".repeat(n)),
+        ))
+    }
+}
+
+fn new(class: &str) -> Node {
+    Node::Insn(Insn::Type {
+        op: 0xbb,
+        class: class.to_string(),
+    })
+}
+
+fn init(owner: &str, desc: &str) -> Node {
+    Node::Insn(Insn::Method {
+        op: 0xb7,
+        owner: owner.to_string(),
+        name: "<init>".to_string(),
+        desc: desc.to_string(),
+        interface: false,
+    })
+}
+
+/// The class each `new` and the owner and descriptor of each `<init>` call in `node`.
+fn constructions(node: &MethodNode) -> Vec<String> {
+    node.instructions()
+        .filter_map(|insn| match insn {
+            Insn::Type { op: 0xbb, class } => Some(format!("new {class}")),
+            Insn::Method {
+                owner, name, desc, ..
+            } if name == "<init>" => Some(format!("init {owner}{desc}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_nested_construction_pairs_each_new_with_the_call_that_initializes_it() {
+    // `A(B())`: A's `new` comes first, B's constructor call first.
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        new("lib/A$f$1"),
+        op(0x59),
+        new("lib/B$f$2"),
+        op(0x59),
+        init("lib/B$f$2", "()V"),
+        init("lib/A$f$1", "(Ljava/lang/Object;)V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    let mut objects = NumberingObjects::default();
+    object_regeneration::regenerate_objects(&mut node, &mut objects).expect("regenerates");
+    assert_eq!(
+        objects.asked,
+        [
+            ("lib/A$f$1".to_string(), "(Ljava/lang/Object;)V".to_string()),
+            ("lib/B$f$2".to_string(), "()V".to_string()),
+        ]
+    );
+    assert_eq!(
+        constructions(&node),
+        [
+            "new Main$g$$inlined$f$1",
+            "new Main$g$$inlined$f$2",
+            "init Main$g$$inlined$f$2(II)V",
+            "init Main$g$$inlined$f$1(I)V",
+        ]
+    );
+}
+
+#[test]
+fn two_outstanding_instances_of_one_class_each_get_their_own_copy() {
+    // `A(A())` of one original class: the inner instance is initialized first.
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        new("lib/A$f$1"),
+        op(0x59),
+        new("lib/A$f$1"),
+        op(0x59),
+        init("lib/A$f$1", "()V"),
+        init("lib/A$f$1", "(Ljava/lang/Object;)V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    let mut objects = NumberingObjects::default();
+    object_regeneration::regenerate_objects(&mut node, &mut objects).expect("regenerates");
+    assert_eq!(
+        objects.asked,
+        [
+            ("lib/A$f$1".to_string(), "(Ljava/lang/Object;)V".to_string()),
+            ("lib/A$f$1".to_string(), "()V".to_string()),
+        ]
+    );
+    assert_eq!(
+        constructions(&node),
+        [
+            "new Main$g$$inlined$f$1",
+            "new Main$g$$inlined$f$2",
+            "init Main$g$$inlined$f$2(II)V",
+            "init Main$g$$inlined$f$1(I)V",
+        ]
+    );
+}
+
+#[test]
+fn a_constructor_call_without_its_new_is_refused() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "(Ljava/lang/Object;)V");
+    node.max_locals = 1;
+    node.nodes = vec![var(0x19, 0), init("lib/A$f$1", "()V"), op(0xb1)];
+    assert_eq!(
+        object_regeneration::regenerate_objects(&mut node, &mut NumberingObjects::default()),
+        Err(InlineError::UnpairedAnonymousObject)
+    );
+}
+
+#[test]
+fn a_new_no_constructor_call_initializes_is_refused() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![new("lib/A$f$1"), op(0x57), op(0xb1)];
+    assert_eq!(
+        object_regeneration::regenerate_objects(&mut node, &mut NumberingObjects::default()),
+        Err(InlineError::UnpairedAnonymousObject)
+    );
+}
+
+#[test]
+fn a_malformed_descriptor_at_the_call_site_declines_the_regeneration() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        new("lib/A$f$1"),
+        op(0x59),
+        init("lib/A$f$1", "()V"),
+        op(0x01),
+        Node::Insn(Insn::Field {
+            op: 0xb5,
+            owner: "lib/A$f$1".to_string(),
+            name: "x".to_string(),
+            desc: "Llib/A$f$1".to_string(),
+        }),
+        op(0xb1),
+    ];
+    assert_eq!(
+        object_regeneration::regenerate_objects(&mut node, &mut NumberingObjects::default()),
+        Err(InlineError::Regeneration(RegenerationError::Malformed(
+            MalformedType("Llib/A$f$1".to_string())
+        )))
+    );
 }

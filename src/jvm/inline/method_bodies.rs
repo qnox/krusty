@@ -50,6 +50,11 @@ pub trait MethodBodies {
     /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
 
+    /// The class file of `internal`, for a class an inlined body's objects are copied from.
+    fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Whether `owner` is an interface, which determines the constant-pool reference kind.
     fn owner_is_interface(&self, _owner: &str) -> bool {
         false

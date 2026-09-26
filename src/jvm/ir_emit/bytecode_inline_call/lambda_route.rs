@@ -87,7 +87,9 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) =
+            inliner::unsupported_shape(&callee, inliner::ObjectRegeneration::Declined)
+        {
             return Ok(LambdaCallRoute::Splice(SpliceReason::CalleeShape(shape)));
         }
         if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
