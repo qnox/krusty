@@ -529,17 +529,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// A receiver-less property associated with a classifier (`Owner::property`). Providers publish
-    /// the Kotlin declaration shape here; its opaque getter/setter identities decide target
-    /// realization later. Core never asks whether storage is a field or an accessor.
-    fn classifier_associated_property(
-        &self,
-        _internal: TypeName,
-        _name: &str,
-    ) -> Option<PropertyInfo> {
-        None
-    }
-
     /// Whether classifier-qualified callable lookup may continue through this classifier's semantic
     /// supertype chain. Foreign-language providers use this for declarations whose source language
     /// permits inherited static members; ordinary Kotlin classifiers keep the default closed scope.
@@ -2426,6 +2415,9 @@ pub struct PropertyInfo {
     pub kind: PropKind,
     /// The extension/member receiver type; `None` for a top-level property.
     pub receiver: Option<Ty>,
+    /// The classifier this receiver-less property is named through (`C.name`): a Java static field,
+    /// a `companion { … }` block property or a companion `@JvmField`, published in `C`'s namespace.
+    pub associated_classifier: Option<TypeName>,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
     pub formals: Vec<String>,
     /// The property's declared type.
@@ -3071,6 +3063,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             name: name.to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
+            associated_classifier: None,
             formals: Vec::new(),
             ty,
             context_count: 0,

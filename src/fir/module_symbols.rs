@@ -610,6 +610,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             name: name.to_owned(),
             kind,
             receiver,
+            associated_classifier: None,
             formals: Vec::new(),
             ty: Ty::Error,
             context_count,
@@ -1156,6 +1157,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                     PropKind::Member
                 },
                 receiver,
+                associated_classifier: None,
                 formals,
                 // Property lookup exposes the declared Kotlin type. A narrower explicit backing
                 // field is storage visible only while checking the declaring body's lexical
@@ -1565,6 +1567,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                     PropKind::TopLevel
                 },
                 receiver: (!imported_associated).then_some(receiver).flatten(),
+                associated_classifier: None,
                 formals,
                 ty: read_ty,
                 context_count,

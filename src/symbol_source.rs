@@ -392,6 +392,7 @@ mod tests {
                                     name: name.clone(),
                                     kind: PropKind::Member,
                                     receiver: None,
+                                    associated_classifier: None,
                                     formals: Vec::new(),
                                     ty: Ty::Int,
                                     context_count: 0,
