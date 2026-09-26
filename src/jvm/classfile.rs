@@ -2075,15 +2075,13 @@ impl ClassWriter {
                     // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
                     // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
                     // its start recorded past the last instruction and describes no live range, so it
-                    // goes with the code. A later live branch target can grow the method past that
-                    // offset, so also discard a zero-length entry: its initializing store and entire
-                    // source range were dropped even though `start_pc` now happens to index resumed
-                    // code. This keeps debug metadata tied to emitted ranges, never offset coincidence.
+                    // goes with the code. An empty range stays until the method is written, as in
+                    // kotlinc (`prepareForEmitting`): the store before it is a named local's.
                     .filter(|(start, len, ..)| {
                         let start = usize::from(*start);
                         let end =
                             len.map_or(code.bytes.len(), |length| start + usize::from(length));
-                        start < code.bytes.len() && start < end && end <= code.bytes.len()
+                        start < code.bytes.len() && end <= code.bytes.len()
                     })
                     .map(|(start, len, slot, nm, ds)| {
                         (
@@ -4006,6 +4004,7 @@ mod tests {
         code.ret_void();
 
         cw.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
+        cw.rewrite_methods(); // the empty entry goes as the method is written
         assert!(cw.methods[0].lvt.is_empty());
     }
 }

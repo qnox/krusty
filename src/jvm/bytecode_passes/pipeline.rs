@@ -113,7 +113,7 @@ pub(crate) enum Outcome {
     /// Some pass changed the body.
     Changed {
         /// Per local variable, in the order the method had them, whether the final dead-code pass
-        /// removed it with the last instruction of its range.
+        /// removed it because its range holds no instruction (`prepareForEmitting`).
         removed_locals: Vec<bool>,
     },
 }
@@ -184,7 +184,10 @@ impl Run {
 /// Run [`ORDER`] over `method`: every step when kotlinc's `canBeOptimized` admits the method as
 /// it arrives, and otherwise only the steps kotlinc runs over every method.
 pub(crate) fn optimize(method: &mut MethodNode, context: &PassContext<'_>) -> Outcome {
-    let mut run = Run::default();
+    let mut run = Run {
+        removed_locals: vec![false; method.local_variables.len()],
+        ..Run::default()
+    };
     let optimizable = fits_optimization(method);
     if !optimizable {
         crate::trace_compiler!(
@@ -215,7 +218,7 @@ pub(crate) fn optimize(method: &mut MethodNode, context: &PassContext<'_>) -> Ou
 mod tests {
     use super::*;
     use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
-    use crate::jvm::method_node::{Insn, Node};
+    use crate::jvm::method_node::{Insn, LocalVariable, Node};
 
     #[test]
     fn the_order_is_kotlincs() {
@@ -499,5 +502,69 @@ mod tests {
             optimize(&mut method, &context(&value_classes)),
             Outcome::Unchanged
         );
+    }
+
+    #[test]
+    fn a_named_local_with_an_empty_range_keeps_its_store_and_goes_at_the_end() {
+        // `if (x) { val unused = 5 }; return 1`: the local's range opens after its store and closes
+        // at the block's end, so it holds no instruction. kotlinc keeps the entry through its
+        // passes, which makes the store a named local's and not a temporary's, and drops the entry
+        // only when the method is written (`prepareForEmitting`).
+        let mut method = MethodNode::new(0x0019, "t4", "(Z)I");
+        method.max_locals = 2;
+        let (start, opened, closed, end) = (
+            method.new_label(),
+            method.new_label(),
+            method.new_label(),
+            method.new_label(),
+        );
+        method.nodes = vec![
+            Node::Label(start),
+            Node::Insn(Insn::Var { op: 0x15, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: 0x99,
+                target: closed,
+            }),
+            Node::Insn(Insn::Op(0x08)),
+            Node::Insn(Insn::Var { op: 0x36, slot: 1 }),
+            Node::Label(opened),
+            Node::Label(closed),
+            Node::Insn(Insn::Op(0x04)),
+            Node::Insn(Insn::Op(0xac)),
+            Node::Label(end),
+        ];
+        let local = |name: &str, desc: &str, start, end, slot| LocalVariable {
+            name: name.into(),
+            desc: desc.into(),
+            start,
+            end,
+            slot,
+        };
+        method.local_variables = vec![
+            local("x", "Z", start, end, 0),
+            local("unused", "I", opened, closed, 1),
+        ];
+        let value_classes = ValueClassDescriptors::default();
+        assert_eq!(
+            optimize(&mut method, &context(&value_classes)),
+            Outcome::Changed {
+                removed_locals: vec![false, true]
+            }
+        );
+        assert_eq!(
+            method.instructions().cloned().collect::<Vec<_>>(),
+            [
+                Insn::Var { op: 0x15, slot: 0 },
+                Insn::Jump {
+                    op: 0x99,
+                    target: closed
+                },
+                Insn::Op(0x08),
+                Insn::Var { op: 0x36, slot: 1 },
+                Insn::Op(0x04),
+                Insn::Op(0xac),
+            ]
+        );
+        assert_eq!(method.local_variables, [local("x", "Z", start, end, 0)]);
     }
 }
