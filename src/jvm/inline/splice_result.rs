@@ -14,9 +14,6 @@ pub struct SpliceResult {
     /// `athrow`) leaves the enclosing bytecode path unreachable even though its bytes were appended
     /// in bulk.
     pub falls_through: bool,
-    /// Operand-stack height the body needs beyond its own `max_stack`: an expanded `typeOf`
-    /// realization replaces a one-word placeholder with a deeper sequence.
-    pub stack_growth: u16,
     /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
     /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
     /// catch-all/`finally`). Empty for a body with no handlers.

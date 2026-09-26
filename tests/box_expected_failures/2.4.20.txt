@@ -38,13 +38,6 @@ callableReference/kt21014.kt
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 callableReference/property/privateSetterOutsideClass.kt
 casts/kt80795.kt
-casts/mutableCollections/asWithMutable.kt
-casts/mutableCollections/isWithMutable.kt
-casts/mutableCollections/reifiedAsWithMutable.kt
-casts/mutableCollections/reifiedIsWithMutable.kt
-casts/mutableCollections/reifiedSafeAsWithMutable.kt
-casts/mutableCollections/safeAsWithMutable.kt
-casts/mutableCollections/weirdMutableCasts.kt
 casts/objectToPrimitiveWithAssertion.kt
 classes/kt2224.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
@@ -205,7 +198,6 @@ funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/defaultsWithVarArg2.kt
-functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/subclass.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt

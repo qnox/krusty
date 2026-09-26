@@ -51,6 +51,7 @@ pub(super) fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
+        mapped_collection: None,
     })
 }
 
@@ -122,5 +123,6 @@ pub(super) fn builtin_library_type(
         annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
+        mapped_collection: None,
     }
 }

@@ -62,6 +62,8 @@ pub struct BackendClassifierFact {
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
     pub value_underlying_property: Option<Box<str>>,
+    /// The role its provider published for the declaration in type checks and casts.
+    pub role: Option<crate::types::ClassifierRole>,
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
@@ -164,6 +166,7 @@ impl BackendClassifierFact {
                 .value_underlying_property
                 .as_deref()
                 .map(Box::<str>::from),
+            role: shape.classifier_role(),
         }
     }
 
@@ -610,6 +613,8 @@ impl BackendModuleFacts {
                 type_param_variances,
                 value_underlying,
                 value_underlying_property,
+                // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
+                role: None,
             };
             source_declarations.insert(
                 classifier.classifier,
@@ -925,6 +930,10 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
     fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
         BackendClassifierSource::classifier(self, classifier)
             .and_then(|fact| fact.value_underlying_property.as_deref().map(str::to_owned))
+    }
+
+    fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {
+        BackendClassifierSource::classifier(self, classifier)?.role
     }
 }
 

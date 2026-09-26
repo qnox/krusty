@@ -28,7 +28,7 @@ pub(crate) fn module_member_jvm_name(
 fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
     let mut declarations = Under::new();
     let mut pending = Vec::new();
-    super::declaration_inventory::collect_classifier_names(ty, &mut pending);
+    crate::ir::referenced_classifiers::collect_classifier_names(ty, &mut pending);
     while let Some(classifier) = pending.pop() {
         if declarations.contains_key(&classifier) {
             continue;
@@ -40,7 +40,7 @@ fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
             classifier,
             underlying.scalar_value_repr().unwrap_or(underlying),
         );
-        super::declaration_inventory::collect_classifier_names(underlying, &mut pending);
+        crate::ir::referenced_classifiers::collect_classifier_names(underlying, &mut pending);
     }
     erase(&ty, &declarations)
 }

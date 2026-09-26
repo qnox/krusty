@@ -202,20 +202,9 @@ fn k_type_descriptor(arguments: &[&str]) -> String {
 
 /// Mutable Kotlin collection classifiers, which share a JVM class with their read-only face and
 /// are told apart only by `Reflection.mutableCollectionType`.
-fn is_mutable_collection(name: TypeName) -> bool {
-    [
-        "kotlin/collections/MutableIterator",
-        "kotlin/collections/MutableIterable",
-        "kotlin/collections/MutableCollection",
-        "kotlin/collections/MutableList",
-        "kotlin/collections/MutableListIterator",
-        "kotlin/collections/MutableSet",
-        "kotlin/collections/MutableMap",
-        "kotlin/collections/MutableMap.MutableEntry",
-        "kotlin/collections/MutableMap$MutableEntry",
-    ]
-    .into_iter()
-    .any(|candidate| name.matches(candidate))
+fn is_mutable_collection(ir: &IrFile, name: TypeName) -> bool {
+    ir.mapped_collection(name)
+        .is_some_and(|collection| collection.mutable)
 }
 
 /// The class instance kotlinc's `generateClassInstance(wrapPrimitives = false)` pushes for a
@@ -344,7 +333,7 @@ impl Generator<'_, '_> {
             k_type_descriptor(&arguments),
         );
         match inner {
-            Ty::Obj(name, _) if is_mutable_collection(name) => self.reflection(
+            Ty::Obj(name, _) if is_mutable_collection(self.parameters.ir, name) => self.reflection(
                 "mutableCollectionType",
                 k_type_descriptor(&[&format!("L{K_TYPE};")]),
             ),
@@ -624,118 +613,6 @@ pub(super) fn encode(
     }
 }
 
-/// The operand-stack peak a realization reaches above its starting height.
-pub(super) fn max_stack(instructions: &[TypeOfInsn]) -> u16 {
-    let (mut height, mut peak) = (0i32, 0i32);
-    for instruction in instructions {
-        height += match instruction {
-            TypeOfInsn::LdcClass(_)
-            | TypeOfInsn::PrimitiveClass(_)
-            | TypeOfInsn::LdcString(_)
-            | TypeOfInsn::PushInt(_)
-            | TypeOfInsn::AconstNull
-            | TypeOfInsn::Dup
-            | TypeOfInsn::New(_)
-            | TypeOfInsn::GetStatic { .. } => 1,
-            TypeOfInsn::ANewArray(_) => 0,
-            TypeOfInsn::AAStore => -3,
-            TypeOfInsn::InvokeStatic { descriptor, .. } => {
-                let (arguments, result) = descriptor_words(descriptor);
-                result - arguments
-            }
-            TypeOfInsn::InvokeVirtual { descriptor, .. }
-            | TypeOfInsn::InvokeSpecial { descriptor, .. } => {
-                let (arguments, result) = descriptor_words(descriptor);
-                result - arguments - 1
-            }
-            // The marker's two arguments are pushed and consumed by the marker call.
-            TypeOfInsn::ReifiedMarker(_) => {
-                peak = peak.max(height + 2);
-                0
-            }
-        };
-        peak = peak.max(height);
-    }
-    peak as u16
-}
-
-/// Encode a realization as spliced instructions against the host class's constant pool.
-pub(super) fn encode_insns(
-    instructions: &[TypeOfInsn],
-    cw: &mut super::classfile::ClassWriter,
-) -> Vec<super::inline::Insn> {
-    use super::inline::Insn;
-    fn plain(op: u8, operands: Vec<u8>) -> Insn {
-        Insn::Plain { op, operands }
-    }
-    fn pooled(op: u8, index: u16) -> Insn {
-        plain(op, index.to_be_bytes().to_vec())
-    }
-    fn ldc(index: u16) -> Insn {
-        match u8::try_from(index) {
-            Ok(index) => plain(0x12, vec![index]),
-            Err(_) => pooled(0x13, index),
-        }
-    }
-    fn push_int(value: i32) -> Insn {
-        match value {
-            -1..=5 => plain((0x03 + value) as u8, Vec::new()),
-            -128..=127 => plain(0x10, vec![value as i8 as u8]),
-            _ => plain(0x11, (value as i16).to_be_bytes().to_vec()),
-        }
-    }
-    let mut out = Vec::with_capacity(instructions.len());
-    for instruction in instructions {
-        match instruction {
-            TypeOfInsn::LdcClass(class) => out.push(ldc(cw.class_ref(class))),
-            TypeOfInsn::PrimitiveClass(wrapper) => out.push(pooled(
-                0xb2,
-                cw.fieldref(wrapper, "TYPE", "Ljava/lang/Class;"),
-            )),
-            TypeOfInsn::LdcString(value) => out.push(ldc(cw.const_string(value))),
-            TypeOfInsn::PushInt(value) => out.push(push_int(*value)),
-            TypeOfInsn::AconstNull => out.push(plain(0x01, Vec::new())),
-            TypeOfInsn::Dup => out.push(plain(0x59, Vec::new())),
-            TypeOfInsn::New(class) => out.push(pooled(0xbb, cw.class_ref(class))),
-            TypeOfInsn::ANewArray(class) => out.push(pooled(0xbd, cw.class_ref(class))),
-            TypeOfInsn::AAStore => out.push(plain(0x53, Vec::new())),
-            TypeOfInsn::GetStatic {
-                owner,
-                name,
-                descriptor,
-            } => out.push(pooled(0xb2, cw.fieldref(owner, name, descriptor))),
-            TypeOfInsn::InvokeStatic {
-                owner,
-                name,
-                descriptor,
-            } => out.push(pooled(0xb8, cw.methodref(owner, name, descriptor))),
-            TypeOfInsn::InvokeVirtual {
-                owner,
-                name,
-                descriptor,
-            } => out.push(pooled(0xb6, cw.methodref(owner, name, descriptor))),
-            TypeOfInsn::InvokeSpecial {
-                owner,
-                name,
-                descriptor,
-            } => out.push(pooled(0xb7, cw.methodref(owner, name, descriptor))),
-            TypeOfInsn::ReifiedMarker(argument) => {
-                out.push(push_int(TYPE_OF_MARKER));
-                out.push(ldc(cw.const_string(argument)));
-                out.push(pooled(
-                    0xb8,
-                    cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "reifiedOperationMarker",
-                        "(ILjava/lang/String;)V",
-                    ),
-                ));
-            }
-        }
-    }
-    out
-}
-
 /// kotlinc's `typeReferencesParameterWithRecursiveBound`, over declared bounds.
 fn references_recursive_bound(
     parameters: &TypeParameters<'_>,
@@ -826,12 +703,37 @@ mod tests {
         );
     }
 
+    /// Publishes the mutable face of the list collection for one classifier, as the provider's
+    /// class map does.
+    struct MutableListRole;
+
+    impl crate::types::ClassifierFactSource for MutableListRole {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {
+            (classifier == crate::types::type_name("kotlin/collections/MutableList")).then_some(
+                crate::types::ClassifierRole::MappedCollection(crate::types::MappedCollection {
+                    kind: crate::types::CollectionKind::List,
+                    mutable: true,
+                }),
+            )
+        }
+    }
+
     #[test]
     fn a_mutable_collection_is_marked_after_its_read_only_class() {
-        let out = realize(Ty::obj_args(
-            "kotlin/collections/MutableList",
-            &[Ty::String],
-        ));
+        let ty = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(0, vec![("T".to_owned(), ty)]);
+        ir.publish_classifier_roles(&MutableListRole);
+        let parameters = TypeParameters::new(&ir, "AKt");
+        let mut out = Vec::new();
+        generate(ty, &parameters, &mut out).expect("describable");
         assert_eq!(out[0], TypeOfInsn::LdcClass("java/util/List".to_owned()));
         assert_eq!(
             out.last(),

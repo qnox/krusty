@@ -489,6 +489,7 @@ impl<'a> ModuleSymbols<'a> {
                 .collect(),
             retention: None,
             annotation_targets: None,
+            mapped_collection: None,
         };
         debug_assert!(
             c.methods

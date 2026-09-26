@@ -7205,6 +7205,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
 
+- **Mutable collections and function types in `is`/`as`/`as?` (kotlinc's `TypeIntrinsics`).** A
+  mutable Kotlin collection shares its JVM interface with its read-only face, and a function type
+  erases to a `FunctionN` that a lambda of another arity may also implement, so neither can be tested
+  with `instanceof` alone. As in kotlinc, `x is MutableList<*>` calls
+  `TypeIntrinsics.isMutableList(x)` (likewise `Iterator`, `Iterable`, `Collection`, `ListIterator`,
+  `Set`, `Map`, `MapEntry`), `x as MutableList<*>` calls `asMutableList`, and `x is (Int) -> Int` and
+  `x is Function1<*, *>` call `isFunctionOfArity(x, 1)`, while `x as (Int) -> Int` calls
+  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. The narrowing on an `as?`'s
+  successful branch is a plain `checkcast` (kotlinc's implicit cast), since its `is` already asked.
+  These checks read the marker interfaces kotlinc adds to every class or interface with a direct
+  Kotlin collection supertype: `KMappedMarker` for read-only faces (once) and `KMutableX` for each
+  mutable one, in supertype order after the declared interfaces, in both the interface table and the
+  class `Signature`. A reified argument substituted into a library body gets the same treatment from
+  the inliner, which also, like kotlinc's `ReifiedTypeInliner`, throws
+  `NullPointerException("null cannot be cast to non-null type <type>")` for a non-null `as` (a
+  root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
+  (`tests/type_intrinsics_e2e.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

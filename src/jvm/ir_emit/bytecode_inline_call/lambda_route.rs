@@ -60,7 +60,17 @@ impl Emitter<'_> {
             ..
         } = *call;
         let callee = MethodNode::read(ACC_STATIC, target.name, target.splice_desc, body)
-            .map_err(|_| "an inline callee's code cannot be read as a method node")?;
+            .map_err(|_| UNREADABLE_INLINE_BODY)?;
+        // Only the MethodNode inliner specializes reified type parameters, so a reified body in a
+        // shape the port does not own yet fails cleanly instead of taking the splice.
+        let reified_body = inliner::has_reified_markers(&callee);
+        let splice = |reason| {
+            if reified_body {
+                Err(REIFIED_BODY_ON_BYTE_SPLICE)
+            } else {
+                Ok(LambdaCallRoute::Splice(reason))
+            }
+        };
         let physical = parse_descriptor_params(target.splice_desc)
             .filter(|physical| physical.len() == args.len())
             .ok_or("an inline callee's descriptor does not match the call's operands")?;
@@ -80,20 +90,20 @@ impl Emitter<'_> {
                 .and_then(|parameter| materialized.get(parameter))
                 .ok_or("a lambda argument has no published materialization role")?;
             if *is_materialized {
-                return Ok(LambdaCallRoute::Splice(SpliceReason::MaterializedLambda));
+                return splice(SpliceReason::MaterializedLambda);
             }
             if let Some(reason) = self.lambda_splice_reason(argument) {
-                return Ok(LambdaCallRoute::Splice(reason));
+                return splice(reason);
             }
             lambda_arguments.push(argument);
         }
         if let Some(shape) =
             inliner::unsupported_shape(&callee, inliner::ObjectRegeneration::Declined)
         {
-            return Ok(LambdaCallRoute::Splice(SpliceReason::CalleeShape(shape)));
+            return splice(SpliceReason::CalleeShape(shape));
         }
         if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
-            return Ok(LambdaCallRoute::Splice(SpliceReason::OperandsAcrossCallee));
+            return splice(SpliceReason::OperandsAcrossCallee);
         }
         let supplies = self
             .parameter_supplies(
@@ -106,13 +116,13 @@ impl Emitter<'_> {
             )
             .ok_or("a function-typed argument has no published materialization role")?;
         if supplies.contains(&Supply::InPlace) {
-            return Ok(LambdaCallRoute::Splice(SpliceReason::InPlaceArguments));
+            return splice(SpliceReason::InPlaceArguments);
         }
         if !lambda_arguments
             .iter()
             .all(|&argument| self.lambda_captures_caller_locals(argument))
         {
-            return Ok(LambdaCallRoute::Splice(SpliceReason::CaptureOutsideFrame));
+            return splice(SpliceReason::CaptureOutsideFrame);
         }
         Ok(LambdaCallRoute::MethodInliner(callee))
     }

@@ -42,7 +42,9 @@ mod intrinsic;
 mod local_class_names;
 mod overrides;
 mod progression;
+pub(crate) mod referenced_classifiers;
 mod references;
+mod type_check_role;
 mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
@@ -60,6 +62,7 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{FuncRef, PropRef};
+pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
 
@@ -2481,6 +2484,11 @@ pub struct IrFile {
     /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
     /// the same generic `when` written by hand must remain distinguishable.
     pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
+    /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
+    /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function
+    /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
+    /// rather than the checked cast a written `as` needs.
+    pub written_casts: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
@@ -2821,9 +2829,8 @@ pub struct IrFile {
     /// whose user-written name happens to resemble a backend helper. Consumers must treat the entry as
     /// valid only while the rewritten expression remains at the same arena index.
     erased_value_constructions: std::collections::HashMap<ExprId, (TypeName, Ty)>,
-    /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
-    /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
-    /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
+    /// Checked [`crate::types::ClassifierRole`] of each referenced classifier that has one.
+    classifier_roles: std::collections::HashMap<TypeName, crate::types::ClassifierRole>,
     /// Call `ExprId` → checked reified-type substitutions for a classpath inline declaration whose
     /// compiled body a target may splice. The values stay backend-agnostic [`Ty`]s here. At the JVM
     /// boundary, a concrete value becomes a class-pool operand while a reified parameter of the host
