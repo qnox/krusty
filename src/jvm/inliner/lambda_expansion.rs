@@ -273,13 +273,7 @@ pub(super) fn expand(
                         let Insn::Method { desc, .. } = insn else {
                             unreachable!("an invoke is a method instruction");
                         };
-                        expansion.expand(
-                            desc,
-                            &mut out,
-                            &mut sorter,
-                            &mut next_local_index,
-                            lines,
-                        )?;
+                        expansion.expand(desc, &mut out, &mut sorter, next_local_index, lines)?;
                     }
                 }
             }
@@ -323,7 +317,7 @@ impl Expansion<'_> {
         invoke_desc: &str,
         out: &mut MethodNode,
         sorter: &mut Sorter,
-        next_local_index: &mut i32,
+        next_local_index: i32,
         lines: &mut dyn SourceLines,
     ) -> Result<(), InlineError> {
         let types = &self.lambda.parameter_types;
@@ -332,18 +326,19 @@ impl Expansion<'_> {
         if arguments.len() != types.len() {
             return Err(InlineError::LambdaArity);
         }
-        let mut value_param_shift = (*next_local_index).max(self.marker_shift)
+        let mut value_param_shift = next_local_index.max(self.marker_shift)
             + types
                 .iter()
                 .map(|ty| descriptors::size(ty) as i32)
                 .sum::<i32>();
+        // kotlinc stores the arguments with `InstructionAdapter.store`, which writes to the
+        // delegate and so never advances `InlineAdapter.nextLocalIndex`: a later invoke stores its
+        // arguments in the same slots.
         for ty in types.iter().rev() {
             out.nodes.extend(coerce_from_object(ty));
             value_param_shift -= descriptors::size(ty) as i32;
             let slot = u16::try_from(value_param_shift).map_err(|_| InlineError::LambdaArity)?;
             let op = Category::of_descriptor(ty).store_op();
-            *next_local_index =
-                (*next_local_index).max(value_param_shift + descriptors::size(ty) as i32);
             let mut store = Insn::Var { op, slot };
             sorter.visit(&mut store);
             out.nodes.push(Node::Insn(store));
@@ -367,7 +362,6 @@ impl Expansion<'_> {
                 out.nodes.push(Node::Line { line, start: label });
             }
         }
-        let saved_next_local_index = *next_local_index;
         let slot = u16::try_from(value_param_shift).map_err(|_| InlineError::LambdaArity)?;
         let inlined = inline_lambda(self.lambda, self.context.parameters, slot)?;
         let import = LabelImport::new(&inlined, out);
@@ -404,7 +398,6 @@ impl Expansion<'_> {
             out.local_variables.push(local);
         }
         out.nodes.extend(coerce_to_object(&self.lambda.return_type));
-        *next_local_index = saved_next_local_index;
         if self.current_line >= 0 {
             let line = u16::try_from(self.current_line).expect("a line number fits u16");
             let line = if self.context.inline_only {
