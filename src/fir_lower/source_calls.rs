@@ -52,6 +52,9 @@ pub(super) enum SelectedDefaultMode {
 pub(super) enum SameFileExtensionReceiverMode {
     Materialized,
     DirectWhenOrdered,
+    /// Every operand is already an evaluated value read, as a callable-reference adapter's own
+    /// parameters are, so the receiver needs no boundary of its own.
+    Direct,
 }
 
 pub(super) struct SelectedOperandRequest<'a> {
@@ -1360,6 +1363,7 @@ impl BodyLowering<'_> {
         // iterator-loop contract may keep its already-ordered, argument-free receiver direct;
         // ordinary calls retain the materialized boundary recorded for general source evaluation.
         let direct = (extension_receiver.is_none()
+            || extension_receiver_mode == SameFileExtensionReceiverMode::Direct
             || (extension_receiver_mode == SameFileExtensionReceiverMode::DirectWhenOrdered
                 && arguments.is_empty()))
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
