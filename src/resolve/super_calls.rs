@@ -36,6 +36,8 @@ pub struct ResolvedSuperCall {
     /// callable identity remains available for ordinary accessor calls, but checked FIR uses this
     /// declaration identity to retain property semantics through target-independent lowering.
     pub external_property: Option<crate::fir::ExternalPropertyId>,
+    /// The selected declaration is a `suspend` function, so the call is a suspension point.
+    pub suspend: bool,
 }
 
 impl ResolvedSuperCall {
@@ -43,12 +45,21 @@ impl ResolvedSuperCall {
         receiver: ImplicitReceiverSelection,
         dispatch_owner: TypeName,
         interface: bool,
-        member: crate::libraries::LibraryMember,
+        mut member: crate::libraries::LibraryMember,
     ) -> Option<Self> {
         let realization = member.realization;
         let stable_declaration = member.stable_declaration;
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
+        let suspend = member.suspend();
+        // A dependency publishes a suspend member's classfile ABI, whose last physical parameter
+        // is the CPS continuation, beside a logical descriptor without it. The super call names
+        // the declaration's logical parameters, as its descriptor does; the coroutine pass
+        // threads the continuation at the call.
+        let mut physical_params = std::mem::take(&mut member.physical_params);
+        if suspend && physical_params.len() == member.params.len() + 1 {
+            physical_params.pop();
+        }
         let physical_owner = member.owner?;
         let (owner, interface) = match realization {
             // A dispatched `super` call names the supertype it is qualified with, as kotlinc's
@@ -74,7 +85,7 @@ impl ResolvedSuperCall {
             owner,
             name: member.physical_name.unwrap_or(member.name),
             params: member.params,
-            physical_params: member.physical_params,
+            physical_params,
             ret: member.ret,
             physical_ret: member.physical_ret,
             descriptor: member.descriptor,
@@ -84,35 +95,33 @@ impl ResolvedSuperCall {
             property_declaration: None,
             source_member,
             external_property,
+            suspend,
         })
     }
 }
 
 impl Checker<'_> {
-    /// Refuse a `super` call whose selected target is a `suspend` member, at its source position.
+    /// Refuse a `super` call to a `suspend` member that dispatches on an ENCLOSING instance
+    /// (`super@Outer.f()` from a nested body), at its source position.
     ///
-    /// Threading a continuation through a NON-VIRTUAL dispatch and resuming back into it is not
-    /// modeled. Emitting it anyway produced an `invokespecial` naming the SOURCE descriptor
-    /// (`A.f:()Ljava/lang/String;`) against a declaration that is
-    /// `A.f:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` — an artifact that cannot link,
-    /// with no diagnostic. The project's rule for a construct it does not model is to decline the
-    /// source.
+    /// Such a call crosses a physical class boundary through a nonvirtual bridge on the outer
+    /// class, and that bridge is not a suspend function: it would neither pass a continuation nor
+    /// name the member's CPS descriptor, so it would not link. A super call on the current
+    /// instance is an ordinary suspension point and is not refused. The project's rule for a
+    /// construct it does not model is to decline the source.
     ///
-    /// The refusal belongs HERE, where the target was selected and its suspend shape is in hand.
-    /// A backend traversal would have to rediscover the fact from a realization that no longer
-    /// names it, and could only recognize the call shapes that reach one particular node: the same
-    /// source with its superclass in a SIBLING FILE, or behind an `@Outer`-labeled enclosing
-    /// dispatch, reaches a different one and slipped through. Every spelling and every origin
-    /// passes through this one selection.
+    /// The refusal belongs HERE, where the target and its receiver were selected and its suspend
+    /// shape is in hand; every spelling and every origin passes through this one selection.
     ///
     /// Returns whether the call was refused, so the caller stops rather than recording a target.
     pub(super) fn reject_suspend_super_call(
         &mut self,
         suspend: bool,
+        receiver: &ImplicitReceiverSelection,
         span: Span,
         name: &str,
     ) -> bool {
-        if !suspend {
+        if !suspend || receiver.current {
             return false;
         }
         self.diags.error(

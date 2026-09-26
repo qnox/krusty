@@ -2903,6 +2903,7 @@ impl BodyFirChecker<'_> {
                     .and_then(|declaration| self.index.callable_for_declaration(declaration))
                     .map(|callable| callable.id),
                 source_member: target.source_member.clone(),
+                suspend: target.suspend,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,

@@ -359,6 +359,9 @@ pub enum FirCallTarget {
         /// owner of retained checked defaults; dependency declarations leave it unset.
         source: Option<CallableId>,
         source_member: Option<crate::libraries::SourceMember>,
+        /// The selected declaration is a `suspend` function: the call is a suspension point, and
+        /// a target passes it a continuation.
+        suspend: bool,
     },
 }
 

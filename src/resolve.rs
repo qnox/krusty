@@ -19798,7 +19798,12 @@ impl<'a> Checker<'a> {
                                 ) {
                                     return Ty::Error;
                                 }
-                                if self.reject_suspend_super_call(m.suspend(), span, &name) {
+                                if self.reject_suspend_super_call(
+                                    m.suspend(),
+                                    &dispatch_receiver,
+                                    span,
+                                    &name,
+                                ) {
                                     return Ty::Error;
                                 }
                                 let ret = m.ret;
@@ -19862,7 +19867,12 @@ impl<'a> Checker<'a> {
                             ) {
                                 return Ty::Error;
                             }
-                            if self.reject_suspend_super_call(member.suspend(), span, &name) {
+                            if self.reject_suspend_super_call(
+                                member.suspend(),
+                                &dispatch_receiver,
+                                span,
+                                &name,
+                            ) {
                                 return Ty::Error;
                             }
                             let ret = member.ret;
@@ -47040,6 +47050,7 @@ impl<'a> Checker<'a> {
                     property_declaration,
                     source_member: selected.source_member,
                     external_property: callable.external_property_identity,
+                    suspend: false,
                 })
             } else {
                 let member = self.select_property_member(applied_owner, name)?;
