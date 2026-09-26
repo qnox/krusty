@@ -259,6 +259,11 @@ fn a_builder_receiver_or_suffix_is_read_as_text_and_sliced_into_a_copy() {
     run_driver("string_builder_receivers");
 }
 
+#[test]
+fn a_concatenation_stops_at_the_first_throwing_to_string() {
+    run_driver("string_plus_throwing_to_string");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

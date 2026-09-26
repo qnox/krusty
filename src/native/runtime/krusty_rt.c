@@ -1099,8 +1099,19 @@ KRef kt_string_plus(KRef a, KRef b) {
     /* Both storages stay in locals across the allocation below: they are its roots. */
     KRef left_storage = NULL;
     KRef right_storage = NULL;
+    /* Rendering an object of the program's runs its own `toString`, which may throw. That comes
+       back with the exception pending and a `null` rendered in the text's place, and Kotlin has
+       gone no further by then: the right operand's `toString` never runs, and there is no text. So
+       the concatenation stops at the first exception, before the other operand and before the
+       allocation, and the NULL it answers is never read; the caller finds the exception first. */
     const char *left = kt_render(a, &left_length, &left_storage);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     const char *right = kt_render(b, &right_length, &right_storage);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
     /* Summed in 64 bits: two lengths that each fit need not fit together, and a sum that wrapped
        would name a buffer smaller than the copies below. Text longer than any array can hold is
        memory the runtime cannot provide, and that is decided before either text is read. Joining a

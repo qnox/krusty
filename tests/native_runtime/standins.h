@@ -2,12 +2,13 @@
 
    The runtime lands in tiers, and a tier below the last one calls functions a later tier defines:
    the text accessor behind every question about a string's content, the `StringBuilder` it answers
-   for, the boxes an exception message renders, and the exception machinery itself. Linked at such a
-   tier those calls reach nothing, so a driver that exercises code making them supplies the missing
-   pieces here. Every one is WEAK: at a tier that defines the real function the linker takes that
-   one, and the driver runs against the runtime as it will ship. `kt_text_of` is the exception — the
-   runtime defines it with internal linkage, so from the tier that does, its calls never reach this
-   definition.
+   for, the dispatch that renders an object through its own `toString`, the boxes an exception
+   message renders, and the exception machinery itself. Linked at such a tier those calls reach
+   nothing, so a driver that exercises code making them supplies the missing pieces here. Every one
+   is WEAK: at a tier that defines the real function the linker takes that one, and the driver runs
+   against the runtime as it will ship. `kt_text_of` and `kt_object_to_string` are the exceptions —
+   the runtime defines them with internal linkage, so from the tier that does, its calls never reach
+   these definitions.
 
    The string layout below mirrors `struct KObject`'s string arm in `krusty_rt.c`, which keeps the
    layout private; a driver has no other way to read the text a runtime call hands back. The builder
@@ -112,6 +113,16 @@ __attribute__((weak)) const char *kt_text_of(KRef self, kt_int *byte_length) {
     return driver_text(self, byte_length);
 }
 
+/* An object's own `toString`, through the slot every vtable keeps for it, as the tier that defines
+   the dispatch reaches it; a type with no such slot renders as `kotlin.Any` does. */
+__attribute__((weak)) KRef kt_object_to_string(KRef value) {
+    const KType *type = driver_type_of(value);
+    if (type->vtable == NULL || type->vtable_length <= KT_SLOT_TO_STRING) {
+        return kt_any_to_string(value);
+    }
+    return ((KRef(*)(KRef))type->vtable[KT_SLOT_TO_STRING])(value);
+}
+
 __attribute__((weak)) KRef kt_box_char(kt_char value) {
     DriverValue *box = (DriverValue *)kt_gc_allocate(&kt_type_char, sizeof(DriverValue));
     box->as.char_value = value;
@@ -125,6 +136,8 @@ __attribute__((weak)) KRef kt_box_int(kt_int value) {
 }
 
 __attribute__((weak)) KRef kt_pending;
+
+__attribute__((weak)) KRef kt_pending_exception(void) { return kt_pending; }
 
 __attribute__((weak)) const KType kt_type_index_out_of_bounds_exception = {
     .name = "kotlin.IndexOutOfBoundsException",

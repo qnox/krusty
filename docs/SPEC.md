@@ -1428,11 +1428,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `.endsWith("\uDE00")`), and `"😀".removeSuffix("\uDE00")` is `"\uD83D"`; bytes still settle a
     search in which neither text holds a lone half. `substring`, `removeSuffix` and the searches
     read a `StringBuilder` receiver or argument as text, and a string cut from a builder is a copy,
-    which the builder's next change leaves alone. A concatenation whose text would be longer than an
-    array can hold ends the program as out of memory, as `repeat` does. The length is summed in 64
-    bits before either text is read: two lengths that each fit can wrap together. Tests:
-    `string_whitespace`, `string_plus_surrogates`, `string_surrogate_halves`,
-    `string_builder_receivers`, `string_plus_overflow` under `tests/native_runtime/`.
+    which the builder's next change leaves alone. A concatenation stops at the first operand whose
+    `toString` throws: the other operand is not rendered and no text is built. A concatenation whose
+    text would be longer than an array can hold ends the program as out of memory, as `repeat` does.
+    The length is summed in 64 bits before either text is read: two lengths that each fit can wrap
+    together. Tests: `string_whitespace`, `string_plus_surrogates`, `string_surrogate_halves`,
+    `string_builder_receivers`, `string_plus_throwing_to_string`, `string_plus_overflow` under
+    `tests/native_runtime/`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
