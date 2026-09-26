@@ -314,3 +314,36 @@ fn a_method_over_the_source_analysis_limit_is_declined_before_the_analysis() {
     method.max_locals = 50;
     assert!(propagate(&mut method, "T").is_err());
 }
+
+#[test]
+fn a_wide_branchy_method_over_the_limit_is_declined_promptly() {
+    // `iload_0; ifeq Lk; iconst_0; pop; Lk:` 3,000 times: 12,000 frames, each branch joining the
+    // next. Squared, that is over the limit at any width, so the pass declines without analyzing;
+    // the analysis of this shape is what grows with every join.
+    let mut method = MethodNode::new(0x0009, "f", "(I)V");
+    method.max_locals = 1;
+    method.max_stack = 1;
+    for _ in 0..3_000 {
+        let join = method.new_label();
+        method.nodes.extend([
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: join,
+            }),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Op(POP)),
+            Node::Label(join),
+        ]);
+    }
+    method.nodes.push(Node::Insn(Insn::Op(RETURN)));
+    let emitted = method.clone();
+    let started = std::time::Instant::now();
+    assert_eq!(propagate(&mut method, "T"), Ok(false));
+    let elapsed = started.elapsed();
+    assert_eq!(method, emitted);
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "declining took {elapsed:?}"
+    );
+}
