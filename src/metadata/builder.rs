@@ -27,10 +27,10 @@ pub struct FnMeta {
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
     pub receiver: Option<Ty>,
-    /// Per-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `params`; empty = none default). Sets
-    /// `ValueParameter.flags` bit 1 so a cross-module caller may OMIT a defaulted argument (the reader's
-    /// `metadata_param_defaults` recovers it). A short/empty vec leaves the remaining params required.
-    pub param_defaults: Vec<bool>,
+    /// What each parameter declared (parallel to `params`; a short/empty vec declares nothing for
+    /// the rest). `DECLARES_DEFAULT_VALUE` lets a cross-module caller OMIT a defaulted argument (the
+    /// reader's `metadata_param_defaults` recovers it).
+    pub param_modifiers: Vec<crate::metadata::DeclaredValueParameter>,
     /// `suspend fun` — sets `Function.flags` `IS_SUSPEND` (bit 13). Its `params`/`ret` are the LOGICAL
     /// signature (no `Continuation`, the source return), exactly as kotlinc records in `@Metadata`.
     pub suspend: bool,
@@ -56,6 +56,8 @@ pub struct FnMeta {
     /// `infix fun` — sets `Function.flags` `IS_INFIX` (bit 9). Same metadata-only story as
     /// `operator`: without it a consumer rejects the `a then b` call form.
     pub infix: bool,
+    /// `tailrec fun` — sets `Function.flags` `IS_TAILREC` (bit 11).
+    pub tailrec: bool,
     /// Declared type parameters in order `(name, reified)` — emitted as the `Function.type_parameter`
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
@@ -109,7 +111,7 @@ impl FnMeta {
             decl_order: 0,
             annotations: Vec::new(),
             receiver: None,
-            param_defaults: Vec::new(),
+            param_modifiers: Vec::new(),
             suspend: false,
             jvm_desc: None,
             jvm_name: None,
@@ -117,6 +119,7 @@ impl FnMeta {
             has_function_typed_parameter: false,
             operator: false,
             infix: false,
+            tailrec: false,
             type_params: Vec::new(),
             semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
@@ -131,9 +134,6 @@ impl FnMeta {
         }
     }
 }
-
-/// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
-const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 
 /// A `Type` message for `t`, resolving type-parameter NAMES to their `Function.type_parameter`
 /// table ids via `tps`. Handles generic class arguments (`Type.argument` = 2), nullability
@@ -417,6 +417,7 @@ fn function_pb(
     let flags = u64::from(!f.annotations.is_empty())
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
+        | (u64::from(f.tailrec) << 11)
         | (u64::from(f.inline) << 10)
         | (u64::from(f.infix) << 9)
         | (u64::from(f.operator) << 8);
@@ -481,18 +482,20 @@ fn function_pb(
         }
         let mut vp = Pb::new();
         let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        // ValueParameter.flags = 1 (before name, matching kotlinc's field order): bit 1 =
-        // DECLARES_DEFAULT_VALUE, set when this parameter has a default so a caller may omit it;
-        // bit 0 = HAS_ANNOTATIONS, set when the `annotation` records below are written.
-        let flags = if f.param_defaults.get(i).copied().unwrap_or(false) {
-            DECLARES_DEFAULT_VALUE_BIT
-        } else {
-            0
-        } | if crate::metadata::class_builder::records_annotations(annotations) {
-            crate::metadata::class_builder::HAS_ANNOTATIONS
-        } else {
-            0
-        };
+        // ValueParameter.flags = 1 (before name, matching kotlinc's field order): what the
+        // parameter declared, plus bit 0 = HAS_ANNOTATIONS when the `annotation` records below are
+        // written.
+        let flags = f
+            .param_modifiers
+            .get(i)
+            .copied()
+            .unwrap_or_default()
+            .flags()
+            | if crate::metadata::class_builder::records_annotations(annotations) {
+                crate::metadata::class_builder::HAS_ANNOTATIONS
+            } else {
+                0
+            };
         if flags != 0 {
             vp.field_varint(1, flags);
         }

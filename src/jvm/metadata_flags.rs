@@ -7,7 +7,11 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
     // recorded visibility stay public.
+    // A classifier declared in executable code, or nested in one, is LOCAL (5) whatever it says.
+    // So is an enum entry's body: kotlinc models it as an anonymous object, although its class id
+    // stays the entry's `Enum.ENTRY` name.
     let visibility: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
+        _ if super::local_classifiers::is_local(ir, c) || c.enum_entry_of.is_some() => 5,
         Some(crate::types::Visibility::Internal) => 0,
         Some(crate::types::Visibility::Private) => 1,
         Some(crate::types::Visibility::Protected) => 2,
@@ -84,8 +88,32 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     // `isInline` (bit 10) is a Kotlin declaration capability, not a bytecode access flag. It must
     // survive class metadata so downstream frontends can select and splice member inline bodies.
     let inline = u64::from(ir.inline_fns.contains(&fid)) << 10;
+    let tailrec = u64::from(ir.tailrec_fns.contains(&fid)) << 11;
     let return_value_status = ir.fn_return_value_statuses.get(&fid).map_or(0, |status| {
         status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
     });
-    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
+    (visibility << 1) | (modality << 4) | operator | infix | inline | tailrec | return_value_status
+}
+
+/// What each value parameter of `fid` declared, extension receiver excluded: `defaults` says which
+/// write a default value, and the IR's recorded inline modifiers supply `crossinline`/`noinline`.
+pub(super) fn declared_value_parameters(
+    ir: &IrFile,
+    fid: u32,
+    defaults: impl IntoIterator<Item = bool>,
+) -> Vec<crate::metadata::DeclaredValueParameter> {
+    use crate::ir::IrInlineParameterModifier as Modifier;
+    let modifiers = ir.declared_inline_modifiers(fid);
+    let mut declared = defaults
+        .into_iter()
+        .map(crate::metadata::DeclaredValueParameter::defaulted)
+        .collect::<Vec<_>>();
+    if declared.len() < modifiers.len() {
+        declared.resize(modifiers.len(), Default::default());
+    }
+    for (parameter, modifier) in declared.iter_mut().zip(modifiers) {
+        parameter.crossinline = modifier == Modifier::Crossinline;
+        parameter.noinline = modifier == Modifier::Noinline;
+    }
+    declared
 }

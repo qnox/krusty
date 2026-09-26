@@ -284,10 +284,7 @@ pub(super) fn emit_func_ref_class(
             emit_singleton_instance_clinit(&mut cw, &fq);
             add_singleton_instance_field(&mut cw, &fq);
         }
-        // A reference class is local to the scope it was written in.
-        let xi = synthetic_class_xi(SYNTHETIC_LOCAL);
-        cw.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
-        return cw.finish();
+        return finish_local_synthetic_class(cw);
     }
 
     // Numbered JVM function interfaces stop at arity 22. Larger Kotlin function types use the
@@ -496,5 +493,5 @@ pub(super) fn emit_func_ref_class(
         emit_singleton_instance_clinit(&mut cw, &fq);
         add_singleton_instance_field(&mut cw, &fq);
     }
-    cw.finish()
+    finish_local_synthetic_class(cw)
 }

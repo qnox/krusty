@@ -4,8 +4,10 @@
 //! contracts, and type aliases. Keep that schema here; the surrounding declaration builders only
 //! decide which field contains the encoded type.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::metadata::{protobuf::Pb, serialize_string_table_types};
 use crate::spelling::Spelled;
@@ -68,9 +70,28 @@ pub(crate) struct StringTable {
     /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
     /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
     local_names: Vec<u32>,
+    /// Indices of literal class ids; each opens a new `Record` rather than extending a plain run.
+    record_starts: Vec<u32>,
+    /// Classifiers declared in executable code (or nested in one): named by their raw internal
+    /// name, marked local, wherever a class id is interned.
+    local_classifiers: std::collections::HashSet<TypeName>,
+    /// The local classifiers kotlinc gives no raw-name replacement: enum entry bodies, whose ids
+    /// keep their `pkg/Enum.ENTRY` spelling.
+    enum_entry_bodies: std::collections::HashSet<TypeName>,
 }
 
 impl StringTable {
+    pub(crate) fn with_local_classifiers(
+        local_classifiers: &std::collections::HashSet<TypeName>,
+        enum_entry_bodies: &std::collections::HashSet<TypeName>,
+    ) -> Self {
+        StringTable {
+            local_classifiers: local_classifiers.clone(),
+            enum_entry_bodies: enum_entry_bodies.clone(),
+            ..StringTable::default()
+        }
+    }
+
     fn intern(&mut self, string: String, record: Pb) -> u32 {
         let key = (string.clone(), record.as_bytes().to_vec());
         if let Some(&index) = self.dedup.get(&key) {
@@ -94,6 +115,10 @@ impl StringTable {
     }
 
     pub(crate) fn class_id(&mut self, classifier: TypeName) -> u32 {
+        if self.local_classifiers.contains(&classifier) {
+            let literal = self.local_class_literal(classifier);
+            return self.class_literal(literal, true);
+        }
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
@@ -103,21 +128,61 @@ impl StringTable {
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
             return self.intern(format!("L{};", classifier.render()), record);
         }
-        self.intern(encoded.literal, Pb::new())
+        self.class_literal(encoded.literal, false)
+    }
+
+    /// A local classifier's id: the raw internal name of the classifier declared in executable
+    /// code, then `.`-separated segments for the classes nested in it (`app/AKt$make$Local.In`).
+    /// An enum entry body keeps its ordinary class id instead (`app/Coded.A.In`).
+    fn local_class_literal(&self, classifier: TypeName) -> String {
+        let mut nested = Vec::new();
+        let mut outer = classifier;
+        while let Some(owner) = outer
+            .nested_owner()
+            .filter(|owner| self.local_classifiers.contains(owner))
+        {
+            nested.push(
+                outer
+                    .nested_segment_within(owner)
+                    .expect("a recorded nested owner must own the classifier segment"),
+            );
+            outer = owner;
+        }
+        let mut literal = if self.enum_entry_bodies.contains(&outer) {
+            class_id_of(outer).literal
+        } else {
+            outer.render()
+        };
+        for segment in nested.into_iter().rev() {
+            literal.push('.');
+            literal.push_str(segment);
+        }
+        literal
+    }
+
+    /// kotlinc's `JvmStringTable.getQualifiedClassNameIndex` for a class id stored literally (a
+    /// local classifier, or a name with a `$`): it reuses an equal string only when that string's
+    /// locality matches, and always opens a new record, which the plain strings after it extend.
+    fn class_literal(&mut self, literal: String, local: bool) -> u32 {
+        let key = (literal, Vec::new());
+        if let Some(&index) = self.dedup.get(&key) {
+            if local == self.local_names.contains(&index) {
+                return index;
+            }
+        }
+        let index = self.strings.len() as u32;
+        self.strings.push(key.0.clone());
+        self.records.push(Pb::new());
+        self.dedup.insert(key, index);
+        if local {
+            self.local_names.push(index);
+        }
+        self.record_starts.push(index);
+        index
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
-        serialize_string_table_types(&self.records, &self.local_names)
-    }
-
-    /// Intern a LOCAL/ANONYMOUS class's RAW internal name as a class id: an EMPTY record plus a
-    /// `StringTableTypes.localName` entry marking the index (kotlinc's local-class encoding).
-    pub(crate) fn local_class_id(&mut self, internal: &str) -> u32 {
-        let index = self.intern(internal.to_string(), Pb::new());
-        if !self.local_names.contains(&index) {
-            self.local_names.push(index);
-        }
-        index
+        serialize_string_table_types(&self.records, &self.local_names, &self.record_starts)
     }
 
     pub(crate) fn into_strings(self) -> Vec<String> {
@@ -163,7 +228,16 @@ impl fmt::Display for TypeEncodeError {
 }
 
 /// How a `Type` refers to each type parameter in scope, keyed by source and semantic name.
-pub(crate) type TypeParameters = HashMap<String, TypeParameterRef>;
+///
+/// Ids follow kotlinc's per-declaration `Interner`: a scope's own parameters take the ids after its
+/// parent's, and a parameter a local class captures from an enclosing declaration takes the next id
+/// of the scope that first writes it. A member of a local class is a child scope, so a captured
+/// parameter first written there is numbered for that member only.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TypeParameters {
+    references: HashMap<String, TypeParameterRef>,
+    captured: Rc<CapturedScope>,
+}
 
 /// One in-scope type parameter as a `Type` records it. kotlinc's serializer names a parameter the
 /// declaration being written owns (`Type.type_parameter_name`, f9) and addresses an enclosing
@@ -171,11 +245,116 @@ pub(crate) type TypeParameters = HashMap<String, TypeParameterRef>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TypeParameterRef {
     Id(u64),
-    /// Captured from an enclosing class: the joint index, plus the name (f9), since the isolated
-    /// reader has no enclosing-chain context to resolve a bare joint index.
+    /// Captured by an inner class from an enclosing class: the joint index, plus the name (f9),
+    /// since the isolated reader has no enclosing-chain context to resolve a bare joint index.
     Captured(u64),
     /// Owned by the declaration being written, by its source name.
     Named(String),
+    /// Captured by a local or anonymous class from an enclosing declaration: numbered on first
+    /// use, and recorded by id alone, as kotlinc does.
+    CapturedOnUse,
+}
+
+/// The captured parameters one declaration scope has numbered, after `first_index` ids that its
+/// parent and its own parameters hold.
+#[derive(Debug, Default)]
+struct CapturedScope {
+    parent: Option<Rc<CapturedScope>>,
+    first_index: u64,
+    interned: RefCell<Vec<String>>,
+}
+
+impl CapturedScope {
+    fn find(&self, name: &str) -> Option<u64> {
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.find(name))
+            .or_else(|| {
+                let interned = self.interned.borrow();
+                let position = interned.iter().position(|interned| interned == name)?;
+                Some(self.first_index + position as u64)
+            })
+    }
+
+    fn intern(&self, name: &str) -> u64 {
+        self.find(name).unwrap_or_else(|| {
+            let mut interned = self.interned.borrow_mut();
+            interned.push(name.to_owned());
+            self.first_index + interned.len() as u64 - 1
+        })
+    }
+
+    fn size(&self) -> u64 {
+        self.first_index + self.interned.borrow().len() as u64
+    }
+}
+
+impl TypeParameters {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A classifier's scope: its `own_count` parameters hold ids `0..own_count`, and each of
+    /// `captured` is numbered after them on first use.
+    pub(crate) fn classifier(own_count: usize, captured: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            references: captured
+                .into_iter()
+                .map(|name| (name, TypeParameterRef::CapturedOnUse))
+                .collect(),
+            captured: Rc::new(CapturedScope {
+                parent: None,
+                first_index: own_count as u64,
+                interned: RefCell::default(),
+            }),
+        }
+    }
+
+    /// A member declaration's scope within this one, and the first id of its `own_count` own
+    /// parameters. Captured parameters it numbers itself come after those.
+    pub(crate) fn member(&self, own_count: usize) -> (Self, u64) {
+        let first_own = self.captured.size();
+        let child = Self {
+            references: self.references.clone(),
+            captured: Rc::new(CapturedScope {
+                parent: Some(Rc::clone(&self.captured)),
+                first_index: first_own + own_count as u64,
+                interned: RefCell::default(),
+            }),
+        };
+        (child, first_own)
+    }
+
+    pub(crate) fn insert(&mut self, name: String, reference: TypeParameterRef) {
+        self.references.insert(name, reference);
+    }
+
+    fn get(&self, name: &str) -> Option<&TypeParameterRef> {
+        self.references.get(name)
+    }
+}
+
+impl Extend<(String, TypeParameterRef)> for TypeParameters {
+    fn extend<I: IntoIterator<Item = (String, TypeParameterRef)>>(&mut self, iter: I) {
+        self.references.extend(iter);
+    }
+}
+
+impl IntoIterator for TypeParameters {
+    type Item = (String, TypeParameterRef);
+    type IntoIter = std::collections::hash_map::IntoIter<String, TypeParameterRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.references.into_iter()
+    }
+}
+
+impl FromIterator<(String, TypeParameterRef)> for TypeParameters {
+    fn from_iter<I: IntoIterator<Item = (String, TypeParameterRef)>>(iter: I) -> Self {
+        let mut parameters = Self::new();
+        parameters.extend(iter);
+        parameters
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -359,6 +538,9 @@ fn encode_type_with_parameter(
                     message.field_varint(7, *id);
                     let source_name = crate::types::type_parameter_source_name(name);
                     message.field_varint(9, strings.local(source_name) as u64);
+                }
+                TypeParameterRef::CapturedOnUse => {
+                    message.field_varint(7, type_parameters.captured.intern(name));
                 }
                 TypeParameterRef::Named(source_name) => {
                     message.field_varint(9, strings.local(source_name) as u64);
@@ -729,7 +911,7 @@ mod tests {
     #[test]
     fn definitely_non_null_type_parameter_sets_the_metadata_type_flag() {
         let mut strings = StringTable::default();
-        let parameters = TypeParameters::from([("T".to_owned(), TypeParameterRef::Id(0))]);
+        let parameters = TypeParameters::from_iter([("T".to_owned(), TypeParameterRef::Id(0))]);
         let encoded = encode_declared_type(
             &mut strings,
             Ty::ty_param("T", Ty::obj("kotlin/Any")),
