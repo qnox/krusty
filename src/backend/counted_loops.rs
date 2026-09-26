@@ -41,9 +41,29 @@ pub(crate) enum CounterLoopStyle {
     JavaLike,
 }
 
+/// Whether a target realizes the calls kotlinc's `ForLoopsLowering` inlines into an unsigned
+/// loop's header as nodes of their own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeaderInlining {
+    /// An unsigned value is its own representation, and the header's calls are ordinary calls.
+    None,
+    /// The JVM: an unsigned bound is converted to its `Int`/`Long` representation with the inline
+    /// `toInt()`/`toLong()`, and `UInt.compareTo` is inlined. Each is marked as an inlined call,
+    /// so the emitter applies kotlinc's line rule after an inlined call to it.
+    Kotlinc,
+}
+
+/// How a target realizes its counted loops: each backend names its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CountedLoopPolicy {
+    pub(crate) style: CounterLoopStyle,
+    pub(crate) inlining: HeaderInlining,
+}
+
 /// Realize every checked range loop. An unsigned loop compares through the function resolution
 /// selected for it, called like any other external declaration.
-pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
+pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
+    let CountedLoopPolicy { style, inlining } = policy;
     let mut next_slot = None;
     for expression in 0..ir.exprs.len() {
         let IrExpr::Checked(IrCheckedOperation::RangeLoop {
@@ -63,6 +83,7 @@ pub(crate) fn realize(ir: &mut IrFile, style: CounterLoopStyle) {
             next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
             ir: &mut *ir,
             style,
+            inlining,
             unsigned_compare,
             inlined_calls: Vec::new(),
             represented: Vec::new(),
@@ -110,13 +131,15 @@ impl Operand {
     }
 }
 
-/// The IR file being rewritten, the target's loop style, the next free value slot, the
+/// The IR file being rewritten, the target's loop style and header inlining, the next free value
+/// slot, the
 /// comparison the loop being realized orders an unsigned counter with, the nodes realizing a call
 /// kotlinc inlines, and the unsigned values the header already holds in their `Int`/`Long`
 /// representation.
 struct Realizer<'a> {
     ir: &'a mut IrFile,
     style: CounterLoopStyle,
+    inlining: HeaderInlining,
     next_slot: u32,
     unsigned_compare: Option<IrRuntimeFunction>,
     inlined_calls: Vec<ExprId>,
@@ -230,7 +253,8 @@ impl Realizer<'_> {
     /// and needs no conversion of a value already in that representation. The conversion is the
     /// identity on the JVM, so its node carries only the provenance of that inlined call.
     fn element_representation(&mut self, value: ExprId, ty: Ty) -> ExprId {
-        if !is_unsigned(ty)
+        if self.inlining == HeaderInlining::None
+            || !is_unsigned(ty)
             || constant_bound(self.ir, value).is_some()
             || self.represented.contains(&value)
         {
@@ -243,6 +267,21 @@ impl Realizer<'_> {
         });
         self.inlined_calls.push(converted);
         converted
+    }
+
+    /// Mark `call` as one kotlinc inlines, where the target realizes those as such.
+    fn inlined_call(&mut self, call: ExprId) {
+        if self.inlining == HeaderInlining::Kotlinc {
+            self.inlined_calls.push(call);
+        }
+    }
+
+    /// Record that `value` is already in its `Int`/`Long` representation, where the target
+    /// converts unsigned bounds to it.
+    fn in_representation(&mut self, value: ExprId) {
+        if self.inlining == HeaderInlining::Kotlinc {
+            self.represented.push(value);
+        }
     }
 
     /// A call of a runtime function resolution selected, realized by the backend like any other

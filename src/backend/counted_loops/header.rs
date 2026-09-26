@@ -162,7 +162,7 @@ impl ProgressionHeader {
         // `lhs.compareTo(rhs) < 0` (`<= 0`) through the selected unsigned comparison: kotlinc calls
         // the inline `UInt.compareTo`, whose body is that comparison.
         let compared = realizer.runtime_call(&compare, vec![lhs, rhs]);
-        realizer.inlined_calls.push(compared);
+        realizer.inlined_call(compared);
         let zero = realizer.add(IrExpr::Const(IrConst::Int(0)));
         realizer.add(IrExpr::PrimitiveBinOp {
             op,
@@ -488,7 +488,7 @@ impl Realizer<'_> {
             let last = self.as_step_type(last, nested.ty, element_ty);
             let element = self.runtime_call(last_element, vec![first, last, final_step.value]);
             let element = self.as_step_type(element, element_ty, nested.ty);
-            self.represented.push(element);
+            self.in_representation(element);
             Operand {
                 value: element,
                 can_change: true,

@@ -3363,7 +3363,7 @@ pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {
     lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
 }
 
-fn lower_single_source_with_platform(
+pub(crate) fn lower_single_source_with_platform(
     source: &str,
     stem: &str,
     platform: Box<dyn crate::libraries::SemanticPlatform>,
