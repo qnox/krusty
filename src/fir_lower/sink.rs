@@ -197,6 +197,7 @@ impl<'a> CommonIrBodySink<'a> {
             false,
         )?;
         self.predeclare_functions(index)?;
+        finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
         super::constructors::finalize_local_superclass_captures(self.ir)?;
@@ -1167,12 +1168,6 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
-            let inherited = index.callable_inherited_status(callable.id);
-            if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
-                self.ir
-                    .fn_return_value_statuses
-                    .insert(function, inherited.return_value);
-            }
             if callable.shape.extension_receiver.is_some() && !companion_associated {
                 self.ir.extension_receiver_fns.insert(function);
             }
@@ -1201,18 +1196,16 @@ impl<'a> CommonIrBodySink<'a> {
             if index.has_function_typed_parameter(callable.id) {
                 self.ir.function_typed_parameter_fns.insert(function);
             }
-            // An override inherits `operator` / `infix` from the declarations it overrides.
-            if inherited.operator
-                || declaration_header
-                    .flags
-                    .has(crate::fir::DeclarationFlags::OPERATOR)
+            // An override also inherits `operator` / `infix`; see `finalize_inherited_statuses`.
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::OPERATOR)
             {
                 self.ir.operator_fns.insert(function);
             }
-            if inherited.infix
-                || declaration_header
-                    .flags
-                    .has(crate::fir::DeclarationFlags::INFIX)
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::INFIX)
             {
                 self.ir.infix_fns.insert(function);
             }
@@ -1515,6 +1508,26 @@ impl CheckedBodySink for IndexedCommonIrBodySink<'_, '_> {
                     "checked FIR body lowering failed owner={owner:?} failure={failure:?}",
                 );
             }
+        }
+    }
+}
+
+/// Record what each lowered callable inherits from the declarations it overrides: its
+/// return-value status and `operator` / `infix`. A local classifier's override plan, and with it
+/// what its members inherit, is published when the body declaring it is checked, after the members
+/// were predeclared, so these are read once every body has been.
+fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    for (&callable, &function) in &ir.checked_callable_functions {
+        let inherited = index.callable_inherited_status(callable);
+        if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
+            ir.fn_return_value_statuses
+                .insert(function, inherited.return_value);
+        }
+        if inherited.operator {
+            ir.operator_fns.insert(function);
+        }
+        if inherited.infix {
+            ir.infix_fns.insert(function);
         }
     }
 }
